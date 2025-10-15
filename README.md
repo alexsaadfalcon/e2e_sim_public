@@ -21,10 +21,10 @@ Set the `DRJIT_LIBLLVM_PATH` environment variable. Run this command to automatic
 ```bash
 # Detect your shell and add to the appropriate config file
 if [ -n "$ZSH_VERSION" ]; then
-    echo "export DRJIT_LIBLLVM_PATH=\$(find \$CONDA_PREFIX -name 'libLLVM*.dylib' -o -name 'libLLVM*.so' 2>/dev/null | head -1)" >> ~/.zshrc
+    echo "export DRJIT_LIBLLVM_PATH=$(find $CONDA_PREFIX/lib -name 'libLLVM*.dylib' 2>/dev/null | head -1)" >> ~/.zshrc
     source ~/.zshrc
 elif [ -n "$BASH_VERSION" ]; then
-    echo "export DRJIT_LIBLLVM_PATH=\$(find \$CONDA_PREFIX -name 'libLLVM*.dylib' -o -name 'libLLVM*.so' 2>/dev/null | head -1)" >> ~/.bashrc
+    echo "export DRJIT_LIBLLVM_PATH=$(find $CONDA_PREFIX/lib -name 'libLLVM*.dylib' 2>/dev/null | head -1)" >> ~/.bashrc
     source ~/.bashrc
 fi
 ```
@@ -32,7 +32,7 @@ fi
 **Verify the setup:**
 
 ```bash
-echo $DRJIT_LIBLLVM_PATH
+echo LLVM PATH: $DRJIT_LIBLLVM_PATH
 python -c "import drjit; print('DrJit loaded successfully!')"
 ```
 
