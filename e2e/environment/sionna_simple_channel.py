@@ -5,6 +5,9 @@ import sionna.rt
 # Other imports
 import matplotlib.pyplot as plt
 import numpy as np
+
+import os
+from tqdm import tqdm
 no_preview = False # Toggle to False to use the preview widget
 
 # Import relevant components from Sionna RT
@@ -107,7 +110,7 @@ rx.position += [-50, 0, 0]
 # %%
 # animation
 # p_solver = PathSolver()
-# from tqdm import tqdm
+# os.makedirs('sionna_frames', exist_ok=True)
 # for i in tqdm(range(100)):
 #     paths = p_solver(scene=scene,
 #                  max_depth=5,
