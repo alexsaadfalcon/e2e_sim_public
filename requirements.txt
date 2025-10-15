@@ -1,0 +1,17 @@
+# Core dependencies
+torch==2.4.1
+numpy==1.26.4
+matplotlib==3.10.6
+tqdm==4.67.1
+
+# Sionna and related packages
+sionna==1.2.0
+sionna-rt==1.2.0
+drjit==1.2.0
+mitsuba==3.7.1
+
+# Optional dependencies
+Pillow>=10.0.0  # For PIL (used in interactive interface)
+
+# Development dependencies (optional)
+setuptools>=65.0.0
