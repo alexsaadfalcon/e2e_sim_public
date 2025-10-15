@@ -4,6 +4,38 @@
 
 ## Getting Started
 
+### Prerequisites
+
+#### Install LLVM (Required for DrJit)
+
+DrJit requires LLVM to run on CPU. Install it using conda/mamba:
+
+```bash
+conda install -c conda-forge llvm
+# or with mamba
+mamba install -c conda-forge llvm
+```
+
+Set the `DRJIT_LIBLLVM_PATH` environment variable. Run this command to automatically add it to your shell configuration:
+
+```bash
+# Detect your shell and add to the appropriate config file
+if [ -n "$ZSH_VERSION" ]; then
+    echo "export DRJIT_LIBLLVM_PATH=\$(find \$CONDA_PREFIX -name 'libLLVM*.dylib' -o -name 'libLLVM*.so' 2>/dev/null | head -1)" >> ~/.zshrc
+    source ~/.zshrc
+elif [ -n "$BASH_VERSION" ]; then
+    echo "export DRJIT_LIBLLVM_PATH=\$(find \$CONDA_PREFIX -name 'libLLVM*.dylib' -o -name 'libLLVM*.so' 2>/dev/null | head -1)" >> ~/.bashrc
+    source ~/.bashrc
+fi
+```
+
+**Verify the setup:**
+
+```bash
+echo $DRJIT_LIBLLVM_PATH
+python -c "import drjit; print('DrJit loaded successfully!')"
+```
+
 ### Installation
 
 Install the required libraries using:
