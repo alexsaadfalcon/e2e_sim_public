@@ -1,0 +1,124 @@
+{
+  "name": "canyon_radar",
+  "base_scene": "simple_street_canyon",
+  "frequency": {
+    "carrier_hz": 30000000000.0,
+    "start_hz": 28500000000.0,
+    "stop_hz": 31500000000.0,
+    "num_freqs": 128
+  },
+  "num_frames": 10,
+  "nodes": [
+    {
+      "name": "radar",
+      "role": "radar",
+      "position": [
+        -10.0,
+        0.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 16,
+        "num_cols": 16,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {},
+      "tx_power_dbm": 12.0
+    }
+  ],
+  "objects": [
+    {
+      "name": "scatterer-0",
+      "kind": "sphere",
+      "position": [
+        -5.0,
+        2.5,
+        1.0
+      ],
+      "scaling": 1.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "scatterer-1",
+      "kind": "sphere",
+      "position": [
+        0.0,
+        -2.5,
+        1.0
+      ],
+      "scaling": 1.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "scatterer-2",
+      "kind": "sphere",
+      "position": [
+        5.0,
+        2.5,
+        1.0
+      ],
+      "scaling": 1.5,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    }
+  ],
+  "description": "LIGHTWEIGHT pack member (num_frames=10, num_freqs=128, both within the pack's <=20/<=1024 test budget). Small monostatic radar (16x16) driving down the Sionna RT built-in 'simple_street_canyon' scene, from x=-10 to x=-1 in 1 m/frame steps along the street centerline (y=0, z=1.5 m). Three small sphere scatterers sit near ground level a few meters off-axis to give the radar targets to resolve; all positions are conservative (within a few meters of the origin) to stay clear of the canyon building facades.",
+  "metadata": {}
+}

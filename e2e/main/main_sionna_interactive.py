@@ -212,7 +212,7 @@ class SimulationGUI:
         # Display scene image
         if self.sim and self.sim.environment_block:
             frame_counter = self.sim.environment_block.frame_counter
-            scene_path = f"v1/environment/sionna_frames/scene{frame_counter//2}.png"
+            scene_path = f"e2e/environment/sionna_frames/scene{frame_counter//2}.png"
             try:
                 from PIL import Image, ImageTk
                 import os
@@ -221,28 +221,22 @@ class SimulationGUI:
                     # Load and display image
                     img = Image.open(scene_path)
                     
-                    # Get the frame size to scale image to fit the subwindow
-                    self.scene_frame.update_idletasks()
-                    frame_width = self.scene_frame.winfo_width()
-                    frame_height = self.scene_frame.winfo_height()
+                    # Use a fixed maximum size to prevent image from growing
+                    max_width = 400
+                    max_height = 300
                     
-                    # If frame size is not available yet, use a reasonable default
-                    if frame_width <= 1 or frame_height <= 1:
-                        frame_width = 400
-                        frame_height = 300
-                    
-                    # Calculate scaling to fit within the frame while maintaining aspect ratio
+                    # Calculate scaling to fit within the maximum size while maintaining aspect ratio
                     img_width, img_height = img.size
-                    scale_w = frame_width / img_width
-                    scale_h = frame_height / img_height
-                    scale = min(scale_w, scale_h)  # Use min to fit within the frame
+                    scale_w = max_width / img_width
+                    scale_h = max_height / img_height
+                    scale = min(scale_w, scale_h)  # Use min to fit within the maximum size
                     
                     new_width = int(img_width * scale)
                     new_height = int(img_height * scale)
                     
-                    # Ensure the image doesn't exceed frame dimensions
-                    new_width = min(new_width, frame_width)
-                    new_height = min(new_height, frame_height)
+                    # Ensure the image doesn't exceed maximum dimensions
+                    new_width = min(new_width, max_width)
+                    new_height = min(new_height, max_height)
                     
                     img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
                     photo = ImageTk.PhotoImage(img)

@@ -16,9 +16,12 @@ def subspace_dist(A, B):
 def subspace_dist_frob(A, B):
     assert A.shape == B.shape, f'shape mismatch: {A.shape} and {B.shape}'
     d = A.shape[1]
+    # Stay on-device: operate on tensors throughout (no .item() GPU->CPU sync,
+    # no CPU torch.tensor(...) that could mismatch A/B's device). Clamp the
+    # radicand at 0 so float error (or a slightly non-orthonormal basis) can
+    # never push it negative and produce sqrt(nan).
     ip = torch.linalg.norm(A.t().conj() @ B) ** 2
-    ip = min(d, ip.item())
-    return torch.sqrt(torch.tensor(d - ip))
+    return torch.sqrt(torch.clamp(d - ip, min=0))
 
 def Glog(X, Y):
     # first argument is the base

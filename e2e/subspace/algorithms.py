@@ -8,7 +8,6 @@ from .subspace_utils import Gexp, subspace_dist_frob
 
 norm = linalg.norm
 orth = lambda A: linalg.qr(A)[0]
-n_iter = 10
 n_iter = 1
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,7 +55,6 @@ class GROUSE(object):
         pnorm = norm(p)
         rnorm = norm(r)
         wnorm = norm(w)
-        theta = torch.atan(rnorm / pnorm)
         theta = eta * sigma
 
         pw = pnorm * wnorm
@@ -226,7 +224,11 @@ class GrassmannGD(object):
         return self.U
 
 
-def gen_A_ada(U, m, device=device):
+def gen_A_ada(U, m, device=None):
+    # Build the sensing matrix on U's own device (not the module-level default) so a
+    # CPU-resident U on a CUDA box doesn't device-mismatch in the matmul below.
+    if device is None:
+        device = U.device
     n, d = U.shape
     B = torch.randn(n, m - d, dtype=torch.cfloat, device=device)
     B -= U @ (U.T.conj() @ B)

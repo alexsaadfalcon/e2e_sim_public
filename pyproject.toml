@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e2e-sim"
+version = "1.0.0"
+description = "Array-processing end-to-end simulator: Sionna RT channels, RF front-end / AFE modeling, adaptive subspace tracking, and OFDM/ISAC communications."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Alex Saad-Falcon", email = "alex.saadfalcon@myfalcomm.com" },
+]
+keywords = ["radar", "array-processing", "sionna", "ofdm", "isac", "subspace-tracking"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+
+# Core runtime dependencies. Note: the radar/comms pipeline needs torch, but the
+# scenario layer (e2e.scenario) and the webapp shell stay importable without it.
+dependencies = [
+    "torch>=2.4.1",
+    "numpy==1.26.4",
+    "matplotlib>=3.8",
+    "tqdm>=4.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+# Browser-based block-diagram + scenario-scheduling UI.
+webapp = [
+    "dash>=2.16.0",
+    "plotly>=5.20.0",
+    "dash-cytoscape>=1.0.0",
+]
+# Sionna RT ray tracing for real frame generation (needs a CUDA-12.x driver / LLVM;
+# see the "GPU / driver / LLVM" section of the README).
+sionna = [
+    "sionna==1.2.0",
+    "sionna-rt==1.2.0",
+    "drjit==1.2.0",
+    "mitsuba==3.7.1",
+]
+# Automated test suite (the default, hands-off run). Mirrors requirements-dev.txt.
+dev = [
+    "pytest>=8.0",
+    "matplotlib>=3.8",
+    "tqdm>=4.0",
+    "Pillow>=10.0.0",
+    "dash>=2.16.0",
+    "plotly>=5.20.0",
+    "dash-cytoscape>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/alexsaadfalcon/e2e_sim_public"
+Repository = "https://github.com/alexsaadfalcon/e2e_sim_public"
+
+[project.scripts]
+e2e-webapp = "webapp.app:main"
+e2e-generate = "e2e.environment.scenario_runner:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["e2e*", "webapp*"]

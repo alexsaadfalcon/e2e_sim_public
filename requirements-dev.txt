@@ -1,0 +1,17 @@
+# Dependencies for running the automated test suite (the default, hands-off run).
+#
+# Deliberately EXCLUDES Sionna RT / DrJit / Mitsuba: those are only needed for *real*
+# scenario generation (tests for that path are marked @pytest.mark.sionna and skipped
+# by default) and require an LLVM toolchain. The default `pytest` run uses small
+# synthetic data and needs none of them.
+#
+# PyTorch is required but best installed separately so CI can pick the lean CPU build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+pytest>=8.0
+numpy==1.26.4
+matplotlib>=3.8
+tqdm>=4.0
+Pillow>=10.0.0
+dash>=2.16.0
+plotly>=5.20.0
+dash-cytoscape>=1.0.0

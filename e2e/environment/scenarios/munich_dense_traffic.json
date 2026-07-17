@@ -1,0 +1,280 @@
+{
+  "name": "munich_dense_traffic",
+  "base_scene": "munich",
+  "frequency": {
+    "carrier_hz": 30000000000.0,
+    "start_hz": 28500000000.0,
+    "stop_hz": 31500000000.0,
+    "num_freqs": 512
+  },
+  "num_frames": 20,
+  "nodes": [
+    {
+      "name": "radar",
+      "role": "radar",
+      "position": [
+        45.0,
+        90.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 32,
+        "num_cols": 32,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          1.0,
+          0.3,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 3.0
+      },
+      "params": {},
+      "tx_power_dbm": 12.0
+    }
+  ],
+  "objects": [
+    {
+      "name": "car-0",
+      "kind": "sphere",
+      "position": [
+        -127.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-1",
+      "kind": "sphere",
+      "position": [
+        -107.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.5,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-2",
+      "kind": "sphere",
+      "position": [
+        -87.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-3",
+      "kind": "sphere",
+      "position": [
+        -67.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.5,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-4",
+      "kind": "sphere",
+      "position": [
+        -127.0,
+        57.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.1,
+        0.1,
+        0.8
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-5",
+      "kind": "sphere",
+      "position": [
+        -107.0,
+        57.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.1,
+        0.1,
+        0.8
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-6",
+      "kind": "sphere",
+      "position": [
+        -87.0,
+        57.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.1,
+        0.1,
+        0.8
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          -0.5,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-7",
+      "kind": "sphere",
+      "position": [
+        -67.0,
+        57.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.1,
+        0.1,
+        0.8
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-8",
+      "kind": "sphere",
+      "position": [
+        -97.0,
+        47.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.1,
+        0.8,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    }
+  ],
+  "description": "LIGHTWEIGHT pack member (num_frames=20, num_freqs=512, both within the pack's <=20/<=1024 test budget). Dense-traffic variant of munich_radar: 9 car scatterers in a two-row grid near the square (a few given slow independent velocity), and the radar itself both translates and turns (velocity + angular_velocity_deg) -- per e2e/environment/motion.py, combined translation+rotation curves about the radar's OWN origin (base position), not the scene centroid, so this is a bounded 'drive forward while turning' arc rather than an outward spiral.",
+  "metadata": {}
+}

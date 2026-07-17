@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated artifacts
+e2e/main/figures/
+
+# Large generated data (regenerate via scenario_runner / sionna scripts) -- never commit
+e2e/environment/sionna_sims/
+e2e/environment/sionna_frames/
+*.pkl
+
+# Presentation assets (large, not part of the code deliverable)
+slides/
+
+# Internal working docs -- not part of the public release. The public docs
+# (README, CHANGELOG, CONTRIBUTING, ROADMAP, tests/ and webapp/ READMEs) are tracked.
+TODO.md
+CLAUDE.md
+# Internal dev tooling (swarm agent/skill definitions reference internal docs + local paths)
+.claude/

@@ -34,7 +34,7 @@ downstream_blocks = [
     SubspaceErrorBlock(),
 ]
 
-circuit_block = RFFEBlock(n=N_RX * N_TX, chirp_dur=10e-9)
+circuit_block = RFFEBlock(n=N_RX * N_TX)
 interconnect_block1 = InterconnectBlock(case='case3')
 interconnect_block2 = InterconnectBlock(case='synthetic')
 

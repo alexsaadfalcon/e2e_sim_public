@@ -1,0 +1,191 @@
+{
+  "name": "munich_two_link_isac",
+  "base_scene": "munich",
+  "frequency": {
+    "carrier_hz": 30000000000.0,
+    "start_hz": 28500000000.0,
+    "stop_hz": 31500000000.0,
+    "num_freqs": 256
+  },
+  "num_frames": 15,
+  "nodes": [
+    {
+      "name": "car_radar",
+      "role": "radar",
+      "position": [
+        45.0,
+        90.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 8,
+        "num_cols": 8,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {
+        "waveform": "fmcw"
+      },
+      "tx_power_dbm": 12.0
+    },
+    {
+      "name": "building_comm_tx",
+      "role": "comm_tx",
+      "position": [
+        8.5,
+        21.0,
+        27.0
+      ],
+      "look_at": [
+        45.0,
+        90.0,
+        1.5
+      ],
+      "array": {
+        "num_rows": 1,
+        "num_cols": 1,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "tr38901",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {
+        "waveform": "ofdm"
+      },
+      "tx_power_dbm": 12.0
+    },
+    {
+      "name": "car_comm_rx",
+      "role": "comm_rx",
+      "position": [
+        45.0,
+        90.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 4,
+        "num_cols": 4,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {}
+    },
+    {
+      "name": "pedestrian_comm_rx",
+      "role": "comm_rx",
+      "position": [
+        30.0,
+        70.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 2,
+        "num_cols": 2,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          0.2,
+          0.1,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {}
+    }
+  ],
+  "objects": [
+    {
+      "name": "car-0",
+      "kind": "sphere",
+      "position": [
+        -127.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    },
+    {
+      "name": "car-1",
+      "kind": "sphere",
+      "position": [
+        -107.0,
+        37.0,
+        1.5
+      ],
+      "scaling": 5.0,
+      "material": "metal",
+      "color": [
+        0.8,
+        0.1,
+        0.1
+      ],
+      "asset": null,
+      "motion": {
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      }
+    }
+  ],
+  "description": "LIGHTWEIGHT pack member (num_frames=15, num_freqs=256, both within the pack's <=20/<=1024 test budget). ISAC with a two-receiver comm cell: one COMM_TX (building_comm_tx) serves TWO independent COMM_RX nodes with different array sizes (car_comm_rx 4x4, pedestrian_comm_rx 2x2), plus a monostatic radar (car_radar, 8x8) -- 3 links total via scenario_runner.enumerate_links: 'car_radar' (radar) + 'building_comm_tx__car_comm_rx' + 'building_comm_tx__pedestrian_comm_rx' (comm).",
+  "metadata": {}
+}

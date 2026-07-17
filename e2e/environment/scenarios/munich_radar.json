@@ -1,0 +1,45 @@
+{
+  "name": "munich_radar",
+  "base_scene": "munich",
+  "frequency": {
+    "carrier_hz": 30000000000.0,
+    "start_hz": 28500000000.0,
+    "stop_hz": 31500000000.0,
+    "num_freqs": 5000
+  },
+  "num_frames": 100,
+  "nodes": [
+    {
+      "name": "radar",
+      "role": "radar",
+      "position": [
+        45.0,
+        90.0,
+        1.5
+      ],
+      "look_at": null,
+      "array": {
+        "num_rows": 32,
+        "num_cols": 32,
+        "vertical_spacing": 0.5,
+        "horizontal_spacing": 0.5,
+        "pattern": "iso",
+        "polarization": "V"
+      },
+      "motion": {
+        "velocity": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "waypoints": [],
+        "angular_velocity_deg": 0.0
+      },
+      "params": {},
+      "tx_power_dbm": 12.0
+    }
+  ],
+  "objects": [],
+  "description": "Monostatic 32x32 radar translating across the Munich square.",
+  "metadata": {}
+}

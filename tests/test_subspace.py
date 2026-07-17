@@ -1,0 +1,73 @@
+"""Tests for subspace utilities and the online Oja tracker (e2e.subspace)."""
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from e2e.subspace.subspace_utils import subspace_dist_frob, subspace_dist
+from e2e.subspace.algorithms import Oja, rand_orth_complex, gen_A_ada, device
+
+
+def test_subspace_dist_zero_for_identical_basis():
+    U = rand_orth_complex(20, 4)
+    # float32 SVD leaves a small residual; loosen accordingly.
+    assert subspace_dist_frob(U, U).item() == pytest.approx(0.0, abs=1e-2)
+    assert subspace_dist(U, U).item() == pytest.approx(0.0, abs=1e-2)
+
+
+def test_subspace_dist_positive_for_different_basis():
+    U = rand_orth_complex(20, 4)
+    V = rand_orth_complex(20, 4)
+    assert subspace_dist_frob(U, V).item() > 0.0
+
+
+def test_subspace_dist_frob_finite_for_edge_basis():
+    # A slightly non-orthonormal basis can push d - ||A^H B||^2 marginally
+    # negative; the clamp must keep the result finite (no sqrt(nan)).
+    torch.manual_seed(0)
+    U = rand_orth_complex(20, 4)
+    # Perturb so it is no longer exactly orthonormal.
+    pert = 1e-3 * (torch.randn_like(U.real) + 1j * torch.randn_like(U.real))
+    U_edge = U + pert.to(U.dtype)
+    out = subspace_dist_frob(U_edge, U_edge)
+    assert torch.isfinite(out)
+
+
+def test_subspace_dist_frob_stays_on_device():
+    U = rand_orth_complex(20, 4)
+    V = rand_orth_complex(20, 4)
+    out = subspace_dist_frob(U, V)
+    # Compare by device type (cuda/cpu), not the exact index: the module-level
+    # `device` is "cuda" while tensors land on "cuda:0", so a raw == would spuriously
+    # fail on a GPU box even though the result is correctly on the library device.
+    assert out.device == U.device
+    assert out.device.type == device.type
+    # Still a scalar tensor.
+    assert out.shape == torch.Size([])
+
+
+def test_gen_A_ada_shape_and_rows():
+    U = rand_orth_complex(30, 5)
+    m = 12
+    A = gen_A_ada(U, m)
+    assert A.shape == (m, 30)
+    # First d rows are U^H by construction.
+    assert torch.allclose(A[:5, :], U.t().conj(), atol=1e-5)
+
+
+def test_oja_tracks_a_static_subspace():
+    """Oja with adaptive sensing should reduce subspace error toward a fixed truth."""
+    torch.manual_seed(0)
+    n, d = 40, 4
+    U_true = rand_orth_complex(n, d)
+    oja = Oja(n, d, eta=1e0, fixed_step=True)
+
+    err0 = subspace_dist_frob(oja.U, U_true).item()
+    for _ in range(200):
+        coeffs = torch.randn(d, 8, dtype=torch.cfloat, device=device)
+        V = U_true @ coeffs
+        A = gen_A_ada(oja.U.clone(), d * 2)
+        X = A @ V
+        oja.add_data(X, A)
+    err1 = subspace_dist_frob(oja.U, U_true).item()
+    assert err1 < err0  # learning made progress

@@ -13,5 +13,10 @@ mitsuba==3.7.1
 # Optional dependencies
 Pillow>=10.0.0  # For PIL (used in interactive interface)
 
+# Web UI (block-diagram + scenario-scheduling interface)
+dash>=2.16.0
+plotly>=5.20.0
+dash-cytoscape>=1.0.0
+
 # Development dependencies (optional)
 setuptools>=65.0.0
