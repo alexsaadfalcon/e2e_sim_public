@@ -6,11 +6,19 @@ channel (a precomputed Sionna frame if available, otherwise a synthetic multipat
 fallback), estimates the channel from pilots, equalizes, demaps, and sweeps SNR to
 produce a BER-vs-SNR curve plus a received constellation.
 
+For uncoded per-subcarrier hard decisions, unbiased scalar MMSE and ZF are
+*algebraically identical* (both reduce to rx/H) -- so BER(ZF) ~= BER(MMSE) here,
+which is the theoretically correct outcome, not a wash. MMSE's real advantage
+over ZF -- lower estimation MSE / noise enhancement on weak subcarriers -- shows
+up in the soft-symbol EVM (computed from the raw, biased MMSE output), reported
+alongside BER below.
+
 Run:
     python -m e2e.main.main_comms_link
 
 Outputs (saved under e2e/main/figures/, no display needed):
-    comms_link_ber.png            BER vs SNR
+    comms_link_ber.png            BER vs SNR (ZF vs unbiased-MMSE) and soft-symbol
+                                   EVM vs SNR (ZF vs raw/biased-MMSE)
     comms_link_constellation.png  RX constellation before/after equalization
 """
 
@@ -63,11 +71,21 @@ def main():
     # (100+snr), and captures a pre-/post-EQ constellation snapshot at SNR=20 dB.
     # Folding it into the blocks would change the seeds/structure and hence the
     # figures, so the link loop is kept inline here on purpose.
+    #
+    # NOTE on ZF vs MMSE here: `mmse_equalize` bias-corrects its output by default
+    # (`unbiased=True`) so the demapper slices against a unit-power constellation --
+    # for uncoded per-subcarrier hard decisions this makes unbiased-MMSE decisions
+    # IDENTICAL to ZF (both reduce to `rx / H`), so BER(ZF) ~= BER(MMSE) below. The
+    # real MMSE-vs-ZF advantage is lower estimation MSE / noise enhancement on weak
+    # subcarriers, which only shows up in the raw (biased) MMSE output before
+    # slicing -- reported here as EVM (`unbiased=False`), not as uncoded BER.
     snr_list = list(range(0, 31, 2))
     ber_zf, ber_mmse = [], []
+    evm_zf, evm_mmse_raw = [], []
     n_bits = n_symbols * modem.data_bits_per_symbol_block
     tx_bits = random_bits(n_bits, seed=1)
     tx_time, tx_freq = modem.modulate(tx_bits, n_symbols)
+    tx_data = modem.extract_data(tx_freq)
 
     constellation_snapshot = None
     for snr in snr_list:
@@ -79,34 +97,52 @@ def main():
         H_est = ch.ls_estimate(rx_pilots, tx_pilots, modem.pilot_idx, modem.fft_size)
 
         eq_zf = modem.extract_data(ch.zf_equalize(rx_freq, H_est))
-        eq_mmse = modem.extract_data(ch.mmse_equalize(rx_freq, H_est, snr))
+        eq_mmse = modem.extract_data(ch.mmse_equalize(rx_freq, H_est, snr))  # unbiased (decisions)
+        eq_mmse_raw = modem.extract_data(
+            ch.mmse_equalize(rx_freq, H_est, snr, unbiased=False))          # biased (soft metric)
 
         from e2e.comms.ofdm import qam_demod
         rx_bits_zf = qam_demod(eq_zf.reshape(-1), bits_per_symbol, modem.const)
         rx_bits_mmse = qam_demod(eq_mmse.reshape(-1), bits_per_symbol, modem.const)
         ber_zf.append(ch.ber(tx_bits, rx_bits_zf))
         ber_mmse.append(ch.ber(tx_bits, rx_bits_mmse))
+        evm_zf.append(ch.evm(eq_zf, tx_data))
+        evm_mmse_raw.append(ch.evm(eq_mmse_raw, tx_data))
 
         if snr == 20:
             constellation_snapshot = (modem.extract_data(rx_freq).reshape(-1).cpu().numpy(),
                                       eq_mmse.reshape(-1).cpu().numpy())
 
-    print("[comms_link] SNR(dB)  BER(ZF)     BER(MMSE)")
-    for s, bz, bm in zip(snr_list, ber_zf, ber_mmse):
-        print(f"            {s:5d}   {bz:.3e}   {bm:.3e}")
+    print("[comms_link] uncoded hard-decision BER: ZF and unbiased-MMSE make identical "
+          "decisions (both reduce to rx/H), so BER(ZF) ~= BER(MMSE) below.")
+    print("[comms_link] SNR(dB)  BER(ZF)     BER(MMSE)   EVM(ZF)   EVM(MMSE,raw)")
+    for s, bz, bm, ez, em in zip(snr_list, ber_zf, ber_mmse, evm_zf, evm_mmse_raw):
+        print(f"            {s:5d}   {bz:.3e}   {bm:.3e}   {ez:.3e}   {em:.3e}")
+    print("[comms_link] EVM(MMSE,raw) < EVM(ZF) is the genuine MMSE advantage -- lower "
+          "estimation error before bias-correction/hard-slicing, most visible at low SNR.")
 
     # ---- plots -----------------------------------------------------------
-    plt.figure()
-    plt.semilogy(snr_list, np.clip(ber_zf, 1e-6, 1), "o-", label="ZF")
-    plt.semilogy(snr_list, np.clip(ber_mmse, 1e-6, 1), "s-", label="MMSE")
-    plt.xlabel("SNR (dB)")
-    plt.ylabel("BER")
-    plt.title(f"OFDM 16-QAM BER vs SNR (channel: {source})")
-    plt.grid(True, which="both")
-    plt.legend()
+    fig, (ax_ber, ax_evm) = plt.subplots(1, 2, figsize=(10, 4))
+    ax_ber.semilogy(snr_list, np.clip(ber_zf, 1e-6, 1), "o-", label="ZF")
+    ax_ber.semilogy(snr_list, np.clip(ber_mmse, 1e-6, 1), "s-", label="MMSE (unbiased)")
+    ax_ber.set_xlabel("SNR (dB)")
+    ax_ber.set_ylabel("BER")
+    ax_ber.set_title("Uncoded BER (ZF ~= unbiased-MMSE)")
+    ax_ber.grid(True, which="both")
+    ax_ber.legend()
+
+    ax_evm.semilogy(snr_list, np.clip(evm_zf, 1e-6, 1), "o-", label="ZF")
+    ax_evm.semilogy(snr_list, np.clip(evm_mmse_raw, 1e-6, 1), "s-", label="MMSE (raw/biased)")
+    ax_evm.set_xlabel("SNR (dB)")
+    ax_evm.set_ylabel("EVM (RMS fraction)")
+    ax_evm.set_title("Soft-symbol EVM (MMSE's genuine advantage)")
+    ax_evm.grid(True, which="both")
+    ax_evm.legend()
+
+    fig.suptitle(f"OFDM 16-QAM link (channel: {source})")
     ber_path = os.path.join(FIG_DIR, "comms_link_ber.png")
-    plt.savefig(ber_path, dpi=120, bbox_inches="tight")
-    plt.close()
+    fig.savefig(ber_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
     if constellation_snapshot is not None:
         raw, eq = constellation_snapshot
@@ -117,7 +153,7 @@ def main():
         plt.axis("equal"); plt.grid(True)
         plt.subplot(1, 2, 2)
         plt.scatter(eq.real, eq.imag, s=4, alpha=0.4)
-        plt.title("RX data (post-MMSE-EQ, SNR=20dB)")
+        plt.title("RX data (post-unbiased-MMSE-EQ, SNR=20dB)")
         plt.axis("equal"); plt.grid(True)
         const_path = os.path.join(FIG_DIR, "comms_link_constellation.png")
         plt.savefig(const_path, dpi=120, bbox_inches="tight")

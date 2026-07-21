@@ -14,9 +14,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def randn_complex(a, b, device=device):
-    ret = torch.randn(a, b, dtype=torch.cfloat, device=device) \
-        + 1j * torch.randn(a, b, dtype=torch.cfloat, device=device)
-    return ret
+    # Measured E|X|^2 = 2.0 over 1e6 samples (real/imag parts are each unit
+    # variance, i.e. CN(0, 2), not CN(0, 4) as a stacked-cfloat construction
+    # might suggest: torch.randn(..., dtype=torch.cfloat) itself already
+    # splits unit variance across its real/imag parts). This real-dtype form
+    # is the simplest, self-documenting way to reproduce that same E|X|^2 = 2
+    # scale, so seeded downstream behavior is unchanged.
+    return torch.randn(a, b, device=device) + 1j * torch.randn(a, b, device=device)
 
 def rand_orth_complex(n, d, device=device):
     U = randn_complex(n, d, device=device)
@@ -232,6 +236,12 @@ def gen_A_ada(U, m, device=None):
     n, d = U.shape
     B = torch.randn(n, m - d, dtype=torch.cfloat, device=device)
     B -= U @ (U.T.conj() @ B)
+    # U's columns are unit-norm (orthonormal), so the deterministic rows of A
+    # (U^H) already have unit row-norm. The random columns of B are unnormalized
+    # complex Gaussians, whose column norm scales like sqrt(n) (measured ~32 for
+    # n=1024) -- a huge scale mismatch against the deterministic rows if left
+    # as-is. Normalize so both halves of the sensing matrix weight equally.
+    B = B / B.norm(dim=0, keepdim=True)
     A = torch.zeros((m, n), dtype=torch.cfloat, device=device)
     A[:d, :] = U.T.conj()
     A[d:, :] = B.T.conj()

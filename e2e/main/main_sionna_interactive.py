@@ -255,7 +255,8 @@ class SimulationGUI:
         if 'fft' in outputs and outputs['fft']:
             _fft = outputs['fft'][-1]
             _fft = _fft / torch.max(torch.abs(_fft))
-            fft_energy = 20 * torch.log10(torch.abs(_fft)).T.cpu()
+            # FFTBlock now returns a real power map -> 10*log10 (power dB), not 20.
+            fft_energy = 10 * torch.log10(torch.abs(_fft)).T.cpu()
             
             # Linear scale FFT (bottom left)
             fig1, ax1 = plt.subplots(figsize=(6, 4))

@@ -10,10 +10,24 @@ class SionnaIterator:
         # makes regenerating/overwriting the same path later fail with a sharing error.
         with open(fname, 'rb') as f:
             data = pickle.load(f)
-        # Multi-link scenarios (e.g. ISAC) dump a dict {link_name: frames_array};
-        # single-link scenarios dump a plain ndarray. Select one link's frames so the
-        # rest of the pipeline sees the same single-link array either way.
-        if isinstance(data, dict):
+        # Three payload shapes on disk (see module docstring / CLAUDE.md format contract):
+        #   1. bare ndarray                          -> legacy single-link
+        #   2. dict WITHOUT "meta"  {name: array}     -> legacy multi-link
+        #   3. dict WITH "meta" AND "links"           -> v2 self-describing multi-link
+        if isinstance(data, dict) and "meta" in data and "links" in data:
+            self.meta = data["meta"]
+            links_dict = data["links"]
+            self.links = list(links_dict.keys())
+            if link is None:
+                link = self.links[0]
+            elif link not in links_dict:
+                raise KeyError(f"link {link!r} not in {fname} (available: {self.links})")
+            self.link = link
+            self.all_s_pars = links_dict[link]
+            self.link_meta = self.meta.get("links", {}).get(link)
+        elif isinstance(data, dict):
+            self.meta = None
+            self.link_meta = None
             self.links = list(data.keys())
             if link is None:
                 link = self.links[0]
@@ -22,9 +36,35 @@ class SionnaIterator:
             self.link = link
             self.all_s_pars = data[link]
         else:
+            self.meta = None
+            self.link_meta = None
             self.links = None
             self.link = None
             self.all_s_pars = data
+
+    @property
+    def freq_plan(self):
+        """The frequency plan dict ({carrier_hz,start_hz,stop_hz,num_freqs}) for v2
+        payloads, or None for legacy pkls / when unavailable."""
+        if self.meta is None:
+            return None
+        return self.meta.get("freq_plan")
+
+    @property
+    def rx_array_shape(self):
+        """The selected link's rx array shape (rows, cols) for v2 payloads, else None."""
+        if self.link_meta is None:
+            return None
+        shape = self.link_meta.get("rx_array_shape")
+        return tuple(shape) if shape is not None else None
+
+    @property
+    def physical_scale(self):
+        """Whether the selected link's frames are physically scaled, for v2 payloads,
+        else None."""
+        if self.link_meta is None:
+            return None
+        return self.link_meta.get("physical_scale")
 
     def __iter__(self):
         for i in range(self.all_s_pars.shape[0]):
@@ -43,7 +83,11 @@ class SionnaIterator:
         # Context manager: close the handle so we don't lock the .pkl (see __init__).
         with open(fname, 'rb') as f:
             data = pickle.load(f)
-        return list(data.keys()) if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        if "meta" in data and "links" in data:
+            return list(data["links"].keys())
+        return list(data.keys())
 
 
 _this_dir = os.path.abspath(os.path.dirname(__file__))

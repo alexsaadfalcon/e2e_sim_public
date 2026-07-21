@@ -52,6 +52,7 @@ _POSITIVE_PARAMS = {
     ("fft", "bins"),
     ("range_az", "bins"),
     ("range_el", "bins"),
+    ("comms", "fft_size"),
 }
 
 
@@ -70,6 +71,57 @@ def _enabled(state: Dict[str, Dict[str, Any]], block_id: str) -> bool:
     return bool(state.get(block_id, {}).get("enabled", False))
 
 
+def _resolve_physical_scale(mode: str, env_block: Any) -> bool:
+    """Map the rffe scale_mode param to RFFEBlock's physical_scale bool.
+
+    'physical'/'legacy' force the value; 'auto' (or anything else) follows the
+    environment block's own ``physical_scale`` metadata (v2 pkls only -- legacy
+    pkls expose it as absent/None, which falls back to False, i.e. unchanged
+    legacy behavior).
+    """
+    if mode == "physical":
+        return True
+    if mode == "legacy":
+        return False
+    return bool(getattr(env_block, "physical_scale", None))
+
+
+def _resolve_freq_span_hz(state: Dict[str, Dict[str, Any]], env_block: Any) -> float:
+    """The RFFE buffer's true sample-rate span (Hz).
+
+    Prefers the environment block's own ``freq_plan`` metadata (v2 pkls) so the
+    frontend automatically matches the frames' actual band; falls back to the
+    rffe freq_span_hz UI param for legacy pkls (no freq_plan).
+    """
+    freq_plan = getattr(env_block, "freq_plan", None)
+    if freq_plan:
+        return float(freq_plan["stop_hz"]) - float(freq_plan["start_hz"])
+    return float(_p_positive(state, "rffe", "freq_span_hz"))
+
+
+def _comms_freqs(state: Dict[str, Dict[str, Any]], env_block: Any) -> np.ndarray:
+    """Frequency grid (Hz) for the comms head's `ModemBlock`.
+
+    Prefers the environment block's own ``freq_plan`` metadata (v2 pkls):
+    ``linspace(start_hz, stop_hz, num_freqs)`` -- mirrors :func:`_resolve_freq_span_hz`.
+    Falls back (legacy pkls, no ``freq_plan``) to a span centered at 30 GHz built
+    from the rffe ``freq_span_hz`` UI param, matching the reference scenarios'
+    carrier. Either way the point count follows the actual frame's frequency-
+    sample count when available (best-effort; a fixed default otherwise).
+    """
+    try:
+        n_freqs = int(env_block.get_S_pars().shape[-1])
+    except Exception:
+        n_freqs = 64
+    freq_plan = getattr(env_block, "freq_plan", None)
+    if freq_plan:
+        num = int(freq_plan.get("num_freqs") or n_freqs)
+        return np.linspace(float(freq_plan["start_hz"]), float(freq_plan["stop_hz"]), num)
+    span = _resolve_freq_span_hz(state, env_block)
+    carrier = 30e9
+    return np.linspace(carrier - span / 2.0, carrier + span / 2.0, n_freqs)
+
+
 def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[str, Any]:
     """
     Build blocks from ``state`` and run ``n_steps`` of the simulation.
@@ -80,6 +132,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # --- lazy heavy imports -----------------------------------------------------
     try:
         import torch  # noqa: F401
+        from e2e.frames import FrameContractError
         from e2e.simulation import Simulation
         from e2e.blocks import (
             SionnaEnvironmentBlock,
@@ -103,12 +156,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     scenario_name = _p(state, "environment", "scenario_name")
     d = int(_p(state, "subspace", "d"))
 
-    # The simulation backend now handles RFFE-off (PRX is initialized to None) and
-    # AFE-off (the no-AFE subspace branch calls subspace.update(X, A) with two args)
-    # cleanly, so neither RFFE nor AFE is required to run. The only hard requirement
-    # the backend still imposes is a subspace block: feed_forward dereferences
-    # subspace_block.oja.U unconditionally. That guarantee is provided below, where a
-    # subspace block is always constructed.
+    # The simulation backend now handles RFFE-off (PRX is initialized to None),
+    # AFE-off (the no-AFE subspace branch calls subspace.update(X, A) with two args),
+    # and even subspace-off (the measurement stage is skipped) cleanly. The webapp
+    # still always constructs a subspace block below because its results view always
+    # includes SubspaceErrorBlock, which consumes the tracker's 'U'.
 
     # --- environment block (loads the .pkl frames; can raise FileNotFoundError) -
     try:
@@ -133,9 +185,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     if _enabled(state, "rffe"):
         circuit_block = RFFEBlock(
             n=N_RX * N_TX,
-            freq_span_hz=float(_p_positive(state, "rffe", "freq_span_hz")),
+            freq_span_hz=_resolve_freq_span_hz(state, environment_block),
             signal_scaling=float(_p_positive(state, "rffe", "signal_scaling")),
-            physical_scale=(_p(state, "rffe", "scale_mode") == "physical"),
+            physical_scale=_resolve_physical_scale(
+                _p(state, "rffe", "scale_mode"), environment_block
+            ),
         )
 
     interconnect_block = None
@@ -157,7 +211,8 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     if afe_block is not None and subspace_block is None:
         raise PipelineError("AFE block requires the AdaOja Subspace block to be enabled.")
     if subspace_block is None:
-        # feed_forward dereferences subspace_block unconditionally; keep one.
+        # The results view always runs SubspaceErrorBlock, which needs the tracker's
+        # 'U'; keep a subspace block even when the user toggles the stage off.
         subspace_block = AdaOjaBlock(N_RX, d)
 
     # --- downstream product blocks (always present) -----------------------------
@@ -170,6 +225,32 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         RangeElBlock(bins=range_el_bins),
         SubspaceErrorBlock(),
     ]
+
+    # --- optional comms head (swappable "product": OFDM demod instead of / -------
+    # alongside the radar products above). Appended AFTER the radar products so it
+    # composes without disturbing their output ordering.
+    comms_combining = None
+    if _enabled(state, "comms"):
+        try:
+            from e2e.comms.blocks import ModemBlock, BERBlock
+        except ImportError as e:
+            raise PipelineError(
+                "Could not import the comms backend (e2e.comms). "
+                "Underlying error: " + str(e)
+            )
+        comms_combining = _p(state, "comms", "combining")
+        comms_snr_db = float(_p(state, "comms", "snr_db"))
+        comms_fft_size = int(_p_positive(state, "comms", "fft_size"))
+        comms_freqs = _comms_freqs(state, environment_block)
+        try:
+            modem_block = ModemBlock(
+                comms_freqs, fft_size=comms_fft_size, snr_db=comms_snr_db,
+                combining=comms_combining,
+            )
+        except ValueError as e:
+            raise PipelineError(str(e))
+        downstream_blocks.append(modem_block)
+        downstream_blocks.append(BERBlock())
 
     sim = Simulation(
         environment_block,
@@ -189,7 +270,9 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             "A required data file was missing during the run (generate frames "
             f"first). Underlying error: {e}"
         )
-    except AssertionError as e:
+    except (AssertionError, FrameContractError) as e:
+        # FrameContractError: the e2e/frames.py shape-contract guards (no MIMO,
+        # single chirp, aperture factorization) that used to be bare asserts.
         raise PipelineError(f"Pipeline constraint failed: {e}")
     except Exception as e:  # surface anything else cleanly to the UI
         raise PipelineError(f"Pipeline run failed: {type(e).__name__}: {e}")
@@ -204,16 +287,32 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         n_freqs = int(environment_block.get_S_pars().shape[-1])
     except Exception:
         pass  # axis metadata is best-effort; figures_from_outputs falls back to bins
-    freq_span_hz = (
-        float(_p_positive(state, "rffe", "freq_span_hz")) if _enabled(state, "rffe") else 3e9
-    )
+    # Prefer the environment block's own freq_plan (v2 pkls) so the range axis matches
+    # the frames' true band automatically, regardless of whether rffe is enabled.
+    freq_plan = getattr(environment_block, "freq_plan", None)
+    if freq_plan:
+        freq_span_hz = float(freq_plan["stop_hz"]) - float(freq_plan["start_hz"])
+        if freq_plan.get("num_freqs") is not None:
+            n_freqs = int(freq_plan["num_freqs"])
+    else:
+        freq_span_hz = (
+            float(_p_positive(state, "rffe", "freq_span_hz")) if _enabled(state, "rffe") else 3e9
+        )
     outputs["_axis_meta"] = {
         "fft_bins": fft_bins,
         "range_az_bins": range_az_bins,
         "range_el_bins": range_el_bins,
         "n_freqs": n_freqs,
         "freq_span_hz": freq_span_hz,
+        # True when the values above came from the frames' own v2 metadata (env
+        # block freq_plan), not from UI params/fallbacks -- lets the UI say so.
+        "from_meta": bool(getattr(environment_block, "freq_plan", None)),
     }
+    if comms_combining is not None:
+        # Small metadata dict figures_from_outputs reads to label the BER figure
+        # (mirrors "_axis_meta" above); leading underscore keeps it out of the
+        # reserved per-frame state_dict keys Simulation.feed_forward guards.
+        outputs["_comms_meta"] = {"combining": comms_combining}
     return outputs
 
 
@@ -230,8 +329,23 @@ def _to_numpy_abs_db(tensor):
     peak = torch.max(torch.abs(tensor))
     peak = torch.clamp(peak, min=1e-12)
     t = tensor / peak
-    db = 20 * torch.log10(torch.abs(t) + 1e-12)
+    # The fft/range_az/range_el products are POWER maps (|.|^2, non-coherent
+    # integration), so dB relative to peak is 10*log10(P/Pmax). (Complex amplitude
+    # inputs would take 20*log10; all heatmap products routed here are power.)
+    db = 10 * torch.log10(torch.abs(t) + 1e-12)
     return db.T.detach().cpu().numpy()
+
+
+def _to_numpy_complex(tensor):
+    """Flatten a (possibly torch) complex tensor to a 1-D numpy array.
+
+    Torch-tolerant like `_to_numpy_abs_db`: only touches `.detach()`/`.cpu()` when
+    the value actually carries them (a torch tensor), so a plain numpy array/list
+    (e.g. a hand-built outputs dict in a test) also works.
+    """
+    if hasattr(tensor, "detach"):
+        tensor = tensor.detach().cpu().numpy()
+    return np.asarray(tensor).reshape(-1)
 
 
 def _sin_angle_axis(n_bins: int):
@@ -293,14 +407,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     if outputs.get("fft"):
         bins = meta.get("fft_bins") or outputs["fft"][-1].shape[0]
         u = _sin_angle_axis(bins)
+        # Coherent 2D aperture FFT, non-coherent (power) integration over range --
+        # a target shows up regardless of its range, not just one at range 0.
         figs["fft"] = _heatmap(
-            _to_numpy_abs_db(outputs["fft"][-1]), "FFT (dB)",
+            _to_numpy_abs_db(outputs["fft"][-1]),
+            "Azimuth-Elevation power (non-coherent over range)",
             x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
         )
 
     for key, title, aperture_label in [
-        ("range_az", "Range-Azimuth (dB)", "azimuth sin(θ)"),
-        ("range_el", "Range-Elevation (dB)", "elevation sin(θ)"),
+        ("range_az", "Range-Azimuth power (non-coherent over elevation)", "azimuth sin(θ)"),
+        ("range_el", "Range-Elevation power (non-coherent over azimuth)", "elevation sin(θ)"),
     ]:
         if outputs.get(key):
             bins = meta.get(f"{key}_bins") or outputs[key][-1].shape[0]
@@ -329,6 +446,57 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             height=360,
         )
         figs["subspace_err"] = fig
+
+    # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
+    # BER/EVM-per-frame lines + a constellation snapshot of the last frame.
+    if outputs.get("ber"):
+        bers = [float(b) for b in outputs["ber"]]
+        comms_meta = outputs.get("_comms_meta") or {}
+        combining = comms_meta.get("combining", "?")
+        title = f"Comms head BER ({combining}"
+        gains = [float(g) for g in (outputs.get("comm_array_gain_db") or [])
+                 if g is not None and np.isfinite(float(g))]
+        if gains:
+            title += f", array gain {np.mean(gains):.1f} dB"
+        title += ")"
+        fig = go.Figure(data=go.Scatter(y=bers, mode="lines+markers"))
+        fig.update_layout(
+            title=title,
+            xaxis_title="Frame",
+            yaxis_title="BER",
+            yaxis_type="log",
+            margin=dict(l=40, r=20, t=40, b=40),
+            height=360,
+        )
+        figs["ber"] = fig
+
+    if outputs.get("evm"):
+        evms = [float(e) for e in outputs["evm"]]
+        fig = go.Figure(data=go.Scatter(y=evms, mode="lines+markers"))
+        fig.update_layout(
+            title="Comms head EVM per frame",
+            xaxis_title="Frame",
+            yaxis_title="EVM",
+            margin=dict(l=40, r=20, t=40, b=40),
+            height=360,
+        )
+        figs["evm"] = fig
+
+    if outputs.get("comm_data_eq"):
+        data_np = _to_numpy_complex(outputs["comm_data_eq"][-1])
+        fig = go.Figure(data=go.Scatter(
+            x=data_np.real, y=data_np.imag, mode="markers",
+            marker=dict(size=4),
+        ))
+        fig.update_layout(
+            title="Comms head constellation (last frame, equalized)",
+            xaxis_title="I",
+            yaxis_title="Q",
+            margin=dict(l=40, r=20, t=40, b=40),
+            height=360,
+        )
+        fig.update_yaxes(scaleanchor="x", scaleratio=1)
+        figs["comm_const"] = fig
 
     return figs
 

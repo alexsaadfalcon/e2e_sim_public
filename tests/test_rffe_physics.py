@@ -64,22 +64,49 @@ def _expected_NBB(cfg):
 
 # --------------------------------------------------------------------------- (a) noise floor
 
-def test_noise_floor_matches_NBB_times_BWIF():
-    """Noise is band-referenced to the receiver's IF bandwidth (BW column, 15 MHz):
-    an S-parameter frame is a stepped-frequency measurement, so each point sees
-    NBB*BW_IF of noise power -- NOT NBB*fs (which would inflate the floor ~23 dB)."""
+def test_noise_floor_matches_NBB_times_BWIF_per_sample():
+    """circuit_model_bb_approx injects noise in the TIME domain, but the buffer goes
+    through an unnormalized forward FFT afterwards (RFFEBlock.apply_circuit), which
+    multiplies variance by nt (the buffer's last-dim length) -- so the per-TIME-SAMPLE
+    variance injected here is intentionally NBB*BW_IF/nt, not NBB*BW_IF (that full
+    per-frequency-bin level is pinned post-FFT by
+    test_frequency_bin_noise_matches_NBB_times_BWIF_after_fft below). Here nt = N
+    (this is a bare 1-D call, so the whole vector is one "buffer")."""
     cfg = _cfg()
     N = 200_000
     zero_in = torch.zeros(N, dtype=torch.cfloat, device=device)
     out, _PRX = circuit_model_bb_approx(cfg, zero_in, FS_DEFAULT, if_filter=False)
 
     BW_IF = cfg[6].item()  # 15e6
-    expected_var = (_expected_NBB(cfg) * BW_IF).item()
+    expected_var = (_expected_NBB(cfg) * BW_IF / N).item()
     # Noise is added independently to the real (I) and imaginary (Q) parts, each with
-    # per-sample variance NBB*BW_IF; average the two measured quadrature variances.
+    # per-sample variance NBB*BW_IF/nt; average the two measured quadrature variances.
     measured_var = (0.5 * (torch.var(out.real) + torch.var(out.imag))).item()
 
     assert measured_var == pytest.approx(expected_var, rel=0.10)
+
+
+def test_frequency_bin_noise_matches_NBB_times_BWIF_after_fft():
+    """End-to-end seam check through RFFEBlock (ifft -> circuit -> unnormalized fft):
+    the per-FREQUENCY-BIN noise variance downstream blocks actually consume must land
+    on NBB*BW_IF, independent of nt. Pre-fix this was inflated by a factor of nt
+    (e.g. ratio ~64 at nt=64) because the per-sample injection wasn't pre-divided by
+    nt before the unnormalized forward FFT."""
+    nt = 64
+    n_rx = 4000  # many independent elements stand in for repeated trials
+    rffe = RFFEBlock(n=n_rx, physical_scale=True, freq_span_hz=FS_DEFAULT)
+    zero_s_pars = torch.zeros(n_rx, 1, 1, nt, dtype=torch.cfloat, device=device)
+
+    s_pars_dist, _PRX = rffe.apply_circuit(zero_s_pars)
+
+    cfg = _cfg()
+    BW_IF = cfg[6].item()
+    expected_var = (_expected_NBB(cfg) * BW_IF).item()
+    # Average per-bin variance across frequency bins and elements (all bins/elements
+    # are statistically identical here: zero input, identical RX_config per element).
+    measured_var = (0.5 * (torch.var(s_pars_dist.real) + torch.var(s_pars_dist.imag))).item()
+
+    assert measured_var == pytest.approx(expected_var, rel=0.15)
 
 
 # --------------------------------------------------------------------------- (b) small-signal gain
@@ -121,6 +148,76 @@ def test_compression_monotonic_and_engaged_at_high_amplitude():
 
     # clamp engaged: gain well below the small-signal gain at the top of the sweep
     assert gains[-1] < gains[0] * 0.9
+
+
+# --------------------------------------------------------------------------- (c.5) phase invariance
+
+def test_lna_mixer_envelope_is_phase_invariant():
+    """Directly targets defect 2: the LNA+mixer nonlinearity now depends only on the
+    envelope |v|, so its output magnitude must be phase-invariant to float precision
+    (an ANALYTIC property of the (3/4)*|v|^2*v envelope form). Replicates the LNA+
+    mixer-only formulas independently of the module under test (same pattern as
+    _expected_NBB), so it doesn't just re-run production code against itself. This
+    FAILS on the old complex cube v**3 (which mixes I/Q and is phase-dependent):
+    pre-fix, the equivalent isolated-stage measurement varies by 2-3x with phase at
+    this amplitude (matching the qualitative pre-fix symptom -- end-to-end |gain|
+    5.28 at phase 0 vs 7.47 at ~67.5deg, |v0|=0.1V -- also driven by this stage,
+    though the BB stage's own real per-rail nonlinearity, left as-is, contributes
+    additional phase dependence downstream; see test_full_chain_gain_no_expansion
+    below for the full-chain assertions this fix supports).
+    """
+    cfg = _cfg()
+    Ibias_LNA, Vbias_LNA, Plo, _Ibias_BB, _Vbias_BB, _Av, _BW = cfg
+    RoLNA, Vodmax, Plomax, Gsw0, Vsat, Kn = 50.0, 0.6, 0.02, 0.06, 0.5, 8.0
+
+    GmLNA = 1.5 * Ibias_LNA / Vbias_LNA
+    G3LNA = Ibias_LNA / Vbias_LNA ** 3 / 2
+    r_star_lna = torch.sqrt(GmLNA / (2.25 * G3LNA))
+    Vod = Vodmax * torch.sqrt(Plo / Plomax)
+    Gsw = Gsw0 * Vod / Vodmax
+    rho = 1 / (Gsw * RoLNA)
+    a2 = -1 / 4 / Vod
+    a3 = -1 / 2 / Vsat ** 2
+
+    v0 = 0.1  # comfortably past r_star_lna (~0.1155 x Vbias_LNA) so the cubic engages
+    phases = torch.linspace(0, 2 * torch.pi, 17)[:-1]
+    mags = []
+    for phase in phases:
+        v = v0 * torch.exp(1j * phase).to(torch.cfloat)
+        v_mag = torch.abs(v)
+        v = v * torch.clamp(r_star_lna / torch.clamp(v_mag, min=1e-30), max=1.0)
+        Vlna = RoLNA * (GmLNA * v - 0.75 * G3LNA * v * torch.abs(v) ** 2)
+        Imix = (Vlna / RoLNA / (1 + rho)
+                - 0.75 * (Vlna * rho) * torch.abs(Vlna * rho) ** 2 / RoLNA / (1 + rho) ** 5
+                * (2 * a2 ** 2 - a3 * (1 + rho)))
+        Vmix = Imix * RoLNA * rho * Kn * (1 + rho) / (1 + rho * (1 + Kn))
+        mags.append(torch.abs(Vmix).item())
+
+    mags_t = torch.tensor(mags)
+    assert (mags_t.max() - mags_t.min()).item() == pytest.approx(0.0, abs=1e-3 * mags_t.mean().item())
+
+
+def test_full_chain_gain_no_expansion(monkeypatch):
+    """Full chain (through circuit_model_bb_approx, noise zeroed): |output| must
+    never exceed the small-signal linear-gain prediction (Av) at any phase or
+    amplitude -- the compressive nonlinearities (LNA/mixer envelope form + BB
+    per-rail cubic) must only ever saturate, never expand. This is the concrete,
+    amplitude-swept form of the defect-2 "0.80V vs 0.60V linear prediction"
+    over-the-clamp EXPANSION symptom."""
+    import e2e.circuit.rffe_model as rffe_mod
+
+    monkeypatch.setattr(rffe_mod.torch, "randn_like", lambda x: torch.zeros_like(x))
+
+    cfg = _cfg()
+    linear_gain = cfg[5].item()  # Av column, 10**(24/20)
+    phases = torch.linspace(0, 2 * torch.pi, 13, device=device)[:-1]
+
+    for v0 in (1e-3, 1e-2, 0.1, 0.3):
+        for phase in phases:
+            tone = torch.full((1,), v0, dtype=torch.cfloat, device=device) * torch.exp(1j * phase)
+            out, _PRX = circuit_model_bb_approx(cfg, tone, FS_DEFAULT, if_filter=False)
+            gain = (torch.abs(out[0]) / v0).item()
+            assert gain <= linear_gain * (1 + 1e-6)
 
 
 # --------------------------------------------------------------------------- (d) BB compressive sign
@@ -276,7 +373,11 @@ def test_rffe_legacy_mode_normalizes_physical_mode_skips_it(monkeypatch):
     n_rx, F = 8, 16
     torch.manual_seed(1)
     s_pars = torch.randn(n_rx, 1, 1, F, dtype=torch.cfloat, device=device)
-    s_pars2 = torch.cat([s_pars, s_pars], dim=2)  # (n_rx, 1, 2, F) as feed_forward builds it
+    # (n_rx, 1, 2, F): apply_circuit's reshape now infers the chirp dim (no longer
+    # hardcoded to 2), so this n_chirp=2 shape just exercises that generality --
+    # CircuitStage/feed_forward itself feeds single-chirp frames directly now (the
+    # vestigial pol-pair duplication was removed).
+    s_pars2 = torch.cat([s_pars, s_pars], dim=2)
 
     expected_frame = torch.fft.ifft(s_pars2.view(n_rx, 1, 2, F), dim=-1)
 
@@ -300,7 +401,7 @@ def test_rffe_legacy_mode_end_to_end_finite():
     n_rx, F = 8, 16
     torch.manual_seed(2)
     s_pars = torch.randn(n_rx, 1, 1, F, dtype=torch.cfloat, device=device)
-    s_pars2 = torch.cat([s_pars, s_pars], dim=2)
+    s_pars2 = torch.cat([s_pars, s_pars], dim=2)  # exercises n_chirp=2 generality; see above
 
     rffe = RFFEBlock(n=n_rx, physical_scale=False, signal_scaling=1e-5)
     out, PRX = rffe.apply_circuit(s_pars2)
@@ -323,8 +424,9 @@ def test_if_filter_enabled_runs_on_batch_input():
     must now run end-to-end through the public RFFEBlock API and stay finite."""
     n_rx = 4
     rffe = RFFEBlock(n=n_rx, if_filter=True)
-    # apply_circuit receives the polarization-doubled frame (Simulation cats the
-    # chirp dim to 2 before the circuit), hence shape [n, 1, 2, F].
+    # apply_circuit's reshape infers the chirp dim, so a n_chirp=2 shape [n, 1, 2, F]
+    # still runs fine (exercised here); Simulation/CircuitStage itself now feeds
+    # single-chirp [n, 1, 1, F] frames directly (no more pol-pair duplication).
     s_pars = (torch.randn(n_rx, 1, 2, 64) + 1j * torch.randn(n_rx, 1, 2, 64)).to(device)
     out, PRX = rffe.apply_circuit(s_pars)
     assert out.shape == s_pars.shape
@@ -402,7 +504,9 @@ def test_mixed_convention_pkl_consumed_per_link(tmp_path):
         it = SionnaIterator(out_path, link=link)
         frame = torch.from_numpy(np.asarray(it[0], dtype=np.complex64)).to(device)
         n_elem = frame.shape[0]
-        # apply_circuit expects the pol-doubled [n, 1, 2, F] frame (as Simulation feeds)
+        # apply_circuit's chirp dim is inferred, so a n_chirp=2 shape [n, 1, 2, F]
+        # still runs (exercised here for generality); Simulation itself now feeds
+        # the frame's native single-chirp shape directly.
         doubled = torch.cat([frame, frame], dim=2)
         out, _prx = RFFEBlock(n=n_elem, physical_scale=physical,
                               freq_span_hz=3e9).apply_circuit(doubled)

@@ -18,28 +18,37 @@ import torch
 
 from .ofdm import OFDMModem, random_bits
 from . import channel as ch
+from . import beamforming as bf
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _carrier_hz(freq_plan, freqs):
+    """Carrier frequency (Hz) from a v2 ``freq_plan`` -- the DICT shape that
+    ``SionnaIterator.freq_plan`` / the env block expose (``{'carrier_hz': ...}``),
+    matching every other freq_plan consumer in the codebase. Falls back to the band
+    midpoint when no plan is threaded into the state dict."""
+    if freq_plan is not None:
+        return float(freq_plan["carrier_hz"])
+    return float(np.mean(freqs))
 
 
 def _cfr_from_state(state_dict, modem, freqs):
     """Pull a 1-D channel frequency response out of a pipeline state dict.
 
     The pipeline stores `s_pars` shaped [N_RX, N_TX, chirp, N_FREQS]. For a comm
-    link we want a single spatial channel; we take element (0,0,0) and resample it
-    onto the modem's subcarrier grid. If a precomputed `cfr`/`H_sc` is already in
-    the state dict we use that directly.
+    link we want a single spatial channel; `ch.frame_to_cfr` (element 0) extracts
+    element (0,0,0), already resampled onto `freqs` (a no-op here since `s_pars`
+    is already sampled on that grid), and we then resample onto the modem's
+    subcarrier grid. If a precomputed `cfr`/`H_sc` is already in the state dict
+    we use that directly.
     """
     if "H_sc" in state_dict:
         return torch.as_tensor(state_dict["H_sc"], dtype=torch.complex64, device=device)
 
     s_pars = state_dict["s_pars"]
-    s_pars = torch.as_tensor(s_pars, dtype=torch.complex64, device=device)
-    # collapse to a single 1-D frequency response
-    flat = s_pars.reshape(-1, s_pars.shape[-1])
-    cfr_dense = flat[0]                                  # one spatial channel
-    fp = state_dict.get("freq_plan", None)
-    carrier = fp.carrier_hz if fp is not None else float(np.mean(freqs))
+    cfr_dense = ch.frame_to_cfr(s_pars, freqs, element=0)   # one spatial channel
+    carrier = _carrier_hz(state_dict.get("freq_plan", None), freqs)
     df = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 1.0
     sc_spacing = state_dict.get("subcarrier_spacing_hz", df)
     return ch.cfr_to_subcarriers(cfr_dense, freqs, modem.fft_size, carrier, sc_spacing)
@@ -51,17 +60,39 @@ class ModemBlock:
     Parameters mirror `OFDMModem`. On `apply` it returns the recovered bits,
     equalized data symbols, the (LS) channel estimate and the bits that were sent
     -- everything a downstream `BERBlock` needs.
+
+    `combining` selects how the array's 1024 elements feed the comms head:
+      - "element0" (default): the historical SISO tap -- element (0, 0) only,
+        via `_cfr_from_state`. Bit-exact with the pre-`combining` `ModemBlock`.
+      - "mrc": full-aperture maximum-ratio combining. Builds a per-element
+        channel `H` (`beamforming.element_channels`) from `state['s_pars']`,
+        injects INDEPENDENT per-element AWGN, and coherently combines
+        (`beamforming.mrc_weights` + `combine`) before the existing pilot
+        estimation / equalization / demap path runs -- unchanged -- on the
+        combined stream (no genie equalization: the modem still estimates the
+        *effective* channel from pilots).
+      - "subspace": same per-element noise + combine machinery, but the
+        (broadband) weight vector is the tracked subspace's dominant direction
+        `state['U'][:, 0]` (`beamforming.subspace_weights`) instead of MRC.
+        Requires a subspace tracker (`AdaOjaBlock`) in the pipeline so `state`
+        carries `'U'`.
     """
 
     def __init__(self, freqs, n_symbols=8, fft_size=64, cp_len=16, n_active=52,
                  pilot_spacing=8, bits_per_symbol=2, snr_db=20.0,
-                 equalizer="mmse", estimator="ls", seed=0):
+                 equalizer="mmse", estimator="ls", seed=0, combining="element0"):
         self.freqs = np.asarray(freqs, dtype=np.float64)
         self.n_symbols = int(n_symbols)
         self.snr_db = float(snr_db)
         self.equalizer = equalizer
         self.estimator = estimator
         self.seed = seed
+        if combining not in ("element0", "mrc", "subspace"):
+            raise ValueError(
+                f"unknown combining mode {combining!r} (expected 'element0', "
+                "'mrc' or 'subspace')"
+            )
+        self.combining = combining
         self.modem = OFDMModem(fft_size=fft_size, cp_len=cp_len, n_active=n_active,
                                pilot_spacing=pilot_spacing, bits_per_symbol=bits_per_symbol)
 
@@ -87,8 +118,6 @@ class ModemBlock:
 
     def apply(self, state_dict):
         modem = self.modem
-        H_sc = _cfr_from_state(state_dict, modem, self.freqs)
-
         # reuse the cached deterministic TX frame (see __init__)
         tx_bits = self._tx_bits
         tx_freq = self._tx_freq
@@ -98,10 +127,19 @@ class ModemBlock:
         # (still reproducible from self.seed); the cached TX is unchanged.
         noise_seed = self.seed + 1 + self._frame
         self._frame += 1
-        rx_freq_clean, _ = ch.apply_channel(tx_freq, H_sc, self.snr_db, rng_seed=noise_seed)
-        # demod is identity here since we already work in the freq grid, but keep it
-        # explicit so the block remains correct if a time-domain channel is swapped in
-        rx_freq = rx_freq_clean
+
+        if self.combining == "element0":
+            # historical SISO tap (element (0, 0, 0)); bit-exact with the
+            # pre-`combining` ModemBlock.
+            H_sc = _cfr_from_state(state_dict, modem, self.freqs)
+            rx_freq, _ = ch.apply_channel(tx_freq, H_sc, self.snr_db, rng_seed=noise_seed)
+            extra = {}
+        else:
+            # full-aperture spatial combining (mrc / subspace): see
+            # `_combine_spatial`. `H_sc` here is the EFFECTIVE (post-combining)
+            # channel `w^H H`, reported the same way element0 reports its
+            # single-tap channel.
+            rx_freq, H_sc, extra = self._combine_spatial(state_dict, tx_freq, noise_seed)
 
         # pilot-based channel estimation
         rx_pilots = modem.extract_pilots(rx_freq)
@@ -120,7 +158,7 @@ class ModemBlock:
         data_eq = modem.extract_data(eq)
         rx_bits = _demap(data_eq, modem)
 
-        return {
+        out = {
             "comm_tx_bits": tx_bits,
             "comm_rx_bits": rx_bits,
             "comm_data_eq": data_eq,
@@ -133,6 +171,77 @@ class ModemBlock:
             # share the prebuilt constellation so BERBlock need not rebuild it
             "comm_const": modem.const,
         }
+        out.update(extra)   # mrc/subspace add 'comm_array_gain_db'; element0 adds nothing
+        return out
+
+    def _combine_spatial(self, state_dict, tx_freq, noise_seed):
+        """Full-aperture receive beamforming for `combining in ('mrc', 'subspace')`.
+
+        Builds the per-element channel `H` [N, fft_size] from `state['s_pars']`
+        (`beamforming.element_channels`), injects INDEPENDENT complex AWGN per
+        element -- noise variance set from `self.snr_db` relative to the MEAN
+        per-element signal power on the active subcarriers (averaged over
+        elements too: one scalar noise variance shared by every
+        element/subcarrier/symbol) -- then coherently combines
+        (`beamforming.combine`) before returning to the caller's unchanged pilot
+        estimation / equalization / demap path.
+
+        Returns `(rx_freq, H_eff, extra)`: `rx_freq` [n_symbols, fft_size] is the
+        combined received frequency grid (drop-in replacement for the element0
+        path's `rx_freq`); `H_eff` [fft_size] is the effective post-combining
+        channel `w^H H`; `extra` carries `'comm_array_gain_db'`.
+        """
+        modem = self.modem
+        if "s_pars" not in state_dict:
+            raise ValueError(
+                f"ModemBlock(combining={self.combining!r}) needs 's_pars' in the "
+                "state dict to build per-element channels -- a precomputed "
+                "scalar 'H_sc' (the element0 shortcut) is not enough for "
+                "spatial combining"
+            )
+        s_pars = state_dict["s_pars"]
+
+        carrier = _carrier_hz(state_dict.get("freq_plan", None), self.freqs)
+        df = float(self.freqs[1] - self.freqs[0]) if len(self.freqs) > 1 else 1.0
+        sc_spacing = state_dict.get("subcarrier_spacing_hz", df)
+        k = np.arange(modem.fft_size)
+        sc_freqs = carrier + (k - modem.fft_size / 2.0) * sc_spacing
+
+        H = bf.element_channels(s_pars, self.freqs, sc_freqs)     # [N, fft_size]
+
+        if self.combining == "mrc":
+            w = bf.mrc_weights(H)                                 # [N, fft_size]
+        else:   # "subspace"
+            if "U" not in state_dict:
+                raise ValueError(
+                    "ModemBlock(combining='subspace') needs the subspace "
+                    "tracker's 'U' in the state dict -- add a subspace tracker "
+                    "(e.g. AdaOjaBlock as Simulation's subspace_block) to the "
+                    "pipeline so it populates 'U'"
+                )
+            w = bf.subspace_weights(state_dict["U"])              # [N]
+
+        active = modem.active_idx
+        rx_clean = tx_freq[:, None, :] * H[None, :, :]            # [n_sym, N, fft]
+
+        sig_pow = torch.mean(torch.abs(rx_clean[:, :, active]) ** 2).item()
+        noise_pow = sig_pow / (10 ** (self.snr_db / 10.0)) if sig_pow > 0 else 1e-12
+
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(int(noise_seed))
+        shape = rx_clean.shape
+        noise = (torch.randn(shape, generator=gen) + 1j * torch.randn(shape, generator=gen))
+        noise = noise.to(device) * float(np.sqrt(noise_pow / 2.0))
+        rx_full = rx_clean + noise                                # independent per element
+
+        rx_freq = bf.combine(rx_full, w)                          # [n_sym, fft]
+        H_eff = bf.combine(H, w)                                  # [fft]
+
+        elem_pow = torch.mean(torch.abs(H[:, active]) ** 2).item()
+        comb_pow = torch.mean(torch.abs(H_eff[active]) ** 2).item()
+        array_gain_db = 10.0 * np.log10(comb_pow / elem_pow) if elem_pow > 0 else float("nan")
+
+        return rx_freq, H_eff, {"comm_array_gain_db": array_gain_db}
 
 
 def _demap(data_eq, modem):

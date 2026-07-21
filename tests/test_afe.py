@@ -65,6 +65,34 @@ def test_non_finite_inputs_propagate():
     assert torch.isnan(xq[2])
 
 
+def test_quantizer_is_unbiased_in_magnitude():
+    # Regression guard for a floor-based mantissa truncation that biased
+    # |Aq| systematically low (~0.52% for exp=5/mantissa=6 on this
+    # distribution) before round-to-nearest replaced it.
+    torch.manual_seed(0)
+    A = torch.rand(200_000) * 2 - 1  # uniform[-1, 1)
+    Aq = quantizer_fp(A, exp=5, mantissa=6)
+    ratio = Aq.abs().mean().item() / A.abs().mean().item()
+    assert ratio == pytest.approx(1.0, abs=1e-3)
+
+
+def test_mantissa_round_up_carries_into_exponent():
+    # A mantissa that rounds up to the next power of two must carry into the
+    # exponent rather than silently wrapping the mantissa field.
+    x = torch.tensor([1.999, -1.999])
+    xq = quantizer_fp(x, exp=4, mantissa=3)
+    assert torch.allclose(xq, torch.tensor([2.0, -2.0]))
+
+
+def test_mantissa_round_up_saturates_at_top_of_range():
+    # Rounding up at the largest representable exponent must saturate to
+    # +/-inf (matching the existing overflow behavior) instead of wrapping.
+    x = torch.tensor([2**7 * (2 - 2**-4), -(2**7 * (2 - 2**-4))])
+    xq = quantizer_fp(x, exp=4, mantissa=3)
+    assert torch.isposinf(xq[0])
+    assert torch.isneginf(xq[1])
+
+
 def test_large_magnitude_saturates_not_wraps():
     # Previously 1e30 wrapped to a wrong-sign / small finite value; it must now
     # saturate to +/-inf and keep its sign.

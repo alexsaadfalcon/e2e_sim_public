@@ -15,3 +15,6 @@ Pillow>=10.0.0
 dash>=2.16.0
 plotly>=5.20.0
 dash-cytoscape>=1.0.0
+# Browser-driven UI journey tests (tests/e2e_ui, marked @pytest.mark.browser, skipped
+# unless RUN_BROWSER=1). After install run: playwright install chromium
+playwright>=1.40

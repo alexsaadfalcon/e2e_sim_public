@@ -343,6 +343,28 @@ def _stale_guard_fired(exc) -> bool:
     return "then Run again" in msg and ("RFFE" in msg or "AFE" in msg)
 
 
+def test_run_pipeline_maps_frame_contract_errors_to_constraint_message(
+        monkeypatch, make_env_block):
+    """A frame violating the shape contract (here: MIMO, n_tx=2) must surface as the
+    friendly 'Pipeline constraint failed: ...' PipelineError, not the generic
+    'Pipeline run failed'. The contract guards moved from bare asserts onto
+    e2e.frames.FrameContractError; this pins the webapp mapping for the new type."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    mimo = torch.cat([env.get_S_pars()] * 2, dim=1)  # [n_rx, 2, 1, F]
+    env.get_S_pars = lambda: mimo
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["rffe"]["enabled"] = False  # fail at the shape guard, not inside RFFE
+    with pytest.raises(pipeline_runner.PipelineError, match=r"Pipeline constraint failed.*MIMO"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+
 def test_run_pipeline_no_longer_errors_when_rffe_disabled():
     """RFFE-off is now a valid config: the stale up-front RFFE guard must not fire.
 
@@ -692,6 +714,225 @@ def test_scale_mode_param_reads_through():
     from webapp.pipeline_registry import default_block_state
 
     state = default_block_state()
+    assert _p(state, "rffe", "scale_mode") == "auto"
+    state["rffe"]["params"]["scale_mode"] = "legacy"
     assert _p(state, "rffe", "scale_mode") == "legacy"
     state["rffe"]["params"]["scale_mode"] = "physical"
     assert _p(state, "rffe", "scale_mode") == "physical"
+
+
+class _FakeEnvBlock:
+    """Minimal stand-in for SionnaEnvironmentBlock's metadata pass-throughs."""
+
+    def __init__(self, freq_plan=None, physical_scale=None):
+        self.freq_plan = freq_plan
+        self.physical_scale = physical_scale
+
+
+class _LegacyEnvBlock:
+    """No freq_plan/physical_scale attrs at all (pre-v2 env block)."""
+
+
+def test_resolve_physical_scale_forced_modes():
+    from webapp.pipeline_runner import _resolve_physical_scale
+
+    env = _FakeEnvBlock(physical_scale=False)
+    assert _resolve_physical_scale("physical", env) is True
+    assert _resolve_physical_scale("legacy", env) is False
+
+    env_true = _FakeEnvBlock(physical_scale=True)
+    assert _resolve_physical_scale("legacy", env_true) is False
+    assert _resolve_physical_scale("physical", env_true) is True
+
+
+def test_resolve_physical_scale_auto_follows_env_metadata():
+    from webapp.pipeline_runner import _resolve_physical_scale
+
+    assert _resolve_physical_scale("auto", _FakeEnvBlock(physical_scale=True)) is True
+    assert _resolve_physical_scale("auto", _FakeEnvBlock(physical_scale=False)) is False
+    # None (v2 pkl with unset metadata) and a legacy block with no attr at all both
+    # degrade to legacy behavior (False), unchanged from before this feature.
+    assert _resolve_physical_scale("auto", _FakeEnvBlock(physical_scale=None)) is False
+    assert _resolve_physical_scale("auto", _LegacyEnvBlock()) is False
+
+
+def test_resolve_freq_span_hz_prefers_freq_plan():
+    from webapp.pipeline_runner import _resolve_freq_span_hz
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    plan = {"carrier_hz": 30e9, "start_hz": 28.5e9, "stop_hz": 31.5e9, "num_freqs": 512}
+    env = _FakeEnvBlock(freq_plan=plan)
+    assert _resolve_freq_span_hz(state, env) == pytest.approx(3e9)
+
+
+def test_resolve_freq_span_hz_falls_back_to_param_when_no_freq_plan():
+    from webapp.pipeline_runner import _resolve_freq_span_hz
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    default_span = state["rffe"]["params"]["freq_span_hz"]
+
+    # No freq_plan attr at all (legacy env block).
+    assert _resolve_freq_span_hz(state, _LegacyEnvBlock()) == pytest.approx(default_span)
+    # freq_plan attr present but None.
+    assert _resolve_freq_span_hz(state, _FakeEnvBlock(freq_plan=None)) == pytest.approx(
+        default_span
+    )
+
+    # Custom UI value is honored when there's no freq_plan to override it.
+    state["rffe"]["params"]["freq_span_hz"] = 5e9
+    assert _resolve_freq_span_hz(state, _LegacyEnvBlock()) == pytest.approx(5e9)
+
+
+# =============================================================================
+# comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms")
+# =============================================================================
+
+def test_registry_comms_block_toggleable_and_disabled_by_default():
+    from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
+
+    spec = BLOCKS_BY_ID["comms"]
+    assert spec.category == "product"
+    assert spec.toggleable is True
+    assert spec.enabled_default is False
+    pkeys = {p.key for p in spec.params}
+    assert pkeys == {"combining", "snr_db", "fft_size"}
+
+    # default block state mirrors the registry: present, off, with the 3 params
+    state = default_block_state()
+    assert state["comms"]["enabled"] is False
+    assert set(state["comms"]["params"]) == {"combining", "snr_db", "fft_size"}
+
+
+def test_comms_freqs_uses_freq_plan_metadata():
+    from webapp.pipeline_runner import _comms_freqs
+    from webapp.pipeline_registry import default_block_state
+    import numpy as np
+
+    state = default_block_state()
+    plan = {"carrier_hz": 30e9, "start_hz": 28.5e9, "stop_hz": 31.5e9, "num_freqs": 16}
+    env = _FakeEnvBlock(freq_plan=plan)
+    freqs = _comms_freqs(state, env)
+    assert len(freqs) == 16
+    assert freqs[0] == pytest.approx(28.5e9)
+    assert freqs[-1] == pytest.approx(31.5e9)
+
+
+def test_comms_freqs_falls_back_to_rffe_span_centered_at_30ghz_for_legacy_env():
+    from webapp.pipeline_runner import _comms_freqs
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    state["rffe"]["params"]["freq_span_hz"] = 2e9
+    freqs = _comms_freqs(state, _LegacyEnvBlock())
+    assert freqs[0] == pytest.approx(30e9 - 1e9)
+    assert freqs[-1] == pytest.approx(30e9 + 1e9)
+
+
+@pytest.mark.gui
+@pytest.mark.slow
+def test_run_pipeline_comms_enabled_emits_ber_and_figures(monkeypatch, make_env_block):
+    """Enabling the comms head appends ModemBlock/BERBlock and the run's outputs
+    (and derived figures) include the new comms products."""
+    pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_runner import figures_from_outputs, run_pipeline
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=2, n_freqs=32)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["comms"]["enabled"] = True
+    outputs = run_pipeline(state, n_steps=2)
+
+    assert "ber" in outputs and len(outputs["ber"]) == 2
+    assert all(0.0 <= b <= 1.0 for b in outputs["ber"])
+    assert "evm" in outputs
+    assert "comm_data_eq" in outputs
+
+    figs = figures_from_outputs(outputs)
+    assert "ber" in figs
+    assert "mrc" in figs["ber"].layout.title.text  # default combining
+    assert figs["ber"].layout.yaxis.type == "log"
+    assert "evm" in figs
+    assert "comm_const" in figs
+
+
+@pytest.mark.gui
+@pytest.mark.slow
+def test_run_pipeline_forwards_comms_combining(monkeypatch, make_env_block):
+    """The comms 'combining' param must reach ModemBlock's constructor, spy-style
+    like test_run_pipeline_forwards_array_shape."""
+    pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+    import e2e.comms.blocks as comm_blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    seen = {}
+    real_modem = comm_blocks.ModemBlock
+
+    def spy_modem(*a, **k):
+        seen["combining"] = k.get("combining")
+        seen["snr_db"] = k.get("snr_db")
+        seen["fft_size"] = k.get("fft_size")
+        return real_modem(*a, **k)
+
+    monkeypatch.setattr(comm_blocks, "ModemBlock", spy_modem)
+
+    state = default_block_state()
+    state["comms"]["enabled"] = True
+    state["comms"]["params"]["combining"] = "subspace"
+    state["comms"]["params"]["snr_db"] = 5.0
+    state["comms"]["params"]["fft_size"] = 128  # > default n_active=52, avoids ValueError
+    try:
+        pipeline_runner.run_pipeline(state, n_steps=1)
+    except Exception:
+        pass  # we only care about what ModemBlock was constructed with
+
+    assert seen.get("combining") == "subspace"
+    assert seen.get("snr_db") == pytest.approx(5.0)
+    assert seen.get("fft_size") == 128
+
+
+def test_figures_from_outputs_ber_evm_constellation():
+    """figures_from_outputs builds the comms figures directly from a hand-built
+    outputs dict (no torch/run_pipeline needed for 'ber'/'evm', which are plain
+    floats; 'comm_data_eq' exercises the torch-tolerant complex flattening)."""
+    torch = pytest.importorskip("torch")
+    from webapp.pipeline_runner import figures_from_outputs
+
+    outputs = {
+        "ber": [0.1, 0.01],
+        "evm": [0.2, 0.05],
+        "comm_array_gain_db": [10.0, 20.0],
+        "comm_data_eq": [torch.tensor([1 + 1j, -1 - 1j], dtype=torch.complex64)],
+        "_comms_meta": {"combining": "mrc"},
+    }
+    figs = figures_from_outputs(outputs)
+
+    assert figs["ber"].layout.title.text == "Comms head BER (mrc, array gain 15.0 dB)"
+    assert figs["ber"].layout.yaxis.type == "log"
+    assert list(figs["ber"].data[0].y) == [0.1, 0.01]
+
+    assert figs["evm"].layout.title.text == "Comms head EVM per frame"
+
+    const = figs["comm_const"].data[0]
+    import numpy as np
+    np.testing.assert_allclose(const.x, [1.0, -1.0])
+    np.testing.assert_allclose(const.y, [1.0, -1.0])
+    assert figs["comm_const"].layout.yaxis.scaleanchor == "x"
+
+
+def test_figures_from_outputs_ber_without_array_gain_omits_it_from_title():
+    from webapp.pipeline_runner import figures_from_outputs
+
+    outputs = {"ber": [0.3], "_comms_meta": {"combining": "element0"}}
+    figs = figures_from_outputs(outputs)
+    assert figs["ber"].layout.title.text == "Comms head BER (element0)"

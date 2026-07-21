@@ -7,6 +7,27 @@ semantic versioning.
 ## [Unreleased]
 
 ### Added
+- **Comms head with spatial combining**: `ModemBlock` gains a `combining` mode
+  (`"element0"` the historical single-tap SISO shortcut / `"mrc"` full-aperture
+  maximum-ratio combining / `"subspace"` broadband combining using the AdaOja
+  tracker's dominant direction, `state['U'][:, 0]`) plus `e2e/comms/beamforming.py`
+  (per-element channel extraction, MRC/subspace weights, coherent combine). Both
+  spatial modes inject independent per-element AWGN *before* combining, so the
+  reported `comm_array_gain_db` is real coherent-combining gain, not a noise-averaging
+  artifact (measured ~+30 dB at 1024 elements). New example
+  `python -m e2e.main.main_comms_head` runs the SAME full pipeline (environment → RFFE →
+  interconnect → AFE → AdaOja subspace) three times, once per combining mode, and
+  reports mean BER/EVM/array-gain plus a radar-product map from the same run — making
+  concrete that radar products and the comms link are two swappable *heads* on one
+  pipeline. Also exposed in the web UI as an optional "Comms Head (OFDM)" block
+  downstream of the subspace stage.
+- **Self-describing frames (A1)**: generated `.pkl`s now carry a `meta` block —
+  frequency plan, per-link RX array geometry, link kind, `tx_power_dbm`, and scale
+  convention — alongside the per-link frame stacks. `SionnaIterator` reads all three
+  formats (v2 / legacy multi-link dict / legacy bare array) and exposes the metadata;
+  the environment block auto-derives its array shape from it; the web UI gains an
+  RFFE "auto" scale mode and derives the true frequency span for range axes from the
+  frames themselves. Validated end-to-end on the real GPU ray-tracing path.
 - **Physical signal levels**: `Node.tx_power_dbm` (reference scenarios default to 12 dBm)
   switches generation to physically scaled S-parameters — Sionna's un-normalized CFR
   (real path) or an analytic free-space level (dry-run) converted to absolute receiver
@@ -54,8 +75,37 @@ semantic versioning.
   ("drive forward while turning") instead of spiraling about the scene centroid.
 - `Scenario.validate()` is stricter: it flags an unpaired comm link in either
   direction, rejects non-positive array dimensions/spacings, and rejects `num_freqs < 1`.
+- **`mmse_equalize` now defaults to `unbiased=True`** (behavior change for any external
+  caller): it rescales by the per-subcarrier estimator bias before hard decisions, so
+  MMSE and ZF now agree on hard decisions (as scalar-MMSE theory predicts) and the
+  shipped BER example reports MMSE's genuine advantage in soft-symbol EVM/MSE instead
+  of an artifact of comparing a biased estimator against unbiased decision boundaries.
+  Pass `unbiased=False` to recover the previous raw (biased) filter output.
+- **The three radar display products (`FFTBlock`, `RangeAzBlock`, `RangeElBlock`) now
+  return real power maps** (previously complex amplitudes accumulated by a coherent
+  sum across the non-displayed axis/range). Output keys and `[bins, bins]` shapes are
+  unchanged, but values are now honest non-coherent-integration power, and consumers
+  that expected complex output (e.g. taking `.abs()` themselves) should drop that step.
+- **The RFFE frequency-domain thermal-noise floor drops by ~`10*log10(n_freqs)` dB**
+  compared to previous runs (verified ratio 64.08 at `n_freqs=64`, i.e. ~18 dB): the
+  noise was inflated at the unnormalized-FFT seam and is now band-referenced correctly
+  per frequency bin. Demo plots and any tuned SNR-dependent thresholds will look
+  different (lower noise floor, more headroom) after this fix.
 
 ### Fixed
+- **Non-square aperture ordering**: Sionna's `PlanarArray` numbers antennas
+  column-first (row index varies fastest along a frame's flat RX axis), so the
+  row-major aperture reshape needs the slow axis first. The env block's array-shape
+  auto-derive from v2 metadata (`[num_rows, num_cols]`) now maps to
+  `(num_cols, num_rows)` — grid dim 0 = columns (azimuth), dim 1 = rows (elevation),
+  the convention the range/angle blocks assume. Square legacy arrays were unaffected;
+  non-square auto-derived arrays would have had a scrambled aperture (wrong angle maps).
+- The frame shape-contract guards raise a dedicated `frames.FrameContractError`
+  (a `ValueError` subclass); the web UI maps it to its friendly
+  "Pipeline constraint failed" message again (lost when the guards stopped being
+  bare `assert`s).
+- `Simulation` with `subspace_block=None` no longer crashes: the measurement stage
+  is skipped, so FFT/range-map-only pipelines run without a subspace tracker.
 - **RF front-end physics** (author-reviewed audit): the baseband stage's cubic
   nonlinearity had the wrong sign (expansive instead of compressive saturation); the
   thermal-noise constant was kT instead of 4kT (~6 dB); the noise floor is band-referenced
@@ -81,6 +131,59 @@ semantic versioning.
 - Generation robustness: per-link RNG streams (a link's dry-run frames are independent of
   other links), pickle files are opened via a context manager (no Windows file lock), and
   the real-Sionna CFR slice is cast to `complex64` to match the dry-run contract.
+- **RFFE physics, round two** (author-reviewed audit, RF/EM panel follow-up):
+  - Injected thermal noise was inflated by a factor of `N_FREQS` at the unnormalized-FFT
+    seam (verified ratio 64.08 at `n_freqs=64`); per-sample variance is now pre-divided
+    by `N_FREQS` so the per-frequency-bin floor lands on `NBB*BW` (stepped-frequency
+    semantics), with a new end-to-end frequency-domain regression test.
+  - The LNA/mixer cubic nonlinearity acted on the complex value directly (`v**3`),
+    giving phase-dependent gain (5.28 vs 7.47 measured across phase) and unphysical
+    expansion for Q-dominant inputs. Both stages now use the standard bandpass
+    baseband-equivalent envelope form (`(3/4)*a3*|v|^2*v`) with a phase-preserving
+    envelope clamp at the compressive peak; the baseband per-rail cubic (post-IQ-demod)
+    is unchanged, since it was already physically correct there.
+  - `CircuitStage` no longer duplicates the frame into a pol pair and discards half
+    (was 2x compute plus a wasted noise draw); `apply_circuit` infers the chirp
+    dimension instead.
+- **Radar display products, non-coherent integration** (RF/EM panel follow-up):
+  `FFTBlock` previously coherently summed raw frequency samples before the aperture
+  FFT, which is only coherent at range 0 (verified a 63 dB collapse by 5 cm), so the
+  az/el map showed zero-range leakage rather than the scene; it now range-transforms
+  first, runs the coherent 2D aperture FFT, and power-sums over range so targets at any
+  range appear. `RangeAzBlock`/`RangeElBlock` previously collapsed the orthogonal
+  aperture axis by a coherent sum (an implicit un-steered broadside beam), which nulled
+  targets more than ~3.6 degrees off broadside (verified peak 65515 -> 0.00); they now
+  run the coherent FFT in the displayed axes and power-sum across the collapsed axis, so
+  all angles contribute. `main_sionna_blocks` now auto-resolves `physical_scale` from the
+  frames' metadata (like the webapp) instead of silently renormalizing physically-scaled
+  frames. Regression tests pin analytic Parseval peak values for off-broadside and 10 m
+  targets.
+- **Comms MMSE estimator/equalizer honesty** (RF/EM panel follow-up): `mmse_estimate`'s
+  Wiener prior was derived circularly from the same few noisy pilots it shrinks (worse
+  than LS in 24/30 low-SNR Monte-Carlo trials); the prior and noise power are now pooled
+  across all pilots and symbols, with tests pinning MMSE <= LS at 0-4 dB SNR and
+  convergence to LS at high SNR. See the `mmse_equalize` unbiased-default entry above
+  under Changed.
+- **Generation guards** (RF/EM panel follow-up): `Scenario.validate()` and
+  `ScenarioRunner` now reject dual-polarization arrays with a physical explanation.
+  Sionna's `PlanarArray` reports 2x antenna ports for VH/cross-polarization, so
+  dual-pol scenarios previously generated frames whose antenna axis contradicted the
+  recorded `rx_array_shape`/`n_tx_ant` metadata (and dry-run mocked the wrong shape);
+  dual-pol support is deferred until the frame contract is dual-pol aware (see
+  `ROADMAP.md`). Separately, `_tx_power_amplitude_scale` never divided by the transmit
+  element count, so a full TX array radiated `P_tx` *per element* (+`10*log10(n_tx)` dB
+  EIRP, ~+30 dB at 1024 elements); `tx_power_dbm` is now the total radiated aperture
+  power, split uniformly across elements, with array gain emerging from coherent
+  combining rather than power double-counting (verified summed channel power ratio
+  full-vs-single array = 0.9986).
+- **AFE quantizer and subspace sensing-matrix bias** (RF/EM panel follow-up): the AFE
+  floating-point quantizer floored the mantissa (truncation), a systematic ~0.52%
+  downward magnitude bias on every quantized measurement matrix; it now rounds to
+  nearest (ties-to-even) with proper carry into the exponent and saturation (bias
+  measured 0.0008% after the fix). `gen_A_ada`'s random sensing rows were unnormalized
+  complex Gaussians with row-norm ~sqrt(n) (~32 at n=1024) against the tracked basis's
+  unit-norm rows; the random block is now column-normalized so both halves of the
+  sensing matrix weight equally.
 
 ### Known limitations
 See `ROADMAP.md`. In brief: the runtime pipeline currently assumes a single chirp and no

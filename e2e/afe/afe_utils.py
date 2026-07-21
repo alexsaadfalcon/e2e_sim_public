@@ -52,8 +52,22 @@ def create_custom_fp_from_components(x_sign, x_exp, x_mantissa, exp_width, manti
     src_inf = (x_exp >= 128) & (x_mantissa == 0)
     src_nan = (x_exp >= 128) & (x_mantissa != 0)
 
-    y_mantissa = torch.floor(x_mantissa * 2**mantissa_width)
+    # Round-to-nearest (ties-to-even, matching torch.round) mantissa quantization.
+    # ``floor`` would systematically bias |value| downward for both signs (the
+    # mantissa fraction only ever shrinks, and sign is stored separately from
+    # magnitude), which is the bug this replaces.
+    y_mantissa = torch.round(x_mantissa * 2**mantissa_width)
     y_exp = x_exp + bias
+
+    # A mantissa that rounds up to 2**mantissa_width overflows the mantissa
+    # field and carries into the exponent (e.g. 1.111...->2.000 becomes
+    # exponent+1, mantissa 0) -- standard IEEE-754 rounding behavior. The
+    # existing exponent-overflow saturation below still applies afterwards, so
+    # a carry that pushes past the largest finite exponent saturates to inf
+    # instead of silently wrapping.
+    mantissa_carry = y_mantissa >= 2**mantissa_width
+    y_mantissa = torch.where(mantissa_carry, torch.zeros_like(y_mantissa), y_mantissa)
+    y_exp = torch.where(mantissa_carry, y_exp + 1, y_exp)
 
     # Underflow (biased exponent <= 0, includes the float32 zero/denormal case)
     # flushes to the zero code.

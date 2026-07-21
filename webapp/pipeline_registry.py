@@ -73,11 +73,13 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,  # required by the current backend (records PRX)
         params=[
-            ParamSpec("scale_mode", "Scale mode", "choice", "legacy",
-                      choices=["legacy", "physical"],
-                      help="'physical' feeds the frames' absolute volts straight into "
-                           "the front-end (for frames generated with tx_power_dbm set); "
-                           "'legacy' renormalizes to the signal-scaling level below."),
+            ParamSpec("scale_mode", "Scale mode", "choice", "auto",
+                      choices=["auto", "legacy", "physical"],
+                      help="'auto' follows the frames' own metadata (v2 pkls); "
+                           "'physical' forces feeding the frames' absolute volts "
+                           "straight into the front-end (for frames generated with "
+                           "tx_power_dbm set); 'legacy' forces renormalizing to the "
+                           "signal-scaling level below."),
             ParamSpec("signal_scaling", "Signal scaling", "number", 1e-5,
                       step=1e-6, help="Drive level into the analog front-end "
                                       "(legacy scale mode only; ignored in physical)."),
@@ -129,7 +131,8 @@ BLOCKS: List[BlockSpec] = [
         toggleable=False,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
-        blurb="2D FFT range/Doppler-style map product.",
+        blurb="Azimuth-elevation power map (coherent aperture FFT, "
+              "non-coherent integration over range).",
     ),
     BlockSpec(
         id="range_az",
@@ -137,7 +140,7 @@ BLOCKS: List[BlockSpec] = [
         toggleable=False,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
-        blurb="Range-azimuth map product.",
+        blurb="Range-azimuth power map (non-coherent over elevation).",
     ),
     BlockSpec(
         id="range_el",
@@ -145,7 +148,7 @@ BLOCKS: List[BlockSpec] = [
         toggleable=False,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
-        blurb="Range-elevation map product.",
+        blurb="Range-elevation power map (non-coherent over azimuth).",
     ),
     BlockSpec(
         id="subspace_err",
@@ -154,6 +157,27 @@ BLOCKS: List[BlockSpec] = [
         category="product",
         params=[],
         blurb="Frobenius subspace distance between tracked and true U.",
+    ),
+    BlockSpec(
+        id="comms",
+        label="Comms Head (OFDM)",
+        toggleable=True,
+        enabled_default=False,   # opt-in: existing (radar-only) pipelines unchanged
+        category="product",
+        params=[
+            ParamSpec("combining", "Combining", "choice", "mrc",
+                      choices=["element0", "mrc", "subspace"],
+                      help="How the array feeds the OFDM demod: 'element0' is the "
+                           "historical single-tap SISO shortcut; 'mrc'/'subspace' "
+                           "combine across the full aperture."),
+            ParamSpec("snr_db", "SNR (dB)", "number", 10.0, step=1.0,
+                      help="Per-element AWGN SNR (dB), injected before combining."),
+            ParamSpec("fft_size", "FFT size", "int", 64, step=1,
+                      help="OFDM subcarrier (FFT) count."),
+        ],
+        blurb=("Full-aperture spatial combining + OFDM demod; subspace mode uses "
+               "the tracker's dominant direction; per-element noise is injected "
+               "before combining so any reported array gain is real."),
     ),
 ]
 
@@ -168,6 +192,7 @@ EDGES: List[tuple] = [
     ("subspace", "range_az"),
     ("subspace", "range_el"),
     ("subspace", "subspace_err"),
+    ("subspace", "comms"),
 ]
 
 

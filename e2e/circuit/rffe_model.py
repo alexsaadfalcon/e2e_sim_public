@@ -99,24 +99,35 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
     Av = RX_config[5]
     BW = RX_config[6]
 
-    # Clamp-at-cubic-peak: the LNA saturates a cubic nonlinearity Gm*v - G3*v^3 whose
-    # peak sits at v* = sqrt(Gm/(3*G3)). Since GmLNA ~ Ibias and G3LNA ~ Ibias, both
-    # scale together with Ibias_LNA, so v* = Vbias_LNA algebraically for ANY Ibias --
-    # the hard clamp below (at +-Vbias_LNA) always lands exactly at the compressive
-    # peak, independent of the bias retune.
     GmLNA = 1.5 * Ibias_LNA / Vbias_LNA
     G3LNA = Ibias_LNA / Vbias_LNA**3 / 2
     AvLNA = GmLNA * RoLNA
     FLNA = 1 + gammalna / GmLNA / Rs + 1 / Av**2
     Pdclna = 2 * RoLNA * Ibias_LNA**2
 
-    bb_approx_I = torch.real(bb_IQ)
-    bb_approx_Q = torch.imag(bb_IQ)
-    bb_approx_I = torch.clamp(bb_approx_I, -Vbias_LNA, Vbias_LNA)
-    bb_approx_Q = torch.clamp(bb_approx_Q, -Vbias_LNA, Vbias_LNA)
-    bb_IQ = bb_approx_I + 1j * bb_approx_Q
+    # Envelope clamp-at-cubic-peak (replaces the old per-rail I/Q clamp at +-Vbias_LNA,
+    # which was only valid for a REAL per-rail cubic -- the LNA is a single complex
+    # bandpass baseband signal, not two independent real rails; see the envelope
+    # nonlinearity comment below). The compressive characteristic g(r) =
+    # GmLNA*r - (3/4)*G3LNA*r^3 (r = envelope |v|, derived below) only compresses up
+    # to its peak; past it the algebraic cubic turns over and would unphysically
+    # EXPAND again. Peak: dg/dr = GmLNA - (9/4)*G3LNA*r^2 = 0
+    #   => r* = sqrt(GmLNA / ((9/4)*G3LNA)).
+    # Clamping the envelope (magnitude, phase preserved) at r* before the cubic pins
+    # the output at the peak for any overdrive, instead of continuing past it.
+    r_star_lna = torch.sqrt(GmLNA / (2.25 * G3LNA))
+    v_mag = torch.abs(bb_IQ)
+    clamp_scale = torch.clamp(r_star_lna / torch.clamp(v_mag, min=1e-30), max=1.0)
+    bb_IQ = bb_IQ * clamp_scale
 
-    Vlna = RoLNA * (GmLNA * bb_IQ - G3LNA * bb_IQ**3)
+    # Bandpass cubic nonlinearity, baseband-equivalent (envelope) form. A real
+    # bandpass cubic y = a1*u + a3*u^3 acting on u = Re{v e^{jwt}} produces, in the
+    # fundamental zone, the complex envelope response a1*v + (3/4)*a3*|v|^2*v (the
+    # standard third-order AM/AM baseband-equivalent identity) -- NOT the complex
+    # cube v**3, which mixes the I/Q rails unphysically and makes the gain
+    # phase-dependent. Here a1 = GmLNA, a3 = -G3LNA (the underlying real cubic being
+    # Gm*u - G3*u^3), so the envelope form is GmLNA*v - (3/4)*G3LNA*|v|^2*v.
+    Vlna = RoLNA * (GmLNA * bb_IQ - 0.75 * G3LNA * bb_IQ * torch.abs(bb_IQ) ** 2)
     Nlna = (Rs * FOURKT) * FLNA * AvLNA**2
 
     Vod = Vodmax * torch.sqrt(Plo / Plomax)
@@ -126,7 +137,9 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
     a3 = -1 / 2 / Vsat**2
     Avmix = rho * Kn / (1 + rho * (1 + Kn))
     Fmix = (1 + rho) * (1 + (rho + 1) / (rho * Kn))
-    Imix = Vlna / RoLNA / (1 + rho) - (Vlna * rho)**3 / RoLNA / (1 + rho)**5 * (2 * a2**2 - a3 * (1 + rho))
+    # Same envelope substitution as the LNA above: (Vlna*rho)**3 -> (3/4)*(Vlna*rho)*
+    # |Vlna*rho|^2, so the mixer's cubic term doesn't mix I/Q or depend on phase.
+    Imix = Vlna / RoLNA / (1 + rho) - 0.75 * (Vlna * rho) * torch.abs(Vlna * rho) ** 2 / RoLNA / (1 + rho)**5 * (2 * a2**2 - a3 * (1 + rho))
     Vmix_I = torch.real(Imix) * RoLNA * rho * Kn * (1 + rho) / (1 + rho * (1 + Kn))
     Vmix_Q = torch.imag(Imix) * RoLNA * rho * Kn * (1 + rho) / (1 + rho * (1 + Kn))
     Nmix = (Nlna + (RoLNA * FOURKT) * (Fmix - 1)) * Avmix**2
@@ -191,8 +204,20 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
     # (~23 dB) -- fs is used only for the IF-filter width above, and the boxcar
     # does NOT act on this noise (it is injected at the BB output, after the
     # filter position), so the noise must be band-referenced here, not filtered.
-    RBBI += torch.randn_like(RBBI) * torch.sqrt(NBB * BW)
-    RBBQ += torch.randn_like(RBBQ) * torch.sqrt(NBB * BW)
+    #
+    # Two-seam bookkeeping with the caller's FFT round-trip (RFFEBlock.apply_circuit):
+    # the signal seam takes ifft (1/N-normalized) into this time-domain buffer and
+    # (unnormalized) fft back out to frequency bins. The noise seam is different: it
+    # is injected HERE, in the time domain, then only goes through the unnormalized
+    # forward fft. That fft is a linear combination of the `nt` (= orig_shape[-1], the
+    # buffer's last-dim length) time samples, so it multiplies the per-sample
+    # variance by nt (each output bin sums nt independent unit-magnitude-coefficient
+    # contributions). Injecting NBB*BW per sample would therefore land nt*NBB*BW per
+    # frequency bin instead of the intended NBB*BW -- so the per-sample variance
+    # injected here must be pre-divided by nt.
+    nt = orig_shape[-1]
+    RBBI += torch.randn_like(RBBI) * torch.sqrt(NBB * BW / nt)
+    RBBQ += torch.randn_like(RBBQ) * torch.sqrt(NBB * BW / nt)
     PRX = Pdclna + Plo + PdcBB
     RxBB = RBBI + 1j * RBBQ
 

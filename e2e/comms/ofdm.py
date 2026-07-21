@@ -10,6 +10,12 @@ optionally inserts a comb of pilot tones, takes the IFFT to time domain, and
 prepends a cyclic prefix. Demodulation inverts that. Channel application,
 estimation and equalization live in `channel.py`.
 
+Note: the shipped examples and `ModemBlock` apply the channel as a per-subcarrier
+frequency-domain multiply (see `channel.py`) and never call `modulate`'s time-domain
+output (`tx_time`) or `demodulate`. `tx_time`/`demodulate` -- and therefore the cyclic
+prefix's actual ISI/multipath protection -- are exercised only by this module's own
+round-trip tests, not by any end-to-end path in this repo.
+
 Conventions
 -----------
 * A "frame" is `[n_symbols, fft_size]` of complex frequency-domain samples.

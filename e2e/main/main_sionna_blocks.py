@@ -34,7 +34,14 @@ downstream_blocks = [
     SubspaceErrorBlock(),
 ]
 
-circuit_block = RFFEBlock(n=N_RX * N_TX)
+# Mirror the webapp's auto scale-resolution (webapp/pipeline_runner.py
+# _resolve_physical_scale): v2 pkls carry physical_scale=True metadata (frames
+# already in volts at the LNA input); legacy pkls expose it as None, which keeps
+# the pre-existing renormalize-by-signal_scaling behavior (physical_scale=False).
+circuit_block = RFFEBlock(
+    n=N_RX * N_TX,
+    physical_scale=bool(getattr(environment_block, 'physical_scale', None)),
+)
 interconnect_block1 = InterconnectBlock(case='case3')
 interconnect_block2 = InterconnectBlock(case='synthetic')
 
@@ -57,10 +64,15 @@ plt.figure()
 plt.title('Subspace Error')
 plt.plot(outputs['subspace_err'])
 
+# 'fft' is now a real, non-negative az/el power map: coherent 2D aperture FFT,
+# non-coherent (power) integration over range -- a target at any range shows up,
+# not just one at range 0 (see e2e/blocks.py FFTBlock).
 for _fft in outputs['fft']:
     _fft = _fft / torch.max(torch.abs(_fft))
-    fft_energy = 20 * torch.log10(torch.abs(_fft)).T.cpu()
+    # Power quantity -> 10*log10 (matches the webapp's conversion).
+    fft_energy = 10 * torch.log10(torch.abs(_fft)).T.cpu()
     plt.figure()
+    plt.title('Azimuth-Elevation power (non-coherent over range)')
     plt.imshow(fft_energy)
     plt.colorbar()
     plt.clim([-40, 0])

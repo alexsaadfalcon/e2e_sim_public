@@ -6,13 +6,14 @@ from e2e.subspace.algorithms import Oja, gen_A_ada
 from e2e.subspace.subspace_utils import subspace_dist_frob
 from e2e.afe.afe_utils import quantizer_fp
 from e2e.circuit.rffe_model import get_RX_config, circuit_model_batch
+from e2e import frames
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class SionnaEnvironmentBlock:
-    def __init__(self, scenario_name, array_shape=(32, 32), link=None):
+    def __init__(self, scenario_name, array_shape=None, link=None):
         valid_scenarios = {
             'etoile': SionnaEtoileIterator,
             'munich': SionnaMunichIterator,
@@ -25,8 +26,22 @@ class SionnaEnvironmentBlock:
         self.link = link
         self.sionna_iterator = valid_scenarios[scenario_name](link=link)
         self.frame_counter = 0
-        # receive-array geometry (n_rx_x, n_rx_y); Simulation reads this to reshape frames
-        self.array_shape = array_shape
+        # receive-array geometry (n_rx_x, n_rx_y); Simulation reads this to reshape frames.
+        # array_shape=None (default) auto-derives: explicit arg wins, else the v2 pkl's
+        # rx_array_shape metadata, else the legacy (32, 32) fallback for pkls with no meta.
+        # The metadata stores [num_rows, num_cols] (ArrayConfig order), but Sionna's
+        # PlanarArray numbers antennas column-first (row index varies FASTEST along the
+        # frame's flat RX axis), so the row-major aperture view needs the slow axis
+        # first: (num_cols, num_rows). Grid dim 0 is then columns (horizontal/azimuth)
+        # and dim 1 rows (vertical/elevation) -- the convention RangeAz/RangeEl assume.
+        # (Square legacy arrays are unaffected; see frames.to_aperture_grid.)
+        meta_shape = self.sionna_iterator.rx_array_shape  # (num_rows, num_cols) or None
+        auto_shape = (meta_shape[1], meta_shape[0]) if meta_shape else None
+        self.array_shape = array_shape or auto_shape or (32, 32)
+        # v2-only metadata pass-throughs for downstream consumers (e.g. the webapp); both
+        # are None for legacy pkls.
+        self.freq_plan = self.sionna_iterator.freq_plan
+        self.physical_scale = self.sionna_iterator.physical_scale
     
     def step(self):
         self.frame_counter += 1
@@ -62,8 +77,12 @@ class RFFEBlock:
         self.n = n
 
     def apply_circuit(self, s_pars):
+        # Chirp/pol dim size is inferred (-1) rather than hardcoded to 2: this makes
+        # the reshape a no-op for whatever n_chirp the caller actually passes (1, the
+        # single-chirp frames Simulation feeds via CircuitStage; or 2, as some direct
+        # callers/tests still exercise) instead of assuming a pol pair.
         s_pars_shape = s_pars.shape
-        s_pars = s_pars.view(self.n, 1, 2, s_pars.shape[-1])
+        s_pars = s_pars.view(self.n, 1, -1, s_pars.shape[-1])
         frame = torch.fft.ifft(s_pars, dim=-1)
         if not self.physical_scale:
             frame = frame * self.signal_scaling / torch.mean(torch.abs(frame))
@@ -79,9 +98,19 @@ class RFFEBlock:
 
 # RF Interconnect Model Block
 class InterconnectBlock:
+    """Placeholder interconnect filter: a fixed 11-tap boxcar impulse response.
+
+    `apply_interconnect` zero-pads an 11-tap all-ones window to the frame length and
+    takes its FFT, giving a sinc-like lowpass frequency response that is applied
+    multiplicatively across the frequency axis. The tap count/shape is fixed and
+    independent of the scenario's `FrequencyPlan` (bandwidth, center frequency, number
+    of tones) -- it does not model any particular physical interconnect, and is
+    placeholder-grade pending a frequency-plan-aware model (see ROADMAP.md).
+    """
+
     def __init__(self, case=None):
         self.case = case
-        
+
     def apply_interconnect(self, frame):
         if self.case == 'case3':
             return frame
@@ -89,8 +118,11 @@ class InterconnectBlock:
         window = window.to(device)
         window_padded = torch.nn.functional.pad(window, (0, frame.shape[-1] - window.shape[0]))
         window_padded = window_padded.to(device)
-        window_ifft = torch.fft.fft(window_padded)
-        frame = frame * window_ifft.view(1, 1, 1, -1)
+        # This is a forward FFT of the (zero-padded) impulse response, i.e. the
+        # interconnect's frequency response -- despite the historical name, it is not
+        # an inverse FFT. Do not "fix" the direction; that would change the filter.
+        window_freq_response = torch.fft.fft(window_padded)
+        frame = frame * window_freq_response.view(1, 1, 1, -1)
         return frame
 
 
@@ -135,40 +167,167 @@ class AdaOjaBlock:
         self.oja.add_data(xn, A)
 
 
+# -------------------------------------------------------------- serial pipeline stages
+# These implement the same protocol as downstream product blocks (`apply(state) ->
+# dict of updates`), but they run in the FIRST loop of Simulation.feed_forward, in
+# series, each one able to (and expected to) update 's_pars' -- they ARE the pipeline,
+# not products of it. See e2e/simulation.py.
+
+class CircuitStage:
+    """RF front-end circuit distortion, applied directly to the single-chirp frame.
+
+    Previously this duplicated the chirp dim (torch.cat([s, s], dim=2)) to feed
+    RFFEBlock a vestigial "pol pair", ran the full circuit on both copies (2x
+    compute, 2 independent noise draws), then discarded the second copy via
+    s_pars[:, :, :1, :]. RFFEBlock.apply_circuit's reshape now infers the chirp dim
+    instead of hardcoding 2, so it accepts the single-chirp frame natively -- one
+    noise realization per element, no wasted compute.
+    """
+
+    def __init__(self, rffe_block):
+        self.rffe_block = rffe_block
+
+    def apply(self, state):
+        s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
+        return {"s_pars": s_pars, "PRX": PRX}
+
+
+class GridStage:
+    """Validates the frame (no MIMO, single chirp) and reshapes it onto the physical
+    receive-array grid."""
+
+    def __init__(self, array_shape):
+        self.array_shape = array_shape
+
+    def apply(self, state):
+        s_pars = state["s_pars"]
+        frames.require_no_mimo(s_pars, "Simulation.feed_forward")
+        frames.require_single_chirp(s_pars, "Simulation.feed_forward")
+        s_pars = frames.to_aperture_grid(s_pars, self.array_shape)
+        return {"s_pars": s_pars}
+
+
+class InterconnectStage:
+    """Interconnect filtering on the aperture grid."""
+
+    def __init__(self, interconnect_block):
+        self.interconnect_block = interconnect_block
+
+    def apply(self, state):
+        s_pars = self.interconnect_block.apply_interconnect(state["s_pars"])
+        return {"s_pars": s_pars}
+
+
+class MeasurementStage:
+    """Adaptive compression (optional AFE) + online subspace tracking.
+
+    With an AFE block: quantized measurement matrix, quantized matmul, subspace
+    update, then reconstruction -- the reconstructed grid replaces 's_pars'.
+    Without an AFE block: the subspace tracker is fed the full-precision compressed
+    measurements directly (same A-generation, no quantization); 's_pars' is left
+    unchanged.
+    """
+
+    def __init__(self, afe_block, subspace_block):
+        self.afe_block = afe_block
+        self.subspace_block = subspace_block
+
+    def apply(self, state):
+        s_pars = state["s_pars"]
+        if self.afe_block:
+            V = s_pars.view(-1, s_pars.shape[-1])
+            A = self.subspace_block.gen_A_ada()
+            Aq, X = self.afe_block.apply_mat_mul(A, V)
+            self.subspace_block.update(X, Aq)
+            Xt = self.afe_block.reconstruct(Aq, X)
+            s_pars = Xt.view(s_pars.shape)
+            return {"s_pars": s_pars, "U": self.subspace_block.oja.U}
+        else:
+            # No AFE: feed the subspace tracker the full-precision compressed
+            # measurements directly (same A-generation as the AFE branch, but
+            # without quantization).
+            V = s_pars.view(-1, s_pars.shape[-1])
+            A = self.subspace_block.gen_A_ada()
+            X = A @ V
+            self.subspace_block.update(X, A)
+            return {"U": self.subspace_block.oja.U}
+
+
 class FFTBlock:
+    """Azimuth-elevation power map: coherent 2D aperture FFT, non-coherent
+    (power) integration over range.
+
+    Previously the raw frequency samples were coherently summed (a bare
+    ``torch.sum`` over the freq axis) before the aperture FFT, which is only
+    coherent for a target sitting exactly at range 0 -- any other range
+    collapses via destructive interference across the stepped-frequency
+    sweep. Instead we range-transform first (freq -> range bins), then run
+    the coherent aperture FFT per range sample, then power-sum over range so
+    a target at ANY range still shows up in the az/el map.
+    """
+
     def __init__(self, bins=256):
         self.bins = bins
 
     def apply(self, state_dict):
-        data = state_dict['s_pars'][:, :, 0, :]
-        assert len(data.shape) == 3
-        data_fft = torch.fft.fft(torch.fft.fft(torch.sum(data, dim=2), self.bins, 0), self.bins, 1)
+        frames.require_single_chirp(state_dict['s_pars'], "FFTBlock")
+        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        # Range-FFT first (freq axis -> self.bins range bins): this shrinks the
+        # freq axis (commonly n_freqs=5000) down to `bins` BEFORE the aperture
+        # FFTs run, so we never materialize a [bins, bins, n_freqs] tensor.
+        range_fft = torch.fft.fft(data, self.bins, 2)  # [az, el, range]
+        data_fft = torch.fft.fft(torch.fft.fft(range_fft, self.bins, 0), self.bins, 1)
         data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 1)
-        return {'fft': data_fft}
+        # Non-coherent integration over range: sum power (not amplitude) across
+        # the range axis, so a target's range doesn't have to be 0 to appear.
+        az_el_power = torch.sum(torch.abs(data_fft) ** 2, dim=2)
+        return {'fft': az_el_power}
 
 
 class RangeAzBlock:
+    """Range-azimuth power map: coherent in the displayed axes (azimuth,
+    range), non-coherent (power) integration across the collapsed elevation
+    axis.
+
+    Previously elevation was collapsed by a COHERENT sum (an implicit
+    un-steered broadside beam in elevation), which nulls any target off
+    broadside in elevation. Here we run the coherent az/range FFTs per
+    elevation element, then power-sum over elevation, so all elevation
+    angles contribute instead of only broadside.
+    """
+
     def __init__(self, bins=256):
         self.bins = bins
 
     def apply(self, state_dict):
-        data = state_dict['s_pars'][:, :, 0, :]
-        assert len(data.shape) == 3
-        data_fft = torch.fft.fft(torch.fft.fft(torch.sum(data, dim=1), self.bins, 0), self.bins, 1)
-        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 1)
-        return {'range_az': data_fft}
+        frames.require_single_chirp(state_dict['s_pars'], "RangeAzBlock")
+        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        data_fft = torch.fft.fft(torch.fft.fft(data, self.bins, 0), self.bins, 2)
+        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 2)
+        # Non-coherent (power) integration over elevation. By Parseval, summing
+        # power over the elevation ELEMENTS equals summing power over
+        # elevation's own FFT bins (up to a constant factor), so no third FFT
+        # over the collapsed axis is needed to integrate it away.
+        range_az = torch.sum(torch.abs(data_fft) ** 2, dim=1)
+        return {'range_az': range_az}
 
 
 class RangeElBlock:
+    """Range-elevation power map: coherent in the displayed axes (elevation,
+    range), non-coherent (power) integration across the collapsed azimuth
+    axis. See RangeAzBlock for the rationale (azimuth/elevation swapped)."""
+
     def __init__(self, bins=256):
         self.bins = bins
 
     def apply(self, state_dict):
-        data = state_dict['s_pars'][:, :, 0, :]
-        assert len(data.shape) == 3
-        data_fft = torch.fft.fft(torch.fft.fft(torch.sum(data, dim=0), self.bins, 0), self.bins, 1)
-        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 1)
-        return {'range_el': data_fft}
+        frames.require_single_chirp(state_dict['s_pars'], "RangeElBlock")
+        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        data_fft = torch.fft.fft(torch.fft.fft(data, self.bins, 1), self.bins, 2)
+        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 1), 2)
+        # Non-coherent (power) integration over azimuth (see RangeAzBlock).
+        range_el = torch.sum(torch.abs(data_fft) ** 2, dim=0)
+        return {'range_el': range_el}
 
 
 class SubspaceErrorBlock:

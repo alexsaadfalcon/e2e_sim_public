@@ -55,6 +55,14 @@ class Polarization(str, Enum):
     CROSS = "cross"
 
 
+# Polarizations that make Sionna's PlanarArray report TWO ports per (row, col) element
+# (e.g. sionna.rt.PlanarArray(num_rows=32, num_cols=32, polarization='VH').num_ant ==
+# 2048). ArrayConfig.num_elements == num_rows * num_cols has no notion of this, and
+# neither does the runtime frame contract (aperture grid, 32x32 view) -- see
+# Scenario.validate() and ScenarioRunner's defensive re-check.
+_DUAL_POL_POLARIZATIONS = (Polarization.VH, Polarization.CROSS)
+
+
 class ObjectKind(str, Enum):
     SPHERE = "sphere"        # built-in Sionna sphere primitive
     BOX = "box"
@@ -114,6 +122,14 @@ class Node:
     # absolute power scale is applied. There is deliberately no separate element-gain
     # field here -- element gain is already carried by ArrayConfig.pattern (the Sionna
     # antenna pattern); a standalone scalar would double-count it.
+    #
+    # Convention: tx_power_dbm is the TOTAL power radiated by the transmit aperture,
+    # split uniformly across its transmit elements -- NOT the power radiated by each
+    # element. A wider tx array (e.g. an opt-in full 32x32 tx aperture) must not inflate
+    # EIRP simply by having more elements; any array/beamforming gain then emerges from
+    # coherent combining in the physics/channel, not from double-counting power per
+    # element. See ScenarioRunner._tx_power_amplitude_scale, which divides the
+    # per-element amplitude scale by sqrt(n_tx_ant).
     tx_power_dbm: Optional[float] = None
     # free-form per-node settings (e.g. tx power, waveform id) used by examples
     params: Dict[str, Any] = field(default_factory=dict)
@@ -204,6 +220,14 @@ class Scenario:
             if a.vertical_spacing <= 0 or a.horizontal_spacing <= 0:
                 problems.append(
                     f"node '{n.name}' array spacings must be > 0"
+                )
+            if a.polarization in _DUAL_POL_POLARIZATIONS:
+                problems.append(
+                    f"node '{n.name}' array uses dual-polarization "
+                    f"('{a.polarization.value}'): this doubles Sionna's antenna port "
+                    f"count (e.g. a 32x32 VH array reports 2048 ports, not 1024), but "
+                    f"the runtime frame contract (aperture grid, 32x32 view) is not "
+                    f"dual-pol aware yet; use polarization V or H (single-pol) instead"
                 )
             if n.tx_power_dbm is not None and n.role not in (NodeRole.RADAR, NodeRole.COMM_TX):
                 problems.append(

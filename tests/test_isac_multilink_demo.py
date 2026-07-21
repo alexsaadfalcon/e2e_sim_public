@@ -79,6 +79,41 @@ def test_comm_leg_outputs_finite(demo_result):
     assert all(0.0 <= b <= 1.0 for b in comm["ber"])
 
 
+def test_comm_leg_per_frame_ber(demo_result):
+    """BER-vs-frame-index array: one finite, valid rate per comm-link frame (the
+    per-frame channel evolution is the point of a multi-link demo)."""
+    result = demo_result["result"]
+    ber_per_frame = result["ber_per_frame"]
+
+    assert ber_per_frame.shape == (N_FRAMES,)
+    assert np.all(np.isfinite(ber_per_frame))
+    assert np.all((ber_per_frame >= 0.0) & (ber_per_frame <= 1.0))
+
+
+def test_band_and_kind_detected_from_meta(demo_result):
+    """A freshly dry-run-generated cache is always a v2 payload (see
+    scenario_runner module docstring), so band/kind selection must resolve via meta,
+    not the legacy name-substring/reference-scenario fallback."""
+    result = demo_result["result"]
+
+    assert result["band_source"] == "meta.freq_plan"
+    assert len(result["freq_band"]) == 2
+    assert result["freq_band"][0] < result["freq_band"][1]
+
+    from e2e.main.main_isac_multilink import _pick_link_by_kind
+
+    links = SionnaIterator.available_links(demo_result["cache_path"])
+    radar_link, radar_src = _pick_link_by_kind(
+        demo_result["cache_path"], links, "radar", "radar")
+    comm_link, comm_src = _pick_link_by_kind(
+        demo_result["cache_path"], links, "comm", "comm")
+
+    assert radar_src == "meta"
+    assert comm_src == "meta"
+    assert radar_link == result["radar_link"]
+    assert comm_link == result["comm_link"]
+
+
 def test_demo_writes_figures_to_tmp_dir(demo_result):
     fig_dir = demo_result["fig_dir"]
     for fig_path in demo_result["result"]["figures"]:

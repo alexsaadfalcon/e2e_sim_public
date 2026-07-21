@@ -6,6 +6,16 @@ available, else synthetic multipath), estimates the channel with LS and MMSE fro
 the pilots, compares estimated vs true channel, and sweeps SNR to show estimation
 MSE vs SNR.
 
+The MMSE estimate is a diagonal Wiener shrinkage whose signal/noise-power prior
+is pooled over every pilot subcarrier AND every OFDM symbol in the frame (the
+maximal averaging available) rather than derived per-pilot from the same noisy
+samples it then shrinks -- the latter is a circular, high-variance prior that can
+make "MMSE" worse than LS at low SNR. With the pooled prior, MMSE beats LS *on
+average* at low SNR (see the Monte-Carlo regression test in
+tests/test_comms_channel.py) and converges to LS as SNR grows and the shrinkage
+vanishes; a single run like this script's, at any one SNR point, is one noise
+realization and can still go either way by a small margin.
+
 Run:
     python -m e2e.main.main_channel_estimation
 
@@ -80,6 +90,10 @@ def main():
     print("[chanest] SNR(dB)  MSE(LS)     MSE(MMSE)")
     for s, ml, mm in zip(snr_list, mse_ls, mse_mmse):
         print(f"          {s:5d}   {ml:.3e}   {mm:.3e}")
+    n_better = sum(1 for ml, mm in zip(mse_ls, mse_mmse) if mm <= ml)
+    print(f"[chanest] MMSE MSE <= LS MSE at {n_better}/{len(snr_list)} SNR points this run "
+          "(pooled empirical-Bayes prior; MMSE wins on average at low SNR over many trials, "
+          "see the Monte-Carlo regression test, and converges to LS as SNR grows).")
 
     # ---- plots -----------------------------------------------------------
     plt.figure()

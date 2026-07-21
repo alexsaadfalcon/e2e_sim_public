@@ -47,46 +47,37 @@ def _radar_s_pars(scenario, freqs, rng, src_band=None):
 
     Uses the precomputed munich frame if available (shape [N_RX, TX, chirp, F]),
     else synthesises an independent multipath channel per array element so the
-    range/angle map is well-defined.
-
-    Note: this keeps its own loader (rather than reusing
-    ``channel.load_or_synthesize_cfr``) because the range/angle map needs *all*
-    N_RX array elements, whereas ``load_or_synthesize_cfr`` deliberately returns a
-    single spatial channel. The per-frequency resampling assumption is the same as
-    documented there: the frame stores only sample values, so the source band must
-    be supplied via `src_band` or is assumed to span the requested `freqs` band.
+    range/angle map is well-defined. Delegates the reshape/resample to
+    ``channel.frame_to_cfr`` with ``element=None`` (all N_RX array elements,
+    unlike ``load_or_synthesize_cfr``'s single spatial channel).
 
     `src_band` : optional ``(f_start_hz, f_stop_hz)`` for the loaded frame's actual
-    band; defaults to ``(freqs[0], freqs[-1])`` (assume the pkl spans `freqs`).
+    band; defaults to ``(freqs[0], freqs[-1])`` (assume the pkl spans `freqs`),
+    see ``channel.frame_to_cfr``.
     """
     n_rx = N_RX_X * N_RX_Y
-    f0, f1 = (src_band if src_band is not None else (freqs[0], freqs[-1]))
-    flat = None
+    arr = None
     try:
         from e2e.environment import sionna_iterator as si
         it = si.SionnaMunichIterator()             # raises if .pkl missing
-        arr = np.asarray(it[0], dtype=np.complex64)
-        flat = arr.reshape(arr.shape[0], -1, arr.shape[-1])[:, 0, :]   # [N_RX, F]
+        arr = it[0]
     except Exception:
-        flat = None                                # .pkl missing -> synthetic below
+        arr = None                                 # .pkl missing -> synthetic below
 
-    if flat is not None:
+    if arr is not None:
+        arr_np = np.asarray(arr)
         # The aperture geometry (N_RX_X x N_RX_Y) is fixed by the range/angle map;
         # the loaded frame MUST provide exactly that many elements or the spatial
         # FFT would be fed uninitialised/garbage rows. Fail loudly (clear error)
         # rather than silently using zeros or falling back to synthetic.
-        if flat.shape[0] != n_rx:
+        if arr_np.shape[0] != n_rx:
             raise ValueError(
-                f"munich frame has {flat.shape[0]} array elements but the "
+                f"munich frame has {arr_np.shape[0]} array elements but the "
                 f"range/angle map expects N_RX_X*N_RX_Y = {n_rx}; cannot map a "
                 f"frame with a different antenna count onto this aperture "
                 f"(set N_RX_X/N_RX_Y to match, or provide a matching frame).")
-        # resample each element's response onto our freq grid by index
-        src = np.linspace(f0, f1, flat.shape[-1])
-        out = np.zeros((n_rx, len(freqs)), dtype=np.complex64)
-        for i in range(n_rx):
-            out[i] = np.interp(freqs, src, flat[i].real) + 1j * np.interp(freqs, src, flat[i].imag)
-        return torch.from_numpy(out).to(ch.device), "sionna:munich"
+        out = ch.frame_to_cfr(arr_np, freqs, src_band=src_band, element=None)
+        return out, "sionna:munich"
 
     # synthetic fallback (no .pkl): shared target delay (~30 m) + per-element
     # random taps so the aperture sees a coherent point target plus clutter.

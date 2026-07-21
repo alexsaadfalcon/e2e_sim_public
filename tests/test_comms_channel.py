@@ -142,6 +142,101 @@ def test_estimation_beats_no_estimation_and_mmse_close_to_ls():
     assert mse_mmse <= 1.25 * mse_ls
 
 
+def _chanest_trial(snr_db, seed):
+    """One pilot-only channel-estimation trial: synthetic multipath channel ->
+    OFDM pilots -> LS and MMSE estimate. Returns (mse_ls, mse_mmse) over the
+    active band, both vs. the true channel used to generate the pilots."""
+    modem = OFDMModem(fft_size=128, cp_len=32, n_active=104, pilot_spacing=4,
+                      bits_per_symbol=2)
+    freqs = np.linspace(28.5e9, 31.5e9, modem.fft_size)
+    H_true = ch.synthetic_multipath_cfr(freqs, n_taps=6,
+                                        rng=np.random.default_rng(seed))
+    n_symbols = 16
+    bits = random_bits(n_symbols * modem.data_bits_per_symbol_block, seed=seed)
+    _, tx_freq = modem.modulate(bits, n_symbols)
+    rx_freq, _ = ch.apply_channel(tx_freq, H_true, snr_db, rng_seed=seed + 1000)
+
+    rx_pilots = modem.extract_pilots(rx_freq)
+    tx_pilots = modem.pilot_grid(n_symbols)
+    H_ls = ch.ls_estimate(rx_pilots, tx_pilots, modem.pilot_idx, modem.fft_size)
+    H_mmse = ch.mmse_estimate(rx_pilots, tx_pilots, modem.pilot_idx, modem.fft_size, snr_db)
+
+    active = modem.active_idx
+    return ch.channel_mse(H_ls, H_true, active), ch.channel_mse(H_mmse, H_true, active)
+
+
+@pytest.mark.parametrize("snr_db", [0.0, 2.0, 4.0])
+def test_mmse_estimate_beats_ls_at_low_snr_monte_carlo(snr_db):
+    """Regression for the circular-prior bug: deriving sigma_H^2 from the same
+    few noisy pilots it then shrinks was a high-variance, sometimes-negative
+    prior that made the 'MMSE' estimator *worse* than plain LS at low SNR. With
+    the prior pooled over every pilot and every OFDM symbol in the frame, the
+    empirical-Bayes shrinkage must (on average, over >=30 fixed-seed trials)
+    beat LS at low SNR."""
+    trials = [_chanest_trial(snr_db, seed) for seed in range(30)]
+    mse_ls, mse_mmse = zip(*trials)
+    assert np.mean(mse_mmse) <= np.mean(mse_ls)
+
+
+def test_mmse_estimate_converges_to_ls_at_high_snr_monte_carlo():
+    """At high SNR the pooled empirical-Bayes prior sees sigma_n2 -> 0, so the
+    Wiener gain -> 1 and the shrinkage vanishes: MMSE should track LS closely
+    (never materially worse) rather than diverge from it."""
+    trials = [_chanest_trial(25.0, seed) for seed in range(30)]
+    mse_ls, mse_mmse = zip(*trials)
+    mean_ls, mean_mmse = np.mean(mse_ls), np.mean(mse_mmse)
+    assert mean_mmse <= mean_ls * 1.05
+    assert mean_mmse == pytest.approx(mean_ls, rel=0.05)
+
+
+# --------------------------------------------------------------------------- equalization bias
+
+def test_mmse_equalize_unbiased_matches_zf_decisions():
+    """Regression for the biased-MMSE-vs-hard-slicer bug: the raw scalar-MMSE
+    filter shrinks amplitude (E[w H] = b_k < 1), but the demapper slices
+    against a unit-power constellation, so uncorrected MMSE decisions differ
+    from ZF's even though they shouldn't. Bias-correcting the equalized symbols
+    (the default, ``unbiased=True``) must reproduce ZF's bit decisions exactly
+    on the same noise realization -- algebraically ``w / b_k == 1/H_k``.
+    Meanwhile the RAW (biased) MMSE output must have lower per-symbol MSE than
+    ZF vs. the true transmitted symbols -- MMSE's genuine advantage over ZF,
+    visible only before the bias correction / hard slicing."""
+    modem = OFDMModem(fft_size=64, cp_len=16, n_active=52, pilot_spacing=8,
+                      bits_per_symbol=4)                      # 16-QAM
+    freqs = np.linspace(28.5e9, 31.5e9, modem.fft_size)
+    H_true = ch.synthetic_multipath_cfr(freqs, n_taps=4, max_delay_s=6e-9,
+                                        rng=np.random.default_rng(0),
+                                        rician_k_db=10.0)
+    n_symbols = 32
+    snr_db = 12.0
+    tx_bits = random_bits(n_symbols * modem.data_bits_per_symbol_block, seed=0)
+    _, tx_freq = modem.modulate(tx_bits, n_symbols)
+    rx_freq, _ = ch.apply_channel(tx_freq, H_true, snr_db, rng_seed=1000)
+
+    rx_pilots = modem.extract_pilots(rx_freq)
+    tx_pilots = modem.pilot_grid(n_symbols)
+    H_est = ch.ls_estimate(rx_pilots, tx_pilots, modem.pilot_idx, modem.fft_size)
+
+    eq_zf = modem.extract_data(ch.zf_equalize(rx_freq, H_est))
+    eq_mmse_unbiased = modem.extract_data(ch.mmse_equalize(rx_freq, H_est, snr_db))
+    eq_mmse_biased = modem.extract_data(
+        ch.mmse_equalize(rx_freq, H_est, snr_db, unbiased=False))
+
+    rx_bits_zf = qam_demod(eq_zf.reshape(-1), modem.bits_per_symbol, modem.const)
+    rx_bits_mmse = qam_demod(eq_mmse_unbiased.reshape(-1), modem.bits_per_symbol, modem.const)
+
+    # (i) identical decisions on the same noise realization
+    assert torch.equal(rx_bits_zf, rx_bits_mmse)
+    assert ch.ber(tx_bits, rx_bits_zf) == ch.ber(tx_bits, rx_bits_mmse)
+
+    # (ii) the actual MMSE advantage: lower estimation MSE (before bias
+    # correction / hard slicing) than ZF against the true transmitted symbols
+    tx_data = modem.extract_data(tx_freq)
+    mse_zf = torch.mean(torch.abs(eq_zf - tx_data) ** 2).item()
+    mse_mmse_biased = torch.mean(torch.abs(eq_mmse_biased - tx_data) ** 2).item()
+    assert mse_mmse_biased < mse_zf
+
+
 # --------------------------------------------------------------------------- metrics
 
 def test_ber_zero_for_identical_positive_for_corrupted():
@@ -248,6 +343,88 @@ def test_load_or_synthesize_src_band_remaps_frequency(monkeypatch):
     H_default, _ = ch.load_or_synthesize_cfr("munich", freqs)
     err_default = np.mean(np.abs(H_default.cpu().numpy() - expected) ** 2)
     assert err_default > err
+
+
+# --------------------------------------------------------------------------- frame_to_cfr
+
+def test_frame_to_cfr_element_int_matches_manual_reshape():
+    """element=0 must match the old 'flatten everything, take row 0' logic used
+    by the pre-refactor load_or_synthesize_cfr / _cfr_from_state."""
+    rng = np.random.default_rng(0)
+    n_rx, n_tx, chirp, F = 6, 2, 1, 40
+    frame = (rng.standard_normal((n_rx, n_tx, chirp, F))
+              + 1j * rng.standard_normal((n_rx, n_tx, chirp, F))).astype(np.complex64)
+    freqs = _freqs(F)
+
+    H = ch.frame_to_cfr(frame, freqs, element=0)
+
+    flat = frame.reshape(-1, frame.shape[-1])
+    expected = flat[0]                        # old manual extraction (rx=0,tx=0,chirp=0)
+    assert H.shape == (F,)
+    assert H.dtype == torch.complex64
+    assert H.device.type == device.type
+    np.testing.assert_allclose(H.cpu().numpy(), expected, atol=1e-5)
+
+
+def test_frame_to_cfr_element_none_returns_all_rows():
+    """element=None must return every spatial row, matching the old per-element
+    loop used by main_isac._radar_s_pars (tx=0, chirp=0 slice per row)."""
+    rng = np.random.default_rng(1)
+    n_rx, n_tx, chirp, F = 5, 3, 1, 32
+    frame = (rng.standard_normal((n_rx, n_tx, chirp, F))
+              + 1j * rng.standard_normal((n_rx, n_tx, chirp, F))).astype(np.complex64)
+    freqs = _freqs(F)
+
+    out = ch.frame_to_cfr(frame, freqs, element=None)
+    assert out.shape == (n_rx, F)
+    assert out.dtype == torch.complex64
+    assert out.device.type == device.type
+
+    expected_rows = frame.reshape(n_rx, -1, F)[:, 0, :]   # old manual per-element loop
+    np.testing.assert_allclose(out.cpu().numpy(), expected_rows, atol=1e-5)
+
+
+def test_frame_to_cfr_already_flat_frame():
+    """A frame already shaped [n_rx, F] (no tx/chirp axes) is handled as-is."""
+    rng = np.random.default_rng(2)
+    n_rx, F = 4, 20
+    frame = (rng.standard_normal((n_rx, F)) + 1j * rng.standard_normal((n_rx, F))).astype(np.complex64)
+    freqs = _freqs(F)
+    out = ch.frame_to_cfr(frame, freqs, element=None)
+    np.testing.assert_allclose(out.cpu().numpy(), frame, atol=1e-5)
+
+
+def test_load_or_synthesize_uses_v2_freq_plan_for_auto_band(monkeypatch):
+    """When the iterator exposes v2 `freq_plan` metadata and no explicit
+    `src_band` is given, the frame's true band (from the metadata) is used
+    automatically instead of guessing that the pkl spans `freqs`."""
+    n_src = 128
+    src_lo, src_hi = 24e9, 36e9                       # the v2-declared true band
+    src_freqs = np.linspace(src_lo, src_hi, n_src)
+    tau = 0.15e-9
+    chan0 = np.exp(-2j * np.pi * src_freqs * tau).astype(np.complex64)
+    frame = np.stack([chan0, np.zeros_like(chan0)], axis=0)   # [2, F]
+
+    class _V2FakeIter(_FakeIter):
+        @property
+        def freq_plan(self):
+            return {"carrier_hz": (src_lo + src_hi) / 2, "start_hz": src_lo,
+                    "stop_hz": src_hi, "num_freqs": n_src}
+
+    from e2e.environment import sionna_iterator as si
+    monkeypatch.setattr(si, "SionnaMunichIterator", lambda *a, **k: _V2FakeIter(frame))
+
+    freqs = np.linspace(27e9, 33e9, 64)
+    H, src = ch.load_or_synthesize_cfr("munich", freqs)
+    assert src == "sionna:munich"
+    expected = np.exp(-2j * np.pi * freqs * tau).astype(np.complex64)
+    err = np.mean(np.abs(H.cpu().numpy() - expected) ** 2)
+    assert err < 1e-3
+
+    # explicit src_band still wins over the v2 metadata
+    H_explicit, _ = ch.load_or_synthesize_cfr("munich", freqs, src_band=(0.0, 1.0))
+    err_explicit = np.mean(np.abs(H_explicit.cpu().numpy() - expected) ** 2)
+    assert err_explicit > err
 
 
 def test_load_or_synthesize_default_band_assumes_freqs_span(monkeypatch):

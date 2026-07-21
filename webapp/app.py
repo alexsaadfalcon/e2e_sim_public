@@ -206,9 +206,14 @@ def _run_pipeline(n_clicks, block_state, n_steps):
     # verify that (no metadata until the frames-carry-metadata refactor), so surface
     # the assumption instead of silently producing clipped/underdriven nonsense when
     # a legacy unit-energy pkl (e.g. the stock munich frames) is fed through it.
-    if (block_state.get("rffe", {}).get("params", {}).get("scale_mode") == "physical"):
-        note = ("  [physical scale mode: assumes frames were generated with "
+    scale_mode = block_state.get("rffe", {}).get("params", {}).get("scale_mode")
+    if scale_mode == "physical":
+        note = ("  [physical scale mode (forced): assumes frames were generated with "
                 "tx_power_dbm set -- stock munich/etoile pkls are legacy-normalized]")
+    elif scale_mode in (None, "auto") and (outputs.get("_axis_meta") or {}).get("from_meta"):
+        # In auto mode the frames declare their own convention (v2 metadata), so no
+        # assumption warning is needed -- but say what was detected, for transparency.
+        note = "  [auto scale mode: following the frames' own metadata]"
     msg = html.Span(f"Run complete: {len(data)} product(s). See Results tab.{note}",
                     style={"color": "#20bf6b"})
     return data, msg, "tab-results"

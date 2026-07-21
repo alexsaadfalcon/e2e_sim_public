@@ -111,6 +111,26 @@ def test_validate_flags_no_nodes():
     assert any("no nodes" in p for p in sc.validate())
 
 
+@pytest.mark.parametrize("bad_pol", [Polarization.VH, Polarization.CROSS])
+def test_validate_rejects_dual_polarization(bad_pol):
+    """VH/CROSS double Sionna's antenna port count vs ArrayConfig.num_elements; the
+    runtime frame contract (aperture grid, 32x32 view) is not dual-pol aware yet."""
+    sc = munich_radar_scenario()
+    sc.nodes[0].array.polarization = bad_pol
+    problems = sc.validate()
+    assert any(
+        "dual-polarization" in p and "radar" in p and bad_pol.value in p
+        for p in problems
+    )
+
+
+@pytest.mark.parametrize("good_pol", [Polarization.V, Polarization.H])
+def test_validate_allows_single_polarization(good_pol):
+    sc = munich_radar_scenario()
+    sc.nodes[0].array.polarization = good_pol
+    assert sc.validate() == []
+
+
 # --------------------------------------------------------------------------- round-trips
 
 @pytest.mark.parametrize("name,factory", list(REFERENCE_SCENARIOS.items()))

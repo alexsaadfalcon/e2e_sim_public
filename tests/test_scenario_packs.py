@@ -110,15 +110,33 @@ def test_dense_traffic_dry_run_generates_single_link(tmp_path):
 
     assert out.is_file()
     assert not runner.is_multilink
-    assert isinstance(payload, np.ndarray)
-    assert payload.dtype == np.complex64
+    assert set(payload.keys()) == {"meta", "links"}
+    links = payload["links"]
+    assert len(links) == 1
+    arr = links[runner.primary_link.name]
+    assert arr.dtype == np.complex64
     # single 32x32 monostatic radar -> 1024 rx ant, 1x1 effective tx, 1 time step
-    assert payload.shape == (2, 1024, 1, 1, 64)
+    assert arr.shape == (2, 1024, 1, 1, 64)
     # 9 car objects with varied positions, radar has combined translation + rotation
     assert len(runner.scenario.objects) >= 8
     radar = runner.scenario.nodes[0]
     assert tuple(radar.motion.velocity) != (0.0, 0.0, 0.0)
     assert radar.motion.angular_velocity_deg != 0.0
+
+    # meta correctness: freq_plan matches the scenario, link is a radar with a 32x32 rx
+    meta = payload["meta"]
+    assert meta["version"] == 1
+    assert meta["scenario_name"] == runner.scenario.name
+    assert meta["freq_plan"] == {
+        "carrier_hz": runner.scenario.frequency.carrier_hz,
+        "start_hz": runner.scenario.frequency.start_hz,
+        "stop_hz": runner.scenario.frequency.stop_hz,
+        "num_freqs": runner.scenario.frequency.num_freqs,
+    }
+    link_meta = meta["links"][runner.primary_link.name]
+    assert link_meta["kind"] == "radar"
+    assert link_meta["rx_array_shape"] == [32, 32]
+    assert link_meta["n_tx_ant"] == 1
 
 
 def test_two_link_isac_dry_run_has_exactly_three_links(tmp_path):
@@ -127,8 +145,9 @@ def test_two_link_isac_dry_run_has_exactly_three_links(tmp_path):
 
     assert out.is_file()
     assert runner.is_multilink
-    assert isinstance(payload, dict)
-    assert len(payload) == 3
+    assert set(payload.keys()) == {"meta", "links"}
+    links = payload["links"]
+    assert len(links) == 3
     assert len(runner.links) == 3
 
     link_names = {link.name for link in runner.links}
@@ -137,13 +156,24 @@ def test_two_link_isac_dry_run_has_exactly_three_links(tmp_path):
         "building_comm_tx__car_comm_rx",
         "building_comm_tx__pedestrian_comm_rx",
     }
-    for arr in payload.values():
+    assert set(links.keys()) == link_names
+    for arr in links.values():
         assert arr.dtype == np.complex64
         assert arr.shape[0] == 2  # num_frames
 
     # the two comm links differ in rx aperture (4x4 == 16 vs 2x2 == 4 elements)
-    assert payload["building_comm_tx__car_comm_rx"].shape[1] == 16
-    assert payload["building_comm_tx__pedestrian_comm_rx"].shape[1] == 4
+    assert links["building_comm_tx__car_comm_rx"].shape[1] == 16
+    assert links["building_comm_tx__pedestrian_comm_rx"].shape[1] == 4
+
+    # meta correctness for a mixed radar/comm pack member: rx_array_shape and kind
+    # track each link's real (non-effective) rx aperture, independent of tx apertures.
+    meta_links = payload["meta"]["links"]
+    assert meta_links["car_radar"]["kind"] == "radar"
+    assert meta_links["car_radar"]["rx_array_shape"] == [8, 8]
+    assert meta_links["building_comm_tx__car_comm_rx"]["kind"] == "comm"
+    assert meta_links["building_comm_tx__car_comm_rx"]["rx_array_shape"] == [4, 4]
+    assert meta_links["building_comm_tx__pedestrian_comm_rx"]["kind"] == "comm"
+    assert meta_links["building_comm_tx__pedestrian_comm_rx"]["rx_array_shape"] == [2, 2]
 
 
 def test_canyon_radar_dry_run_generates_single_link(tmp_path):
@@ -152,10 +182,13 @@ def test_canyon_radar_dry_run_generates_single_link(tmp_path):
 
     assert out.is_file()
     assert not runner.is_multilink
-    assert isinstance(payload, np.ndarray)
-    assert payload.dtype == np.complex64
+    assert set(payload.keys()) == {"meta", "links"}
+    links = payload["links"]
+    assert len(links) == 1
+    arr = links[runner.primary_link.name]
+    assert arr.dtype == np.complex64
     # 16x16 radar -> 256 rx ant, 1x1 effective tx
-    assert payload.shape == (2, 256, 1, 1, 64)
+    assert arr.shape == (2, 256, 1, 1, 64)
     assert runner.scenario.base_scene == "simple_street_canyon"
 
 

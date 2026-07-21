@@ -26,13 +26,37 @@ Sionna's ``paths.cfr(...)`` returns
 ``cfr[0, :, 0, :, :, :]`` -> ``[num_rx_ant, num_tx_ant, n_time, num_freqs]`` and stack
 frames on a new leading axis.
 
-* **Single-link scenario** (e.g. ``munich_radar``): the dumped object is a single stacked
-  array ``(num_frames, num_rx_ant, num_tx_ant, n_time, num_freqs)`` -- identical to the
-  legacy ``sionna_simple_channel.py`` layout, and loaded directly by ``SionnaIterator``.
-* **Multi-link scenario** (e.g. ``munich_isac``): the dumped object is a ``dict`` mapping
-  ``link_name -> stacked_array``. ``SionnaIterator(path, link=...)`` selects one link
-  (defaulting to the first); each link's array feeds the runtime pipeline exactly as a
-  single-link array does.
+The dumped (and returned) object is always a **self-describing v2 payload** -- a dict
+with two top-level keys, ``"meta"`` and ``"links"`` -- regardless of whether the scenario
+has one link or several::
+
+    {
+      "meta": {
+        "version": 1,
+        "scenario_name": <Scenario.name>,
+        "freq_plan": {"carrier_hz": float, "start_hz": float, "stop_hz": float,
+                       "num_freqs": int},
+        "links": {
+          <link_name>: {
+            "tx_node": str, "rx_node": str,
+            "rx_array_shape": [num_rows, num_cols],
+            "n_tx_ant": int,
+            "kind": "radar" | "comm",   # "radar" iff the link is monostatic
+            "tx_power_dbm": float | None,
+            "physical_scale": bool,    # == tx_power_dbm is not None
+          },
+          ...
+        },
+      },
+      "links": {
+        <link_name>: ndarray[num_frames, num_rx_ant, num_tx_ant, n_time, num_freqs],
+        ...
+      },
+    }
+
+A single-link scenario (e.g. ``munich_radar``) still yields this same shape -- just one
+entry in each map. Loading (picking a link, dispatching on ``meta`` for physical-scale
+handling, etc.) is :class:`~e2e.environment.sionna_iterator.SionnaIterator`'s job.
 
 Because antenna devices are not scatterers, the channel for a given (tx, rx) pair is
 independent of which *other* devices are present. We therefore build a **separate Sionna
@@ -65,7 +89,7 @@ import argparse
 import os
 import pickle
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -75,6 +99,7 @@ from e2e.scenario import (
     NodeRole,
     SceneObject,
     ArrayConfig,
+    Polarization,
     REFERENCE_SCENARIOS,
     SYSTEM_IMPEDANCE_OHMS,
 )
@@ -200,6 +225,24 @@ class LinkSpec:
         return self.rx_array.num_elements
 
 
+def _assert_single_pol(array: ArrayConfig, context: str) -> None:
+    """Defensive, Sionna-free guard against the dual-pol port-count mismatch.
+
+    Scenario.validate() already rejects VH/CROSS at the scenario level, so this should
+    be unreachable from ScenarioRunner's normal entry point (its __init__ calls
+    validate() first). This is a second line of defense for callers that build/mutate a
+    Scenario without going through validate() -- raising here keeps the failure at setup
+    (and in dry-run, which never touches Sionna) rather than silently generating a frame
+    whose antenna axis doesn't match the recorded ArrayConfig.num_elements.
+    """
+    if array.polarization in (Polarization.VH, Polarization.CROSS):
+        raise ValueError(
+            f"{context}: dual-polarization ('{array.polarization.value}') would make "
+            f"Sionna report 2x the antenna ports ({2 * array.num_elements}) vs "
+            f"ArrayConfig.num_elements ({array.num_elements}); use V or H (single-pol)."
+        )
+
+
 def enumerate_links(scenario: Scenario) -> List[LinkSpec]:
     """Enumerate the tx->rx links to export, from node roles.
 
@@ -244,21 +287,33 @@ def _cfr_should_normalize(tx_power_dbm: Optional[float]) -> bool:
     return tx_power_dbm is None
 
 
-def _tx_power_amplitude_scale(tx_power_dbm: Optional[float], num_freqs: int) -> float:
-    """Per-link scalar amplitude applied to a physically-scaled frame (1.0 if legacy).
+def _tx_power_amplitude_scale(
+    tx_power_dbm: Optional[float], num_freqs: int, n_tx_ant: int = 1
+) -> float:
+    """Per-(tx-element) scalar amplitude applied to a physically-scaled frame (1.0 if legacy).
 
-    A = sqrt(N * P_tx * Z0), where N = num_freqs, P_tx = transmit power in watts, and
-    Z0 = the system reference impedance. Derivation: torch/np ``ifft`` uses the 1/N
-    convention, so mean|ifft(A*H)|^2 = A^2 * mean|H|^2 / N. Choosing
-    A = sqrt(N * P_tx * Z0) makes the time-domain mean power = P_tx * Z0 * mean|H|^2,
-    i.e. V_rms = sqrt(P_rx * Z0) with P_rx = P_tx * mean|H|^2 the received power --
-    independent of the frequency-grid size N (which would otherwise leak into the
-    absolute voltage scale purely as an artifact of how finely the CFR is sampled).
+    A = sqrt(N * P_tx * Z0 / n_tx_ant), where N = num_freqs, P_tx = transmit power in
+    watts, Z0 = the system reference impedance, and n_tx_ant = the transmit aperture's
+    element count. Derivation: torch/np ``ifft`` uses the 1/N convention, so
+    mean|ifft(A*H)|^2 = A^2 * mean|H|^2 / N. Choosing A = sqrt(N * P_tx * Z0) (n_tx_ant=1)
+    makes the time-domain mean power = P_tx * Z0 * mean|H|^2, i.e. V_rms = sqrt(P_rx * Z0)
+    with P_rx = P_tx * mean|H|^2 the received power -- independent of the frequency-grid
+    size N (which would otherwise leak into the absolute voltage scale purely as an
+    artifact of how finely the CFR is sampled).
+
+    tx_power_dbm is the TOTAL power radiated by the tx aperture (see
+    e2e.scenario.Node.tx_power_dbm), split uniformly across its n_tx_ant elements: each
+    element carries P_tx / n_tx_ant, so its amplitude scale divides by sqrt(n_tx_ant).
+    Without this, every element radiated the FULL P_tx and a wider tx aperture (e.g. a
+    32x32 opt-in full tx array vs the default 1x1) silently inflated summed channel
+    power by a factor of n_tx_ant (+10*log10(n_tx_ant) dB EIRP) at the same configured
+    tx_power_dbm. n_tx_ant=1 (the default / all pre-existing single-element tx arrays)
+    divides by sqrt(1) == 1, i.e. no change from the previous formula.
     """
     if tx_power_dbm is None:
         return 1.0
     p_tx_w = 10.0 ** ((tx_power_dbm - 30.0) / 10.0)
-    return float(np.sqrt(num_freqs * p_tx_w * SYSTEM_IMPEDANCE_OHMS))
+    return float(np.sqrt(num_freqs * p_tx_w * SYSTEM_IMPEDANCE_OHMS / n_tx_ant))
 
 
 # --------------------------------------------------------------------------------
@@ -282,6 +337,9 @@ class ScenarioRunner:
 
         self.schedule = build_schedule(scenario)
         self.links = enumerate_links(scenario)
+        for link in self.links:
+            _assert_single_pol(link.tx_array, f"link {link.name!r} tx array")
+            _assert_single_pol(link.rx_array, f"link {link.name!r} rx array")
         self.primary_link = self.links[0]
         # kept for introspection / describe()
         self.tx_nodes, self.rx_nodes = _tx_rx_nodes(scenario)
@@ -338,8 +396,7 @@ class ScenarioRunner:
                 f"(n_tx_ant={link.n_tx_ant}) -> rx={link.rx_node.name} "
                 f"(n_rx_ant={link.n_rx_ant}); frame {self.frame_shapes[link.name]}"
             )
-        dump = (f"dict of {len(self.links)} link arrays" if self.is_multilink
-                else f"array {(sc.num_frames,) + self.frame_shape}")
+        dump = f"v2 payload: meta + {len(self.links)} link array(s)"
         lines.append(f"dumped:     {dump}")
         lines.append(f"mode:       {'DRY-RUN (synthetic, no Sionna)' if self.dry_run else 'REAL (Sionna RT)'}")
         moving = [n.name for n in sc.nodes if not n.motion.is_static]
@@ -347,13 +404,41 @@ class ScenarioRunner:
         lines.append(f"moving:     {moving or 'none (all static)'}")
         return "\n".join(lines)
 
+    # ---- v2 payload meta ---------------------------------------------------------
+    def _build_meta(self) -> dict:
+        """Build the ``meta`` half of the v2 payload (see the module docstring)."""
+        fp = self.scenario.frequency
+        links_meta = {}
+        for link in self.links:
+            tx_power_dbm = link.tx_node.tx_power_dbm
+            links_meta[link.name] = {
+                "tx_node": link.tx_node.name,
+                "rx_node": link.rx_node.name,
+                "rx_array_shape": [link.rx_array.num_rows, link.rx_array.num_cols],
+                "n_tx_ant": link.n_tx_ant,
+                "kind": "radar" if link.tx_node is link.rx_node else "comm",
+                "tx_power_dbm": tx_power_dbm,
+                "physical_scale": tx_power_dbm is not None,
+            }
+        return {
+            "version": 1,
+            "scenario_name": self.scenario.name,
+            "freq_plan": {
+                "carrier_hz": float(fp.carrier_hz),
+                "start_hz": float(fp.start_hz),
+                "stop_hz": float(fp.stop_hz),
+                "num_freqs": int(fp.num_freqs),
+            },
+            "links": links_meta,
+        }
+
     # ---- batch generation ------------------------------------------------------
-    def run(self, out_path: Optional[str] = None, verbose: bool = True
-            ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+    def run(self, out_path: Optional[str] = None, verbose: bool = True) -> Dict[str, dict]:
         """Generate every frame for every link and dump the result to ``out_path``.
 
-        Returns a single stacked ``(num_frames,) + frame_shape`` array for a single-link
-        scenario, or a ``dict`` of ``link_name -> stacked_array`` for a multi-link one.
+        Always returns (and dumps) the self-describing v2 payload ``{"meta": ..., "links":
+        {link_name: stacked_array}}`` -- single-link scenarios included, as a one-entry
+        map (see the module docstring's "Links and output layout" section).
         """
         if not self.dry_run:
             self._setup_sionna()
@@ -368,9 +453,7 @@ class ScenarioRunner:
                 print(f"  frame {frame_idx + 1}/{n}")
 
         stacks = {name: np.stack(frames, axis=0) for name, frames in per_link.items()}
-        payload: Union[np.ndarray, Dict[str, np.ndarray]] = (
-            stacks if self.is_multilink else stacks[self.primary_link.name]
-        )
+        payload: Dict[str, dict] = {"meta": self._build_meta(), "links": stacks}
 
         if out_path is None:
             out_path = default_out_path(self.scenario.name)
@@ -380,11 +463,8 @@ class ScenarioRunner:
         with open(out_path, "wb") as f:
             pickle.dump(payload, f)
         if verbose:
-            if self.is_multilink:
-                shapes = {k: v.shape for k, v in stacks.items()}
-                print(f"done dumping  {len(stacks)} links {shapes}")
-            else:
-                print(f"done dumping  shape={payload.shape}  dtype={payload.dtype}")
+            shapes = {k: v.shape for k, v in stacks.items()}
+            print(f"done dumping  {len(stacks)} links {shapes}")
         return payload
 
     # ---- single frame (live-mode hook) ----------------------------------------
@@ -438,7 +518,9 @@ class ScenarioRunner:
             lambda_c = _SPEED_OF_LIGHT / self.scenario.frequency.carrier_hz
             fspl_amp = lambda_c / (4.0 * np.pi * dist)
             cfr *= np.complex64(fspl_amp / np.sqrt(2.0))
-            cfr *= np.complex64(_tx_power_amplitude_scale(tx_power_dbm, self.num_freqs))
+            cfr *= np.complex64(
+                _tx_power_amplitude_scale(tx_power_dbm, self.num_freqs, link.n_tx_ant)
+            )
         return cfr
 
     # ---- real Sionna path (needs a CUDA-12.x driver; see driver-incompat note) -
@@ -576,10 +658,14 @@ class ScenarioRunner:
                 diffuse_reflection=False, refraction=True, synthetic_array=False,
                 seed=self.seed,
             )
-            out[link.name] = self._extract_s_pars(paths, link.tx_node.tx_power_dbm)
+            out[link.name] = self._extract_s_pars(
+                paths, link.tx_node.tx_power_dbm, link.n_tx_ant
+            )
         return out
 
-    def _extract_s_pars(self, paths, tx_power_dbm: Optional[float] = None) -> np.ndarray:
+    def _extract_s_pars(
+        self, paths, tx_power_dbm: Optional[float] = None, n_tx_ant: int = 1
+    ) -> np.ndarray:
         """cfr -> per-frame, single-link S-parameter array (rx 0 / tx 0).
 
         ``tx_power_dbm`` (from the link's tx node) is None in the legacy contract, which
@@ -587,7 +673,9 @@ class ScenarioRunner:
         amplitude scale, so output for existing scenarios is unchanged. When set, we
         request ``normalize=False`` (Sionna's own default) so the CFR carries physical
         free-space-path-loss / antenna-pattern / multipath scaling, then apply the
-        per-link absolute-voltage scale (see _tx_power_amplitude_scale).
+        per-link absolute-voltage scale (see _tx_power_amplitude_scale), which
+        ``n_tx_ant`` (the link's transmit element count) splits uniformly across the tx
+        aperture so tx_power_dbm stays the aperture's TOTAL radiated power.
         """
         cfr = paths.cfr(
             frequencies=self.freqs, normalize=_cfr_should_normalize(tx_power_dbm),
@@ -602,7 +690,9 @@ class ScenarioRunner:
         # contract and the dumped .pkl matches regardless of Sionna's native precision.
         arr = np.asarray(sliced).astype(np.complex64)
         if tx_power_dbm is not None:
-            arr = arr * np.complex64(_tx_power_amplitude_scale(tx_power_dbm, self.num_freqs))
+            arr = arr * np.complex64(
+                _tx_power_amplitude_scale(tx_power_dbm, self.num_freqs, n_tx_ant)
+            )
         return arr
 
     # ============================================================================
@@ -680,13 +770,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     payload = runner.run(out_path=out_path)
 
     print("-" * 70)
-    if isinstance(payload, dict):
-        print(f"Generated {scenario.num_frames} frames x {len(payload)} links -> {out_path}")
-        for name, arr in payload.items():
-            print(f"  link {name}: {arr.shape}, dtype {arr.dtype}")
-    else:
-        print(f"Generated {payload.shape[0]} frames -> {out_path}")
-        print(f"Array shape {payload.shape}, dtype {payload.dtype}")
+    links = payload["links"]
+    print(f"Generated {scenario.num_frames} frames x {len(links)} links -> {out_path}")
+    for name, arr in links.items():
+        print(f"  link {name}: {arr.shape}, dtype {arr.dtype}")
     if args.dry_run:
         print("(dry-run: synthetic data; replace with real generation by dropping --dry-run "
               "on a machine with Sionna RT installed.)")

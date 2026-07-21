@@ -124,6 +124,28 @@ def test_comms_blocks_compose_inside_simulation(make_env_block):
     assert len(out["evm"]) == 2 and all(np.isfinite(e) for e in out["evm"])
 
 
+def test_cfr_from_state_matches_manual_flatten(state_dict, n_freqs):
+    """_cfr_from_state (now delegating to ch.frame_to_cfr) must reproduce the old
+    'flatten everything, take row 0, then resample to subcarriers' result."""
+    from e2e.comms import channel as ch
+    from e2e.comms.blocks import _cfr_from_state
+
+    freqs = _freqs(n_freqs)
+    modem = ModemBlock(freqs, n_symbols=2, fft_size=64).modem
+
+    H = _cfr_from_state(state_dict, modem, freqs)
+
+    s_pars = state_dict["s_pars"]
+    flat = s_pars.reshape(-1, s_pars.shape[-1])
+    cfr_dense = flat[0]                                    # old manual extraction
+    carrier = float(np.mean(freqs))
+    df = float(freqs[1] - freqs[0])
+    expected = ch.cfr_to_subcarriers(cfr_dense, freqs, modem.fft_size, carrier, df)
+
+    assert H.shape == expected.shape
+    torch.testing.assert_close(H, expected)
+
+
 def test_modem_block_uses_precomputed_H_sc(n_freqs):
     """If H_sc is in the state dict, ModemBlock uses it directly (bypasses s_pars)."""
     freqs = _freqs(n_freqs)
@@ -134,6 +156,23 @@ def test_modem_block_uses_precomputed_H_sc(n_freqs):
     errs = (out["comm_tx_bits"] != out["comm_rx_bits"]).float().mean().item()
     assert errs == pytest.approx(0.0, abs=1e-9)
     assert torch.allclose(out["comm_H_true"], H_sc)
+
+
+def test_modem_block_defaults_to_element0_combining(state_dict, n_freqs):
+    """`combining` defaults to 'element0' (the historical SISO-tap behavior) and
+    never emits 'comm_array_gain_db' -- see test_comms_beamforming.py for the
+    'mrc'/'subspace' combining modes."""
+    freqs = _freqs(n_freqs)
+    block = ModemBlock(freqs, n_symbols=4, fft_size=64, snr_db=20.0, seed=0)
+    assert block.combining == "element0"
+    out = block.apply(state_dict)
+    assert "comm_array_gain_db" not in out
+
+
+def test_modem_block_rejects_unknown_combining_mode():
+    freqs = _freqs(64)
+    with pytest.raises(ValueError, match="combining"):
+        ModemBlock(freqs, n_symbols=4, fft_size=64, combining="bogus")
 
 
 def test_modem_block_reset_reproduces_noise_sequence(state_dict, n_freqs):
@@ -151,3 +190,25 @@ def test_modem_block_reset_reproduces_noise_sequence(state_dict, n_freqs):
     block.reset()
     out1b = block.apply(dict(state_dict))
     torch.testing.assert_close(out1["comm_data_eq"], out1b["comm_data_eq"])
+
+
+@pytest.mark.parametrize("combining", ["element0", "subspace"])
+def test_modem_block_reads_dict_shaped_freq_plan(state_dict, n_freqs, combining):
+    """A `freq_plan` threaded into the state dict has the DICT shape that
+    SionnaIterator/the env block expose ({'carrier_hz': ...}). ModemBlock must read
+    it as a dict, not via attribute access. Regression: _cfr_from_state /
+    _combine_spatial used fp.carrier_hz and would AttributeError the moment any
+    freq_plan was present in the state."""
+    freqs = _freqs(n_freqs)
+    st = dict(state_dict)
+    st["freq_plan"] = {"carrier_hz": 30e9, "start_hz": 28.5e9,
+                       "stop_hz": 31.5e9, "num_freqs": n_freqs}
+    if combining == "subspace":
+        st["U"] = torch.linalg.qr(
+            torch.randn(1024, 16, dtype=torch.cfloat, device=device))[0]
+    block = ModemBlock(freqs, n_symbols=4, fft_size=64, snr_db=15.0,
+                       combining=combining)
+    out = block.apply(st)   # must not raise AttributeError
+    assert "comm_rx_bits" in out
+    if combining != "element0":
+        assert "comm_array_gain_db" in out

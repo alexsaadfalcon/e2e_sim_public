@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e.subspace.subspace_utils import subspace_dist_frob, subspace_dist
-from e2e.subspace.algorithms import Oja, rand_orth_complex, gen_A_ada, device
+from e2e.subspace.algorithms import Oja, rand_orth_complex, gen_A_ada, randn_complex, device
 
 
 def test_subspace_dist_zero_for_identical_basis():
@@ -53,6 +53,28 @@ def test_gen_A_ada_shape_and_rows():
     assert A.shape == (m, 30)
     # First d rows are U^H by construction.
     assert torch.allclose(A[:5, :], U.t().conj(), atol=1e-5)
+
+
+def test_gen_A_ada_random_rows_match_deterministic_row_scale():
+    # Regression guard: unnormalized random rows had norm ~sqrt(n) (measured
+    # ~32 for n=1024) against unit-norm deterministic rows (U's columns are
+    # orthonormal) -- a huge, unintended scale mismatch in the sensing matrix.
+    U = rand_orth_complex(256, 5)
+    m = 20
+    A = gen_A_ada(U, m)
+    det_norms = A[:5, :].norm(dim=1)
+    rand_norms = A[5:, :].norm(dim=1)
+    assert torch.allclose(det_norms, torch.ones_like(det_norms), atol=1e-4)
+    assert torch.allclose(rand_norms, torch.ones_like(rand_norms), atol=1e-4)
+
+
+def test_randn_complex_variance():
+    # Measured E|X|^2 = 2.0 over >=1e6 samples (real/imag parts each unit
+    # variance); pins the construction against an accidental doubling.
+    x = randn_complex(1000, 1000, device=device)
+    assert x.numel() >= 1_000_000
+    e_abs2 = (x.abs() ** 2).mean().item()
+    assert e_abs2 == pytest.approx(2.0, abs=0.05)
 
 
 def test_oja_tracks_a_static_subspace():

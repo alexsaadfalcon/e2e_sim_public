@@ -2,8 +2,18 @@ import torch
 from tqdm import tqdm
 from collections import defaultdict
 
+from e2e import frames
+from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
+
 
 def get_U_true(s_pars, d):
+    # "Ground truth" here means the top-d left singular vectors of a single frame's
+    # S-parameter matrix -- a meaningful reference for subspace tracking only when the
+    # frame's effective rank (number of singular values well above the noise floor) is
+    # >= d. Below that, the trailing directions returned are noise-dominated, and any
+    # subspace_err computed against them partly measures how well the tracker follows
+    # noise rather than signal structure. See ROADMAP.md for a planned rank/singular-
+    # value-gap diagnostic to make this failure mode visible.
     assert len(s_pars.shape) == 4
     s_pars_0 = s_pars[:, :, 0, :]
     s_pars_0 = s_pars_0.view(-1, s_pars_0.shape[-1])
@@ -25,6 +35,7 @@ class Simulation:
         afe_block=None,
         subspace_block=None,
         array_shape=None,
+        serial_stages=None,
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -41,6 +52,24 @@ class Simulation:
         if array_shape is None:
             array_shape = getattr(environment_block, 'array_shape', (32, 32))
         self.n_rx_x, self.n_rx_y = array_shape
+        # The serial stages form the pipeline proper (each may rewrite 's_pars'), run
+        # in order inside feed_forward. By default they're built from the legacy
+        # block args above; pass `serial_stages` explicitly to replace the whole list
+        # (composability hook -- e.g. inserting a custom stage).
+        if serial_stages is not None:
+            self.serial_stages = serial_stages
+        else:
+            self.serial_stages = []
+            if circuit_block is not None:
+                self.serial_stages.append(CircuitStage(circuit_block))
+            self.serial_stages.append(GridStage((self.n_rx_x, self.n_rx_y)))
+            if interconnect_block is not None:
+                self.serial_stages.append(InterconnectStage(interconnect_block))
+            # No subspace block -> no measurement stage: the pipeline then ends at the
+            # aperture grid, which is all FFT/range-map products need. (AFE without a
+            # subspace block was already rejected above.)
+            if subspace_block is not None:
+                self.serial_stages.append(MeasurementStage(afe_block, subspace_block))
         self.outputs = defaultdict(list)
         # The online subspace tracker is initialized once (from the first frame's
         # subspace) and then tracks the evolving scene; this flag guards that
@@ -75,42 +104,21 @@ class Simulation:
             self.subspace_block.oja.U = perturb_basis(U_true)
             self._subspace_started = True
 
-        PRX = None
-        if self.circuit_block:
-            s_pars = torch.cat([s_pars, s_pars], dim=2)
-            s_pars, PRX = self.circuit_block.apply_circuit(s_pars)
-            s_pars = s_pars[:, :, :1, :]
-
-        assert s_pars.shape[1] == 1, 'MIMO not supported yet'
-        assert s_pars.shape[2] == 1, 'Multiple chirps not supported yet'
-        s_pars = s_pars.view(self.n_rx_x, self.n_rx_y, 1, -1)
-
-        if self.interconnect_block:
-            s_pars = self.interconnect_block.apply_interconnect(s_pars)
-
-        if self.afe_block and self.subspace_block:
-            V = s_pars.view(-1, s_pars.shape[-1])
-            A = self.subspace_block.gen_A_ada()
-            Aq, X = self.afe_block.apply_mat_mul(A, V)
-            self.subspace_block.update(X, Aq)
-            Xt = self.afe_block.reconstruct(Aq, X)
-            s_pars = Xt.view(s_pars.shape)
-        elif self.subspace_block:
-            # No AFE: feed the subspace tracker the full-precision compressed
-            # measurements directly (same A-generation as the AFE branch, but
-            # without quantization).
-            V = s_pars.view(-1, s_pars.shape[-1])
-            A = self.subspace_block.gen_A_ada()
-            X = A @ V
-            self.subspace_block.update(X, A)
-        
-        reserved_keys = {'U', 'U_true', 's_pars', 'PRX'}
         state_dict = {
-            'U': self.subspace_block.oja.U,
-            'U_true': U_true,
             's_pars': s_pars,
-            'PRX': PRX,
+            'U_true': U_true,
+            'PRX': None,
         }
+        for stage in self.serial_stages:
+            state_dict.update(stage.apply(state_dict))
+        # Serial stages that touch the subspace tracker (MeasurementStage) refresh
+        # 'U' via their return dict; re-read it from the tracker here too so 'U' is
+        # always current. Guarded: a serial_stages override may legitimately run
+        # without a subspace block, in which case 'U' is whatever the stages set.
+        if self.subspace_block is not None:
+            state_dict['U'] = self.subspace_block.oja.U
+
+        reserved_keys = {'U', 'U_true', 's_pars', 'PRX'}
 
         for downstream_block in self.downstream_blocks:
             outputs = downstream_block.apply(state_dict)

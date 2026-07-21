@@ -11,6 +11,9 @@ Provided here
 * `synthetic_multipath_cfr`  -- a few random multipath taps -> frequency response
   over an arbitrary frequency grid. Used as the *fallback* channel when the
   precomputed Sionna `.pkl` frames are not available (Sionna cannot run here).
+* `frame_to_cfr`             -- shared frame->CFR extraction (reshape + per-row
+  interpolation onto a target frequency grid) used by every caller that reads a
+  raw pipeline/Sionna frame (`load_or_synthesize_cfr`, `comms.blocks`, `main_isac`).
 * `cfr_to_subcarriers`       -- resample a (dense) channel frequency response onto
   the OFDM subcarrier grid.
 * `apply_channel`            -- multiply an OFDM frequency grid by the per-subcarrier
@@ -162,15 +165,22 @@ def ls_estimate(rx_pilots, tx_pilots, pilot_idx, fft_size):
 
 
 def mmse_estimate(rx_pilots, tx_pilots, pilot_idx, fft_size, snr_db):
-    """Simple per-pilot Wiener (diagonal MMSE) channel estimate.
+    """Pooled empirical-Bayes Wiener (diagonal MMSE) channel estimate.
 
     For each pilot subcarrier we have several noisy LS observations (one per OFDM
-    symbol). Their sample mean is the LS estimate; their sample variance across
-    symbols is a direct, *unbiased* estimate of the per-pilot noise power. The
-    Wiener gain ``g = sigma_H^2 / (sigma_H^2 + sigma_n^2)`` then shrinks each pilot
-    toward zero only as much as the measured noise warrants -- so strong, clean
-    pilots are left untouched and the estimate never floors above LS at high SNR.
-    The de-noised pilots are interpolated onto the full grid exactly as in LS.
+    symbol); their mean over symbols is the LS estimate at that pilot. The Wiener
+    shrinkage ``g = sigma_H^2 / (sigma_H^2 + sigma_n^2 / n_sym)`` needs a signal-
+    power prior ``sigma_H^2`` and a noise-power estimate. Deriving either one from
+    the *same* handful of noisy pilots being shrunk is circular: at low SNR / few
+    pilots that self-estimate is high-variance and can even go negative, making
+    this "MMSE" estimator worse than plain LS. Instead both statistics are pooled
+    across every pilot subcarrier AND every OFDM symbol in the frame -- the
+    maximal averaging available -- giving a single, low-variance, frame-wide
+    prior and noise floor. The same pooled shrinkage factor is then applied to
+    every pilot's own LS mean (a flat prior across subcarriers -- estimating a
+    per-subcarrier power profile without reusing the same noisy samples would
+    need more pilots than a comb typically has). The de-noised pilots are
+    interpolated onto the full grid exactly as in LS.
 
     `snr_db` is accepted for API symmetry but the noise power is measured, not
     assumed, so the estimate is robust to the channel not being unit-power.
@@ -182,17 +192,25 @@ def mmse_estimate(rx_pilots, tx_pilots, pilot_idx, fft_size, snr_db):
 
     n_sym = H_obs.shape[0]
     if n_sym > 1:
-        # variance across symbols -> noise power of a single observation;
-        # the mean of n_sym observations has 1/n_sym of that variance.
-        var_obs = torch.mean(torch.abs(H_obs - H_mean[None, :]) ** 2, dim=0)
-        sigma_n2 = var_obs / n_sym
+        # per-pilot variance across symbols -> noise power of a single observation,
+        # pooled (averaged) over pilots too: one low-variance, frame-wide estimate
+        # instead of n_pilots separate high-variance self-estimates.
+        var_per_pilot = torch.mean(torch.abs(H_obs - H_mean[None, :]) ** 2, dim=0)
+        sigma_n2_obs = torch.mean(var_per_pilot)                    # scalar
+        sigma_n2 = sigma_n2_obs / n_sym                             # noise var of the mean
     else:
-        # single symbol: fall back to the assumed SNR
+        # single symbol: nothing to pool across -> fall back to the assumed SNR
         rho = 10 ** (snr_db / 10.0)
-        sigma_n2 = torch.mean(torch.abs(H_mean) ** 2) / rho * torch.ones_like(torch.abs(H_mean))
+        sigma_n2 = torch.mean(torch.abs(H_mean) ** 2) / rho
 
-    sigma_H2 = torch.clamp(torch.abs(H_mean) ** 2 - sigma_n2, min=0.0)   # signal power
-    gain = sigma_H2 / (sigma_H2 + sigma_n2 + 1e-12)           # per-pilot Wiener gain
+    # pooled empirical-Bayes signal-power prior: average |H_mean|^2 over ALL
+    # pilots (maximal averaging) then remove the (now scalar, low-variance)
+    # noise-of-the-mean bias; clamp so a noisy frame never yields sigma_H2 < 0.
+    mean_pow = torch.mean(torch.abs(H_mean) ** 2)
+    floor = 1e-6 * mean_pow + 1e-12
+    sigma_H2 = torch.clamp(mean_pow - sigma_n2, min=floor)
+
+    gain = sigma_H2 / (sigma_H2 + sigma_n2 + 1e-12)           # single pooled Wiener gain
     H_wiener = H_mean * gain
 
     pidx = torch.as_tensor(pilot_idx, device=device).cpu().numpy()
@@ -214,13 +232,33 @@ def zf_equalize(rx_freq, H_est):
     return rx_freq / (H_est[None, :] + 1e-12)
 
 
-def mmse_equalize(rx_freq, H_est, snr_db):
-    """MMSE equalizer: ``conj(H) / (|H|^2 + 1/SNR)``."""
+def mmse_equalize(rx_freq, H_est, snr_db, unbiased=True):
+    """MMSE equalizer: ``conj(H) / (|H|^2 + 1/SNR)``.
+
+    The raw scalar-MMSE filter ``w = H* / (|H|^2 + 1/rho)`` is *biased*:
+    ``E[w H] = b_k = |H_k|^2 / (|H_k|^2 + 1/rho) < 1``, i.e. it shrinks the
+    equalized point toward zero, more so on weak subcarriers. A hard-decision
+    demapper slices against the *unbiased*, unit-power constellation, so with
+    ``unbiased=True`` (default) the per-subcarrier output is rescaled by
+    ``1/b_k`` (guarded away from 0) before being handed to the demapper.
+    Algebraically ``w / b_k == 1/H_k``, so the unbiased-MMSE decision is
+    identical to ZF: for uncoded per-subcarrier hard decisions, unbiased scalar
+    MMSE and ZF make the *same* decision on the same received sample -- MMSE's
+    real advantage over ZF is lower estimation MSE / noise enhancement at
+    weak subcarriers (visible in soft-symbol MSE or EVM, not in uncoded hard-
+    decision BER). Pass ``unbiased=False`` to get the raw, biased filter
+    output (e.g. to compute that soft-metric advantage).
+    """
     rx_freq = torch.as_tensor(rx_freq, dtype=torch.complex64, device=device)
     H_est = torch.as_tensor(H_est, dtype=torch.complex64, device=device)
     rho = 10 ** (snr_db / 10.0)
-    w = torch.conj(H_est) / (torch.abs(H_est) ** 2 + 1.0 / rho)
-    return rx_freq * w[None, :]
+    h2 = torch.abs(H_est) ** 2
+    w = torch.conj(H_est) / (h2 + 1.0 / rho)
+    eq = rx_freq * w[None, :]
+    if unbiased:
+        bias = h2 / (h2 + 1.0 / rho)
+        eq = eq / torch.clamp(bias, min=1e-6)[None, :]
+    return eq
 
 
 # --------------------------------------------------------------------------------
@@ -270,6 +308,66 @@ def channel_mse(H_est, H_true, active_idx=None):
 
 
 # --------------------------------------------------------------------------------
+# Frame -> CFR: the shared reshape/interpolate helper
+# --------------------------------------------------------------------------------
+def frame_to_cfr(frame, target_freqs, src_band=None, element=0):
+    """Extract and resample spatial channel(s) from a raw pipeline frame.
+
+    Shared helper behind every frame->CFR extraction in the comms layer
+    (`load_or_synthesize_cfr`, `comms.blocks._cfr_from_state`,
+    `main_isac._radar_s_pars`) -- previously three independent copies of the
+    same reshape + per-row interpolation logic.
+
+    Parameters
+    ----------
+    frame : array-like (numpy or torch), shape [n_rx, n_tx, chirp, F], or an
+        already-flat [n_rx, F]. Any axes between the leading (spatial) axis and
+        the trailing (frequency) axis are collapsed and index 0 (tx=0, chirp=0)
+        is kept, matching the pipeline's single-chirp/no-MIMO convention.
+    target_freqs : the frequency grid (Hz) to interpolate each row onto.
+    src_band : optional ``(f_start_hz, f_stop_hz)`` stating the *actual* frequency
+        band the frame's samples span. The frame stores only sample values, not
+        their frequencies, so the source grid must be supplied or assumed. When
+        ``None`` (default) we ASSUME the frame spans exactly the requested
+        ``target_freqs`` band, i.e. ``src_band = (target_freqs[0], target_freqs[-1])``.
+        If the frame was actually sampled over a different band this default
+        silently mis-maps frequency -- pass the true band explicitly whenever
+        known (e.g. from a v2 frame's `freq_plan` metadata).
+    element : spatial row to return -- an int index into the leading (n_rx) axis,
+        or ``None`` to return every row.
+
+    Returns
+    -------
+    complex64 torch tensor on the library device: shape [len(target_freqs)] for
+    an int `element`, or [n_rx, len(target_freqs)] for ``element=None``.
+    """
+    if torch.is_tensor(frame):
+        frame = frame.detach().cpu().numpy()
+    arr = np.asarray(frame, dtype=np.complex64)
+    if arr.ndim > 2:
+        # collapse everything between the leading spatial axis and the trailing
+        # frequency axis, keeping index 0 (tx=0, chirp=0)
+        arr = arr.reshape(arr.shape[0], -1, arr.shape[-1])[:, 0, :]
+
+    target_freqs = np.asarray(target_freqs, dtype=np.float64)
+    f0, f1 = (src_band if src_band is not None
+              else (target_freqs[0], target_freqs[-1]))
+    src_freqs = np.linspace(f0, f1, arr.shape[-1])
+
+    def _interp_row(row):
+        Hr = np.interp(target_freqs, src_freqs, row.real)
+        Hi = np.interp(target_freqs, src_freqs, row.imag)
+        return Hr + 1j * Hi
+
+    if element is None:
+        out = np.stack([_interp_row(arr[i]) for i in range(arr.shape[0])], axis=0)
+    else:
+        out = _interp_row(arr[element])
+    out = out.astype(np.complex64)
+    return torch.from_numpy(out).to(device)
+
+
+# --------------------------------------------------------------------------------
 # Channel sourcing: precomputed Sionna frame if present, else synthetic fallback
 # --------------------------------------------------------------------------------
 def load_or_synthesize_cfr(scenario_name, freqs, frame=0, n_taps=6, rng=None,
@@ -278,21 +376,18 @@ def load_or_synthesize_cfr(scenario_name, freqs, frame=0, n_taps=6, rng=None,
 
     Attempts to read a precomputed Sionna `.pkl` frame via
     ``e2e.environment.sionna_iterator`` for `scenario_name`. The S-parameters
-    there are sampled on the scenario's own dense frequency grid; we take a single
-    spatial channel (element 0) and interpolate it onto `freqs`. If the `.pkl` is
-    absent (or Sionna frames can't be loaded), falls back to
-    ``synthetic_multipath_cfr`` so examples always run.
+    there are read and resampled onto `freqs` by `frame_to_cfr` (single spatial
+    channel, element 0). If the `.pkl` is absent (or Sionna frames can't be
+    loaded), falls back to ``synthetic_multipath_cfr`` so examples always run.
 
     Parameters
     ----------
-    src_band : optional ``(f_start_hz, f_stop_hz)`` stating the *actual* frequency
-        band the loaded `.pkl`'s S-parameters span. The frame stores only sample
-        values, not their frequencies, so the source grid must be supplied or
-        assumed. When ``None`` (default, preserving the historical behaviour) we
-        ASSUME the pkl spans exactly the requested ``freqs`` band, i.e.
-        ``src_band = (freqs[0], freqs[-1])``. If the pkl was actually sampled over
-        a different band this default silently mis-maps frequency, so pass the
-        true band explicitly whenever it is known.
+    src_band : optional ``(f_start_hz, f_stop_hz)``, forwarded to `frame_to_cfr`
+        (see its docstring for the band-guess assumption when omitted). If
+        omitted AND the loaded iterator exposes v2 frame metadata (a
+        `freq_plan` with `start_hz`/`stop_hz`), that band is used automatically
+        instead of guessing -- legacy (pre-v2) pkls still fall back to the
+        "assume it spans `freqs`" default.
 
     `source_str` is 'sionna:<name>' or 'synthetic', for logging.
     """
@@ -305,18 +400,14 @@ def load_or_synthesize_cfr(scenario_name, freqs, frame=0, n_taps=6, rng=None,
             factory = iters.get(scenario_name)
             if factory is not None:
                 it = factory()                          # raises if .pkl missing
-                arr = np.asarray(it[frame % len(it)], dtype=np.complex64)
-                flat = arr.reshape(-1, arr.shape[-1])   # [N_RX*..., N_FREQS]
-                cfr = flat[0]
-                # build the source frequency grid: explicit band if given, else
-                # assume the pkl spans the requested band (see src_band docstring).
-                f0, f1 = (src_band if src_band is not None
-                          else (freqs[0], freqs[-1]))
-                src_freqs = np.linspace(f0, f1, cfr.shape[-1])
-                Hr = np.interp(freqs, src_freqs, cfr.real)
-                Hi = np.interp(freqs, src_freqs, cfr.imag)
-                H = (Hr + 1j * Hi).astype(np.complex64)
-                return torch.from_numpy(H).to(device), f"sionna:{scenario_name}"
+                arr = it[frame % len(it)]
+                band = src_band
+                if band is None:
+                    freq_plan = getattr(it, "freq_plan", None)   # v2 meta, or None
+                    if freq_plan is not None:
+                        band = (freq_plan["start_hz"], freq_plan["stop_hz"])
+                H = frame_to_cfr(arr, freqs, src_band=band, element=0)
+                return H, f"sionna:{scenario_name}"
         except Exception:
             pass   # any load failure -> synthetic fallback
 

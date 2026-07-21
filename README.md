@@ -42,6 +42,7 @@ so they work out of the box on CPU:
 python -m e2e.main.main_comms_link            # OFDM link, BER vs SNR + constellation
 python -m e2e.main.main_channel_estimation    # pilot-based estimation, MSE vs SNR
 python -m e2e.main.main_isac                  # joint radar+comm in one multi-node scene
+python -m e2e.main.main_comms_head            # SAME pipeline, swappable radar/comms heads
 ```
 
 **3. Launch the web UI** (block diagram + scenario editor) — see
@@ -159,8 +160,11 @@ the dry-run mock applies an analytic free-space level, and both are scaled to ab
 voltage via the configured transmit power and the 50 Ω system impedance. The reference
 scenarios default to 12 dBm (IWR1443-class). Leaving `tx_power_dbm` unset (`None`) keeps
 the legacy unit-energy convention. **The convention is per-link** (it follows each link's
-TX node), so a mixed scenario produces a `.pkl` whose links differ in convention — frames
-carry no tag yet, so consumers must set `physical_scale` per link to match. On the
+TX node) — and generated frames are now **self-describing**: the `.pkl` carries a `meta`
+block (frequency plan, per-link array geometry, `tx_power_dbm`, scale convention) that
+`SionnaIterator` exposes and consumers read automatically — the environment block derives
+its array shape from it, and the web UI's RFFE "auto" scale mode follows it. Legacy pkls
+(bare arrays) still load; for those, consumers set `physical_scale` manually. On the
 consumption side, `RFFEBlock(physical_scale=True)`
 feeds those volts directly into the analog front-end — whose clamp, compression, and
 thermal-noise floor are then a real operating point rather than an arbitrary
@@ -190,6 +194,40 @@ from e2e.environment.sionna_iterator import SionnaIterator
 it = SionnaIterator("sionna_sims/munich_isac.pkl", link="building_comm_tx__car_comm_rx")
 ```
 
+### Physical modeling scope & limitations
+
+Honesty contract for this release: what's physically modeled, and what's a placeholder
+or a link-level abstraction.
+
+- **Diffuse reflection is off.** Ray tracing runs specular/LOS/refraction paths only
+  (`max_depth=5`); diffuse scattering from rough surfaces or foliage is not represented,
+  so clutter from those surfaces is absent from generated frames.
+- **Comms SNR is enforced post-hoc at the receiver.** Noise is added to hit a target SNR
+  directly, decoupled from the ray-traced path loss; the radar leg of the same scenarios
+  *does* use the physical channel gain from the ray-traced/analytic path. The **pipeline
+  comms head** (`ModemBlock`, see "Swappable heads" above) does perform real spatial
+  combining across the array (`combining="mrc"`/`"subspace"`, with independent
+  per-element noise injected before combining so the resulting array gain is honest) —
+  it is only the per-element/per-combined-stream SNR target itself that is set post-hoc,
+  not the combining. The standalone link-level examples (`main_comms_link`,
+  `main_isac`, `main_isac_multilink`) remain single-spatial-channel (SISO) by design —
+  they demonstrate the OFDM/channel-estimation machinery in isolation, not the array.
+- **The OFDM path applies the channel as a per-subcarrier frequency-domain multiply**,
+  not a time-domain convolution, so ISI/CP-overrun effects cannot occur in the shipped
+  examples. `cp_len` is exercised only by the modem's own time-domain round-trip
+  (`OFDMModem.modulate`/`demodulate`), not by any end-to-end example.
+- **"S-parameters" are absolute voltages in physical-scale mode.** The stored per-link
+  quantities are called `s_pars` throughout the code, but when generated with
+  `tx_power_dbm` set they are receiver voltages (V_rms across 50 ohms), not the
+  dimensionless network-theory S21 ratios the name suggests. The legacy (`tx_power_dbm
+  = None`) convention is unit-energy, also not literal S21.
+- **Frames are independent scene snapshots** with no frame-to-frame phase continuity, so
+  Doppler processing across frames (as opposed to within a single frame/chirp) is not
+  physically meaningful.
+- **The interconnect model is a placeholder**: a fixed 11-tap boxcar frequency response
+  (`InterconnectBlock`), independent of the scenario's `FrequencyPlan`. It stands in for
+  a real interconnect filter but is not derived from one.
+
 ## Communications and joint radar/comms (ISAC) examples
 
 Beyond the radar pipeline, the `e2e/comms/` package adds an OFDM modem, channel
@@ -214,6 +252,30 @@ The comms blocks are also **first-class pipeline stages**: add `ModemBlock` and 
 to a `Simulation`'s `downstream_blocks` and they run alongside the radar products (FFT,
 range-az/el, subspace error), consuming the same `s_pars` channel. Downstream blocks
 compose — `ModemBlock`'s transmitted/received bits flow to `BERBlock` in the same step.
+
+### Swappable heads: radar products or a comms link, off the same pipeline
+
+The receive chain (environment → RFFE → interconnect → AFE → AdaOja subspace tracking)
+ends in a reconstructed aperture grid; everything past that point is a swappable **head**.
+`RangeAzBlock`/`RangeElBlock`/`FFTBlock` turn it into a radar product; `ModemBlock` +
+`BERBlock` turn the SAME reconstruction into an OFDM communications link. `ModemBlock`'s
+`combining` selects how the comms head uses the array:
+
+- `"element0"` — the historical single-tap SISO shortcut (one spatial channel, no
+  combining).
+- `"mrc"` — full-aperture maximum-ratio combining: independent per-element noise is
+  injected *before* combining (`e2e/comms/beamforming.py`), so the measured array gain
+  (~`10*log10(N)` for `N` elements at high correlation) is real coherent-combining gain,
+  not a noise-averaging artifact.
+- `"subspace"` — reuses the AdaOja tracker's dominant tracked direction (`state['U'][:, 0]`)
+  as a broadband beamformer weight instead of a fresh MRC solve, so the same online-tracked
+  subspace serves both heads.
+
+`python -m e2e.main.main_comms_head` runs the full pipeline three times (fresh
+`Simulation` per run, same frames) — once per `combining` mode — and reports mean
+BER/EVM/array-gain plus a radar-product map from the same run, to make the "one
+pipeline, two heads" point concrete. The web UI exposes the same head as an optional
+"Comms Head (OFDM)" block downstream of the subspace stage.
 
 ## Cookbook
 

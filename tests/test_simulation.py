@@ -15,6 +15,7 @@ from e2e.blocks import (
     AFEBlock,
     AdaOjaBlock,
     FFTBlock,
+    RangeAzBlock,
     SubspaceErrorBlock,
 )
 
@@ -134,6 +135,16 @@ def test_pipeline_array_shape_autoderived_from_env(make_env_block):
     assert len(out["fft"]) == 1
 
 
+def test_pipeline_runs_without_subspace_block(make_env_block):
+    """subspace_block=None skips the measurement stage: FFT/range products still work
+    for users who only want the range/angle maps, with no subspace tracking."""
+    env = make_env_block(n_frames=2, n_freqs=16)
+    sim = Simulation(env, [FFTBlock(bins=16), RangeAzBlock(bins=16)], D)
+    out = sim.run(n_steps=2)
+    assert len(out["fft"]) == 2
+    assert len(out["range_az"]) == 2
+
+
 class _ReservedKeyBlock:
     """Dummy downstream block that emits a reserved pipeline key."""
 
@@ -176,8 +187,83 @@ def test_multiple_chirps_assertion(make_env_block):
         return torch.cat([base, base], dim=2)  # shape (n_rx, 1, 2, F)
 
     env.get_S_pars = _two_chirp_s_pars
-    with pytest.raises(AssertionError, match="Multiple chirps not supported yet"):
+    with pytest.raises(ValueError, match="Simulation.feed_forward: multiple chirps not supported yet"):
         sim.feed_forward()
+
+
+def test_mimo_assertion(make_env_block):
+    """A frame with a TX dim (shape[1]) > 1 must trip the named no-MIMO guard."""
+    env = make_env_block(n_frames=1, n_freqs=32)
+    sim = Simulation(
+        env, _downstream(), D,
+        subspace_block=AdaOjaBlock(N_RX, D),
+    )
+    sim.reset()
+
+    real_get_s_pars = env.get_S_pars
+
+    def _two_tx_s_pars():
+        base = real_get_s_pars()  # shape (n_rx, 1, 1, F)
+        return torch.cat([base, base], dim=1)  # shape (n_rx, 2, 1, F)
+
+    env.get_S_pars = _two_tx_s_pars
+    with pytest.raises(ValueError, match="Simulation.feed_forward: MIMO not supported yet"):
+        sim.feed_forward()
+
+
+class _NoOpStage:
+    """Custom serial stage: tags 's_pars' so we can prove it ran and its edit flowed
+    through the rest of the pipeline (via the `serial_stages` composability hook)."""
+
+    def __init__(self):
+        self.ran = False
+
+    def apply(self, state):
+        self.ran = True
+        return {"s_pars": state["s_pars"] * 2}
+
+
+def test_composability_custom_serial_stage_runs_and_flows_through(make_env_block):
+    """A custom stage passed via serial_stages= replaces the auto-built list, runs in
+    feed_forward, and its s_pars edit is visible to later stages/downstream blocks."""
+    from e2e.blocks import GridStage, MeasurementStage
+
+    env = make_env_block(n_frames=2, n_freqs=32)
+    custom = _NoOpStage()
+    subspace_block = AdaOjaBlock(N_RX, D)
+    sim = Simulation(
+        env, _downstream(), D,
+        subspace_block=subspace_block,
+        serial_stages=[custom, GridStage((32, 32)), MeasurementStage(None, subspace_block)],
+    )
+    out = sim.run(n_steps=1)
+    assert custom.ran
+    assert len(out["subspace_err"]) == 1
+    assert all(torch.isfinite(v) for v in out["subspace_err"])
+
+
+def test_legacy_args_build_expected_stage_sequence(make_env_block):
+    """Legacy positional/kwarg construction auto-builds serial_stages in the right
+    order, skipping stages whose backing block is None."""
+    from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
+
+    env = make_env_block(n_frames=1, n_freqs=32)
+
+    # No circuit, no interconnect -> [GridStage, MeasurementStage]
+    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    assert [type(s) for s in sim.serial_stages] == [GridStage, MeasurementStage]
+
+    # Full stack -> [CircuitStage, GridStage, InterconnectStage, MeasurementStage]
+    sim2 = Simulation(
+        env, _downstream(), D,
+        circuit_block=RFFEBlock(n=N_RX),
+        interconnect_block=InterconnectBlock(case="case3"),
+        afe_block=AFEBlock(),
+        subspace_block=AdaOjaBlock(N_RX, D),
+    )
+    assert [type(s) for s in sim2.serial_stages] == [
+        CircuitStage, GridStage, InterconnectStage, MeasurementStage,
+    ]
 
 
 @pytest.mark.slow

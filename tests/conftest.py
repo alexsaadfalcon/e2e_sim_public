@@ -44,6 +44,8 @@ def pytest_collection_modifyitems(config, items):
         "sionna": (os.environ.get("RUN_SIONNA") == "1", "needs Sionna RT; set RUN_SIONNA=1"),
         "slow": (os.environ.get("RUN_SLOW") == "1", "slow test; set RUN_SLOW=1"),
         "gui": (os.environ.get("RUN_GUI") == "1", "needs display/server; set RUN_GUI=1"),
+        "browser": (os.environ.get("RUN_BROWSER") == "1",
+                    "drives a headless browser; set RUN_BROWSER=1"),
     }
     for item in items:
         for marker, (enabled, reason) in gates.items():
