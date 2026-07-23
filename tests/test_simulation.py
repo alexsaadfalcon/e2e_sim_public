@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.simulation import Simulation, get_U_true, perturb_basis
+from e2e.simulation import Simulation, get_U_true, perturb_basis, rank_diagnostic
 from e2e.blocks import (
     RFFEBlock,
     InterconnectBlock,
@@ -59,6 +59,111 @@ def test_tracker_warm_started_once_not_reset_every_frame(make_env_block, monkeyp
     sim.run(n_steps=4)
     # Warm start fires exactly once across all frames, not once per frame.
     assert calls["n"] == 1
+
+
+def test_warm_start_true_frame0_is_perturbed_ground_truth(make_env_block, monkeypatch):
+    """warm_start=True (the default) reproduces the historical one-time warm start
+    exactly: oja.U is set to perturb_basis(U_true) from frame 0. The tracker's
+    per-frame update() is stubbed so we isolate the warm-start assignment itself
+    from the subsequent online tracking step that also runs inside frame 0."""
+    env = make_env_block(n_frames=2, n_freqs=32)
+    subspace_block = AdaOjaBlock(N_RX, D)
+    monkeypatch.setattr(subspace_block, "update", lambda *a, **k: None)
+    sim = Simulation(env, _downstream(), D, subspace_block=subspace_block)  # warm_start=True default
+    assert sim.warm_start is True
+
+    torch.manual_seed(42)
+    expected = perturb_basis(get_U_true(env.get_S_pars(), D))
+
+    torch.manual_seed(42)
+    sim.run(n_steps=1)
+    assert torch.allclose(sim.subspace_block.oja.U, expected, atol=1e-5)
+
+
+def test_warm_start_false_frame0_is_cold_start(make_env_block, monkeypatch):
+    """warm_start=False leaves Oja's own random cold-start basis untouched -- no
+    peek at ground truth. update() is stubbed to isolate the (non-)assignment from
+    the subsequent tracking step."""
+    env = make_env_block(n_frames=2, n_freqs=32)
+    subspace_block = AdaOjaBlock(N_RX, D)
+    cold_start_U = subspace_block.oja.U.clone()
+    monkeypatch.setattr(subspace_block, "update", lambda *a, **k: None)
+    sim = Simulation(env, _downstream(), D, subspace_block=subspace_block, warm_start=False)
+    assert sim.warm_start is False
+
+    sim.run(n_steps=1)
+    # untouched: still exactly the basis Oja's constructor drew (rand_orth_complex)
+    assert torch.allclose(sim.subspace_block.oja.U, cold_start_U)
+
+    # sanity: this is nowhere near the ground-truth-derived warm start
+    warm = perturb_basis(get_U_true(env.get_S_pars(), D))
+    assert not torch.allclose(sim.subspace_block.oja.U, warm, atol=1e-2)
+
+
+def test_warm_start_false_gives_materially_worse_frame0_subspace_err(make_env_block):
+    """Cold-start (no peek at ground truth) tracking is honestly worse on frame 0
+    than the warm-started default -- subspace_err should reflect that plainly."""
+    env_warm = make_env_block(n_frames=2, n_freqs=32)
+    sim_warm = Simulation(env_warm, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D), warm_start=True)
+    out_warm = sim_warm.run(n_steps=1)
+
+    env_cold = make_env_block(n_frames=2, n_freqs=32)
+    sim_cold = Simulation(env_cold, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D), warm_start=False)
+    out_cold = sim_cold.run(n_steps=1)
+
+    warm_err = float(out_warm["subspace_err"][0])
+    cold_err = float(out_cold["subspace_err"][0])
+    assert cold_err > 2 * warm_err
+    assert cold_err > 0.5  # cold start is a near-random basis vs. the true subspace
+
+
+def test_rank_diagnostic_values():
+    """rank_diagnostic on a hand-built spectrum with a clean gap at index 3."""
+    S = torch.tensor([10.0, 9.0, 8.0, 0.001, 0.0005])
+    diag = rank_diagnostic(S, d=3)
+    assert diag["effective_rank"] == 3
+    assert diag["rank_ok"] is True
+    assert diag["sv_gap_at_d"] == pytest.approx(8.0 / 0.001, rel=1e-3)
+
+    diag_over = rank_diagnostic(S, d=4)
+    assert diag_over["rank_ok"] is False
+
+
+def test_low_rank_frame_triggers_rank_warning_and_outputs(make_env_block, torch_device):
+    """A rank-2 synthetic frame with d > 2 must report rank_ok=False and warn once."""
+    n_freq = 32
+    env = make_env_block(n_frames=2, n_freqs=n_freq)
+    real_get_s_pars = env.get_S_pars
+
+    def _low_rank_s_pars():
+        base = real_get_s_pars()
+        n_rx = base.shape[0]
+        a = torch.randn(n_rx, 2, dtype=torch.complex64, device=torch_device)
+        b = torch.randn(2, n_freq, dtype=torch.complex64, device=torch_device)
+        return (a @ b).view(n_rx, 1, 1, n_freq)
+
+    env.get_S_pars = _low_rank_s_pars
+    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    with pytest.warns(UserWarning, match="exceeds frame effective rank"):
+        out = sim.run(n_steps=2)
+
+    assert out["rank_ok"][0] is False
+    assert out["effective_rank"][0] <= 2
+    assert out["sv_gap_at_d"][0] > 1.0
+
+
+def test_full_rank_frame_no_rank_warning(make_env_block):
+    """A full-rank synthetic (Gaussian noise) frame with d <= effective rank must not
+    warn, and rank_ok must be True."""
+    env = make_env_block(n_frames=2, n_freqs=32)
+    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    import warnings as _warnings
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        out = sim.run(n_steps=2)
+    assert not any("exceeds frame effective rank" in str(w.message) for w in caught)
+    assert out["rank_ok"][0] is True
+    assert "effective_rank" in out and "sv_gap_at_d" in out
 
 
 def test_pipeline_subspace_only_regression(make_env_block):

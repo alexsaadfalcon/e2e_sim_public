@@ -358,22 +358,31 @@ def _sin_angle_axis(n_bins: int):
     return (np.arange(n_bins) - n_bins // 2) / (n_bins / 2)
 
 
-def _range_axis(n_bins: int, freq_span_hz: float):
-    """fftshifted frequency-FFT bin index -> physical range (meters).
+def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
+    """fftshifted range DISPLAY-gate index -> physical range (meters).
 
-    Valid only when the FFT length equals the raw frame's frequency-sample count
-    (no zero-pad/truncate): the n_bins frequency samples then span bandwidth
-    freq_span_hz (B) with sample spacing df = B / n_bins, so the FFT's delay-bin
-    spacing is 1/B and range-per-bin (round-trip) is c / (2*B). Callers must check
-    bins == n_freqs before using this -- with padding/truncation the resolution
-    changes in a way that depends on truncation semantics, so we intentionally
-    don't attempt it (see figures_from_outputs).
+    The range blocks compress over the FULL frequency band (all n_freqs samples
+    spanning bandwidth freq_span_hz = B, sample spacing df = B / n_freqs, so the
+    native round-trip range-per-bin is c / (2*B)), then power-bin the n_freqs
+    fftshifted native range bins down to n_bins display gates. This calibration MUST
+    mirror e2e.blocks._power_bin exactly: it groups per = ceil(n_freqs / n_bins)
+    native bins into each gate, so range-per-gate is per * c / (2*B), NOT the
+    exact-ratio c*n_freqs / (2*B*n_bins) (they differ whenever n_bins does not divide
+    n_freqs -- the production case n_freqs~5000, n_bins=256 has per=20 vs 19.53).
+
+    Zero range: the block fftshifts the native range axis (zero-delay DC bin -> index
+    n_freqs // 2) BEFORE power-binning (which pads at the high-index end), so the
+    zero-range gate is (n_freqs // 2) // per, which is n_bins // 2 only when n_bins
+    divides n_freqs. Deriving both from `per` keeps the axis aligned in every case.
 
     Sign: the range blocks take a FORWARD fft over frequency, so a physical delay
     +tau (a target at +R) lands on the NEGATIVE side of the fftshifted axis; the
     axis is negated here so physical targets read at positive range.
     """
-    return -(np.arange(n_bins) - n_bins // 2) * (_C / (2.0 * freq_span_hz))
+    per = -(-n_freqs // n_bins)               # ceil(n_freqs / n_bins); matches _power_bin
+    range_per_gate = per * _C / (2.0 * freq_span_hz)
+    zero_gate = (n_freqs // 2) // per
+    return -(np.arange(n_bins) - zero_gate) * range_per_gate
 
 
 def _heatmap(data_db, title: str, *, x=None, y=None,
@@ -422,12 +431,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if outputs.get(key):
             bins = meta.get(f"{key}_bins") or outputs[key][-1].shape[0]
             x = _sin_angle_axis(bins)
-            if n_freqs and freq_span_hz and bins == n_freqs:
-                y = _range_axis(bins, freq_span_hz)
+            if n_freqs and freq_span_hz:
+                # Full-band range compression + power-binning to `bins` gates means
+                # the physical range axis is well-defined for any bins (see
+                # _range_axis); only needs the frame's band + freq-sample count.
+                y = _range_axis(bins, freq_span_hz, n_freqs)
                 ylabel = "range (m)"
             else:
-                # bins != n_freqs (or metadata unavailable): mapping is nontrivial
-                # (zero-pad/truncate before the DFT), fall back to raw bin indices.
+                # Metadata unavailable (e.g. a hand-built outputs dict): fall back
+                # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
             figs[key] = _heatmap(

@@ -479,33 +479,62 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     assert figs["range_el"].layout.yaxis.title.text == "range (m)"
 
 
-def test_figures_from_outputs_falls_back_to_bins_when_range_fft_bins_mismatch_freqs():
-    """When the range-FFT bin count != the raw frame's frequency-sample count, the
-    freq->range mapping is ambiguous (zero-pad/truncate before the DFT), so the
-    range axis falls back to raw bin indices labeled '(bins)' rather than a bogus
-    physical unit."""
+def test_figures_from_outputs_range_axis_valid_for_any_bins():
+    """The range blocks compress over the FULL frequency band and power-bin to
+    `bins` display gates, so the physical range axis is well-defined even when
+    bins != the frame's frequency-sample count (range-per-gate = c*n_freqs /
+    (2*B*bins)). Only a genuinely absent metadata dict falls back to raw indices."""
     torch = pytest.importorskip("torch")
     import numpy as np
     from webapp.pipeline_runner import figures_from_outputs
 
     bins = 8
+    n_freqs = 64
+    freq_span_hz = 3e9
     outputs = {
         "range_az": [torch.zeros((bins, bins), dtype=torch.complex64)],
         "_axis_meta": {
             "range_az_bins": bins,
-            "n_freqs": 64,  # != bins -> exact range mapping does not apply
-            "freq_span_hz": 3e9,
+            "n_freqs": n_freqs,  # != bins: full-band compression still gives a valid axis
+            "freq_span_hz": freq_span_hz,
         },
     }
     figs = figures_from_outputs(outputs)
-    np.testing.assert_allclose(figs["range_az"].data[0].y, np.arange(bins))
-    assert figs["range_az"].layout.yaxis.title.text == "range (bins)"
+    range_per_gate = 2.99792458e8 * n_freqs / (2.0 * freq_span_hz * bins)
+    expected_range = -(np.arange(bins) - bins // 2) * range_per_gate
+    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
+    assert figs["range_az"].layout.yaxis.title.text == "range (m)"
 
-    # No metadata at all (e.g. a hand-built outputs dict): same fallback.
+    # No metadata at all (e.g. a hand-built outputs dict): fall back to raw gates.
     outputs_no_meta = {"range_el": [torch.zeros((bins, bins), dtype=torch.complex64)]}
     figs2 = figures_from_outputs(outputs_no_meta)
     np.testing.assert_allclose(figs2["range_el"].data[0].y, np.arange(bins))
     assert figs2["range_el"].layout.yaxis.title.text == "range (bins)"
+
+
+def test_range_axis_mirrors_power_bin_grouping_when_nondivisible():
+    """When bins does not divide n_freqs (the production case), the range axis must
+    mirror e2e.blocks._power_bin's ceil-grouping: range-per-gate = per*c/(2B) with
+    per = ceil(n_freqs/bins), and the zero-range gate is (n_freqs//2)//per, not
+    bins//2. (The exact-multiple case in the test above cannot catch this.)"""
+    torch = pytest.importorskip("torch")
+    import math
+    import numpy as np
+    from webapp.pipeline_runner import figures_from_outputs
+
+    bins, n_freqs, freq_span_hz = 8, 100, 3e9   # 100 % 8 != 0
+    outputs = {
+        "range_az": [torch.zeros((bins, bins), dtype=torch.complex64)],
+        "_axis_meta": {"range_az_bins": bins, "n_freqs": n_freqs, "freq_span_hz": freq_span_hz},
+    }
+    figs = figures_from_outputs(outputs)
+    per = math.ceil(n_freqs / bins)
+    range_per_gate = per * 2.99792458e8 / (2.0 * freq_span_hz)
+    zero_gate = (n_freqs // 2) // per
+    assert zero_gate != bins // 2
+    expected_range = -(np.arange(bins) - zero_gate) * range_per_gate
+    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
+    assert figs["range_az"].layout.yaxis.title.text == "range (m)"
 
 
 def test_placeholder_figure_is_plotly_figure():

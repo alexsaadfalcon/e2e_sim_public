@@ -33,16 +33,19 @@ contract **self-describing and general** so blocks compose freely and the geomet
   the 32×32 aperture and the frequency grid. Embed a `meta` block (freq plan, array
   shape, role) in the frame (or a sidecar) and have consumers read it. **Unblocks
   almost everything below.**
-- **Subspace-tracking mode.** Make the online (Oja) tracker's warm-start behavior
-  explicit/configurable so the reported subspace error reflects a clear, documented
-  setting.
+- **Subspace-tracking mode. ✅ DONE 2026-07** (`Simulation(warm_start=...)`): the
+  online (Oja) tracker's warm-start behavior is now an explicit, documented flag --
+  `True` (default) keeps the perturbed-ground-truth warm start; `False` is an honest
+  cold start where subspace_err reflects tracking from scratch.
 - **RF front-end operating point.** Review and document the default RFFE
   configuration (bandwidth/gain/scaling) so the front-end distortion study runs at a
   representative operating point.
-- **Subspace ground-truth diagnostic.** A rank / singular-value-gap check on
-  `get_U_true`'s input frame so `subspace_err` reports (or flags) when the requested
-  `d` exceeds the frame's effective rank, instead of silently tracking noise.
-- **Docs/UX:** finish the cookbook; tidy entry points and base-scene options.
+- **Subspace ground-truth diagnostic. ✅ DONE 2026-07:** `rank_diagnostic` reports
+  effective_rank / sv_gap_at_d / rank_ok per frame in the outputs and warns once per
+  run when the requested `d` exceeds the frame's effective rank (instead of silently
+  tracking noise).
+- **Docs/UX:** cookbook is in the README; still to do: tidy entry points and
+  base-scene options.
 
 ## Mid-term — widen the contract, pay down abstraction debt
 
@@ -76,16 +79,23 @@ contract **self-describing and general** so blocks compose freely and the geomet
 - **Optional diffuse reflection + configurable solver settings.** Ray tracing currently
   runs specular/LOS/refraction only (`max_depth=5`); expose diffuse scattering and
   solver depth/settings for scenes where rough-surface/foliage clutter matters.
-- **Aperture tapering / window options for the radar maps.** `FFTBlock` /
-  `RangeAzBlock` / `RangeElBlock` currently apply no amplitude taper before the
-  aperture FFT; expose windowing (Hamming/Taylor/etc.) for sidelobe control.
-- **Interconnect model parameterized by the frequency plan.** `InterconnectBlock` is a
-  fixed 11-tap boxcar independent of the scenario's `FrequencyPlan`; make its response
-  derive from (or at least track) the configured bandwidth/center frequency.
-- **Range FFT should decimate, not truncate.** The range transform passes `n=bins` to
-  `torch.fft.fft`, which crops an `n_freqs`≈5000 frequency axis to its first `bins`
-  samples — discarding ~95% of the swept band (~13 dB integration gain and the
-  documented range resolution). Bin/decimate or chunk the full axis instead.
+- **Aperture tapering / window options for the radar maps. ✅ DONE 2026-07** (partial):
+  `FFTBlock` / `RangeAzBlock` / `RangeElBlock` take a `window` arg (None/'hann'/
+  'hamming', default None) tapering the aperture axes for sidelobe control. Taylor and
+  other tapers can be added to `e2e.blocks._aperture_window`.
+- **Interconnect model parameterized by the frequency plan. ✅ DONE 2026-07** (partial):
+  `InterconnectBlock(transfer_csv=..., band_hz=...)` now loads a physical interconnect
+  transfer function S21(f) and resamples it onto the frame's frequency grid (see
+  `e2e/data/interconnect/` + `python -m e2e.main.main_interconnect`). The default is still
+  the placeholder boxcar. Remaining: source the band automatically from the frame's
+  self-describing `FrequencyPlan` instead of an explicit `band_hz`, and allow per-element
+  / per-link responses.
+- **Range FFT should decimate, not truncate. ✅ DONE 2026-07:** the range transform now
+  compresses over the FULL frequency band (`bins` sizes only the aperture FFTs + the
+  range display axis); FFTBlock chunks the aperture FFT over range and RangeAz/El loop
+  the collapsed axis to bound memory, then power-bin the full-band range profile down
+  to `bins` gates (recovering the ~13 dB integration gain and the documented range
+  resolution). webapp `_range_axis` calibration updated to match.
 
 ## Long-term — reach & rigor
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -96,24 +98,91 @@ class RFFEBlock:
         return s_pars_dist, PRX
 
 
+# Packaged interconnect transfer-function data (a Tessera TSV S21(f) sweep; the model
+# that produced it is external and not vendored -- only this derived CSV ships). See
+# e2e/data/interconnect/README.md.
+TESSERA_INTERCONNECT_CSV = (
+    Path(__file__).resolve().parent / "data" / "interconnect" / "tessera_tsv_s21.csv"
+)
+
+
+def load_interconnect_transfer(path):
+    """Load an interconnect transfer function ``(freq_hz, s21)`` from a CSV.
+
+    The CSV must have a header row with at least ``freq_hz``, ``s21_re`` and ``s21_im``
+    columns (extra columns are ignored); ``#``-prefixed comment lines are skipped.
+    Returns two numpy arrays sorted by ascending frequency: ``freq_hz`` (float) and
+    ``s21`` (complex). See e2e/data/interconnect/ for the shipped file and its provenance.
+    """
+    freqs, s21 = [], []
+    cols = None
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if cols is None:  # first non-comment line is the header row
+                names = [c.strip() for c in line.split(",")]
+                cols = (names.index("freq_hz"), names.index("s21_re"), names.index("s21_im"))
+                continue
+            parts = line.split(",")
+            freqs.append(float(parts[cols[0]]))
+            s21.append(complex(float(parts[cols[1]]), float(parts[cols[2]])))
+    freq = np.asarray(freqs, dtype=np.float64)
+    s = np.asarray(s21, dtype=np.complex128)
+    order = np.argsort(freq)
+    return freq[order], s[order]
+
+
 # RF Interconnect Model Block
 class InterconnectBlock:
-    """Placeholder interconnect filter: a fixed 11-tap boxcar impulse response.
+    """Interconnect filtering, applied multiplicatively across the frequency axis.
 
-    `apply_interconnect` zero-pads an 11-tap all-ones window to the frame length and
-    takes its FFT, giving a sinc-like lowpass frequency response that is applied
-    multiplicatively across the frequency axis. The tap count/shape is fixed and
-    independent of the scenario's `FrequencyPlan` (bandwidth, center frequency, number
-    of tones) -- it does not model any particular physical interconnect, and is
-    placeholder-grade pending a frequency-plan-aware model (see ROADMAP.md).
+    Two modes:
+
+    - **Placeholder (default):** a fixed 11-tap boxcar impulse response. `apply_interconnect`
+      zero-pads an 11-tap all-ones window to the frame length and FFTs it, giving a
+      sinc-like lowpass frequency response applied across the frequency axis. The tap
+      count/shape is fixed and independent of the scenario's `FrequencyPlan`; it does not
+      model any particular physical interconnect.
+
+    - **Data-driven (`transfer_csv`):** a simulated/measured interconnect transfer function
+      S21(f) loaded from a CSV (see e2e/data/interconnect/) and interpolated onto the
+      frame's frequency grid, then applied as ``frame * S21(f)``. `band_hz=(f_start, f_stop)`
+      is the physical span the frame's `n_freqs` samples cover (e.g. the FrequencyPlan's
+      band); when omitted the CSV's own frequency span is mapped across the frame's samples
+      (band-agnostic). Grid points outside the CSV's frequency range clamp to its endpoints.
+
+    `case='case3'` is an identity pass-through in either mode.
     """
 
-    def __init__(self, case=None):
+    def __init__(self, case=None, transfer_csv=None, band_hz=None):
         self.case = case
+        self.transfer_csv = transfer_csv
+        self.band_hz = band_hz
+        self._csv_freq = None
+        self._csv_s21 = None
+        if transfer_csv is not None:
+            self._csv_freq, self._csv_s21 = load_interconnect_transfer(transfer_csv)
+
+    def _resampled_response(self, n_freqs, dev):
+        """Interpolate the loaded S21(f) onto the frame's `n_freqs`-point grid."""
+        if self.band_hz is not None:
+            grid = np.linspace(self.band_hz[0], self.band_hz[1], n_freqs)
+        else:
+            grid = np.linspace(self._csv_freq[0], self._csv_freq[-1], n_freqs)
+        # The transfer function is smooth and densely sampled, so linear interpolation of
+        # the real and imaginary parts is faithful (and avoids phase-unwrap subtleties).
+        re = np.interp(grid, self._csv_freq, self._csv_s21.real)
+        im = np.interp(grid, self._csv_freq, self._csv_s21.imag)
+        return torch.tensor(re + 1j * im, dtype=torch.complex64, device=dev)
 
     def apply_interconnect(self, frame):
         if self.case == 'case3':
             return frame
+        if self.transfer_csv is not None:
+            H = self._resampled_response(frame.shape[-1], frame.device)
+            return frame * H.view(1, 1, 1, -1)
         window = torch.ones(11)
         window = window.to(device)
         window_padded = torch.nn.functional.pad(window, (0, frame.shape[-1] - window.shape[0]))
@@ -253,80 +322,166 @@ class MeasurementStage:
             return {"U": self.subspace_block.oja.U}
 
 
-class FFTBlock:
-    """Azimuth-elevation power map: coherent 2D aperture FFT, non-coherent
-    (power) integration over range.
+def _aperture_window(kind, length, device):
+    """Real 1-D aperture taper of `length` for sidelobe control, or None (uniform).
 
-    Previously the raw frequency samples were coherently summed (a bare
-    ``torch.sum`` over the freq axis) before the aperture FFT, which is only
-    coherent for a target sitting exactly at range 0 -- any other range
-    collapses via destructive interference across the stepped-frequency
-    sweep. Instead we range-transform first (freq -> range bins), then run
-    the coherent aperture FFT per range sample, then power-sum over range so
-    a target at ANY range still shows up in the az/el map.
+    Supported kinds: None / 'none' (no taper -- the default, bit-for-bit unchanged
+    behavior), 'hann', 'hamming'. The taper multiplies an aperture (angle) axis
+    before its FFT; it is never applied to the range/frequency axis.
+    """
+    if kind is None or kind == 'none':
+        return None
+    if kind == 'hann':
+        w = torch.hann_window(length, periodic=False, device=device)
+    elif kind == 'hamming':
+        w = torch.hamming_window(length, periodic=False, device=device)
+    else:
+        raise ValueError(
+            f"unknown aperture window {kind!r}; use None, 'hann', or 'hamming'"
+        )
+    return w.to(torch.float32)
+
+
+def _power_bin(power, n_bins, dim):
+    """Reduce a real `power` tensor along `dim` from length L to `n_bins` display
+    gates by summing power within contiguous groups (zero-padded up to a multiple
+    of n_bins).
+
+    Energy- and extent-preserving: a point target's coherently range-compressed
+    energy sits in ONE native range bin, which lands whole inside one display gate,
+    so the gate captures the full integration gain (unlike truncating the frequency
+    axis, which throws most of the band away). Identity when L == n_bins; a pass-
+    through when L < n_bins (nothing to integrate down).
+    """
+    L = power.shape[dim]
+    if L <= n_bins:
+        return power
+    per = -(-L // n_bins)              # ceil division
+    pad = per * n_bins - L
+    if pad:
+        pad_shape = list(power.shape)
+        pad_shape[dim] = pad
+        power = torch.cat([power, power.new_zeros(pad_shape)], dim=dim)
+    power = power.movedim(dim, -1)
+    power = power.reshape(*power.shape[:-1], n_bins, per).sum(dim=-1)
+    return power.movedim(-1, dim)
+
+
+class FFTBlock:
+    """Azimuth-elevation power map: coherent 2D aperture FFT + full-band range
+    compression, with non-coherent (power) integration over range.
+
+    ``bins`` sizes ONLY the azimuth/elevation (aperture) FFTs. The range transform
+    always spans the FULL frequency band (all ``n_freqs`` samples). Earlier code
+    passed ``bins`` as the range-FFT length too, which TRUNCATED the frequency axis
+    to its first ``bins`` samples -- discarding most of the swept band (both range
+    resolution and ~10*log10(n_freqs/bins) dB of coherent integration gain). Because
+    range is integrated away in this product, we range-compress over the full band,
+    aperture-FFT each range bin (chunked to bound memory), and power-sum over range,
+    so a target at ANY range appears at full SNR.
+
+    ``window`` optionally tapers the aperture (angle) axes for sidelobe control
+    (None / 'hann' / 'hamming'); it never touches the range axis. The default None
+    is the untapered map (numbers unchanged from the uniform-aperture case).
     """
 
-    def __init__(self, bins=256):
+    def __init__(self, bins=256, window=None):
         self.bins = bins
+        self.window = window
 
     def apply(self, state_dict):
         frames.require_single_chirp(state_dict['s_pars'], "FFTBlock")
         data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
-        # Range-FFT first (freq axis -> self.bins range bins): this shrinks the
-        # freq axis (commonly n_freqs=5000) down to `bins` BEFORE the aperture
-        # FFTs run, so we never materialize a [bins, bins, n_freqs] tensor.
-        range_fft = torch.fft.fft(data, self.bins, 2)  # [az, el, range]
-        data_fft = torch.fft.fft(torch.fft.fft(range_fft, self.bins, 0), self.bins, 1)
-        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 1)
-        # Non-coherent integration over range: sum power (not amplitude) across
-        # the range axis, so a target's range doesn't have to be 0 to appear.
-        az_el_power = torch.sum(torch.abs(data_fft) ** 2, dim=2)
-        return {'fft': az_el_power}
+        n_az, n_el, n_freqs = data.shape
+        # Full-band range compression (freq -> range); NOT truncated to `bins`.
+        range_full = torch.fft.fft(data, dim=2)     # [az, el, n_freqs]
+        w_az = _aperture_window(self.window, n_az, data.device)
+        w_el = _aperture_window(self.window, n_el, data.device)
+        if w_az is not None:
+            range_full = range_full * w_az.view(n_az, 1, 1)
+        if w_el is not None:
+            range_full = range_full * w_el.view(1, n_el, 1)
+        # Aperture FFT per range bin, power-integrated over range, chunked over the
+        # range axis so we never materialize a [bins, bins, n_freqs] tensor.
+        acc = torch.zeros(self.bins, self.bins, dtype=torch.float32, device=data.device)
+        chunk = 256
+        for r0 in range(0, n_freqs, chunk):
+            blk = range_full[:, :, r0:r0 + chunk]
+            ap = torch.fft.fft(torch.fft.fft(blk, self.bins, 0), self.bins, 1)
+            ap = torch.fft.fftshift(torch.fft.fftshift(ap, 0), 1)
+            acc = acc + torch.sum(torch.abs(ap) ** 2, dim=2)
+        return {'fft': acc}
 
 
 class RangeAzBlock:
-    """Range-azimuth power map: coherent in the displayed axes (azimuth,
-    range), non-coherent (power) integration across the collapsed elevation
-    axis.
+    """Range-azimuth power map: coherent azimuth FFT + full-band range
+    compression, non-coherent (power) integration across the collapsed
+    elevation axis.
 
-    Previously elevation was collapsed by a COHERENT sum (an implicit
-    un-steered broadside beam in elevation), which nulls any target off
-    broadside in elevation. Here we run the coherent az/range FFTs per
-    elevation element, then power-sum over elevation, so all elevation
-    angles contribute instead of only broadside.
+    As in FFTBlock, ``bins`` sizes only the azimuth (aperture) FFT and the range
+    DISPLAY axis; the range compression spans the full frequency band (all
+    ``n_freqs`` samples) rather than truncating to the first ``bins``. The full-band
+    range profile is power-binned down to ``bins`` display gates (energy- and
+    extent-preserving), and elevation is integrated non-coherently (power) so a
+    target off broadside in elevation survives -- previously elevation was collapsed
+    by a COHERENT sum (an implicit broadside beam) that nulled off-broadside targets.
+
+    ``window`` optionally tapers the azimuth aperture (None / 'hann' / 'hamming').
     """
 
-    def __init__(self, bins=256):
+    def __init__(self, bins=256, window=None):
         self.bins = bins
+        self.window = window
 
     def apply(self, state_dict):
         frames.require_single_chirp(state_dict['s_pars'], "RangeAzBlock")
         data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
-        data_fft = torch.fft.fft(torch.fft.fft(data, self.bins, 0), self.bins, 2)
-        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 0), 2)
-        # Non-coherent (power) integration over elevation. By Parseval, summing
-        # power over the elevation ELEMENTS equals summing power over
-        # elevation's own FFT bins (up to a constant factor), so no third FFT
-        # over the collapsed axis is needed to integrate it away.
-        range_az = torch.sum(torch.abs(data_fft) ** 2, dim=1)
+        n_az, n_el, n_freqs = data.shape
+        w_az = _aperture_window(self.window, n_az, data.device)
+        # Accumulate power over the collapsed (elevation) axis one element at a
+        # time -- bounds memory to a single [bins, n_freqs] slab regardless of
+        # aperture size or band length.
+        power = torch.zeros(self.bins, n_freqs, dtype=torch.float32, device=data.device)
+        for e in range(n_el):
+            col = data[:, e, :]                      # [az, n_freqs]
+            if w_az is not None:
+                col = col * w_az.view(n_az, 1)       # taper before the aperture FFT
+            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
+            r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
+            power = power + torch.abs(r) ** 2
+        range_az = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
         return {'range_az': range_az}
 
 
 class RangeElBlock:
-    """Range-elevation power map: coherent in the displayed axes (elevation,
-    range), non-coherent (power) integration across the collapsed azimuth
-    axis. See RangeAzBlock for the rationale (azimuth/elevation swapped)."""
+    """Range-elevation power map: coherent elevation FFT + full-band range
+    compression, non-coherent (power) integration across the collapsed azimuth
+    axis. See RangeAzBlock for the rationale (azimuth/elevation swapped): ``bins``
+    sizes only the elevation aperture FFT and the range display axis; range
+    compression uses the full band and is power-binned to ``bins`` gates.
 
-    def __init__(self, bins=256):
+    ``window`` optionally tapers the elevation aperture (None / 'hann' / 'hamming').
+    """
+
+    def __init__(self, bins=256, window=None):
         self.bins = bins
+        self.window = window
 
     def apply(self, state_dict):
         frames.require_single_chirp(state_dict['s_pars'], "RangeElBlock")
         data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
-        data_fft = torch.fft.fft(torch.fft.fft(data, self.bins, 1), self.bins, 2)
-        data_fft = torch.fft.fftshift(torch.fft.fftshift(data_fft, 1), 2)
-        # Non-coherent (power) integration over azimuth (see RangeAzBlock).
-        range_el = torch.sum(torch.abs(data_fft) ** 2, dim=0)
+        n_az, n_el, n_freqs = data.shape
+        w_el = _aperture_window(self.window, n_el, data.device)
+        # Accumulate power over the collapsed (azimuth) axis one element at a time.
+        power = torch.zeros(self.bins, n_freqs, dtype=torch.float32, device=data.device)
+        for m in range(n_az):
+            col = data[m, :, :]                      # [el, n_freqs]
+            if w_el is not None:
+                col = col * w_el.view(n_el, 1)       # taper before the aperture FFT
+            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
+            r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
+            power = power + torch.abs(r) ** 2
+        range_el = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
         return {'range_el': range_el}
 
 

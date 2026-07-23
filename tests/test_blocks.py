@@ -127,6 +127,102 @@ def test_fft_block_noncoherent_range_shows_target_at_10m():
     assert (az_bin, el_bin) == (n // 2 + k, n // 2 + k)
 
 
+# ------------------------------------- full-band range compression (decimate, not truncate)
+
+
+def test_fft_block_integrates_full_band_when_bins_lt_nfreqs():
+    """The range transform must span the FULL frequency band, not be truncated to the
+    first `bins` samples. With bins < n_freqs, a matched target's range-integrated
+    az/el peak is (n_az*n_el)**2 * n_freqs**2 -- all n_freqs samples coherently
+    compressed then power-integrated, independent of range (tau). The old code passed
+    `bins` as the range-FFT length, trimming the freq axis to its first `bins` samples
+    and giving (n_az*n_el)**2 * bins**2, a factor (n_freqs/bins)**2 too small."""
+    n_ap, n_freqs, bins = 8, 64, 8
+    k = 2
+    off = np.degrees(np.arcsin(2 * k / n_ap))
+    tau = 2 * 7.5 / _C  # nonzero range; peak must be tau-independent
+    state = _steering_frame(n_ap, n_ap, n_freqs, az_deg=off, el_deg=off, tau=tau, dev=device)
+    out = FFTBlock(bins=bins).apply(state)
+    power = out["fft"]
+    assert power.shape == (bins, bins)
+    peak = torch.max(power).item()
+    expected_full = (n_ap * n_ap) ** 2 * n_freqs ** 2
+    assert peak == pytest.approx(expected_full, rel=1e-3)
+    # decisively above the freq-truncated value (would be bins**2, not n_freqs**2)
+    assert peak > 10 * ((n_ap * n_ap) ** 2 * bins ** 2)
+    az_bin, el_bin = divmod(torch.argmax(power).item(), power.shape[1])
+    assert (az_bin, el_bin) == (bins // 2 + k, bins // 2 + k)
+
+
+def test_range_az_full_band_compression_when_bins_lt_nfreqs():
+    """RangeAz compresses over the full band then power-bins to `bins` range gates.
+    With bins < n_freqs and a zero-delay target, the peak gate holds
+    n_el*(n_az*n_freqs)**2 (full-band coherent range gain), a factor (n_freqs/bins)**2
+    above the old freq-truncated value."""
+    n_ap, n_freqs, bins = 8, 64, 8
+    state = _steering_frame(n_ap, n_ap, n_freqs, az_deg=0.0, el_deg=0.0, tau=0.0, dev=device)
+    out = RangeAzBlock(bins=bins).apply(state)
+    power = out["range_az"]
+    assert power.shape == (bins, bins)
+    peak = torch.max(power).item()
+    expected_full = n_ap * (n_ap * n_freqs) ** 2
+    assert peak == pytest.approx(expected_full, rel=1e-3)
+    assert peak > 10 * (n_ap * (n_ap * bins) ** 2)
+    az_bin, range_bin = divmod(torch.argmax(power).item(), power.shape[1])
+    assert (az_bin, range_bin) == (bins // 2, bins // 2)  # broadside az, zero-delay range
+
+
+def test_aperture_window_reduces_sidelobes():
+    """A Hamming aperture taper lowers the peak sidelobe of the az/el response
+    relative to the uniform (rectangular) aperture (classic ~-13 dB -> ~-40 dB
+    trade for a wider main lobe). Uses a small real aperture zero-padded by the
+    aperture FFT (bins > n_ap) so the beampattern is finely sampled."""
+    n_ap, n_freqs, bins = 16, 16, 64
+    state = _steering_frame(n_ap, n_ap, n_freqs, az_deg=0.0, el_deg=0.0, tau=0.0, dev=device)
+    uni = FFTBlock(bins=bins, window=None).apply(state)["fft"]
+    ham = FFTBlock(bins=bins, window="hamming").apply(state)["fft"]
+
+    def peak_sidelobe(m):
+        row = m[:, bins // 2]                     # azimuth cut at elevation broadside
+        peak_idx = int(torch.argmax(row).item())
+        peak = row[peak_idx]
+        mask = torch.ones_like(row, dtype=torch.bool)
+        # Exclude a main-lobe region wide enough to clear the tapered window's
+        # broader main lobe (rect first null ~ bins/n_ap = 4; Hamming ~2x wider).
+        lo, hi = max(0, peak_idx - 8), min(len(row), peak_idx + 9)
+        mask[lo:hi] = False
+        return (torch.max(row[mask]) / peak).item()
+
+    assert peak_sidelobe(ham) < peak_sidelobe(uni)
+
+
+def test_aperture_window_invalid_raises():
+    state = _steering_frame(8, 8, 16, az_deg=0.0, el_deg=0.0, tau=0.0, dev=device)
+    with pytest.raises(ValueError):
+        FFTBlock(bins=8, window="blackman").apply(state)
+
+
+def test_range_az_nondivisible_nfreqs_zero_gate_and_energy():
+    """When n_freqs is NOT a multiple of bins (the production case, n_freqs~5000,
+    bins=256), power-binning groups per = ceil(n_freqs/bins) native bins per gate, so
+    a zero-delay target's peak lands in gate (n_freqs//2)//per -- NOT bins//2 -- while
+    still carrying the full coherent range energy. Guards the _power_bin / _range_axis
+    alignment that the exact-multiple tests miss."""
+    import math
+    n_ap, n_freqs, bins = 4, 100, 8   # 100 % 8 != 0
+    state = _steering_frame(n_ap, n_ap, n_freqs, az_deg=0.0, el_deg=0.0, tau=0.0, dev=device)
+    out = RangeAzBlock(bins=bins).apply(state)
+    power = out["range_az"]
+    assert power.shape == (bins, bins)
+    per = math.ceil(n_freqs / bins)
+    zero_gate = (n_freqs // 2) // per
+    assert zero_gate != bins // 2         # the whole point: non-divisible shifts the zero gate
+    az_bin, range_bin = divmod(torch.argmax(power).item(), power.shape[1])
+    assert (az_bin, range_bin) == (bins // 2, zero_gate)
+    peak = torch.max(power).item()
+    assert peak == pytest.approx(n_ap * (n_ap * n_freqs) ** 2, rel=1e-3)
+
+
 def test_subspace_error_zero_for_identical_basis(state_dict):
     out = SubspaceErrorBlock().apply(state_dict)
     # float32 QR leaves a small residual in subspace_dist_frob; 1e-3 is too tight

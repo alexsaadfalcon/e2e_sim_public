@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 from tqdm import tqdm
 from collections import defaultdict
@@ -6,20 +8,63 @@ from e2e import frames
 from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
 
 
+# Relative threshold (fraction of the top singular value) below which a singular value
+# is treated as noise floor when computing effective rank -- see rank_diagnostic.
+_RANK_RTOL = 1e-2
+
+
+def _svd_frame(s_pars):
+    """SVD of a single frame's flattened S-parameter matrix, computed once.
+
+    Returns (U, S): the full left-singular-vector matrix and the singular values
+    (descending). Shared by get_U_true and rank_diagnostic so callers that need both
+    the top-d basis and the singular-value spectrum don't pay for two decompositions.
+    """
+    assert len(s_pars.shape) == 4
+    s_pars_0 = s_pars[:, :, 0, :]
+    s_pars_0 = s_pars_0.view(-1, s_pars_0.shape[-1])
+    U, S, _ = torch.linalg.svd(s_pars_0)
+    return U, S
+
+
 def get_U_true(s_pars, d):
     # "Ground truth" here means the top-d left singular vectors of a single frame's
     # S-parameter matrix -- a meaningful reference for subspace tracking only when the
     # frame's effective rank (number of singular values well above the noise floor) is
     # >= d. Below that, the trailing directions returned are noise-dominated, and any
     # subspace_err computed against them partly measures how well the tracker follows
-    # noise rather than signal structure. See ROADMAP.md for a planned rank/singular-
-    # value-gap diagnostic to make this failure mode visible.
-    assert len(s_pars.shape) == 4
-    s_pars_0 = s_pars[:, :, 0, :]
-    s_pars_0 = s_pars_0.view(-1, s_pars_0.shape[-1])
-    U, _, __ = torch.linalg.svd(s_pars_0)
-    U_true = U[:, :d]
-    return U_true
+    # noise rather than signal structure. See rank_diagnostic (and Simulation.feed_forward,
+    # which records it per frame) for the diagnostic that makes this failure mode visible.
+    U, _ = _svd_frame(s_pars)
+    return U[:, :d]
+
+
+def rank_diagnostic(S, d, rtol=_RANK_RTOL):
+    """Rank / singular-value-gap diagnostic for a frame's singular-value spectrum `S`
+    (descending, as returned by `_svd_frame`), against a requested subspace dim `d`.
+
+    - `effective_rank`: count of singular values above `rtol * S[0]` (default rtol
+      _RANK_RTOL) -- i.e. singular values still well above the noise floor.
+    - `sv_gap_at_d`: ratio S[d-1] / S[d], the singular-value gap right at the requested
+      cutoff (large gap = a clean signal/noise boundary at d; near 1 = no real
+      boundary there). NaN if d >= len(S) (no S[d] to compare against).
+    - `rank_ok`: True iff `d <= effective_rank`, i.e. the requested subspace dim is
+      supported by the frame's actual signal content.
+    """
+    threshold = rtol * S[0]
+    effective_rank = int((S > threshold).sum().item())
+    if d < len(S):
+        denom = S[d]
+        sv_gap_at_d = float((S[d - 1] / denom).item()) if denom > 0 else float('inf')
+    else:
+        sv_gap_at_d = float('nan')
+    rank_ok = d <= effective_rank
+    return {
+        'effective_rank': effective_rank,
+        'sv_gap_at_d': sv_gap_at_d,
+        'rank_ok': rank_ok,
+    }
+
 
 def perturb_basis(U):
     U = U + 1e-3 * (torch.randn_like(U) + 1j * torch.randn_like(U))
@@ -36,6 +81,7 @@ class Simulation:
         subspace_block=None,
         array_shape=None,
         serial_stages=None,
+        warm_start=True,
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -44,6 +90,12 @@ class Simulation:
         self.interconnect_block = interconnect_block
         self.afe_block = afe_block
         self.subspace_block = subspace_block
+        # Whether the one-time tracker init (see feed_forward) warm-starts from a
+        # perturbed ground truth (True, default -- preserves pre-existing numbers) or
+        # leaves Oja's own random cold-start basis untouched (False -- an honest
+        # cold-start run, where subspace_err reflects tracking from scratch with no
+        # peek at ground truth).
+        self.warm_start = warm_start
         if subspace_block is None and afe_block is not None:
             raise ValueError('Need subspace block to pair with AFE block')
         # Receive-array geometry (n_rx_x, n_rx_y). Explicit arg wins; otherwise take it
@@ -75,14 +127,18 @@ class Simulation:
         # subspace) and then tracks the evolving scene; this flag guards that
         # one-time warm start. See feed_forward.
         self._subspace_started = False
+        # Throttles the rank-diagnostic warning to once per run (see feed_forward).
+        self._rank_warned = False
 
     def step(self):
         self.environment_block.step()
 
     def reset(self):
         self.environment_block.reset()
-        # Re-arm the one-time tracker warm start so each run() starts fresh.
+        # Re-arm the one-time tracker warm start and rank-diagnostic warning so each
+        # run() starts fresh.
         self._subspace_started = False
+        self._rank_warned = False
         # Downstream blocks with per-run state (e.g. ModemBlock's frame-indexed
         # noise counter) expose reset(); rewind them so repeated run() calls on
         # the same Simulation are reproducible.
@@ -92,16 +148,42 @@ class Simulation:
 
     def feed_forward(self):
         s_pars = self.environment_block.get_S_pars()
-        U_true = get_U_true(s_pars, self.d)
-        # Initialize the online (Oja) tracker ONCE, from the first frame's subspace
-        # (lightly perturbed), then let it actually track the evolving scene across
-        # frames. Previously the basis was reset to the ground truth on EVERY frame,
-        # which made online tracking a no-op (subspace_err reflected the injected
-        # perturbation, not the tracker). Note: because each frame is a fresh
-        # moving-platform channel snapshot, the per-frame subspace can change faster
-        # than a one-step tracker follows, so subspace_err reflects that tracking lag.
+        U, S = _svd_frame(s_pars)
+        U_true = U[:, :self.d]
+
+        # Rank / singular-value-gap diagnostic on the frame get_U_true saw: flags when
+        # the requested subspace dim self.d exceeds the frame's effective rank, in
+        # which case the trailing "ground truth" directions are noise and subspace_err
+        # partly measures noise-tracking rather than signal-subspace tracking. Reuses
+        # the SVD above -- no second decomposition.
+        rank_diag = rank_diagnostic(S, self.d)
+        self.outputs['effective_rank'].append(rank_diag['effective_rank'])
+        self.outputs['sv_gap_at_d'].append(rank_diag['sv_gap_at_d'])
+        self.outputs['rank_ok'].append(rank_diag['rank_ok'])
+        if not rank_diag['rank_ok'] and not self._rank_warned:
+            warnings.warn(
+                f"requested subspace dim d={self.d} exceeds frame effective rank "
+                f"{rank_diag['effective_rank']}; subspace_err partly reflects noise "
+                f"tracking."
+            )
+            self._rank_warned = True
+
+        # Initialize the online (Oja) tracker ONCE, then let it actually track the
+        # evolving scene across frames -- never reset it every frame (that used to make
+        # online tracking a no-op: subspace_err reflected the injected perturbation,
+        # not the tracker). Note: because each frame is a fresh moving-platform channel
+        # snapshot, the per-frame subspace can change faster than a one-step tracker
+        # follows, so subspace_err reflects that tracking lag.
+        #
+        # warm_start=True (default): warm-start from a perturbed ground truth (the
+        # historical behavior; subspace_err then measures tracking lag from a
+        # near-truth starting point).
+        # warm_start=False: leave Oja's own random cold-start basis (rand_orth_complex)
+        # untouched -- an honest cold start with no peek at ground truth; subspace_err
+        # then also reflects the tracker converging from scratch.
         if self.subspace_block is not None and not self._subspace_started:
-            self.subspace_block.oja.U = perturb_basis(U_true)
+            if self.warm_start:
+                self.subspace_block.oja.U = perturb_basis(U_true)
             self._subspace_started = True
 
         state_dict = {
