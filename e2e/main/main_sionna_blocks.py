@@ -1,3 +1,5 @@
+import os
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -60,20 +62,32 @@ sim = Simulation(
 )
 outputs = sim.run(n_steps=2)
 
+FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
+os.makedirs(FIG_DIR, exist_ok=True)
+
 plt.figure()
-plt.title('Subspace Error')
-plt.plot(outputs['subspace_err'])
+plt.title('Subspace tracking error per frame')
+# subspace_err entries are scalar tensors on the library device; float() copies each
+# to the host so matplotlib never sees a CUDA tensor (plt would try .numpy() and fail).
+plt.plot([float(x) for x in outputs['subspace_err']], marker='o')
+plt.xlabel('frame')
+plt.ylabel('subspace error')
+plt.grid(True, alpha=0.3)
+plt.savefig(os.path.join(FIG_DIR, 'sionna_blocks_subspace_err.png'), bbox_inches='tight')
 
 # 'fft' is now a real, non-negative az/el power map: coherent 2D aperture FFT,
 # non-coherent (power) integration over range -- a target at any range shows up,
 # not just one at range 0 (see e2e/blocks.py FFTBlock).
-for _fft in outputs['fft']:
+for i, _fft in enumerate(outputs['fft']):
     _fft = _fft / torch.max(torch.abs(_fft))
-    # Power quantity -> 10*log10 (matches the webapp's conversion).
-    fft_energy = 10 * torch.log10(torch.abs(_fft)).T.cpu()
+    # Power quantity -> 10*log10 (matches the webapp's conversion). .cpu().numpy()
+    # so the frame's device (CPU or CUDA) doesn't matter for plotting.
+    fft_energy = (10 * torch.log10(torch.abs(_fft))).T.cpu().numpy()
     plt.figure()
     plt.title('Azimuth-Elevation power (non-coherent over range)')
     plt.imshow(fft_energy)
     plt.colorbar()
     plt.clim([-40, 0])
+    plt.savefig(os.path.join(FIG_DIR, f'sionna_blocks_az_el_frame{i}.png'),
+                bbox_inches='tight')
     plt.show()
