@@ -48,13 +48,16 @@ interconnect_block1 = InterconnectBlock(case='case3')
 interconnect_block2 = InterconnectBlock(case='synthetic')
 
 afe_block = AFEBlock()
-d = 16
-subspace_block = AdaOjaBlock(N_RX, d)
+# Track at the signal's spectral elbow (rank ~8, where the top-k subspace is well
+# defined) with enough measurements (m=512) to observe the scene's subspace drift; the
+# tracker then follows it via a per-frame SVD re-estimate. See AdaOjaBlock / ROADMAP.
+k = 8
+subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
 
 sim = Simulation(
     environment_block,
     downstream_blocks,
-    d,
+    k,
     circuit_block,
     interconnect_block1,
     afe_block,

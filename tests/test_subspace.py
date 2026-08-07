@@ -22,7 +22,7 @@ def test_subspace_dist_positive_for_different_basis():
 
 
 def test_subspace_dist_frob_finite_for_edge_basis():
-    # A slightly non-orthonormal basis can push d - ||A^H B||^2 marginally
+    # A slightly non-orthonormal basis can push k - ||A^H B||^2 marginally
     # negative; the clamp must keep the result finite (no sqrt(nan)).
     torch.manual_seed(0)
     U = rand_orth_complex(20, 4)
@@ -51,7 +51,7 @@ def test_gen_A_ada_shape_and_rows():
     m = 12
     A = gen_A_ada(U, m)
     assert A.shape == (m, 30)
-    # First d rows are U^H by construction.
+    # First k rows are U^H by construction.
     assert torch.allclose(A[:5, :], U.t().conj(), atol=1e-5)
 
 
@@ -80,15 +80,15 @@ def test_randn_complex_variance():
 def test_oja_tracks_a_static_subspace():
     """Oja with adaptive sensing should reduce subspace error toward a fixed truth."""
     torch.manual_seed(0)
-    n, d = 40, 4
-    U_true = rand_orth_complex(n, d)
-    oja = Oja(n, d, eta=1e0, fixed_step=True)
+    d, k = 40, 4
+    U_true = rand_orth_complex(d, k)
+    oja = Oja(d, k, eta=1e0, fixed_step=True)
 
     err0 = subspace_dist_frob(oja.U, U_true).item()
     for _ in range(200):
-        coeffs = torch.randn(d, 8, dtype=torch.cfloat, device=device)
+        coeffs = torch.randn(k, 8, dtype=torch.cfloat, device=device)
         V = U_true @ coeffs
-        A = gen_A_ada(oja.U.clone(), d * 2)
+        A = gen_A_ada(oja.U.clone(), k * 2)
         X = A @ V
         oja.add_data(X, A)
     err1 = subspace_dist_frob(oja.U, U_true).item()

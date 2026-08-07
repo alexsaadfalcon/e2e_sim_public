@@ -41,8 +41,8 @@ contract **self-describing and general** so blocks compose freely and the geomet
   configuration (bandwidth/gain/scaling) so the front-end distortion study runs at a
   representative operating point.
 - **Subspace ground-truth diagnostic. ✅ DONE 2026-07:** `rank_diagnostic` reports
-  effective_rank / sv_gap_at_d / rank_ok per frame in the outputs and warns once per
-  run when the requested `d` exceeds the frame's effective rank (instead of silently
+  effective_rank / sv_gap_at_k / rank_ok per frame in the outputs and warns once per
+  run when the requested rank `k` exceeds the frame's effective rank (instead of silently
   tracking noise).
 - **Docs/UX:** cookbook is in the README; still to do: tidy entry points and
   base-scene options.
@@ -106,6 +106,31 @@ contract **self-describing and general** so blocks compose freely and the geomet
 - **GPU-accelerated / batched runtime** (vectorize the RFFE; batch frames).
 - **More scenes and full array-size parameterization** end to end.
 - **Model validation** against measured or reference data.
+- **FMCW radar ML training-data generator + ported detection models. ✅ DONE 2026-08**
+  (`e2e/ml/`): scenario-driven, Sionna-free synthetic dataset generation (difficulty
+  tiers D0–D3, `.npz` + manifest, `RadarFrameDataset`) and two ported detection models
+  (`FFTRadNet` from valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) sharing one
+  train/eval CLI (`e2e.ml.train`); CUDA-smoke-tested end to end (see `e2e/ml/README.md`
+  and the changelog). Both model ports are pending explicit upstream license
+  confirmation before public redistribution. Follow-ups:
+  - **Loss-balance / hyperparameter tuning for honest AP.** The ported loss keeps
+    upstream's `reg_weight=100` (tuned for RADIal's real recordings); on our synthetic
+    scenes it visibly starves the objectness term — smoke-scale training reaches real
+    recall and exact matched-pair localization but weak absolute AP (see
+    `e2e/ml/README.md`). A small sweep over `reg_weight`/lr (and possibly a focal-alpha
+    term) is the first thing a serious training effort should do.
+  - **Multi-frame tracks / Doppler sequences.** Current samples are independent
+    single-instant scenes (`Scenario.num_frames=1` per sample); a multi-frame track
+    generator would let models exploit frame-to-frame motion continuity.
+  - **`mamba_ssm` fast path on Linux.** `SSMRadNet`'s default is a pure-torch parallel
+    scan (no Windows wheels for the fused CUDA kernel); validate/benchmark the
+    `mamba_ssm`-backed `backend="mamba_ssm"` path on a Linux/CUDA box.
+  - **Richer clutter models.** Static clutter is currently uniform-random low-RCS
+    points; structured/correlated clutter (e.g. multipath ground bounce, extended
+    objects) would better match real automotive radar returns.
+  - **Per-class AP.** `metrics.evaluate_dataset` currently reports one dataset-wide
+    AP/AR; splitting by `object_class` (vehicle/pedestrian/clutter) would surface
+    class-specific detector weaknesses the aggregate metric hides.
 
 ## Suggested 1.1 milestone
 

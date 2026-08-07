@@ -277,6 +277,22 @@ BER/EVM/array-gain plus a radar-product map from the same run, to make the "one
 pipeline, two heads" point concrete. The web UI exposes the same head as an optional
 "Comms Head (OFDM)" block downstream of the subspace stage.
 
+## Machine learning: FMCW radar dataset + perception models
+
+`e2e/ml/` generates labeled FMCW MIMO radar training data (range-Doppler tensors +
+FFTRadNet-style detection labels) from declarative scenarios, analytically — no Sionna
+and no GPU required for generation — plus two ported detection models (`FFTRadNet` from
+valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) and a reference train/eval CLI:
+
+```bash
+python -m e2e.ml.dataset --config ti_iwr1443 --tier D1 --n 200 --seed 0   # generate
+python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
+    --model fftradnet --epochs 25                                        # train/evaluate
+```
+
+See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
+format, smoke-test results, and model attribution/licensing notes.
+
 ## Cookbook
 
 Where to look when you want to...
@@ -287,6 +303,7 @@ Where to look when you want to...
 | **Add a pipeline block** | `e2e/blocks.py` — implement an `apply(state_dict) -> dict` block class (see `RFFEBlock` / `FFTBlock`), then wire it into the feed-forward order in `e2e/simulation.py` (`Simulation`). Comms blocks live in `e2e/comms/blocks.py`. The web UI registry is `webapp/pipeline_registry.py`. |
 | **Define a scenario** | `e2e/scenario.py` — build a `Scenario` (nodes, objects, `FrequencyPlan`, motion) or add an entry to `REFERENCE_SCENARIOS`. Generate frames with `e2e/environment/scenario_runner.py`. |
 | **Extend the comms / ISAC layer** | `e2e/comms/` — `ofdm.py` (modem), `channel.py` (estimation/equalization/metrics + synthetic fallback), `isac.py` (sensing/comm split), `blocks.py` (pipeline blocks). |
+| **Generate radar ML training data / train a model** | `e2e/ml/` — see [`e2e/ml/README.md`](e2e/ml/README.md); `python -m e2e.ml.dataset` (generate) and `python -m e2e.ml.train` (train/evaluate). |
 
 ## Testing
 

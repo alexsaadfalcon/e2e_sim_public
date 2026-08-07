@@ -19,7 +19,7 @@ from e2e.blocks import (
     SubspaceErrorBlock,
 )
 
-D = 16
+K = 16
 N_RX = 1024
 
 
@@ -30,8 +30,8 @@ def _downstream():
 def test_get_u_true_shape(make_env_block):
     env = make_env_block(n_freqs=32)
     s_pars = env.get_S_pars()
-    U = get_U_true(s_pars, D)
-    assert U.shape == (N_RX, D)
+    U = get_U_true(s_pars, K)
+    assert U.shape == (N_RX, K)
 
 
 def test_perturb_basis_stays_orthonormal():
@@ -55,7 +55,7 @@ def test_tracker_warm_started_once_not_reset_every_frame(make_env_block, monkeyp
 
     monkeypatch.setattr(sim_mod, "perturb_basis", counting_perturb)
     env = make_env_block(n_frames=4, n_freqs=32)
-    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K))
     sim.run(n_steps=4)
     # Warm start fires exactly once across all frames, not once per frame.
     assert calls["n"] == 1
@@ -67,13 +67,13 @@ def test_warm_start_true_frame0_is_perturbed_ground_truth(make_env_block, monkey
     per-frame update() is stubbed so we isolate the warm-start assignment itself
     from the subsequent online tracking step that also runs inside frame 0."""
     env = make_env_block(n_frames=2, n_freqs=32)
-    subspace_block = AdaOjaBlock(N_RX, D)
+    subspace_block = AdaOjaBlock(N_RX, K)
     monkeypatch.setattr(subspace_block, "update", lambda *a, **k: None)
-    sim = Simulation(env, _downstream(), D, subspace_block=subspace_block)  # warm_start=True default
+    sim = Simulation(env, _downstream(), K, subspace_block=subspace_block)  # warm_start=True default
     assert sim.warm_start is True
 
     torch.manual_seed(42)
-    expected = perturb_basis(get_U_true(env.get_S_pars(), D))
+    expected = perturb_basis(get_U_true(env.get_S_pars(), K))
 
     torch.manual_seed(42)
     sim.run(n_steps=1)
@@ -85,10 +85,10 @@ def test_warm_start_false_frame0_is_cold_start(make_env_block, monkeypatch):
     peek at ground truth. update() is stubbed to isolate the (non-)assignment from
     the subsequent tracking step."""
     env = make_env_block(n_frames=2, n_freqs=32)
-    subspace_block = AdaOjaBlock(N_RX, D)
+    subspace_block = AdaOjaBlock(N_RX, K)
     cold_start_U = subspace_block.oja.U.clone()
     monkeypatch.setattr(subspace_block, "update", lambda *a, **k: None)
-    sim = Simulation(env, _downstream(), D, subspace_block=subspace_block, warm_start=False)
+    sim = Simulation(env, _downstream(), K, subspace_block=subspace_block, warm_start=False)
     assert sim.warm_start is False
 
     sim.run(n_steps=1)
@@ -96,7 +96,7 @@ def test_warm_start_false_frame0_is_cold_start(make_env_block, monkeypatch):
     assert torch.allclose(sim.subspace_block.oja.U, cold_start_U)
 
     # sanity: this is nowhere near the ground-truth-derived warm start
-    warm = perturb_basis(get_U_true(env.get_S_pars(), D))
+    warm = perturb_basis(get_U_true(env.get_S_pars(), K))
     assert not torch.allclose(sim.subspace_block.oja.U, warm, atol=1e-2)
 
 
@@ -104,11 +104,11 @@ def test_warm_start_false_gives_materially_worse_frame0_subspace_err(make_env_bl
     """Cold-start (no peek at ground truth) tracking is honestly worse on frame 0
     than the warm-started default -- subspace_err should reflect that plainly."""
     env_warm = make_env_block(n_frames=2, n_freqs=32)
-    sim_warm = Simulation(env_warm, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D), warm_start=True)
+    sim_warm = Simulation(env_warm, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K), warm_start=True)
     out_warm = sim_warm.run(n_steps=1)
 
     env_cold = make_env_block(n_frames=2, n_freqs=32)
-    sim_cold = Simulation(env_cold, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D), warm_start=False)
+    sim_cold = Simulation(env_cold, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K), warm_start=False)
     out_cold = sim_cold.run(n_steps=1)
 
     warm_err = float(out_warm["subspace_err"][0])
@@ -120,17 +120,17 @@ def test_warm_start_false_gives_materially_worse_frame0_subspace_err(make_env_bl
 def test_rank_diagnostic_values():
     """rank_diagnostic on a hand-built spectrum with a clean gap at index 3."""
     S = torch.tensor([10.0, 9.0, 8.0, 0.001, 0.0005])
-    diag = rank_diagnostic(S, d=3)
+    diag = rank_diagnostic(S, k=3)
     assert diag["effective_rank"] == 3
     assert diag["rank_ok"] is True
-    assert diag["sv_gap_at_d"] == pytest.approx(8.0 / 0.001, rel=1e-3)
+    assert diag["sv_gap_at_k"] == pytest.approx(8.0 / 0.001, rel=1e-3)
 
-    diag_over = rank_diagnostic(S, d=4)
+    diag_over = rank_diagnostic(S, k=4)
     assert diag_over["rank_ok"] is False
 
 
 def test_low_rank_frame_triggers_rank_warning_and_outputs(make_env_block, torch_device):
-    """A rank-2 synthetic frame with d > 2 must report rank_ok=False and warn once."""
+    """A rank-2 synthetic frame with k > 2 must report rank_ok=False and warn once."""
     n_freq = 32
     env = make_env_block(n_frames=2, n_freqs=n_freq)
     real_get_s_pars = env.get_S_pars
@@ -143,35 +143,35 @@ def test_low_rank_frame_triggers_rank_warning_and_outputs(make_env_block, torch_
         return (a @ b).view(n_rx, 1, 1, n_freq)
 
     env.get_S_pars = _low_rank_s_pars
-    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K))
     with pytest.warns(UserWarning, match="exceeds frame effective rank"):
         out = sim.run(n_steps=2)
 
     assert out["rank_ok"][0] is False
     assert out["effective_rank"][0] <= 2
-    assert out["sv_gap_at_d"][0] > 1.0
+    assert out["sv_gap_at_k"][0] > 1.0
 
 
 def test_full_rank_frame_no_rank_warning(make_env_block):
-    """A full-rank synthetic (Gaussian noise) frame with d <= effective rank must not
+    """A full-rank synthetic (Gaussian noise) frame with k <= effective rank must not
     warn, and rank_ok must be True."""
     env = make_env_block(n_frames=2, n_freqs=32)
-    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K))
     import warnings as _warnings
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
         out = sim.run(n_steps=2)
     assert not any("exceeds frame effective rank" in str(w.message) for w in caught)
     assert out["rank_ok"][0] is True
-    assert "effective_rank" in out and "sv_gap_at_d" in out
+    assert "effective_rank" in out and "sv_gap_at_k" in out
 
 
 def test_pipeline_subspace_only_regression(make_env_block):
     """No AFE and no circuit block: this path raised NameError/TypeError before the fix."""
     env = make_env_block(n_frames=3, n_freqs=32)
     sim = Simulation(
-        env, _downstream(), D,
-        subspace_block=AdaOjaBlock(N_RX, D),
+        env, _downstream(), K,
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     out = sim.run(n_steps=2)
     assert set(["fft", "subspace_err"]).issubset(out.keys())
@@ -182,9 +182,9 @@ def test_pipeline_subspace_only_regression(make_env_block):
 def test_pipeline_with_afe(make_env_block):
     env = make_env_block(n_frames=3, n_freqs=32)
     sim = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         afe_block=AFEBlock(),
-        subspace_block=AdaOjaBlock(N_RX, D),
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     out = sim.run(n_steps=2)
     assert len(out["subspace_err"]) == 2
@@ -193,10 +193,10 @@ def test_pipeline_with_afe(make_env_block):
 def test_pipeline_with_interconnect(make_env_block):
     env = make_env_block(n_frames=3, n_freqs=32)
     sim = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         interconnect_block=InterconnectBlock(case="case3"),
         afe_block=AFEBlock(),
-        subspace_block=AdaOjaBlock(N_RX, D),
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     out = sim.run(n_steps=2)
     assert len(out["fft"]) == 2
@@ -205,7 +205,7 @@ def test_pipeline_with_interconnect(make_env_block):
 def test_afe_requires_subspace_block(make_env_block):
     env = make_env_block(n_frames=2, n_freqs=32)
     with pytest.raises(ValueError):
-        Simulation(env, _downstream(), D, afe_block=AFEBlock(), subspace_block=None)
+        Simulation(env, _downstream(), K, afe_block=AFEBlock(), subspace_block=None)
 
 
 def test_reset_returns_to_first_frame(make_env_block):
@@ -221,9 +221,9 @@ def test_pipeline_custom_array_shape_explicit(make_env_block):
     """Pipeline works for a non-32x32 array via the explicit array_shape arg."""
     env = make_env_block(n_frames=3, n_freqs=32, n_rx=256, array_shape=(16, 16))
     sim = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         afe_block=AFEBlock(),
-        subspace_block=AdaOjaBlock(256, D),
+        subspace_block=AdaOjaBlock(256, K),
         array_shape=(16, 16),
     )
     out = sim.run(n_steps=2)
@@ -234,7 +234,7 @@ def test_pipeline_custom_array_shape_explicit(make_env_block):
 def test_pipeline_array_shape_autoderived_from_env(make_env_block):
     """Simulation derives geometry from the environment block when not given one."""
     env = make_env_block(n_frames=2, n_freqs=16, n_rx=256, array_shape=(8, 32))
-    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(256, D))
+    sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(256, K))
     assert (sim.n_rx_x, sim.n_rx_y) == (8, 32)
     out = sim.run(n_steps=1)
     assert len(out["fft"]) == 1
@@ -244,7 +244,7 @@ def test_pipeline_runs_without_subspace_block(make_env_block):
     """subspace_block=None skips the measurement stage: FFT/range products still work
     for users who only want the range/angle maps, with no subspace tracking."""
     env = make_env_block(n_frames=2, n_freqs=16)
-    sim = Simulation(env, [FFTBlock(bins=16), RangeAzBlock(bins=16)], D)
+    sim = Simulation(env, [FFTBlock(bins=16), RangeAzBlock(bins=16)], K)
     out = sim.run(n_steps=2)
     assert len(out["fft"]) == 2
     assert len(out["range_az"]) == 2
@@ -264,8 +264,8 @@ def test_downstream_block_reserved_key_raises(make_env_block):
     """A downstream block clobbering a reserved key must raise ValueError."""
     env = make_env_block(n_frames=2, n_freqs=32)
     sim = Simulation(
-        env, [_ReservedKeyBlock("s_pars")], D,
-        subspace_block=AdaOjaBlock(N_RX, D),
+        env, [_ReservedKeyBlock("s_pars")], K,
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     with pytest.raises(ValueError, match="reserved key"):
         sim.run(n_steps=1)
@@ -275,8 +275,8 @@ def test_multiple_chirps_assertion(make_env_block):
     """A frame with chirp dim (shape[2]) > 1 must trip the multi-chirp guard."""
     env = make_env_block(n_frames=1, n_freqs=32)
     sim = Simulation(
-        env, _downstream(), D,
-        subspace_block=AdaOjaBlock(N_RX, D),
+        env, _downstream(), K,
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     sim.reset()
 
@@ -300,8 +300,8 @@ def test_mimo_assertion(make_env_block):
     """A frame with a TX dim (shape[1]) > 1 must trip the named no-MIMO guard."""
     env = make_env_block(n_frames=1, n_freqs=32)
     sim = Simulation(
-        env, _downstream(), D,
-        subspace_block=AdaOjaBlock(N_RX, D),
+        env, _downstream(), K,
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     sim.reset()
 
@@ -335,9 +335,9 @@ def test_composability_custom_serial_stage_runs_and_flows_through(make_env_block
 
     env = make_env_block(n_frames=2, n_freqs=32)
     custom = _NoOpStage()
-    subspace_block = AdaOjaBlock(N_RX, D)
+    subspace_block = AdaOjaBlock(N_RX, K)
     sim = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         subspace_block=subspace_block,
         serial_stages=[custom, GridStage((32, 32)), MeasurementStage(None, subspace_block)],
     )
@@ -355,16 +355,16 @@ def test_legacy_args_build_expected_stage_sequence(make_env_block):
     env = make_env_block(n_frames=1, n_freqs=32)
 
     # No circuit, no interconnect -> [GridStage, MeasurementStage]
-    sim = Simulation(env, _downstream(), D, subspace_block=AdaOjaBlock(N_RX, D))
+    sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K))
     assert [type(s) for s in sim.serial_stages] == [GridStage, MeasurementStage]
 
     # Full stack -> [CircuitStage, GridStage, InterconnectStage, MeasurementStage]
     sim2 = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         circuit_block=RFFEBlock(n=N_RX),
         interconnect_block=InterconnectBlock(case="case3"),
         afe_block=AFEBlock(),
-        subspace_block=AdaOjaBlock(N_RX, D),
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     assert [type(s) for s in sim2.serial_stages] == [
         CircuitStage, GridStage, InterconnectStage, MeasurementStage,
@@ -376,10 +376,10 @@ def test_pipeline_with_rffe_circuit(make_env_block):
     """Full chain including the (heavier) RF front-end circuit model."""
     env = make_env_block(n_frames=2, n_freqs=64)
     sim = Simulation(
-        env, _downstream(), D,
+        env, _downstream(), K,
         circuit_block=RFFEBlock(n=N_RX),
         afe_block=AFEBlock(),
-        subspace_block=AdaOjaBlock(N_RX, D),
+        subspace_block=AdaOjaBlock(N_RX, K),
     )
     out = sim.run(n_steps=1)
     assert len(out["subspace_err"]) == 1

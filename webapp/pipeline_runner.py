@@ -154,7 +154,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     N_TX = 1
 
     scenario_name = _p(state, "environment", "scenario_name")
-    d = int(_p(state, "subspace", "d"))
+    k = int(_p(state, "subspace", "k"))
 
     # The simulation backend now handles RFFE-off (PRX is initialized to None),
     # AFE-off (the no-AFE subspace branch calls subspace.update(X, A) with two args),
@@ -207,13 +207,13 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # Subspace is required whenever AFE is on (simulation enforces this too).
     subspace_block = None
     if _enabled(state, "subspace") or afe_block is not None:
-        subspace_block = AdaOjaBlock(N_RX, d)
+        subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
     if afe_block is not None and subspace_block is None:
         raise PipelineError("AFE block requires the AdaOja Subspace block to be enabled.")
     if subspace_block is None:
         # The results view always runs SubspaceErrorBlock, which needs the tracker's
         # 'U'; keep a subspace block even when the user toggles the stage off.
-        subspace_block = AdaOjaBlock(N_RX, d)
+        subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
 
     # --- downstream product blocks (always present) -----------------------------
     fft_bins = int(_p_positive(state, "fft", "bins"))
@@ -255,7 +255,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     sim = Simulation(
         environment_block,
         downstream_blocks,
-        d,
+        k,
         circuit_block,
         interconnect_block,
         afe_block,

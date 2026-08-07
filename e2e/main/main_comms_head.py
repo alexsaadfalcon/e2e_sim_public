@@ -114,7 +114,7 @@ def _make_environment(n_frames, n_freqs, force_synthetic, seed):
     return env, freqs, "synthetic"
 
 
-def _build_simulation(environment_block, combining, freqs, d, snr_db, n_symbols, seed):
+def _build_simulation(environment_block, combining, freqs, k, snr_db, n_symbols, seed):
     """A fresh Simulation (fresh RFFE/interconnect/AFE/subspace state) around the SAME
     environment_block (same frames), terminating in a radar head (RangeAzBlock) PLUS
     the requested comms head (ModemBlock(combining=...) -> BERBlock)."""
@@ -127,14 +127,14 @@ def _build_simulation(environment_block, combining, freqs, d, snr_db, n_symbols,
     )
     interconnect_block = InterconnectBlock(case="case3")
     afe_block = AFEBlock()
-    subspace_block = AdaOjaBlock(N_RX, d)
+    subspace_block = AdaOjaBlock(N_RX, k)
     modem = ModemBlock(freqs, n_symbols=n_symbols, snr_db=snr_db, seed=seed,
                        combining=combining)
     downstream_blocks = [RangeAzBlock(), modem, BERBlock()]
     return Simulation(
         environment_block,
         downstream_blocks,
-        d,
+        k,
         circuit_block,
         interconnect_block,
         afe_block,
@@ -143,7 +143,7 @@ def _build_simulation(environment_block, combining, freqs, d, snr_db, n_symbols,
 
 
 def main(n_frames=5, show=False, force_synthetic=False, n_freqs=None,
-         d=16, snr_db=5.0, n_symbols=16, seed=0):
+         k=16, snr_db=5.0, n_symbols=16, seed=0):
     """Run the same full pipeline three times (fresh Simulation each time, same
     frames) -- once per comms `combining` mode -- print a summary table, and
     (if `show`) save the figures. Returns a dict `{mode: {"ber", "evm", "gain_db"}}`
@@ -155,7 +155,7 @@ def main(n_frames=5, show=False, force_synthetic=False, n_freqs=None,
     results = {}
     last_range_az = None
     for mode in MODES:
-        sim = _build_simulation(environment_block, mode, freqs, d, snr_db, n_symbols, seed)
+        sim = _build_simulation(environment_block, mode, freqs, k, snr_db, n_symbols, seed)
         outputs = sim.run(n_steps=n_frames)
         ber = np.asarray(outputs["ber"], dtype=np.float64)
         evm = np.asarray(outputs["evm"], dtype=np.float64)
@@ -164,7 +164,7 @@ def main(n_frames=5, show=False, force_synthetic=False, n_freqs=None,
         results[mode] = {"ber": ber, "evm": evm, "gain_db": gain_db}
         last_range_az = outputs["range_az"][-1]
 
-    print(f"[comms_head] {n_frames} frames, comms SNR={snr_db:.1f} dB, subspace dim d={d}")
+    print(f"[comms_head] {n_frames} frames, comms SNR={snr_db:.1f} dB, subspace dim k={k}")
     print("[comms_head] mode        mean BER      mean EVM      mean array gain (dB)")
     for mode in MODES:
         r = results[mode]

@@ -17,6 +17,7 @@ e2e/main/figures/
 # Large generated data (regenerate via scenario_runner / sionna scripts) -- never commit
 e2e/environment/sionna_sims/
 e2e/environment/sionna_frames/
+e2e/ml/datasets/
 *.pkl
 
 # Presentation assets (large, not part of the code deliverable)

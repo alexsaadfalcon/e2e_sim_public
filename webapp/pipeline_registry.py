@@ -120,8 +120,8 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,
         params=[
-            ParamSpec("d", "Subspace dim d", "int", 16, step=1,
-                      help="Tracked subspace dimension; also used for U_true."),
+            ParamSpec("k", "Subspace dim k", "int", 8, step=1,
+                      help="Tracked subspace rank k; also used for U_true."),
         ],
         blurb="Online subspace tracking via Oja's algorithm. Required by AFE.",
     ),

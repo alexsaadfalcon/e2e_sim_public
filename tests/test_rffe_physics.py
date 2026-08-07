@@ -336,16 +336,16 @@ def test_circuit_model_batch_matches_per_slice_single_call_with_if_filter(monkey
 
 def test_ada_oja_scale_invariant_to_input_amplitude():
     torch.manual_seed(0)
-    n, d, m = 64, 4, 8
-    U0 = rand_orth_complex(n, d)
+    d, k, m = 64, 4, 8
+    U0 = rand_orth_complex(d, k)
 
-    block_small = AdaOjaBlock(n=n, d=d, eta=0.1)
-    block_large = AdaOjaBlock(n=n, d=d, eta=0.1)
+    block_small = AdaOjaBlock(d=d, k=k, eta=0.1)
+    block_large = AdaOjaBlock(d=d, k=k, eta=0.1)
     block_small.oja.U = U0.clone()
     block_large.oja.U = U0.clone()
 
     A = block_small.gen_A_ada(m=m)
-    V = torch.randn(n, 8, dtype=torch.cfloat, device=device)
+    V = torch.randn(d, 8, dtype=torch.cfloat, device=device)
     X = A @ V
 
     block_small.update(X * 1e-6, A)
@@ -453,7 +453,7 @@ def test_full_pipeline_physical_scale_and_if_filter(make_env_block):
     n_rx = 64
     env = make_env_block(n_frames=2, n_freqs=64, n_rx=n_rx, array_shape=(8, 8))
     sim = Simulation(
-        env, [FFTBlock(bins=16), SubspaceErrorBlock()], d=8,
+        env, [FFTBlock(bins=16), SubspaceErrorBlock()], k=8,
         circuit_block=RFFEBlock(n=n_rx, physical_scale=True, if_filter=True,
                                 freq_span_hz=3e9),
         afe_block=AFEBlock(),

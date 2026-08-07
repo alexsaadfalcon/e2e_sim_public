@@ -391,3 +391,66 @@ def test_reference_scenarios_transmitting_nodes_have_tx_power_dbm(factory):
         if n.role == NodeRole.COMM_RX:
             assert n.tx_power_dbm is None
     assert sc.validate() == []
+
+
+# --------------------------------------------------------------------------- ML label fields (object_class / rcs_dbsm / velocity_mps)
+
+def test_scene_object_label_fields_default():
+    o = SceneObject(name="o0")
+    assert o.object_class == "scatterer"
+    assert o.rcs_dbsm is None
+    assert o.velocity_mps is None
+
+
+def test_scene_object_label_fields_json_roundtrip():
+    sc = Scenario(
+        name="labeled_objects",
+        objects=[
+            SceneObject(
+                name="ped-0",
+                kind=ObjectKind.SPHERE,
+                object_class="pedestrian",
+                rcs_dbsm=-10.0,
+                velocity_mps=(1.2, 0.0, 0.0),
+            ),
+        ],
+    )
+    rebuilt = Scenario.from_json(sc.to_json())
+    obj = rebuilt.objects[0]
+    assert obj.object_class == "pedestrian"
+    assert obj.rcs_dbsm == -10.0
+    assert obj.velocity_mps == (1.2, 0.0, 0.0)
+    assert rebuilt.to_dict() == sc.to_dict()
+    assert rebuilt == sc
+
+
+def test_scene_object_label_fields_missing_keys_load_as_defaults_back_compat():
+    sc = munich_isac_scenario()
+    d = sc.to_dict()
+    del d["objects"][0]["object_class"]
+    del d["objects"][0]["rcs_dbsm"]
+    del d["objects"][0]["velocity_mps"]
+    rebuilt = Scenario.from_dict(d)
+    obj = rebuilt.objects[0]
+    assert obj.object_class == "scatterer"
+    assert obj.rcs_dbsm is None
+    assert obj.velocity_mps is None
+
+
+def test_validate_flags_bad_velocity_mps_length():
+    sc = Scenario(
+        name="bad_velocity",
+        nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0, 0, 0))],
+        objects=[SceneObject(name="o0", velocity_mps=(1.0, 2.0))],
+    )
+    problems = sc.validate()
+    assert any("velocity_mps" in p and "o0" in p for p in problems)
+
+
+def test_validate_allows_good_velocity_mps():
+    sc = Scenario(
+        name="ok_velocity",
+        nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0, 0, 0))],
+        objects=[SceneObject(name="o0", velocity_mps=(1.0, 2.0, 0.0))],
+    )
+    assert sc.validate() == []

@@ -298,7 +298,7 @@ def test_full_pipeline_subspace_combining_runs_green(make_env_block):
     sim = Simulation(
         env,
         [modem, BERBlock()],
-        d=16,
+        k=16,
         subspace_block=AdaOjaBlock(1024, 16),
     )
     out = sim.run(n_steps=2)

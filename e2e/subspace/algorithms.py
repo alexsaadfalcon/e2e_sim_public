@@ -22,16 +22,16 @@ def randn_complex(a, b, device=device):
     # scale, so seeded downstream behavior is unchanged.
     return torch.randn(a, b, device=device) + 1j * torch.randn(a, b, device=device)
 
-def rand_orth_complex(n, d, device=device):
-    U = randn_complex(n, d, device=device)
+def rand_orth_complex(d, k, device=device):
+    U = randn_complex(d, k, device=device)
     return orth(U)
 
 
 class GROUSE(object):
-    def __init__(self, n, d, eta=None, fixed_step=False, device=device):
-        self.n = n
+    def __init__(self, d, k, eta=None, fixed_step=False, device=device):
         self.d = d
-        self.U = rand_orth_complex(n, d, device=device)
+        self.k = k
+        self.U = rand_orth_complex(d, k, device=device)
 
         if eta is not None:
             self.eta0 = eta
@@ -80,10 +80,10 @@ class GROUSE(object):
         return self.U
 
 class Oja(object):
-    def __init__(self, n, d, eta=None, fixed_step=False, device=device):
-        self.n = n
+    def __init__(self, d, k, eta=None, fixed_step=False, device=device):
         self.d = d
-        self.U = rand_orth_complex(n, d, device=device)
+        self.k = k
+        self.U = rand_orth_complex(d, k, device=device)
 
         if eta is not None:
             self.eta0 = eta
@@ -191,10 +191,10 @@ class Oja(object):
 
 
 class GrassmannGD(object):
-    def __init__(self, n, d, eta=None, fixed_step=False, device=device):
-        self.n = n
+    def __init__(self, d, k, eta=None, fixed_step=False, device=device):
         self.d = d
-        self.U = rand_orth_complex(n, d, device=device)
+        self.k = k
+        self.U = rand_orth_complex(d, k, device=device)
 
         if eta is not None:
             self.eta0 = eta
@@ -233,8 +233,8 @@ def gen_A_ada(U, m, device=None):
     # CPU-resident U on a CUDA box doesn't device-mismatch in the matmul below.
     if device is None:
         device = U.device
-    n, d = U.shape
-    B = torch.randn(n, m - d, dtype=torch.cfloat, device=device)
+    d, k = U.shape
+    B = torch.randn(d, m - k, dtype=torch.cfloat, device=device)
     B -= U @ (U.T.conj() @ B)
     # U's columns are unit-norm (orthonormal), so the deterministic rows of A
     # (U^H) already have unit row-norm. The random columns of B are unnormalized
@@ -242,9 +242,9 @@ def gen_A_ada(U, m, device=None):
     # n=1024) -- a huge scale mismatch against the deterministic rows if left
     # as-is. Normalize so both halves of the sensing matrix weight equally.
     B = B / B.norm(dim=0, keepdim=True)
-    A = torch.zeros((m, n), dtype=torch.cfloat, device=device)
-    A[:d, :] = U.T.conj()
-    A[d:, :] = B.T.conj()
+    A = torch.zeros((m, d), dtype=torch.cfloat, device=device)
+    A[:k, :] = U.T.conj()
+    A[k:, :] = B.T.conj()
     return A
 
 if __name__ == '__main__':

@@ -146,6 +146,17 @@ class SceneObject:
     color: Optional[Tuple[float, float, float]] = None
     asset: Optional[str] = None             # path to mesh when kind == MESH
     motion: Motion = field(default_factory=Motion)
+    # Free-form class tag consumed by radar-dataset generation (ML training labels);
+    # "vehicle" and "pedestrian" are the classes the generator recognizes today. Any
+    # other value (including the default "scatterer") is treated as an unlabeled target.
+    object_class: str = "scatterer"
+    # Radar cross-section in dBsm. None = generator picks a class-appropriate default
+    # (e.g. from object_class) rather than a fixed RCS.
+    rcs_dbsm: Optional[float] = None
+    # Explicit velocity vector (m/s) for objects with no Motion track. Ignored when
+    # `motion` is non-static: per-frame velocity is then derived from the trajectory
+    # (Motion.velocity / waypoints / angular_velocity_deg) instead.
+    velocity_mps: Optional[Vec3] = None
 
 
 @dataclass
@@ -233,6 +244,12 @@ class Scenario:
                 problems.append(
                     f"node '{n.name}' has tx_power_dbm but role '{n.role.value}' does not transmit"
                 )
+        for o in self.objects:
+            if o.velocity_mps is not None and len(o.velocity_mps) != 3:
+                problems.append(
+                    f"object '{o.name}' velocity_mps must have 3 components, "
+                    f"got {len(o.velocity_mps)}"
+                )
         return problems
 
     # ---- (de)serialization -----------------------------------------------------
@@ -282,6 +299,8 @@ class Scenario:
             o["position"] = tuple(o.get("position", (0.0, 0.0, 0.0)))
             if o.get("color") is not None:
                 o["color"] = tuple(o["color"])
+            if o.get("velocity_mps") is not None:
+                o["velocity_mps"] = tuple(o["velocity_mps"])
             o["motion"] = _motion(o.get("motion", {}))
             objects.append(SceneObject(**o))
 

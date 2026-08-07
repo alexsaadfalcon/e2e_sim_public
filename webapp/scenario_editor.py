@@ -52,6 +52,18 @@ def map_figure(scenario: Scenario) -> go.Figure:
     """2D scatter of node and object positions (x vs y), role-colored."""
     fig = go.Figure()
 
+    # Declutter labels: nodes that share (nearly) the same (x, y) -- e.g. a radar and
+    # a comm-rx co-located on one platform -- would otherwise print their names on top
+    # of each other. Stagger the text position per collision so every label stays legible.
+    _label_slots = ["top center", "bottom center", "middle right", "middle left"]
+    _seen: Dict[tuple, int] = {}
+
+    def _textpos(x, y):
+        key = (round(float(x), 1), round(float(y), 1))
+        i = _seen.get(key, 0)
+        _seen[key] = i + 1
+        return _label_slots[i % len(_label_slots)]
+
     # group nodes by role for a clean legend
     by_role: Dict[str, List] = {}
     for n in scenario.nodes:
@@ -62,7 +74,7 @@ def map_figure(scenario: Scenario) -> go.Figure:
             y=[n.position[1] for n in nodes],
             mode="markers+text",
             text=[n.name for n in nodes],
-            textposition="top center",
+            textposition=[_textpos(n.position[0], n.position[1]) for n in nodes],
             marker=dict(size=16, symbol="square",
                         color=ROLE_COLORS.get(role, "#778ca3"),
                         line=dict(width=1, color="#2d3a4a")),

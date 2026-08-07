@@ -6,7 +6,58 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Adversarial-review fixes to `e2e/ml/` (pre-merge audit, 6 confirmed findings)**:
+  - Clutter is no longer detection ground truth: label encoding/target listing take a
+    class filter and the dataset generator labels only vehicles/pedestrians
+    (`dataset.LABEL_CLASSES`, recorded in manifests). D2/D3 ground truth was previously
+    70–80% background clutter.
+  - `metrics.evaluate_dataset` no longer counts vacuous `precision=1.0` at thresholds
+    where the model made no detections against existing ground truth — such thresholds
+    are excluded from the AP mean (per-threshold NaN), so AP no longer rewards
+    under-confident detectors.
+  - DDMA now pays the physically correct `n_tx` unambiguous-velocity penalty in
+    `RadarConfig.max_velocity_mps` (empirically, velocities one sub-band apart alias
+    to identical replica sets); the `radial_like` preset moves to `n_chirps=252`
+    (divisible by `n_tx=12`) so DDMA replicas land on exact Doppler bins, and the
+    FFTRadNet DDMA pre-encoder rejects fractional replica spacings outright.
+  - `RadarConfig` normalizes the `mimo` tag at construction (a case-mismatched `"TDM"`
+    previously synthesized correctly while silently mis-computing the noise coherent
+    gain by 10·log10(n_tx) dB).
+  - `FFTRadNet`'s decoder now crops deconv outputs to each skip's range length,
+    fixing forward-pass crashes for most non-power-of-two `n_range_in` values.
+  - `train.py` keeps the later epoch on a val-AP tie (`>=`), and a new end-to-end
+    seam test pins the input tensor's range axis to the label grid through
+    `generate_sample`.
+
 ### Added
+- **FMCW MIMO radar ML dataset + perception models (`e2e/ml/`)**: a self-contained,
+  torch-free-at-the-geometry-layer package for generating labeled radar training data
+  and training/evaluating perception models on it.
+  - `radar_config.py` (dependency-free `RadarConfig` + reference presets `ti_iwr1443`
+    3TX/4RX TDM and `radial_like` 12TX/16RX DDMA, the latter reproducing the RADIal
+    paper's published resolution/FOV numbers) and `scenes.py` (four difficulty tiers
+    D0–D3 of vehicle/pedestrian/clutter scenes, sampled from `e2e.scenario`).
+  - Analytic raw-ADC synthesis (`rd_synth.py`) and pure-torch ADC→range-Doppler
+    transforms including TDM de-interleave and network-input packing (`transforms.py`,
+    with the residual TDM Doppler-phase term across TX groups documented rather than
+    corrected).
+  - FFTRadNet/RADIal-style dense detection labels — `(range, sin-azimuth)` grid, 3×3
+    footprint + per-cell regression residuals, encode/decode — in `labels.py`.
+  - `dataset.py`: `.npz` + manifest dataset generator, `RadarFrameDataset`, and a
+    `python -m e2e.ml.dataset` CLI (with a `--dry-run` sizing mode).
+  - Two ported detection models sharing one input/output contract: `FFTRadNet` (from
+    valeoai/RADIal, Rebut et al., CVPR 2022) and `SSMRadNet` (a two-scale selective-
+    state-space detector from AnuvabSen1/SSMRadNet, with a pure-torch Mamba selective
+    scan since `mamba_ssm` ships no Windows wheels), plus `losses.py` (focal + masked
+    regression) and `metrics.py` (confidence-sweep AP/AR, RADIal-style).
+  - `train.py`: a reference `python -m e2e.ml.train` train/eval CLI. CUDA smoke test on
+    `ti_iwr1443`/D0 (160 frames, `batch_size=2`): FFTRadNet loss 36.7k→1.8k over 25
+    epochs (val AP ~0.45–0.56); SSMRadNet loss 5.3k→161 over 15 epochs (val AP 0.778,
+    held-out test AP 0.778, range RMSE ~0 m) — plumbing verification, not benchmarks.
+  - Neither upstream repo ships a `LICENSE` file; both ports carry attribution headers
+    and are pending explicit license confirmation before public redistribution (see
+    `e2e/ml/README.md`).
 - **Comms head with spatial combining**: `ModemBlock` gains a `combining` mode
   (`"element0"` the historical single-tap SISO shortcut / `"mrc"` full-aperture
   maximum-ratio combining / `"subspace"` broadband combining using the AdaOja

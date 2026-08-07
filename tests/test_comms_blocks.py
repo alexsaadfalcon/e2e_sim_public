@@ -112,7 +112,7 @@ def test_comms_blocks_compose_inside_simulation(make_env_block):
     sim = Simulation(
         env,
         [FFTBlock(), modem, BERBlock(), SubspaceErrorBlock()],
-        d=16,
+        k=16,
         subspace_block=AdaOjaBlock(1024, 16),
     )
     out = sim.run(n_steps=2)

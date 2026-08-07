@@ -549,12 +549,12 @@ def test_param_helper_falls_back_to_default():
     from webapp.pipeline_registry import default_block_state
     state = default_block_state()
     # explicit value is returned
-    assert _p(state, "subspace", "d") == state["subspace"]["params"]["d"]
+    assert _p(state, "subspace", "k") == state["subspace"]["params"]["k"]
     # None / missing falls back to the registry default
-    state["subspace"]["params"]["d"] = None
+    state["subspace"]["params"]["k"] = None
     from webapp.pipeline_registry import BLOCKS_BY_ID
-    default_d = next(p.default for p in BLOCKS_BY_ID["subspace"].params if p.key == "d")
-    assert _p(state, "subspace", "d") == default_d
+    default_k = next(p.default for p in BLOCKS_BY_ID["subspace"].params if p.key == "k")
+    assert _p(state, "subspace", "k") == default_k
 
 
 # --- Fix #3: positive-only params fall back to default on <= 0 --------------------
@@ -624,9 +624,9 @@ def test_run_pipeline_forwards_array_shape(monkeypatch, make_env_block):
 
     real_oja = blocks.AdaOjaBlock
 
-    def spy_oja(n, d):
-        seen["oja_n"] = n
-        return real_oja(n, d)
+    def spy_oja(d, k, *args, **kwargs):
+        seen["oja_d"] = d
+        return real_oja(d, k, *args, **kwargs)
 
     monkeypatch.setattr(blocks, "AdaOjaBlock", spy_oja)
 
@@ -647,8 +647,8 @@ def test_run_pipeline_forwards_array_shape(monkeypatch, make_env_block):
     except Exception:
         pass  # we only care about what was constructed, not a full successful run
 
-    assert seen.get("oja_n") == shape[0] * shape[1], (
-        f"AdaOja dim {seen.get('oja_n')} should equal n_rx={shape[0] * shape[1]}"
+    assert seen.get("oja_d") == shape[0] * shape[1], (
+        f"AdaOja dim {seen.get('oja_d')} should equal n_rx={shape[0] * shape[1]}"
     )
     assert seen.get("array_shape") == shape, (
         f"Simulation array_shape {seen.get('array_shape')} should be {shape}"

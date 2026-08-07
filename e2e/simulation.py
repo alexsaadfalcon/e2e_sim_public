@@ -18,7 +18,7 @@ def _svd_frame(s_pars):
 
     Returns (U, S): the full left-singular-vector matrix and the singular values
     (descending). Shared by get_U_true and rank_diagnostic so callers that need both
-    the top-d basis and the singular-value spectrum don't pay for two decompositions.
+    the top-k basis and the singular-value spectrum don't pay for two decompositions.
     """
     assert len(s_pars.shape) == 4
     s_pars_0 = s_pars[:, :, 0, :]
@@ -27,41 +27,41 @@ def _svd_frame(s_pars):
     return U, S
 
 
-def get_U_true(s_pars, d):
-    # "Ground truth" here means the top-d left singular vectors of a single frame's
+def get_U_true(s_pars, k):
+    # "Ground truth" here means the top-k left singular vectors of a single frame's
     # S-parameter matrix -- a meaningful reference for subspace tracking only when the
     # frame's effective rank (number of singular values well above the noise floor) is
-    # >= d. Below that, the trailing directions returned are noise-dominated, and any
+    # >= k. Below that, the trailing directions returned are noise-dominated, and any
     # subspace_err computed against them partly measures how well the tracker follows
     # noise rather than signal structure. See rank_diagnostic (and Simulation.feed_forward,
     # which records it per frame) for the diagnostic that makes this failure mode visible.
     U, _ = _svd_frame(s_pars)
-    return U[:, :d]
+    return U[:, :k]
 
 
-def rank_diagnostic(S, d, rtol=_RANK_RTOL):
+def rank_diagnostic(S, k, rtol=_RANK_RTOL):
     """Rank / singular-value-gap diagnostic for a frame's singular-value spectrum `S`
-    (descending, as returned by `_svd_frame`), against a requested subspace dim `d`.
+    (descending, as returned by `_svd_frame`), against a requested subspace rank `k`.
 
     - `effective_rank`: count of singular values above `rtol * S[0]` (default rtol
       _RANK_RTOL) -- i.e. singular values still well above the noise floor.
-    - `sv_gap_at_d`: ratio S[d-1] / S[d], the singular-value gap right at the requested
-      cutoff (large gap = a clean signal/noise boundary at d; near 1 = no real
-      boundary there). NaN if d >= len(S) (no S[d] to compare against).
-    - `rank_ok`: True iff `d <= effective_rank`, i.e. the requested subspace dim is
+    - `sv_gap_at_k`: ratio S[k-1] / S[k], the singular-value gap right at the requested
+      cutoff (large gap = a clean signal/noise boundary at k; near 1 = no real
+      boundary there). NaN if k >= len(S) (no S[k] to compare against).
+    - `rank_ok`: True iff `k <= effective_rank`, i.e. the requested subspace rank is
       supported by the frame's actual signal content.
     """
     threshold = rtol * S[0]
     effective_rank = int((S > threshold).sum().item())
-    if d < len(S):
-        denom = S[d]
-        sv_gap_at_d = float((S[d - 1] / denom).item()) if denom > 0 else float('inf')
+    if k < len(S):
+        denom = S[k]
+        sv_gap_at_k = float((S[k - 1] / denom).item()) if denom > 0 else float('inf')
     else:
-        sv_gap_at_d = float('nan')
-    rank_ok = d <= effective_rank
+        sv_gap_at_k = float('nan')
+    rank_ok = k <= effective_rank
     return {
         'effective_rank': effective_rank,
-        'sv_gap_at_d': sv_gap_at_d,
+        'sv_gap_at_k': sv_gap_at_k,
         'rank_ok': rank_ok,
     }
 
@@ -74,7 +74,7 @@ class Simulation:
     def __init__(self,
         environment_block,
         downstream_blocks,
-        d,
+        k,
         circuit_block=None,
         interconnect_block=None,
         afe_block=None,
@@ -85,7 +85,7 @@ class Simulation:
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
-        self.d = d
+        self.k = k
         self.circuit_block = circuit_block
         self.interconnect_block = interconnect_block
         self.afe_block = afe_block
@@ -149,20 +149,20 @@ class Simulation:
     def feed_forward(self):
         s_pars = self.environment_block.get_S_pars()
         U, S = _svd_frame(s_pars)
-        U_true = U[:, :self.d]
+        U_true = U[:, :self.k]
 
         # Rank / singular-value-gap diagnostic on the frame get_U_true saw: flags when
-        # the requested subspace dim self.d exceeds the frame's effective rank, in
+        # the requested subspace rank self.k exceeds the frame's effective rank, in
         # which case the trailing "ground truth" directions are noise and subspace_err
         # partly measures noise-tracking rather than signal-subspace tracking. Reuses
         # the SVD above -- no second decomposition.
-        rank_diag = rank_diagnostic(S, self.d)
+        rank_diag = rank_diagnostic(S, self.k)
         self.outputs['effective_rank'].append(rank_diag['effective_rank'])
-        self.outputs['sv_gap_at_d'].append(rank_diag['sv_gap_at_d'])
+        self.outputs['sv_gap_at_k'].append(rank_diag['sv_gap_at_k'])
         self.outputs['rank_ok'].append(rank_diag['rank_ok'])
         if not rank_diag['rank_ok'] and not self._rank_warned:
             warnings.warn(
-                f"requested subspace dim d={self.d} exceeds frame effective rank "
+                f"requested subspace rank k={self.k} exceeds frame effective rank "
                 f"{rank_diag['effective_rank']}; subspace_err partly reflects noise "
                 f"tracking."
             )

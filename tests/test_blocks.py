@@ -263,7 +263,7 @@ def test_afe_block_matmul_and_reconstruct_shapes():
 
 
 def test_ada_oja_block_update_runs():
-    block = AdaOjaBlock(n=64, d=4)
+    block = AdaOjaBlock(d=64, k=4)
     block.oja.U = rand_orth_complex(64, 4)
     A = block.gen_A_ada()
     V = torch.randn(64, 8, dtype=torch.cfloat, device=device)
