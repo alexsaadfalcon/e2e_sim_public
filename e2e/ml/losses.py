@@ -1,8 +1,9 @@
 """
 Detection loss for the FMCW radar detection head.
 
-Adapted from valeoai/RADIal (no LICENSE file upstream; used with attribution
-pending confirmation). Deviations documented inline. The upstream reference is
+Adapted from valeoai/RADIal (no LICENSE file upstream; license inquiry sent
+2026-08-07, used with attribution and removed on request -- see
+e2e/ml/models/fftradnet.py's header). Deviations documented inline. The upstream reference is
 `FFTRadNet/loss/loss.py` (`FocalLoss` + `pixor_loss`); this module ports its
 math to our `e2e.ml.labels` target format:
 

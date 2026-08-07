@@ -2,10 +2,12 @@
 FFTRadNet detection model.
 
 Adapted from valeoai/RADIal (https://github.com/valeoai/RADIal), FFTRadNet by
-Rebut et al., CVPR 2022. The upstream repository ships no LICENSE file; this
-adaptation is used with the research-community norms of attribution and
-pending explicit license confirmation from the authors. Deviations from
-upstream are documented inline (and summarized here).
+Rebut et al., CVPR 2022. The upstream repository ships no LICENSE file; a license
+inquiry was sent to the authors (2026-08-07) and this adaptation proceeds under
+research-community norms of attribution, consistent with the upstream project's
+evident open-research intent. It will be removed or relicensed promptly on the
+authors' request. Deviations from upstream are documented inline (and summarized
+here).
 
 Upstream source ported: `FFTRadNet/model/FFTRadNet.py` (`MIMO_PreEncoder`,
 `FPN_BackBone`, `Bottleneck`, `BasicBlock`, `RangeAngle_Decoder`,

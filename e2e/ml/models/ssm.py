@@ -2,7 +2,8 @@
 Mamba-1 style selective state-space layer in pure PyTorch (no CUDA extensions).
 
 Adapted from AnuvabSen1/SSMRadNet (https://github.com/AnuvabSen1/SSMRadNet). The upstream
-repository ships no LICENSE file; the SSMRadNet authors requested this integration
+repository ships no LICENSE file; the SSMRadNet authors gave written approval for this
+adaptation's redistribution (2026-08-07) and requested this integration
 (training/evaluation on this simulator's synthetic data). Deviations documented inline.
 
 Why this file exists

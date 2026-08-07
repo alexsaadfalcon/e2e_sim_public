@@ -3,7 +3,8 @@ SSMRadNet: a two-scale selective-state-space radar detector.
 
 Adapted from AnuvabSen1/SSMRadNet (https://github.com/AnuvabSen1/SSMRadNet). The upstream
 repository ships no LICENSE file; the SSMRadNet authors requested this integration
-(training/evaluation on this simulator's synthetic data). Deviations documented inline.
+(training/evaluation on this simulator's synthetic data) and gave written approval for
+this adaptation's redistribution (2026-08-07). Deviations documented inline.
 
 What upstream does
 ------------------
