@@ -149,7 +149,12 @@ def test_low_rank_frame_triggers_rank_warning_and_outputs(make_env_block, torch_
 
     assert out["rank_ok"][0] is False
     assert out["effective_rank"][0] <= 2
-    assert out["sv_gap_at_k"][0] > 1.0
+    # The gap at k sits between two noise-floor singular values of an exactly-rank-2
+    # frame: the ratio is >= 1 by construction (descending order) but can be EXACTLY
+    # 1.0 when the trailing SVs tie -- CPU LAPACK does this where CUDA's SVD returns
+    # a hair above 1.0 (caught on CI). The semantic signal is rank_ok/effective_rank
+    # above; this line only sanity-checks the diagnostic is well-formed.
+    assert out["sv_gap_at_k"][0] >= 1.0
 
 
 def test_full_rank_frame_no_rank_warning(make_env_block):
