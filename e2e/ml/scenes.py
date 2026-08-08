@@ -8,6 +8,12 @@ dense, fast, tightly-packed multi-target scene (D3). `dataset.py` calls `sample_
 per training example; `scatterers.py`/`rd_synth.py` turn the resulting `Scenario` into
 point scatterers and, from there, a range-Doppler cube.
 
+`sample_scene(..., n_frames=1)` defaults to a single-instant scene (the original
+behavior); `n_frames>1` gives moving (vehicle/pedestrian) objects a real
+constant-velocity `Motion` track spanning `Scenario.num_frames == n_frames`, so
+`dataset.py` can synthesize a SEQUENCE of consecutive, motion-consistent frames from
+one scene (see `sample_scene`'s docstring). Clutter is always static.
+
 Only numpy + stdlib + `e2e.scenario` / `e2e.ml.scatterers` are imported here (no
 torch), matching the rest of this package's torch-free scene-description layer.
 
@@ -26,7 +32,7 @@ from typing import Dict, List, Tuple, Union
 import numpy as np
 
 from e2e.ml.scatterers import DEFAULT_RCS_DBSM, pedestrian, vehicle
-from e2e.scenario import Node, NodeRole, Scenario, SceneObject
+from e2e.scenario import Motion, Node, NodeRole, Scenario, SceneObject
 
 # Fraction of the radar's unambiguous range/angle FOV that targets are placed within
 # (kept off the extreme edges, where FFT-based downstream processing is least
@@ -136,12 +142,19 @@ def _sample_fov_position(cfg, rng: np.random.Generator) -> np.ndarray:
 
 
 def _sample_separated_position(cfg, rng: np.random.Generator,
-                                placed: List[np.ndarray], min_sep: float) -> np.ndarray:
-    """`_sample_fov_position`, reject-sampled against `placed` for `min_sep`."""
-    for _ in range(_MAX_PLACEMENT_ATTEMPTS):
+                                placed: List[np.ndarray], min_sep: float) -> Tuple[np.ndarray, int]:
+    """`_sample_fov_position`, reject-sampled against `placed` for `min_sep`.
+
+    Returns `(position, attempts_used)` -- `attempts_used` (1-based) is surfaced by
+    `sample_scene` into `Scenario.metadata["placement_attempts"]` so a corpus can be
+    monitored for how close the reject-sampler is running to `_MAX_PLACEMENT_ATTEMPTS`
+    (see the stats-design review: a one-off stress test isn't as convincing as a
+    per-corpus signal).
+    """
+    for attempt in range(1, _MAX_PLACEMENT_ATTEMPTS + 1):
         pos = _sample_fov_position(cfg, rng)
         if all(np.linalg.norm(pos - p) >= min_sep for p in placed):
-            return pos
+            return pos, attempt
     raise RuntimeError(
         f"could not place a target with min_target_separation_m={min_sep} after "
         f"{_MAX_PLACEMENT_ATTEMPTS} attempts ({len(placed)} already placed)"
@@ -179,15 +192,25 @@ def _sample_velocity(cfg, rng: np.random.Generator, position: np.ndarray,
     return velocity
 
 
-def sample_scene(cfg, tier: Union[str, TierSpec], rng: np.random.Generator) -> Scenario:
-    """Draw a random single-frame radar scene at difficulty `tier`.
+def sample_scene(cfg, tier: Union[str, TierSpec], rng: np.random.Generator,
+                 *, n_frames: int = 1) -> Scenario:
+    """Draw a random radar scene at difficulty `tier`, spanning `n_frames` frames.
 
-    `cfg` (a `RadarConfig`) sets the scene scale (`max_range_m`, `max_velocity_mps`);
-    `tier` selects a `TierSpec` (either by `DIFFICULTY_TIERS` key or directly); `rng`
-    is a caller-seeded `numpy.random.Generator` -- determinism is the caller's
-    contract (see module docstring). Raises `KeyError` for an unknown tier name and
-    `RuntimeError` if `min_target_separation_m` cannot be satisfied within the
+    `cfg` (a `RadarConfig`) sets the scene scale (`max_range_m`, `max_velocity_mps`,
+    `frame_rate_hz`); `tier` selects a `TierSpec` (either by `DIFFICULTY_TIERS` key or
+    directly); `rng` is a caller-seeded `numpy.random.Generator` -- determinism is the
+    caller's contract (see module docstring). Raises `KeyError` for an unknown tier
+    name and `RuntimeError` if `min_target_separation_m` cannot be satisfied within the
     attempt budget.
+
+    `n_frames=1` (default) is the original single-instant behavior: vehicles/
+    pedestrians get a static `Motion` and an explicit `velocity_mps` (used only for
+    bookkeeping; there is no second frame to move into). `n_frames>1` gives moving
+    (vehicle/pedestrian) objects a real constant-velocity `Motion` track: the sampled
+    velocity vector is converted from m/s to the per-frame displacement `Motion.velocity`
+    expects (`e2e.scenario.Motion` docstring) via `dt = 1 / cfg.frame_rate_hz`, so
+    `resolve_motion`'s frame-indexed track advances the target physically frame to
+    frame. Clutter stays static (and un-tracked) regardless of `n_frames`.
     """
     spec = _resolve_tier(tier)
 
@@ -195,27 +218,34 @@ def sample_scene(cfg, tier: Union[str, TierSpec], rng: np.random.Generator) -> S
     n_pedestrians = int(rng.integers(spec.n_pedestrians[0], spec.n_pedestrians[1] + 1))
     n_clutter = int(rng.integers(spec.n_clutter[0], spec.n_clutter[1] + 1))
 
+    dt = 1.0 / cfg.frame_rate_hz  # only used when n_frames > 1
+
     placed: List[np.ndarray] = []
     objects: List[SceneObject] = []
+    placement_attempts = 0  # sum of reject-sampling attempts across all placements
 
     for i in range(n_vehicles):
-        pos = _sample_separated_position(cfg, rng, placed, spec.min_target_separation_m)
+        pos, attempts = _sample_separated_position(cfg, rng, placed, spec.min_target_separation_m)
+        placement_attempts += attempts
         placed.append(pos)
         vel = _sample_velocity(cfg, rng, pos, spec.vehicle_speed_mps)
         rcs = DEFAULT_RCS_DBSM["vehicle"] + rng.uniform(-spec.rcs_jitter_db, spec.rcs_jitter_db)
+        motion = Motion(velocity=tuple(float(v * dt) for v in vel)) if n_frames > 1 else None
         objects.append(vehicle(
             f"vehicle-{i}", tuple(float(x) for x in pos),
-            velocity=tuple(float(x) for x in vel), rcs_dbsm=float(rcs),
+            velocity=tuple(float(x) for x in vel), motion=motion, rcs_dbsm=float(rcs),
         ))
 
     for i in range(n_pedestrians):
-        pos = _sample_separated_position(cfg, rng, placed, spec.min_target_separation_m)
+        pos, attempts = _sample_separated_position(cfg, rng, placed, spec.min_target_separation_m)
+        placement_attempts += attempts
         placed.append(pos)
         vel = _sample_velocity(cfg, rng, pos, spec.pedestrian_speed_mps)
         rcs = DEFAULT_RCS_DBSM["pedestrian"] + rng.uniform(-spec.rcs_jitter_db, spec.rcs_jitter_db)
+        motion = Motion(velocity=tuple(float(v * dt) for v in vel)) if n_frames > 1 else None
         objects.append(pedestrian(
             f"pedestrian-{i}", tuple(float(x) for x in pos),
-            velocity=tuple(float(x) for x in vel), rcs_dbsm=float(rcs),
+            velocity=tuple(float(x) for x in vel), motion=motion, rcs_dbsm=float(rcs),
         ))
 
     for i in range(n_clutter):
@@ -234,7 +264,7 @@ def sample_scene(cfg, tier: Union[str, TierSpec], rng: np.random.Generator) -> S
     return Scenario(
         name=f"scene_{spec.name}_{tag}",
         base_scene="synthetic",  # no Sionna base scene; scatterers are analytic (rd_synth)
-        num_frames=1,            # single-frame samples; per-frame motion tracks are a later concern
+        num_frames=n_frames,
         nodes=[
             Node(
                 name="radar",
@@ -245,16 +275,32 @@ def sample_scene(cfg, tier: Union[str, TierSpec], rng: np.random.Generator) -> S
         ],
         objects=objects,
         description=f"Randomly sampled {spec.name} scene for {cfg.name}.",
-        metadata={"tier": spec.name, "radar_config": cfg.name},
+        metadata={
+            "tier": spec.name,
+            "radar_config": cfg.name,
+            "placement_attempts": placement_attempts,
+        },
     )
 
 
 def scene_summary(scenario: Scenario) -> dict:
-    """Compact per-class counts for manifests/debugging."""
-    classes = [o.object_class for o in scenario.objects]
+    """Compact per-class counts + per-clutter position/RCS for manifests/debugging.
+
+    Drops the old flat `classes` list (fully derivable from the counts here and added
+    no new information -- see the stats-design review). Adds `clutter` (per-point
+    position/RCS -- clutter is signal but not a label, so it is otherwise invisible in
+    `meta["targets"]`, which is the only way to check e.g. "does clutter ever land on
+    top of a real target's footprint") and `placement_attempts` (the reject-sampler's
+    total attempt count for this scene, from `sample_scene`'s `Scenario.metadata`;
+    `None` for a hand-built `Scenario` that never went through `sample_scene`).
+    """
+    clutter = [o for o in scenario.objects if o.object_class == "scatterer"]
     return {
-        "n_vehicles": classes.count("vehicle"),
-        "n_pedestrians": classes.count("pedestrian"),
-        "n_clutter": classes.count("scatterer"),
-        "classes": classes,
+        "n_vehicles": sum(1 for o in scenario.objects if o.object_class == "vehicle"),
+        "n_pedestrians": sum(1 for o in scenario.objects if o.object_class == "pedestrian"),
+        "n_clutter": len(clutter),
+        "clutter": [
+            {"position": list(o.position), "rcs_dbsm": o.rcs_dbsm} for o in clutter
+        ],
+        "placement_attempts": scenario.metadata.get("placement_attempts"),
     }

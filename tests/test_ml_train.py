@@ -107,7 +107,8 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
     checkpoint = torch.load(best_pt, map_location="cpu")
     assert checkpoint["model_name"] == "fftradnet"
     assert checkpoint["manifest"] == str(tiny_manifest_path)
-    assert set(checkpoint) == {"model_state", "model_name", "manifest", "history"}
+    assert set(checkpoint) == {"model_state", "model_name", "manifest", "history",
+                               "input_format"}
 
     metrics = train_mod.evaluate(tiny_manifest_path, best_pt, split="test")
     assert math.isfinite(metrics["AP"])
@@ -183,3 +184,180 @@ def test_train_fftradnet_full_size_loss_decreases(tmp_path_factory):
 
     assert len(history["train_loss"]) == 3
     assert history["train_loss"][-1] < history["train_loss"][0]
+
+
+# --------------------------------------------------------------------------------
+# W1b additions: input_format="adc" plumbing (build_model / train() / CLI) and the
+# reg_weight/gamma loss-part logging. Deliberately decoupled from the on-disk
+# `e2e.ml.dataset` generation pipeline (a concurrently-changing sibling shard) via a
+# minimal stub `RadarFrameDataset` -- see `_StubRadarFrameDataset`'s docstring.
+# --------------------------------------------------------------------------------
+class _StubRadarFrameDataset(torch.utils.data.Dataset):
+    """A `RadarFrameDataset`-shaped stand-in that needs no on-disk `.npz` corpus.
+
+    Sizes its random tensors from `manifest["config"]`/`manifest["grid"]` alone (via
+    `train_mod._input_dims`), matching the real `RadarFrameDataset(manifest_path,
+    split=..., input_format=...)` constructor contract that `train._make_dataset`
+    calls -- this lets the `train.py`-focused tests below exercise the real
+    `input_format` plumbing without depending on `e2e.ml.dataset`'s on-disk generation
+    pipeline landing/being in a consistent state.
+    """
+
+    _SPLIT_SIZES = {"train": 4, "val": 2, "test": 2}
+    _SPLIT_SEEDS = {"train": 0, "val": 1, "test": 2}
+
+    def __init__(self, manifest_path, split: str = "train", input_format: str = "rd"):
+        from e2e.ml.radar_config import RadarConfig  # local: not imported at module scope here
+
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        cfg = RadarConfig.from_dict(manifest["config"])
+        c, r, d = train_mod._input_dims(cfg, input_format)
+        grid = manifest["grid"]
+        n_range_out, n_azimuth_out = int(grid["n_range"]), int(grid["n_azimuth"])
+
+        n = self._SPLIT_SIZES[split]
+        gen = torch.Generator().manual_seed(self._SPLIT_SEEDS[split])
+        self._x = torch.randn(n, c, r, d, generator=gen)
+        self._y = torch.zeros(n, 3, n_range_out, n_azimuth_out)
+        self._y[:, 0, 0, 0] = 1.0  # one positive cell/frame -> the reg term is non-trivial
+
+    def __len__(self) -> int:
+        return self._x.shape[0]
+
+    def __getitem__(self, idx: int):
+        return self._x[idx], self._y[idx]
+
+    def targets(self, idx: int):
+        return []
+
+
+def _write_stub_manifest(tmp_path, *, input_format: str = "adc", n_chirps: int = 12,
+                         n_samples: int = 64) -> Path:
+    """A minimal manifest.json (config + grid only) for `_StubRadarFrameDataset` tests."""
+    cfg = dataclasses.replace(TI_IWR1443, name=f"test_stub_{input_format}", n_chirps=n_chirps,
+                              n_samples=n_samples)
+    manifest = {
+        "config": cfg.to_dict(),
+        "grid": {"n_range": 8, "n_azimuth": 12, "max_range_m": 40.0},
+        "input_format": input_format,
+        "files": {"train": [], "val": [], "test": []},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+def test_input_dims_adc_format_is_raw_physical_channels():
+    cfg = dataclasses.replace(TI_IWR1443, name="test_input_dims_adc", n_chirps=12, n_samples=64)
+    c, r, d = train_mod._input_dims(cfg, "adc")
+    assert (c, r, d) == (2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps)
+    # regression: "rd" formula is untouched (TDM de-interleaves to the virtual array)
+    c_rd, r_rd, d_rd = train_mod._input_dims(cfg, "rd")
+    assert (c_rd, r_rd, d_rd) == (2 * cfg.n_virtual, cfg.n_samples, cfg.n_chirps_per_tx)
+
+
+def test_build_model_ssmradnet_adc_format_dims_and_mode():
+    cfg = dataclasses.replace(TI_IWR1443, name="test_build_model_adc", n_chirps=12, n_samples=64)
+    manifest = {
+        "config": cfg.to_dict(),
+        "grid": {"n_range": 8, "n_azimuth": 12, "max_range_m": 40.0},
+        "input_format": "adc",
+    }
+    model = train_mod.build_model("ssmradnet", manifest, device=torch.device("cpu"))
+    assert model.input_mode == "adc"
+    assert (model.in_channels, model.n_range_in, model.n_doppler_in) == (
+        2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps,
+    )
+    assert isinstance(model.doppler_pool, torch.nn.Identity)
+
+
+def test_build_model_fftradnet_rejects_adc_format():
+    cfg = dataclasses.replace(TI_IWR1443, name="test_build_model_adc_fft", n_chirps=12,
+                              n_samples=64)
+    manifest = {
+        "config": cfg.to_dict(),
+        "grid": {"n_range": 8, "n_azimuth": 12, "max_range_m": 40.0},
+        "input_format": "adc",
+    }
+    with pytest.raises(ValueError, match="raw-ADC"):
+        train_mod.build_model("fftradnet", manifest, device=torch.device("cpu"))
+
+
+def test_train_one_epoch_input_format_adc_with_stub_dataset(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="adc")
+    out_dir = tmp_path / "run_adc"
+
+    history = train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2,
+                               input_format="adc", out_dir=out_dir, seed=0)
+
+    assert history["epoch"] == [1]
+    for key in ("train_loss", "train_cls_loss", "train_reg_loss", "val_AP", "val_AR",
+                "val_range_rmse_m"):
+        assert len(history[key]) == 1
+        assert math.isfinite(history[key][0])
+
+    checkpoint = torch.load(out_dir / "best.pt", map_location="cpu")
+    assert checkpoint["model_name"] == "ssmradnet"
+    assert checkpoint["input_format"] == "adc"
+
+    history_json = json.loads((out_dir / "history.json").read_text())
+    assert "train_cls_loss" in history_json and "train_reg_loss" in history_json
+
+
+def test_train_threads_reg_weight_and_gamma_into_detection_loss(tmp_path, monkeypatch):
+    """`train(..., reg_weight=..., gamma=...)` must reach `detection_loss` unchanged."""
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="adc")
+
+    calls = []
+    real_detection_loss = train_mod.detection_loss
+
+    def _spy(pred, target, **kwargs):
+        calls.append(kwargs)
+        return real_detection_loss(pred, target, **kwargs)
+
+    monkeypatch.setattr(train_mod, "detection_loss", _spy)
+    train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2, input_format="adc",
+                    reg_weight=7.5, gamma=1.5, seed=0)
+
+    assert calls, "detection_loss was never called"
+    assert all(c["reg_weight"] == 7.5 and c["gamma"] == 1.5 for c in calls)
+
+
+def test_cli_threads_reg_weight_gamma_and_input_format(monkeypatch):
+    """`--reg-weight`/`--gamma`/`--input-format` reach `train()` unchanged (CLI wiring)."""
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured["manifest_path"] = manifest_path
+        captured["model_name"] = model_name
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    rc = train_mod.main([
+        "--manifest", "dummy_manifest.json", "--model", "ssmradnet",
+        "--reg-weight", "7.5", "--gamma", "1.5", "--input-format", "adc",
+    ])
+
+    assert rc == 0
+    assert captured["model_name"] == "ssmradnet"
+    assert captured["reg_weight"] == 7.5
+    assert captured["gamma"] == 1.5
+    assert captured["input_format"] == "adc"
+
+
+def test_cli_input_format_default_is_rd(monkeypatch):
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet"])
+    assert captured["input_format"] == "rd"
+    assert captured["reg_weight"] == 100.0
+    assert captured["gamma"] == 2.0

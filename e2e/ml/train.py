@@ -13,22 +13,28 @@ Artifact layout
 `train(manifest_path, model_name, ..., out_dir=None)` writes, under `out_dir`
 (default: `<manifest's directory>/runs/<model_name>/`):
   * `best.pt`      -- `torch.save({"model_state": <state_dict, cpu>, "model_name": str,
-                       "manifest": str(manifest_path), "history": dict})` for the epoch
-                       with the highest validation AP.
-  * `history.json` -- `{"epoch": [...], "train_loss": [...], "val_AP": [...],
-                        "val_AR": [...], "val_range_rmse_m": [...]}` (one entry/epoch).
+                       "input_format": str, "manifest": str(manifest_path),
+                       "history": dict})` for the epoch with the highest validation AP.
+                       `input_format` pins down which stem `evaluate()` must rebuild
+                       even if the manifest's own default has since changed.
+  * `history.json` -- `{"epoch": [...], "train_loss": [...], "train_cls_loss": [...],
+                        "train_reg_loss": [...], "val_AP": [...], "val_AR": [...],
+                        "val_range_rmse_m": [...]}` (one entry/epoch; `train_cls_loss`/
+                        `train_reg_loss` are the mean per-epoch `detection_loss` term
+                        breakdown, see that function's returned `_parts`).
 
 CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]
-        [--batch-size 8] [--lr 1e-4] [--seed 0] [--out DIR] [--eval-only CKPT]
-        [--split test]
+        [--batch-size 8] [--lr 1e-4] [--seed 0] [--reg-weight 100.0] [--gamma 2.0]
+        [--input-format rd|adc] [--out DIR] [--eval-only CKPT] [--split test]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -48,18 +54,27 @@ def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def _input_dims(cfg: RadarConfig):
-    """`(in_channels, n_range_in, n_doppler_in)` for `cfg`.
+def _input_dims(cfg: RadarConfig, input_format: str = "rd"):
+    """`(in_channels, n_range_in, n_doppler_in)` for `cfg` / `input_format`.
 
-    Matches the exact `[2*C, R, D]` contract `e2e.ml.dataset.generate_sample` /
-    `RadarFrameDataset` produce for this config (see `e2e.ml.dataset`'s module
-    docstring, and the same formula in its dry-run CLI / `test_ml_dataset.py`'s
-    `_expected_shapes`): TDM de-interleaves to the virtual array first
-    (`C = n_virtual`, `D = n_chirps_per_tx`); DDMA/single use the raw ADC
-    (`C = n_rx`, `D = n_chirps`). `R` is always `cfg.n_samples`. Deriving this from
-    the manifest's own `RadarConfig` avoids loading a dataset sample just to read
-    off its shape.
+    `input_format="rd"` (default) matches the exact `[2*C, R, D]` contract
+    `e2e.ml.dataset.generate_sample` / `RadarFrameDataset` produce for this config (see
+    `e2e.ml.dataset`'s module docstring, and the same formula in its dry-run CLI /
+    `test_ml_dataset.py`'s `_expected_shapes`): TDM de-interleaves to the virtual array
+    first (`C = n_virtual`, `D = n_chirps_per_tx`); DDMA/single use the raw ADC
+    (`C = n_rx`, `D = n_chirps`). `R` is always `cfg.n_samples`.
+
+    `input_format="adc"` is the raw, un-deinterleaved physical-channel ADC cube
+    (`e2e.ml.transforms.adc_to_input`): `(2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps)`
+    regardless of `mimo` -- there is no virtual-array formation on this path (see
+    `e2e.ml.models.ssmradnet`'s "Raw-ADC input mode" for why deinterleaving is skipped
+    deliberately, not just not-yet-implemented).
+
+    Deriving this from the manifest's own `RadarConfig` avoids loading a dataset sample
+    just to read off its shape.
     """
+    if input_format == "adc":
+        return 2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps
     if cfg.mimo == "tdm":
         c, d = cfg.n_virtual, cfg.n_chirps_per_tx
     else:
@@ -76,19 +91,34 @@ def build_model(name: str, manifest: Dict, *, device=None) -> nn.Module:
     `manifest` is a parsed `generate_dataset` manifest dict (e.g.
     `RadarFrameDataset(path).manifest` or `json.load`ed directly) -- its `"config"`
     (a `RadarConfig.to_dict()`) and `"grid"` (a `LabelGrid` dict) entries fully
-    determine the model's input/output shapes.
+    determine the model's input/output shapes. `manifest.get("input_format", "rd")`
+    selects the raw-ADC vs. range-Doppler input contract (see `_input_dims`); callers
+    that want an `input_format` other than the manifest's own default (e.g. `train()`
+    threading its own `input_format` argument) should pass a shallow copy of
+    `manifest` with `"input_format"` overridden, not mutate the caller's dict.
 
     `name` must be `"fftradnet"` or `"ssmradnet"`; for `fftradnet` on a `mimo=="ddma"`
     config, the DDMA MIMO pre-encoder is selected (`mimo_preencoder="ddma"`,
     `n_tx=cfg.n_tx`) -- otherwise the plain conv-stem path is used (appropriate for
-    TDM inputs, where a virtual array has already been formed upstream).
+    TDM inputs, where a virtual array has already been formed upstream). `fftradnet`
+    has no raw-ADC path (`e2e.ml.models.fftradnet` is RD-only); `input_format=="adc"`
+    with `name=="fftradnet"` raises `ValueError` rather than silently building a model
+    that will shape-mismatch on the first batch.
     """
     cfg = RadarConfig.from_dict(manifest["config"])
-    in_channels, n_range_in, n_doppler_in = _input_dims(cfg)
+    input_format = manifest.get("input_format", "rd")
+    if input_format not in ("rd", "adc"):
+        raise ValueError(f"input_format must be 'rd' or 'adc', got {input_format!r}")
+    in_channels, n_range_in, n_doppler_in = _input_dims(cfg, input_format)
     grid = manifest["grid"]
     n_range_out, n_azimuth_out = int(grid["n_range"]), int(grid["n_azimuth"])
 
     if name == "fftradnet":
+        if input_format == "adc":
+            raise ValueError(
+                "fftradnet has no raw-ADC input path (RD-only model); use "
+                "input_format='rd', or model='ssmradnet' for input_format='adc'"
+            )
         from e2e.ml.models import FFTRadNet
 
         kwargs = {}
@@ -100,11 +130,29 @@ def build_model(name: str, manifest: Dict, *, device=None) -> nn.Module:
     elif name == "ssmradnet":
         from e2e.ml.models import SSMRadNet
 
-        model = SSMRadNet(in_channels, n_range_in, n_doppler_in, n_range_out, n_azimuth_out)
+        model = SSMRadNet(in_channels, n_range_in, n_doppler_in, n_range_out, n_azimuth_out,
+                          input_mode=input_format)
     else:
         raise ValueError(f"unknown model {name!r}; choices: {_MODEL_NAMES}")
 
     return model.to(device if device is not None else _default_device())
+
+
+def _make_dataset(manifest_path, split: str, input_format: str) -> RadarFrameDataset:
+    """`RadarFrameDataset(manifest_path, split=split, input_format=input_format)`.
+
+    Falls back to the pre-`input_format` constructor signature (positional/`split`-only)
+    when `input_format=="rd"` and the installed `RadarFrameDataset` does not yet accept
+    the kwarg -- this keeps `train.py` working against either version of the sibling
+    `e2e.ml.dataset` shard while it lands. `input_format=="adc"` against an old
+    `RadarFrameDataset` re-raises: there is nothing sensible to fall back to.
+    """
+    try:
+        return RadarFrameDataset(manifest_path, split=split, input_format=input_format)
+    except TypeError:
+        if input_format != "rd":
+            raise
+        return RadarFrameDataset(manifest_path, split=split)
 
 
 # --------------------------------------------------------------------------------
@@ -144,8 +192,18 @@ def _load_grid(manifest: Dict):
 # --------------------------------------------------------------------------------
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
-          num_workers: int = 0) -> Dict:
+          input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
+          num_workers: Optional[int] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
+
+    `input_format` ("rd" default | "adc") selects the range-Doppler vs. raw-ADC input
+    contract (see `_input_dims` / `e2e.ml.models.ssmradnet`'s "Raw-ADC input mode");
+    it overrides the manifest's own `input_format` for both the dataset and the model
+    built from it (a manifest may hold both formats' derivable inputs -- see
+    `e2e.ml.dataset` -- so this is a legitimate per-run choice, not just a mirror of
+    the manifest). `reg_weight`/`gamma` are forwarded to `detection_loss` (see that
+    function and `e2e.ml.losses`'s module docstring for the upstream-inherited
+    defaults `reg_weight=100, gamma=2` this overrides).
 
     Returns the `history` dict (also written to `history.json`); see the module
     docstring for the artifact layout. `drop_last=False` throughout, so this still
@@ -159,50 +217,71 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         manifest = json.load(f)
     grid = _load_grid(manifest)
 
-    train_ds = RadarFrameDataset(manifest_path, split="train")
-    val_ds = RadarFrameDataset(manifest_path, split="val")
+    train_ds = _make_dataset(manifest_path, "train", input_format)
+    val_ds = _make_dataset(manifest_path, "val", input_format)
+
+    if num_workers is None:
+        # input_format=="rd" pays a real per-sample CPU FFT (adc_to_rd/tdm_deinterleave)
+        # that DataLoader prefetch workers can overlap with the GPU step (benchmarked
+        # ~4.6ms/frame, see adc_design notes); "adc" pays no such transform. Windows
+        # multiprocessing DataLoader workers use `spawn` and need the *importing*
+        # script guarded by `if __name__ == "__main__"` -- true for this module's own
+        # CLI entry point, not guaranteed for embedding callers (tests, notebooks) --
+        # and add real per-worker startup cost on the small tiers this reference
+        # script trains on, so default 0 on Windows regardless of input_format.
+        num_workers = 2 if (input_format == "rd" and sys.platform != "win32") else 0
 
     gen = torch.Generator()
     gen.manual_seed(seed)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
                                generator=gen, num_workers=num_workers)
 
-    model = build_model(model_name, manifest, device=device)
+    manifest_for_model = dict(manifest)
+    manifest_for_model["input_format"] = input_format
+    model = build_model(model_name, manifest_for_model, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     out_dir = Path(out_dir) if out_dir is not None else manifest_path.parent / "runs" / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    history: Dict[str, list] = {"epoch": [], "train_loss": [], "val_AP": [], "val_AR": [],
+    history: Dict[str, list] = {"epoch": [], "train_loss": [], "train_cls_loss": [],
+                                 "train_reg_loss": [], "val_AP": [], "val_AR": [],
                                  "val_range_rmse_m": []}
     best_ap = -1.0
     best_state = None
 
     for epoch in range(1, epochs + 1):
         model.train()
-        total_loss, n_batches = 0.0, 0
+        total_loss, total_cls, total_reg, n_batches = 0.0, 0.0, 0.0, 0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             pred = model(x)["detection"]
-            loss, _parts = detection_loss(pred, y)
+            loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += float(loss.detach().item())
+            total_cls += parts["cls"]
+            total_reg += parts["reg"]
             n_batches += 1
         train_loss = total_loss / max(n_batches, 1)
+        train_cls_loss = total_cls / max(n_batches, 1)
+        train_reg_loss = total_reg / max(n_batches, 1)
 
         val_metrics = _evaluate_split(model, val_ds, grid, device=device, batch_size=batch_size)
 
         history["epoch"].append(epoch)
         history["train_loss"].append(train_loss)
+        history["train_cls_loss"].append(train_cls_loss)
+        history["train_reg_loss"].append(train_reg_loss)
         history["val_AP"].append(val_metrics["AP"])
         history["val_AR"].append(val_metrics["AR"])
         history["val_range_rmse_m"].append(val_metrics["range_rmse_m"])
 
         print(f"[{model_name}] epoch {epoch}/{epochs}  loss={train_loss:.4f}  "
+              f"(cls={train_cls_loss:.4f} reg={train_reg_loss:.4f})  "
               f"val_AP={val_metrics['AP']:.3f}  val_AR={val_metrics['AR']:.3f}")
 
         # >= not >: on an AP tie (common when val AP saturates early on easy tiers),
@@ -216,8 +295,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
     torch.save(
-        {"model_state": best_state, "model_name": model_name, "manifest": str(manifest_path),
-         "history": history},
+        {"model_state": best_state, "model_name": model_name, "input_format": input_format,
+         "manifest": str(manifest_path), "history": history},
         out_dir / "best.pt",
     )
     with open(out_dir / "history.json", "w") as f:
@@ -230,7 +309,13 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
 # Evaluation-only entry point
 # --------------------------------------------------------------------------------
 def evaluate(manifest_path, checkpoint_path, *, split: str = "test", device=None) -> Dict:
-    """Rebuild a model from `checkpoint_path` and run `metrics.evaluate_dataset` on `split`."""
+    """Rebuild a model from `checkpoint_path` and run `metrics.evaluate_dataset` on `split`.
+
+    Uses `checkpoint.get("input_format", ...)` (falling back to the manifest's own
+    default for older checkpoints saved before this key existed) rather than the
+    manifest's current `input_format`, so a manifest edited after training still
+    reconstructs the model/dataset the checkpoint was actually trained with.
+    """
     manifest_path = Path(manifest_path)
     device = device if device is not None else _default_device()
 
@@ -239,10 +324,13 @@ def evaluate(manifest_path, checkpoint_path, *, split: str = "test", device=None
     grid = _load_grid(manifest)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model = build_model(checkpoint["model_name"], manifest, device=device)
+    input_format = checkpoint.get("input_format", manifest.get("input_format", "rd"))
+    manifest_for_model = dict(manifest)
+    manifest_for_model["input_format"] = input_format
+    model = build_model(checkpoint["model_name"], manifest_for_model, device=device)
     model.load_state_dict(checkpoint["model_state"])
 
-    ds = RadarFrameDataset(manifest_path, split=split)
+    ds = _make_dataset(manifest_path, split, input_format)
     metrics = _evaluate_split(model, ds, grid, device=device)
 
     print(f"[{checkpoint['model_name']}] {split}: AP={metrics['AP']:.3f}  "
@@ -266,6 +354,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--input-format", choices=("rd", "adc"), default="rd",
+                   help="network input contract: range-Doppler (default) or raw ADC "
+                        "(see e2e.ml.models.ssmradnet's 'Raw-ADC input mode'; fftradnet "
+                        "has no adc path)")
+    p.add_argument("--reg-weight", type=float, default=100.0,
+                   help="detection_loss regression-term weight (see e2e.ml.losses)")
+    p.add_argument("--gamma", type=float, default=2.0,
+                   help="focal-loss gamma for the classification term (0 == plain BCE)")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -285,7 +381,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.model is None:
         parser.error("--model is required when training (omit it only with --eval-only)")
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
-          seed=args.seed, out_dir=args.out)
+          seed=args.seed, out_dir=args.out, input_format=args.input_format,
+          reg_weight=args.reg_weight, gamma=args.gamma)
     return 0
 
 

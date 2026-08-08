@@ -293,6 +293,15 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
 format, smoke-test results, and model attribution/licensing notes.
 
+`python -m e2e.ml.render_scene` renders a sampled scene (bird's-eye view + the radar's
+own range-azimuth power map) to an animated GIF, e.g. a busy D2 scene with several
+moving vehicles/pedestrians crossing the field of view:
+
+![D2 scene: bird's-eye view and radar range-azimuth map](docs/media/scene_D2.gif)
+
+See also [a quiet single-target D0 scene](docs/media/scene_D0.gif) and a
+[dense multi-target D3 scene](docs/media/scene_D3.gif).
+
 ## Cookbook
 
 Where to look when you want to...

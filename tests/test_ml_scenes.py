@@ -8,7 +8,7 @@ import pytest
 
 from e2e.ml.radar_config import PRESETS, RADIAL_LIKE, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS, TierSpec, sample_scene, scene_summary
-from e2e.scenario import Scenario
+from e2e.scenario import Motion, Scenario
 
 _EPS = 1e-6
 
@@ -127,11 +127,87 @@ def test_scene_summary_counts_match_objects():
     sc = sample_scene(cfg, "D3", np.random.default_rng(7))
     summary = scene_summary(sc)
     classes = [o.object_class for o in sc.objects]
-    assert summary["classes"] == classes
+    assert "classes" not in summary  # dropped: redundant with the counts below
     assert summary["n_vehicles"] == classes.count("vehicle")
     assert summary["n_pedestrians"] == classes.count("pedestrian")
     assert summary["n_clutter"] == classes.count("scatterer")
     assert summary["n_vehicles"] + summary["n_pedestrians"] + summary["n_clutter"] == len(classes)
+
+
+def test_scene_summary_clutter_position_and_rcs():
+    cfg = TI_IWR1443
+    sc = sample_scene(cfg, "D3", np.random.default_rng(11))
+    summary = scene_summary(sc)
+    clutter_objs = [o for o in sc.objects if o.object_class == "scatterer"]
+    assert len(summary["clutter"]) == summary["n_clutter"] == len(clutter_objs)
+    for entry, obj in zip(summary["clutter"], clutter_objs):
+        assert entry["position"] == list(obj.position)
+        assert entry["rcs_dbsm"] == obj.rcs_dbsm
+        assert isinstance(entry["position"], list) and len(entry["position"]) == 3
+
+
+# --------------------------------------------------------------------------- placement retries
+
+def test_placement_attempts_recorded_and_json_safe():
+    cfg = TI_IWR1443
+    sc = sample_scene(cfg, "D3", np.random.default_rng(3))
+    summary = scene_summary(sc)
+    attempts = summary["placement_attempts"]
+    n_placed = summary["n_vehicles"] + summary["n_pedestrians"]
+    assert isinstance(attempts, int)
+    # every placement uses >= 1 attempt (the successful one), so the total is at
+    # least the number of vehicles/pedestrians placed under the separation constraint.
+    assert attempts >= n_placed
+    assert sc.metadata["placement_attempts"] == attempts
+
+
+def test_placement_attempts_none_for_hand_built_scenario():
+    sc = Scenario(name="hand_built")
+    assert scene_summary(sc)["placement_attempts"] is None
+
+
+# --------------------------------------------------------------------------- multi-frame motion
+
+def test_sample_scene_single_frame_default_keeps_static_motion():
+    cfg = TI_IWR1443
+    sc = sample_scene(cfg, "D1", np.random.default_rng(20))
+    assert sc.num_frames == 1
+    for obj in sc.objects:
+        if obj.object_class in ("vehicle", "pedestrian"):
+            assert obj.motion.is_static  # single-instant sample: no Motion track needed
+
+
+def test_sample_scene_n_frames_gives_moving_objects_a_track():
+    cfg = TI_IWR1443
+    n_frames = 5
+    sc = sample_scene(cfg, "D1", np.random.default_rng(21), n_frames=n_frames)
+    assert sc.num_frames == n_frames
+
+    from e2e.environment.motion import resolve_motion
+
+    dt = 1.0 / cfg.frame_rate_hz
+    moving_checked = 0
+    for obj in sc.objects:
+        if obj.object_class not in ("vehicle", "pedestrian"):
+            continue
+        track = resolve_motion(obj.position, obj.motion, n_frames)
+        assert track.shape == (n_frames, 3)
+        vel = np.asarray(obj.velocity_mps, dtype=float)
+        if np.linalg.norm(vel) < 1e-9:
+            continue  # a sampled-zero-speed object legitimately has a static track
+        moving_checked += 1
+        # constant-velocity track: frame t sits at base + t * (vel * dt).
+        expected = track[0] + np.arange(n_frames)[:, None] * (vel * dt)[None, :]
+        assert np.allclose(track, expected, atol=1e-6)
+    assert moving_checked > 0  # D1 with this seed has at least one genuinely moving object
+
+
+def test_sample_scene_n_frames_one_matches_default():
+    """`n_frames=1` (explicit) must be identical to the default (no motion track)."""
+    cfg = TI_IWR1443
+    sc1 = sample_scene(cfg, "D2", np.random.default_rng(4))
+    sc2 = sample_scene(cfg, "D2", np.random.default_rng(4), n_frames=1)
+    assert sc1.to_json() == sc2.to_json()
 
 
 # --------------------------------------------------------------------------- misc

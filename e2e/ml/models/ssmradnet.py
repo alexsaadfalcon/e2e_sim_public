@@ -49,6 +49,35 @@ Documented deviations
 * Residual SSM stages use pre-LayerNorm (upstream adds the raw block output); this only
   affects trainability, not the architecture.
 
+Raw-ADC input mode (`input_mode="adc"`)
+----------------------------------------
+`e2e.ml.dataset`'s `input_format="adc"` (see `e2e.ml.transforms.adc_to_input`) serves the
+raw, un-deinterleaved physical-channel ADC cube `[2*n_rx, n_samples, n_chirps]` instead of
+the post-RD-FFT tensor described above. This restores upstream's literal "no FFT" premise
+for the fast axis (it now scans real ADC samples, not range bins) -- but the RD stem above
+is *wrong* for it: `doppler_pool` average-pools the chirp axis *before* either SSM has seen
+it, which for RD is harmless (Doppler bins are already FFT-correlated) but for raw ADC
+would average together chirps before `slow_ssm` ever gets to learn their sequence -- exactly
+backwards from "let the SSM learn the raw structure". `input_mode="adc"` therefore selects
+a different stem (`_ADCStem`, pointwise channel embed, no spatial mixing) and disables the
+pre-scan chirp pooling entirely (`doppler_pool` becomes the identity, achieved by setting
+`n_doppler_tokens == n_doppler_in`) so `slow_ssm` scans the *full*, unpooled chirp sequence;
+pooling only happens after a scan has run (the existing `range_pool`-after-`fast_ssm`
+pattern, unchanged, and `slow_ssm`'s own post-scan `.mean(dim=1)` collapse), matching
+upstream's intent that pooling never precedes the SSM that is supposed to model that axis.
+
+Honest fork from upstream, not resolved by this code: upstream's raw ADC is **DDMA** (all
+TX transmit every chirp, so consecutive chirps are simultaneous-TX snapshots); this
+simulator's TDM MIMO config fires **one TX per chirp, round-robin** (chirp `c` was
+illuminated by TX `c % n_tx` only -- see `e2e.ml.transforms.tdm_deinterleave`'s docstring).
+`input_mode="adc"` does **not** deinterleave (deinterleaving is itself a hand-engineered
+MIMO-demux step that would defeat the "raw signal" premise this input mode exists to
+serve), so for TDM configs the slow axis `slow_ssm` scans is TX-interleaved: it must learn
+the `n_tx`-chirp periodicity itself from raw, abruptly-alternating-aperture data, a strictly
+harder (and physically different) inductive-bias problem than DDMA's simultaneous-every-
+chirp raw ADC. This is flagged, not solved: whether the extra difficulty is worth the
+"honest" raw-signal input is an open research question for this port.
+
 Output contract (shared with `e2e.ml.models.fftradnet`)
 -------------------------------------------------------
 `forward` returns `{"detection": [B, 3, n_range_out, n_azimuth_out]}` matching
@@ -99,23 +128,56 @@ class _ChannelMix(nn.Module):
         return x + self.fc2(F.silu(self.fc1(self.norm(x))))
 
 
+class _ADCStem(nn.Module):
+    """Pointwise (1x1) channel embed for raw-ADC input -- no spatial mixing at all.
+
+    Unlike the RD stem's `3x3` `Conv2d` (which deliberately smooths neighbouring
+    range/Doppler bins, already-correlated FFT output), raw ADC samples/chirps carry no
+    such correlation to exploit -- a `3x3` conv would just be an uninvited, hand-rolled
+    local-smoothing prior with no upstream equivalent (upstream's fast SSM sees each
+    chirp's raw samples untouched). `1x1` embeds each `(sample, chirp)` cell's channel
+    vector independently, leaving all fast/slow-axis structure for the two SSM scans
+    to find.
+    """
+
+    def __init__(self, in_channels: int, d_model: int):
+        super().__init__()
+        self.embed = nn.Sequential(
+            nn.Conv2d(in_channels, d_model, kernel_size=1, bias=False),
+            nn.BatchNorm2d(d_model),
+            nn.SiLU(),
+        )
+
+    def forward(self, x):
+        return self.embed(x)
+
+
 class SSMRadNet(nn.Module):
-    """Two-scale selective-SSM radar detector on range-Doppler input.
+    """Two-scale selective-SSM radar detector on range-Doppler *or* raw-ADC input.
 
     Parameters
     ----------
     in_channels, n_range_in, n_doppler_in
-        Shape of the input tensor `[B, in_channels, n_range_in, n_doppler_in]` (the
-        `[2*n_rx, range_bin, doppler_bin]` layout produced by `e2e.ml.transforms`).
+        Shape of the input tensor `[B, in_channels, n_range_in, n_doppler_in]`. For
+        `input_mode="rd"` (default) this is the `[2*n_rx, range_bin, doppler_bin]` layout
+        produced by `e2e.ml.transforms.rd_to_input`; for `input_mode="adc"` it is the raw
+        `[2*n_rx, n_samples, n_chirps]` layout produced by `e2e.ml.transforms.adc_to_input`
+        -- same tensor rank/argument order, different physical axis meaning (samples
+        instead of range bins, chirps instead of Doppler bins). See "Raw-ADC input mode"
+        in the module docstring.
     n_range_out, n_azimuth_out
         Detection-map geometry (see `e2e.ml.labels.LabelGrid`).
     d_model, d_state, n_layers_fast, n_layers_slow
         SSM width / state size / depth of the range and Doppler scan stages.
     backend
         Forwarded to `MambaBlock` ("auto" | "torch" | "mamba_ssm").
+    input_mode
+        `"rd"` (default, current/original behavior) or `"adc"` (see module docstring).
     n_doppler_tokens
-        Doppler bins are average-pooled to at most this many tokens at the stem (no-op if
-        `n_doppler_in` is already smaller). See "Documented deviations".
+        `input_mode="rd"` only: Doppler bins are average-pooled to at most this many
+        tokens at the stem (no-op if `n_doppler_in` is already smaller; see "Documented
+        deviations"). Ignored for `input_mode="adc"`, where the pre-scan pool is disabled
+        outright (see "Raw-ADC input mode").
     head_channels
         Width of the conv decoder that produces the detection map.
     """
@@ -133,6 +195,7 @@ class SSMRadNet(nn.Module):
         n_layers_fast: int = 2,
         n_layers_slow: int = 2,
         backend: str = "auto",
+        input_mode: str = "rd",
         n_doppler_tokens: int = 16,
         head_channels: int = 32,
     ):
@@ -144,6 +207,8 @@ class SSMRadNet(nn.Module):
         ):
             if int(value) <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+        if input_mode not in ("rd", "adc"):
+            raise ValueError(f"input_mode must be 'rd' or 'adc', got {input_mode!r}")
 
         self.in_channels = int(in_channels)
         self.n_range_in = int(n_range_in)
@@ -151,15 +216,24 @@ class SSMRadNet(nn.Module):
         self.n_range_out = int(n_range_out)
         self.n_azimuth_out = int(n_azimuth_out)
         self.d_model = int(d_model)
-        self.n_doppler_tokens = min(int(n_doppler_tokens), self.n_doppler_in)
+        self.input_mode = input_mode
 
-        # ---- stem: embed channels, group the Doppler axis ------------------------------
-        self.stem = nn.Sequential(
-            nn.Conv2d(self.in_channels, self.d_model, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(self.d_model),
-            nn.SiLU(),
-        )
-        self.doppler_pool = nn.AdaptiveAvgPool2d((self.n_range_in, self.n_doppler_tokens))
+        # ---- stem: embed channels; RD groups the Doppler axis, ADC pools nothing -------
+        if input_mode == "rd":
+            self.stem = nn.Sequential(
+                nn.Conv2d(self.in_channels, self.d_model, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(self.d_model),
+                nn.SiLU(),
+            )
+            self.n_doppler_tokens = min(int(n_doppler_tokens), self.n_doppler_in)
+            self.doppler_pool = nn.AdaptiveAvgPool2d((self.n_range_in, self.n_doppler_tokens))
+        else:  # "adc"
+            self.stem = _ADCStem(self.in_channels, self.d_model)
+            # No pre-scan chirp pooling: n_doppler_tokens == n_doppler_in makes
+            # `doppler_pool` a size-preserving (identity) average pool, so `slow_ssm`
+            # below scans the full, unpooled chirp sequence -- see "Raw-ADC input mode".
+            self.n_doppler_tokens = self.n_doppler_in
+            self.doppler_pool = nn.Identity()
 
         # ---- two SSM scales + channel mixing -------------------------------------------
         self.fast_ssm = _SSMStage(self.d_model, d_state, n_layers_fast, backend)   # scans range
