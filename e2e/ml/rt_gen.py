@@ -111,6 +111,21 @@ CLI
                             [--target sphere|box] [--no-diffuse]
 runs `doppler_error_study` and prints the native-vs-re-trace table. Use
 `--target box --no-diffuse` for the deterministic (Monte-Carlo-free) comparison.
+
+Ground-rest placement / local (unshipped) asset library
+---------------------------------------------------------
+`object_local_height_m` reports each object's unscaled mesh z-extent (bbox height) --
+pure constants/cheap file parsing, no Sionna needed -- so `e2e.ml.rt_scenes` can place
+every object's CENTER at `0.5 * height * scaling` above the ground. That matters because
+`SceneObject.position`'s setter (Sionna) re-centers the mesh's AABB on the given point,
+so naively placing every object at world z=0 buries the bottom half of it below the
+ground plane. `LOCAL_ASSET_SPECS` registers a small library of higher-fidelity meshes
+that live on this workstation only (real Mustang/Charger/semi STLs, an SBR+ pedestrian
+OBJ) -- NOT shipped with the repo. Each is loaded from a directory named by an env var
+(overriding a machine-specific default constant) and converted to a ground-aligned PLY
+in a temp cache dir; if the source file is not found (any other machine, CI), the asset
+degrades gracefully to a same-category Sionna-bundled mesh. See `ASSET_LICENSES` --
+every local asset is recorded with an explicit UNKNOWN-provenance license status.
 """
 
 from __future__ import annotations
@@ -118,11 +133,12 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import struct
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -182,6 +198,281 @@ ASSET_LICENSES = {
                   "Slated for replacement by a CC0 human mesh once one is sourced.",
     },
 }
+
+# --------------------------------------------------------------------------------
+# Ground-rest placement: unscaled local mesh z-extents (bbox height), so a caller can
+# compute "where must this object's CENTER be so its bbox rests on z=0 after Sionna's
+# SceneObject.position setter re-centers it" WITHOUT a ray tracer (see the module
+# docstring). Sphere/box are Sionna's own primitives; measured once via
+# `sionna.rt.load_mesh(...).bbox()` (see tests/test_ml_rt_meshes.py's gated mesh-scale
+# checks for the same numbers from a different angle). Cars share one geometry across
+# all of `CAR_ASSET_NAMES` (see that constant's docstring).
+# --------------------------------------------------------------------------------
+SPHERE_LOCAL_HEIGHT_M = 1.995   # rt.scene.sphere bbox z-extent (unit sphere, diameter ~2)
+BOX_LOCAL_HEIGHT_M = 5.0        # Sionna's bundled box mesh (see _box_mesh_path)
+CAR_LOCAL_HEIGHT_M = 1.5        # low_poly_car mesh, shared by every CAR_ASSET_NAMES entry
+# Procedural pedestrian placeholder: derived exactly from _pedestrian_mesh_path's own
+# construction (legs z in [0, 0.85], torso to 1.50, head sphere top at 1.50+0.12=1.62...
+# no: head centre 1.50+0.12=1.62, radius 0.12 -> top 1.74) -- see that function.
+PEDESTRIAN_LOCAL_HEIGHT_M = 1.74
+
+
+def object_local_height_m(kind, asset: Optional[str] = None) -> float:
+    """Unscaled local z-extent (bbox height, metres) of the mesh `SceneObject.scaling`
+    multiplies -- pure constants / cheap local file parsing, no Sionna needed. Callers
+    compute a ground-resting placement as `centre_z = 0.5 * object_local_height_m(...) *
+    scaling` (world z=0 ground; see the module docstring). Raises `ValueError` for an
+    unrecognized (kind, asset) combination.
+    """
+    from e2e.scenario import ObjectKind
+
+    if kind == ObjectKind.SPHERE:
+        return SPHERE_LOCAL_HEIGHT_M
+    if kind == ObjectKind.BOX:
+        return BOX_LOCAL_HEIGHT_M
+    if asset == PEDESTRIAN_ASSET_NAME:
+        return PEDESTRIAN_LOCAL_HEIGHT_M
+    if asset in CAR_ASSET_NAMES:
+        return CAR_LOCAL_HEIGHT_M
+    if asset in LOCAL_ASSET_SPECS:
+        loaded = _load_local_asset(asset)
+        if loaded is not None:
+            return loaded[1]
+        # Source file absent on this machine: `_object_mesh` will ALSO fall back to a
+        # same-category Sionna mesh at load time, so fall back to ITS height here too
+        # (keeps placement and the mesh actually loaded consistent).
+        return (CAR_LOCAL_HEIGHT_M if LOCAL_ASSET_SPECS[asset].category == "vehicle"
+                else PEDESTRIAN_LOCAL_HEIGHT_M)
+    raise ValueError(f"no known local height for kind={kind!r} asset={asset!r}")
+
+
+# --------------------------------------------------------------------------------
+# Local (unshipped) asset library: higher-fidelity vehicle/pedestrian meshes that exist
+# only on this workstation (see the module docstring). Each entry names an env var
+# (falling back to a machine-specific default constant) pointing at the directory that
+# holds it; if the file is not found there, every consumer degrades gracefully to a
+# Sionna-bundled mesh -- the repo works unmodified for anyone else and in CI.
+#
+# CRITICAL: none of these binaries are committed to this repository. Provenance/license
+# for each is UNKNOWN (see ASSET_LICENSES below) -- a user decision is needed before any
+# of them ship in a public dataset or distribution.
+# --------------------------------------------------------------------------------
+LOCAL_ASSET_DIR_ENV_AVX_MODELS = "E2E_ML_LOCAL_ASSET_DIR_AVX_MODELS"
+LOCAL_ASSET_DIR_ENV_AVX_STLS = "E2E_ML_LOCAL_ASSET_DIR_AVX_STLS"
+LOCAL_ASSET_DIR_ENV_SBR = "E2E_ML_LOCAL_ASSET_DIR_SBR"
+
+# Machine-specific defaults (this workstation only); env vars above override them.
+_DEFAULT_LOCAL_ASSET_DIRS: Dict[str, str] = {
+    LOCAL_ASSET_DIR_ENV_AVX_MODELS: r"C:\Users\asf3\workspace\e2e_sim\avx\models",
+    LOCAL_ASSET_DIR_ENV_AVX_STLS: r"C:\Users\asf3\Documents\avx\stls",
+    LOCAL_ASSET_DIR_ENV_SBR: (r"C:\Users\asf3\Documents\pyaedt_backups\pyaedt_prj_GI6"
+                              r"\doppler.pyaedt\sbr_array_32x32"),
+}
+
+
+@dataclass(frozen=True)
+class LocalAssetSpec:
+    dir_env: str            # env var (falls back to _DEFAULT_LOCAL_ASSET_DIRS[dir_env])
+    filename: str            # filename inside that directory
+    unit_scale: float        # multiply raw file vertex coordinates by this to get metres
+    category: str            # "vehicle" | "pedestrian"
+
+
+# Inventory (measured empirically -- see the campaign report for the full table of
+# every candidate file inspected, including ones NOT wired in here):
+#  * mustang-no-wheels.stl: already metres (bbox ~4.77 x 1.81 x 1.24 m -- a real Mustang
+#    is ~4.79 m long); unit_scale=1.0.
+#  * tractor-trailor.stl: already metres (~16.48 x 3.12 x 4.00 m, a real semi); heavier/
+#    longer than a "car" but still a real, distinct vehicle mesh; unit_scale=1.0.
+#  * dodgebody_repaired.stl: NOT metres -- raw bbox ~76.9 x 212.6 x 53.25 (unitless CAD
+#    units); those numbers only make automotive sense in INCHES (0.0254 m/in ->
+#    ~1.95 x 5.40 x 1.35 m, matching a 2013 Dodge Charger's real ~5.03 m length /
+#    ~1.9 m width once axis identity is sorted out); unit_scale=0.0254.
+#  * person_Unnamed_1.obj (from the SBR+ 32x32 array project): already metres (its
+#    scene's bike_wheel.obj bbox is a ~0.62 m diameter, matching a real bicycle wheel,
+#    which calibrates the scene's units). Height 1.39 m -- this is a seated/crouched
+#    cyclist pose, NOT a standing 1.7 m pedestrian; unit_scale=1.0 (kept physically
+#    accurate to the source rather than force-scaled to a standing height, which would
+#    distort the pose). Flagged as a caveat, not silently "fixed".
+LOCAL_ASSET_SPECS: Dict[str, LocalAssetSpec] = {
+    "local_mustang": LocalAssetSpec(LOCAL_ASSET_DIR_ENV_AVX_MODELS,
+                                    "mustang-no-wheels.stl", 1.0, "vehicle"),
+    "local_tractor_trailer": LocalAssetSpec(LOCAL_ASSET_DIR_ENV_AVX_MODELS,
+                                            "tractor-trailor.stl", 1.0, "vehicle"),
+    "local_dodge_charger": LocalAssetSpec(LOCAL_ASSET_DIR_ENV_AVX_STLS,
+                                          "dodgebody_repaired.stl", 0.0254, "vehicle"),
+    "local_pedestrian_rider": LocalAssetSpec(LOCAL_ASSET_DIR_ENV_SBR,
+                                             "person_Unnamed_1.obj", 1.0, "pedestrian"),
+}
+LOCAL_VEHICLE_ASSET_NAMES = tuple(n for n, s in LOCAL_ASSET_SPECS.items()
+                                  if s.category == "vehicle")
+LOCAL_PEDESTRIAN_ASSET_NAMES = tuple(n for n, s in LOCAL_ASSET_SPECS.items()
+                                     if s.category == "pedestrian")
+
+for _name, _spec in LOCAL_ASSET_SPECS.items():
+    ASSET_LICENSES[_name] = {
+        "source": f"local file {_spec.filename!r} (dir env {_spec.dir_env}, default "
+                  f"{_DEFAULT_LOCAL_ASSET_DIRS[_spec.dir_env]!r}) -- NOT bundled with "
+                  "this repository, NOT committed",
+        "license": "UNKNOWN -- local file, provenance not established; must be cleared "
+                  "before any public distribution",
+        "category": _spec.category,
+        "unit_scale_to_metres": _spec.unit_scale,
+    }
+del _name, _spec
+
+
+def _local_asset_dir(dir_env: str) -> Optional[str]:
+    """Env var override, else the machine-specific default; `None` if neither is set."""
+    return os.environ.get(dir_env) or _DEFAULT_LOCAL_ASSET_DIRS.get(dir_env)
+
+
+def _local_asset_source_path(name: str) -> Optional[str]:
+    """Resolved source file path for a `LOCAL_ASSET_SPECS` entry, or `None` if its
+    directory is unknown or the file isn't there (graceful degrade)."""
+    spec = LOCAL_ASSET_SPECS.get(name)
+    if spec is None:
+        return None
+    d = _local_asset_dir(spec.dir_env)
+    if not d:
+        return None
+    path = os.path.join(d, spec.filename)
+    return path if os.path.isfile(path) else None
+
+
+def _read_stl(path: str) -> Tuple[List[tuple], List[tuple]]:
+    """`(verts, faces)` from an STL file, binary or ASCII. Uses `trimesh` if installed
+    (handles more edge cases); otherwise a minimal hand-rolled parser for both variants
+    (no third-party mesh library is a hard dependency of this module)."""
+    try:
+        import trimesh
+        mesh = trimesh.load(path, force="mesh", process=False)
+        return [tuple(map(float, v)) for v in mesh.vertices], \
+               [tuple(map(int, f)) for f in mesh.faces]
+    except ImportError:
+        pass
+
+    with open(path, "rb") as f:
+        header = f.read(80)
+        count_bytes = f.read(4)
+    is_binary = False
+    if len(count_bytes) == 4 and not header.lstrip().lower().startswith(b"solid"):
+        is_binary = True
+    elif len(count_bytes) == 4:
+        # Some binary STLs still start with "solid" (a legal but confusing header) --
+        # disambiguate by checking whether the declared triangle count matches the
+        # file size exactly (84-byte header/count + 50 bytes/triangle).
+        n_tri = struct.unpack("<I", count_bytes)[0]
+        is_binary = os.path.getsize(path) == 84 + n_tri * 50
+    return _read_stl_binary(path) if is_binary else _read_stl_ascii(path)
+
+
+def _read_stl_binary(path: str) -> Tuple[List[tuple], List[tuple]]:
+    verts: List[tuple] = []
+    faces: List[tuple] = []
+    with open(path, "rb") as f:
+        f.read(80)
+        n_tri = struct.unpack("<I", f.read(4))[0]
+        for i in range(n_tri):
+            data = f.read(50)
+            if len(data) < 50:
+                break
+            vals = struct.unpack("<12f", data[:48])   # normal(3) + 3 vertices(3 each)
+            base = len(verts)
+            for k in range(3):
+                verts.append(tuple(vals[3 + 3 * k: 6 + 3 * k]))
+            faces.append((base, base + 1, base + 2))
+    return verts, faces
+
+
+def _read_stl_ascii(path: str) -> Tuple[List[tuple], List[tuple]]:
+    verts: List[tuple] = []
+    faces: List[tuple] = []
+    face_verts: List[tuple] = []
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("vertex"):
+                p = line.split()
+                face_verts.append((float(p[1]), float(p[2]), float(p[3])))
+                if len(face_verts) == 3:
+                    base = len(verts)
+                    verts.extend(face_verts)
+                    faces.append((base, base + 1, base + 2))
+                    face_verts = []
+    return verts, faces
+
+
+def _read_obj(path: str) -> Tuple[List[tuple], List[tuple]]:
+    """`(verts, faces)` from a Wavefront OBJ file: vertex positions + triangulated
+    faces (fan triangulation for polygons with > 3 vertices). Uses `trimesh` if
+    installed, else a minimal parser (positions/faces only -- normals, UVs, materials
+    and multiple objects-per-file are ignored, which is fine for our bbox/placement
+    purposes)."""
+    try:
+        import trimesh
+        mesh = trimesh.load(path, force="mesh", process=False)
+        return [tuple(map(float, v)) for v in mesh.vertices], \
+               [tuple(map(int, f)) for f in mesh.faces]
+    except ImportError:
+        pass
+
+    verts: List[tuple] = []
+    faces: List[tuple] = []
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            if line.startswith("v "):
+                p = line.split()
+                verts.append((float(p[1]), float(p[2]), float(p[3])))
+            elif line.startswith("f "):
+                idx = []
+                for tok in line.split()[1:]:
+                    vi = int(tok.split("/")[0])
+                    idx.append(vi - 1 if vi > 0 else len(verts) + vi)
+                for k in range(1, len(idx) - 1):
+                    faces.append((idx[0], idx[k], idx[k + 1]))
+    return verts, faces
+
+
+_local_asset_cache: Dict[str, Tuple[str, float]] = {}
+
+
+def _load_local_asset(name: str) -> Optional[Tuple[str, float]]:
+    """Convert (once per process) a `LOCAL_ASSET_SPECS` entry into a ground-aligned,
+    metre-scaled PLY cached under a temp dir. Returns `(ply_path, height_m)`, or `None`
+    if the source file isn't found on this machine or fails to parse (graceful
+    degrade -- callers fall back to a Sionna-bundled mesh)."""
+    if name in _local_asset_cache:
+        return _local_asset_cache[name]
+    spec = LOCAL_ASSET_SPECS.get(name)
+    if spec is None:
+        return None
+    src = _local_asset_source_path(name)
+    if src is None:
+        return None
+    try:
+        ext = os.path.splitext(src)[1].lower()
+        verts, faces = _read_obj(src) if ext == ".obj" else _read_stl(src)
+        if not verts or not faces:
+            return None
+        s = float(spec.unit_scale)
+        zs_scaled = [v[2] * s for v in verts]
+        z_min = min(zs_scaled)
+        # Rebase so the mesh's OWN local bbox already rests at z=0 (feet/wheels-down) --
+        # matches _pedestrian_mesh_path's convention and makes the cached ply's frame
+        # intuitive; only the SPAN (not this offset) drives ground-rest placement (see
+        # object_local_height_m), but a self-consistent local frame is good hygiene.
+        scaled_verts = [(v[0] * s, v[1] * s, v[2] * s - z_min) for v in verts]
+        height = max(zs_scaled) - z_min
+        d = tempfile.mkdtemp(prefix="e2e-rt-local-asset-")
+        ply_path = os.path.join(d, f"{name}.ply")
+        _write_ply(ply_path, scaled_verts, faces)
+    except (OSError, ValueError, IndexError, struct.error):
+        return None
+    result = (ply_path, float(height))
+    _local_asset_cache[name] = result
+    return result
+
 
 # "flat" base scene: a single large ground rectangle. Mitsuba's built-in `rectangle`
 # shape is the [-1,1]^2 unit plane in z=0 with a +z normal, so one scale transform is
@@ -466,6 +757,15 @@ def _object_mesh(rt, obj):
         return _pedestrian_mesh_path()
     if obj.asset in CAR_ASSET_NAMES:
         return _car_mesh_path(rt, obj.asset)
+    if obj.asset in LOCAL_ASSET_SPECS:
+        loaded = _load_local_asset(obj.asset)
+        if loaded is not None:
+            return loaded[0]
+        # Source file not found on this machine: degrade to a same-category
+        # Sionna-bundled mesh (see the module docstring / LOCAL_ASSET_SPECS).
+        spec = LOCAL_ASSET_SPECS[obj.asset]
+        return _pedestrian_mesh_path() if spec.category == "pedestrian" \
+            else _car_mesh_path(rt, "low_poly_car")
     return obj.asset
 
 

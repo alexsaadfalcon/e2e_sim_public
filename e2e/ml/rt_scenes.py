@@ -52,7 +52,9 @@ from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 
-from e2e.ml.rt_gen import CAR_ASSET_NAMES, PEDESTRIAN_ASSET_NAME
+from e2e.ml.rt_gen import (CAR_ASSET_NAMES, LOCAL_PEDESTRIAN_ASSET_NAMES,
+                          LOCAL_VEHICLE_ASSET_NAMES, PEDESTRIAN_ASSET_NAME,
+                          object_local_height_m)
 from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 
 # Placement envelope: targets are scattered in the radar's forward FOV, matching
@@ -173,7 +175,8 @@ def _n_in(rng: np.random.Generator, lo_hi: Tuple[int, int]) -> int:
 
 def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, seed: int = 0,
                            num_frames: int = 2,
-                           radar_position: Optional[Tuple[float, float, float]] = None) -> Scenario:
+                           radar_position: Optional[Tuple[float, float, float]] = None,
+                           use_local_assets: bool = False) -> Scenario:
     """Draw a deterministic RT `Scenario` at difficulty `tier`.
 
     `frame_idx`/`seed` together select the draw (see the module docstring's
@@ -189,8 +192,21 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     tier's base scene has one (currently "munich"), else the origin (`(0, 0, 1.5)`) --
     see that dict's docstring for why a built-in city scene needs a scene-specific
     default. The radar's boresight is always +x (`look_at` = position + (1, 0, 0)) and
-    every object's position is that local (`dx`, `dy`, `0`) offset translated by
-    `radar_position`'s (x, y) -- NOT rotated, since boresight never varies.
+    every object's (x, y) position is that local (`dx`, `dy`) offset translated by
+    `radar_position`'s (x, y) -- NOT rotated, since boresight never varies. Every
+    object's z is `0.5 * object_local_height_m(...) * scaling` (see that function's
+    docstring): Sionna's `SceneObject.position` setter re-centers the mesh's own AABB
+    on the given point, so this is the centre height that makes the bbox rest ON the
+    z=0 ground plane rather than sink half its height below it.
+
+    `use_local_assets`: when True, cars/pedestrians are drawn from an EXPANDED pool
+    that also includes `e2e.ml.rt_gen.LOCAL_VEHICLE_ASSET_NAMES` /
+    `LOCAL_PEDESTRIAN_ASSET_NAMES` -- higher-fidelity meshes that live only on this
+    workstation (see that module's docstring); on any other machine those names
+    degrade gracefully to a Sionna-bundled mesh at `build_rt_scene` time. Defaults to
+    False so every existing caller/test (including this module's own determinism
+    tests) keeps drawing from exactly `CAR_ASSET_NAMES`/`PEDESTRIAN_ASSET_NAME`, byte-
+    for-byte unchanged.
 
     Raises `KeyError` for an unknown tier name (see `RT_DIFFICULTY_TIERS`).
     """
@@ -202,8 +218,13 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     rx0, ry0, rz0 = radar_position
     radar_look_at = (rx0 + 1.0, ry0, rz0)
 
-    def _abs_pos(dx: float, dy: float) -> Tuple[float, float, float]:
-        return (rx0 + dx, ry0 + dy, 0.0)
+    def _ground_pos(dx: float, dy: float, kind, asset: Optional[str], scaling: float) -> Tuple[float, float, float]:
+        z = 0.5 * object_local_height_m(kind, asset) * float(scaling)
+        return (rx0 + dx, ry0 + dy, z)
+
+    car_pool = CAR_ASSET_NAMES + LOCAL_VEHICLE_ASSET_NAMES if use_local_assets else CAR_ASSET_NAMES
+    pedestrian_pool = ((PEDESTRIAN_ASSET_NAME,) + LOCAL_PEDESTRIAN_ASSET_NAMES
+                       if use_local_assets else (PEDESTRIAN_ASSET_NAME,))
 
     objects = []
 
@@ -211,40 +232,46 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         return Motion(velocity=vel) if num_frames > 1 else Motion()
 
     for i in range(_n_in(rng, spec.n_spheres)):
-        pos = _abs_pos(*_sample_local_offset(rng))
+        dx, dy = _sample_local_offset(rng)
         vel = _sample_velocity(rng, spec.speed_mps)
+        pos = _ground_pos(dx, dy, ObjectKind.SPHERE, None, 0.5)
         objects.append(SceneObject(
             name=f"sphere-{i}", kind=ObjectKind.SPHERE, position=pos, scaling=0.5,
             material="metal", object_class="vehicle", motion=_motion(vel),
         ))
 
     for i in range(_n_in(rng, spec.n_cars)):
-        pos = _abs_pos(*_sample_local_offset(rng))
+        dx, dy = _sample_local_offset(rng)
         vel = _sample_velocity(rng, spec.speed_mps)
-        asset = CAR_ASSET_NAMES[int(rng.integers(0, len(CAR_ASSET_NAMES)))]
+        asset = car_pool[int(rng.integers(0, len(car_pool)))]
+        pos = _ground_pos(dx, dy, ObjectKind.MESH, asset, 1.0)
         objects.append(SceneObject(
             name=f"car-{i}", kind=ObjectKind.MESH, asset=asset, position=pos,
             scaling=1.0, material="metal", object_class="vehicle", motion=_motion(vel),
         ))
 
     for i in range(_n_in(rng, spec.n_pedestrians)):
-        pos = _abs_pos(*_sample_local_offset(rng))
+        dx, dy = _sample_local_offset(rng)
         # pedestrians are slower than vehicles regardless of the tier's vehicle range.
         vel = _sample_velocity(rng, (0.0, min(2.0, spec.speed_mps[1])))
+        asset = pedestrian_pool[int(rng.integers(0, len(pedestrian_pool)))]
+        pos = _ground_pos(dx, dy, ObjectKind.MESH, asset, 1.0)
         objects.append(SceneObject(
-            name=f"pedestrian-{i}", kind=ObjectKind.MESH, asset=PEDESTRIAN_ASSET_NAME,
+            name=f"pedestrian-{i}", kind=ObjectKind.MESH, asset=asset,
             position=pos, scaling=1.0, material="skin", object_class="pedestrian",
             motion=_motion(vel),
         ))
 
     for i in range(_n_in(rng, spec.n_clutter_boxes)):
-        pos = _abs_pos(*_sample_local_offset(rng))
+        dx, dy = _sample_local_offset(rng)
         # Sionna's bundled box mesh is a 10x10x5 m primitive (measured from its own
         # bbox) -- scaling by _CLUTTER_BOX_SCALING gives ~3-6 m "parked container"
         # sized clutter, not (unscaled) building-sized blocks.
+        scaling = float(rng.uniform(*_CLUTTER_BOX_SCALING))
+        pos = _ground_pos(dx, dy, ObjectKind.BOX, None, scaling)
         objects.append(SceneObject(
             name=f"clutter-box-{i}", kind=ObjectKind.BOX, position=pos,
-            scaling=float(rng.uniform(*_CLUTTER_BOX_SCALING)), material="concrete",
+            scaling=scaling, material="concrete",
             object_class="scatterer", motion=Motion(),
         ))
 
@@ -268,7 +295,7 @@ def tier_summary(scenario: Scenario) -> dict:
         "base_scene": scenario.base_scene,
         "n_spheres": sum(1 for o in scenario.objects if o.kind == ObjectKind.SPHERE),
         "n_cars": sum(1 for o in scenario.objects
-                      if o.kind == ObjectKind.MESH and o.asset in CAR_ASSET_NAMES),
+                      if o.kind == ObjectKind.MESH and o.object_class == "vehicle"),
         "n_pedestrians": sum(1 for o in scenario.objects if o.object_class == "pedestrian"),
         "n_clutter_boxes": sum(1 for o in scenario.objects if o.kind == ObjectKind.BOX),
     }

@@ -24,7 +24,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.rt_gen import ASSET_LICENSES, CAR_ASSET_NAMES, PEDESTRIAN_ASSET_NAME
+from e2e.ml.rt_gen import (ASSET_LICENSES, CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
+                          LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
+                          PEDESTRIAN_ASSET_NAME, object_local_height_m)
 from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario, tier_summary
 from e2e.scenario import ObjectKind
 
@@ -164,6 +166,79 @@ def test_car_objects_reference_a_real_bundled_asset_name():
 
 
 # --------------------------------------------------------------------------------
+# Ground-rest placement (ungated -- object_local_height_m/build_rt_tier_scenario's
+# z-placement math is pure Python; only ASSETS THAT NEED SIONNA TO LOAD are gated).
+# --------------------------------------------------------------------------------
+def test_object_local_height_m_known_kinds():
+    assert object_local_height_m(ObjectKind.SPHERE) > 0
+    assert object_local_height_m(ObjectKind.BOX) > 0
+    assert object_local_height_m(ObjectKind.MESH, "low_poly_car") > 0
+    assert object_local_height_m(ObjectKind.MESH, PEDESTRIAN_ASSET_NAME) == pytest.approx(1.74)
+    with pytest.raises(ValueError):
+        object_local_height_m(ObjectKind.MESH, "not-a-real-asset")
+
+
+@pytest.mark.parametrize("tier", sorted(RT_DIFFICULTY_TIERS))
+def test_every_object_position_z_is_ground_rest_centre(tier):
+    """Regression for the sinking-into-the-ground bug: `build_rt_tier_scenario` must
+    place each object's CENTER at `0.5 * object_local_height_m(...) * scaling`, not at
+    world z=0 -- z=0 is what Sionna's `SceneObject.position` setter would then use as
+    the bbox CENTER, burying the bottom half of the object below ground (see
+    `e2e.ml.rt_gen`'s module docstring)."""
+    sc = build_rt_tier_scenario(tier, frame_idx=0, seed=1, num_frames=1)
+    for o in sc.objects:
+        expected_z = 0.5 * object_local_height_m(o.kind, o.asset) * float(o.scaling)
+        assert o.position[2] == pytest.approx(expected_z, abs=1e-9), \
+            f"{tier}/{o.name}: z={o.position[2]} != ground-rest centre {expected_z}"
+        assert o.position[2] > 0.0, f"{tier}/{o.name}: z <= 0 can't be a ground-rest centre"
+
+
+# --------------------------------------------------------------------------------
+# Local (unshipped) asset library -- degrades gracefully when the files aren't present
+# (this file must pass whether or not this happens to be the workstation that has
+# them; see e2e.ml.rt_gen's module docstring).
+# --------------------------------------------------------------------------------
+def test_local_asset_specs_are_recorded_with_unknown_license():
+    assert len(LOCAL_ASSET_SPECS) > 0
+    for name, spec in LOCAL_ASSET_SPECS.items():
+        assert name in ASSET_LICENSES
+        assert "UNKNOWN" in ASSET_LICENSES[name]["license"]
+        assert spec.category in ("vehicle", "pedestrian")
+    assert set(LOCAL_VEHICLE_ASSET_NAMES) | set(LOCAL_PEDESTRIAN_ASSET_NAMES) \
+        == set(LOCAL_ASSET_SPECS)
+
+
+def test_use_local_assets_false_matches_the_sionna_only_pool_exactly():
+    """Default behaviour (use_local_assets=False, every existing caller) must draw
+    ONLY from CAR_ASSET_NAMES/PEDESTRIAN_ASSET_NAME -- never a local asset name --
+    regardless of whether this happens to be a machine that HAS the local files."""
+    for tier in sorted(RT_DIFFICULTY_TIERS):
+        sc = build_rt_tier_scenario(tier, frame_idx=2, seed=5, num_frames=1)
+        for o in sc.objects:
+            if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
+                assert o.asset in CAR_ASSET_NAMES
+            if o.object_class == "pedestrian":
+                assert o.asset == PEDESTRIAN_ASSET_NAME
+
+
+def test_use_local_assets_true_stays_within_the_expanded_pool():
+    """use_local_assets=True may draw local names (if this machine has the files) but
+    must never draw anything OUTSIDE the expanded pool -- works whether or not the
+    local files are actually present (graceful degrade)."""
+    car_pool = set(CAR_ASSET_NAMES) | set(LOCAL_VEHICLE_ASSET_NAMES)
+    ped_pool = {PEDESTRIAN_ASSET_NAME} | set(LOCAL_PEDESTRIAN_ASSET_NAMES)
+    for tier in ("D1", "D2", "D3"):
+        for seed in range(5):
+            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed, num_frames=1,
+                                        use_local_assets=True)
+            for o in sc.objects:
+                if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
+                    assert o.asset in car_pool
+                if o.object_class == "pedestrian":
+                    assert o.asset in ped_pool
+
+
+# --------------------------------------------------------------------------------
 # Gated: mesh loading + scale checks (real Sionna RT)
 # --------------------------------------------------------------------------------
 @pytest.mark.sionna
@@ -237,6 +312,37 @@ def test_d1_tier_scene_solves_to_nonzero_return_monostatically(sionna_rt):
     beat = _beat_from_paths(paths, cfg, n_chirps=cfg.n_chirps)
     assert np.isfinite(beat).all()
     assert np.abs(beat).sum() > 0, "no monostatic return from the D1 (car mesh) scene"
+
+
+# --------------------------------------------------------------------------------
+# Gated: ground-rest placement regression (objects must not sink into the ground)
+# --------------------------------------------------------------------------------
+@pytest.mark.sionna
+@pytest.mark.parametrize("tier", sorted(RT_DIFFICULTY_TIERS))
+@pytest.mark.parametrize("use_local_assets", [False, True])
+def test_every_placed_object_rests_on_or_above_ground(sionna_rt, tier, use_local_assets):
+    """Regression: `SceneObject.position` re-centers the mesh's own AABB on the given
+    point, so placing every object at world z=0 (the old behaviour) buried the bottom
+    half of it below the ground plane. Every REAL object in a built RT scene must have
+    a bbox min-z at or above the z=0 ground plane, for every tier and with/without the
+    local (unshipped) asset pool wired in (use_local_assets degrades gracefully to
+    Sionna meshes on a machine without the local files -- see rt_gen's module
+    docstring -- so this must hold either way)."""
+    from e2e.ml.radar_config import TI_IWR1443
+
+    scenario = build_rt_tier_scenario(tier, frame_idx=0, seed=0, num_frames=1,
+                                      use_local_assets=use_local_assets)
+    if not scenario.objects:
+        pytest.skip(f"{tier} draw at this seed placed zero objects")
+
+    from e2e.ml.rt_gen import build_rt_scene
+
+    rt_scene = build_rt_scene(scenario, TI_IWR1443, base_scene="flat", frame_idx=0)
+    for obj in scenario.objects:
+        so = rt_scene.objects[obj.name]
+        bbox = so._mi_mesh.bbox()
+        min_z = float(np.asarray(bbox.min.numpy()).reshape(-1)[2])
+        assert min_z >= -1e-3, f"{tier}/{obj.name} (asset={obj.asset!r}) sinks into the ground: min_z={min_z:.4f}"
 
 
 # --------------------------------------------------------------------------------

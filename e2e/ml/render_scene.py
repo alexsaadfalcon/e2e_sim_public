@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import inspect
+import math
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -279,9 +280,59 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
 # GIF path above still runs) with no Sionna installed; only `--rt`/`render_rt_tier_png`
 # need it.
 # --------------------------------------------------------------------------------
+# Radar marker/boresight-rod colour: bright amber, chosen to stand out against the red
+# object materials (build_rt_scene's default (0.8, 0.1, 0.1)), the gray ground, and
+# Sionna's own (green) device icon -- so the radar reads as unmistakable at a glance.
+_RADAR_MARKER_COLOR = (1.0, 0.85, 0.0)
+_RADAR_MARKER_RADIUS_M = 0.8            # ~1.6 m diameter -- legible, still << a ~4.5 m car
+_RADAR_BORESIGHT_LEN_M = 6.0            # length of the amber "boresight rod" in front of it
+_RENDER_FOV_DEG = 50.0                  # explicit (not Sionna's 45 deg default) horizontal FOV
+# Flat per-object framing radius: cheap stand-in for "how big is this thing on screen"
+# (a real car/pedestrian/clutter-box bbox half-extent, generously rounded up so even the
+# occasional oversized local asset -- e.g. the ~16 m tractor-trailer, see rt_gen's
+# LOCAL_ASSET_SPECS -- doesn't get clipped at the frame edge).
+_OBJECT_FRAMING_RADIUS_M = 9.0
+
+
+def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
+                         fov_deg: float, aspect: float, margin: float = 1.2):
+    """`(camera_position, look_at)` that keeps every `points[i]` (inflated by
+    `radii[i]`) inside a `fov_deg`-wide (horizontal, Mitsuba `fov_axis="x"` convention)
+    camera looking along `-camera_dir` at the points' centroid, positioned back along
+    `camera_dir` from it. Fixes the earlier bare "2.2x bounding-radius" heuristic, which
+    could still leave an off-axis point (typically the radar, since objects cluster in
+    the boresight direction while the radar sits at the FOV's edge of that cluster)
+    right at -- or past -- the frame edge: this fits the actual horizontal AND vertical
+    half-angle needed, not just an isotropic bounding-sphere distance.
+    """
+    centroid = points.mean(axis=0)
+    forward = -np.asarray(camera_dir, dtype=float)
+    forward = forward / np.linalg.norm(forward)
+    world_up = np.array([0.0, 0.0, 1.0])
+    if abs(float(np.dot(forward, world_up))) > 0.98:      # near-vertical view: avoid a
+        world_up = np.array([0.0, 1.0, 0.0])              # degenerate cross product
+    right = np.cross(forward, world_up)
+    right = right / np.linalg.norm(right)
+    up = np.cross(right, forward)
+
+    rel = points - centroid
+    half_h = np.abs(rel @ right) + radii
+    half_v = np.abs(rel @ up) + radii
+
+    fov_h = math.radians(float(fov_deg))
+    fov_v = 2.0 * math.atan(math.tan(fov_h / 2.0) / float(aspect))
+    dist_h = float(half_h.max()) / math.tan(fov_h / 2.0)
+    dist_v = float(half_v.max()) / math.tan(fov_v / 2.0)
+    dist = max(dist_h, dist_v, 1.0) * float(margin)
+
+    cam_pos = centroid - forward * dist
+    return cam_pos, centroid
+
+
 def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: int = 0,
                        resolution=(1280, 720), camera_dir=(-1.0, -1.0, 1.15),
-                       num_samples: int = 128):
+                       num_samples: int = 128, use_local_assets: bool = True,
+                       caption: bool = True):
     """Ray-trace `e2e.ml.rt_scenes` tier `tier` and save a camera render (array +
     objects) as a PNG at `out_path`. Needs Sionna RT; this is a plain geometry render
     (no path solve -- `Scene.render_to_file` needs no `PathSolver` output unless a
@@ -291,12 +342,29 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
 
     `cfg` (a `RadarConfig`, default `e2e.ml.radar_config.PRESETS["ti_iwr1443"]`) only
     sets the radar's array/frequency for scene construction (`rt_gen.build_rt_scene`);
-    it plays no role in the image itself. The camera auto-frames the radar node AND
-    every object: it looks at their centroid from `centroid + unit(camera_dir) *
-    max(2.2 * scene_radius, 15 m)` (behind-and-above by default), so tiers with
-    different object counts/spreads (D0's single close sphere vs D3's dozen-plus
-    spread-out objects) both stay fully in frame without per-tier tuning.
-    `resolution` is `(width, height)` pixels.
+    it plays no role in the image itself. The camera auto-frames the radar node, the
+    radar's own amber marker/boresight-rod (see below) AND every object: `_fit_camera_
+    position` fits the actual `fov_deg`-wide horizontal/vertical half-angles needed to
+    keep every (radius-inflated) point in frame, looking along `camera_dir` (default
+    behind-and-above), so tiers with different object counts/spreads (D0's single close
+    sphere vs D3's dozen-plus spread-out objects) both stay fully in frame -- including
+    the radar itself, which otherwise tends to sit at the edge of the object cluster's
+    field of view -- without per-tier tuning. `resolution` is `(width, height)` pixels.
+
+    The radar position is marked TWICE, redundantly, so it can't be missed: Sionna's
+    own tx/rx device icon (pinned to a fixed, legible `display_radius` -- its default
+    auto-sizes from the scene's own bounding box, which for the 400 m "flat" ground
+    plane makes it a 2 m sphere that still gets lost at review-camera distance) PLUS an
+    explicit amber marker sphere + a thin amber "boresight rod" pointing along the
+    radar's look direction, added as ordinary (non-scattering-tagged) `SceneObject`s
+    purely for this render -- this function never re-uses `rt_scene` for a path solve,
+    so decorating it has no effect on any simulated return.
+
+    `use_local_assets` (default True, unlike `build_rt_tier_scenario`'s own default)
+    draws cars/pedestrians from the expanded local-mesh pool when available on this
+    machine (see `e2e.ml.rt_gen`'s module docstring); it degrades gracefully to the
+    Sionna-bundled meshes elsewhere. `caption` overlays a title bar (tier, object
+    counts, radar position) via Pillow if installed; silently skipped otherwise.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,37 +372,98 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     import sionna.rt as rt
 
     from e2e.ml.radar_config import PRESETS
-    from e2e.ml.rt_gen import build_rt_scene
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.ml.rt_gen import _box_mesh_path, build_rt_scene
+    from e2e.ml.rt_scenes import build_rt_tier_scenario, tier_summary
 
     if cfg is None:
         cfg = PRESETS["ti_iwr1443"]
 
-    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1)
+    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1,
+                                      use_local_assets=use_local_assets)
     rt_scene = build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
 
-    # Sionna's device "icon" (the sphere marking tx/rx) auto-sizes from the SCENE's own
-    # bounding box (`renderer.get_overlay_scene`: `radius = max(0.005*scene_scale, 0.5)`)
-    # -- for the "flat" base scene's 400 m ground plane that is a 2 m sphere, which
-    # dwarfs a ~4 m car or ~1.7 m pedestrian at review-camera distance. Pin a small,
-    # tier-independent icon size instead so the array marker stays legible without
-    # occluding the objects it's meant to sit alongside.
     rt_scene.tx.display_radius = 0.3
     rt_scene.rx.display_radius = 0.3
 
-    points = np.array([scenario.nodes[0].position] + [o.position for o in scenario.objects],
-                      dtype=float)
-    centroid = points.mean(axis=0)
-    scene_radius = float(np.linalg.norm(points - centroid, axis=1).max()) if len(points) > 1 else 5.0
-    direction = np.asarray(camera_dir, dtype=float)
-    direction /= np.linalg.norm(direction)
-    cam_pos = centroid + direction * max(2.2 * scene_radius, 15.0)
+    radar_node = scenario.nodes[0]
+    radar_pos = np.asarray(radar_node.position, dtype=float)
+    look_at = (np.asarray(radar_node.look_at, dtype=float) if radar_node.look_at is not None
+              else radar_pos + np.array([1.0, 0.0, 0.0]))
+    boresight = look_at - radar_pos
+    boresight = boresight / np.linalg.norm(boresight)
+
+    marker_mat = rt.ITURadioMaterial("e2e-radar-marker-mat", "metal", thickness=0.01,
+                                     color=_RADAR_MARKER_COLOR)
+    marker = rt.SceneObject(fname=rt.scene.sphere, name="e2e-radar-marker", radio_material=marker_mat)
+    rt_scene.scene.edit(add=[marker])
+    marker.scaling = float(_RADAR_MARKER_RADIUS_M)   # rt.scene.sphere is a unit (r~1 m) sphere
+    marker.position = radar_pos.tolist()
+
+    # Boresight rod: Sionna's box mesh is a 10x10x5 m primitive (see rt_gen._box_mesh_path)
+    # -- non-uniform scaling shrinks it to a thin (0.3 x 0.15 m cross-section) rod along
+    # its OWN local x axis. This package's radar boresight is always world +x (see
+    # rt_scenes' module docstring), which is exactly the box's unrotated local x, so no
+    # orientation transform is needed here -- this is specific to this pipeline's
+    # convention, not a general-purpose gizmo.
+    rod_mat = rt.ITURadioMaterial("e2e-radar-boresight-mat", "metal", thickness=0.01,
+                                  color=_RADAR_MARKER_COLOR)
+    rod = rt.SceneObject(fname=_box_mesh_path(rt), name="e2e-radar-boresight", radio_material=rod_mat)
+    rt_scene.scene.edit(add=[rod])
+    rod.scaling = (_RADAR_BORESIGHT_LEN_M / 10.0, 0.03, 0.03)
+    rod.position = (radar_pos + boresight * _RADAR_BORESIGHT_LEN_M / 2.0).tolist()
+
+    # Each framed point carries an approximate world-space RADIUS (not just a bare
+    # position) so the fit accounts for how big things actually are on screen -- a
+    # bare-centroid distance heuristic put the (small-icon) radar right at the frame
+    # edge in earlier renders; this is the actual fix, the marker/rod above is what
+    # makes it worth getting right.
+    points = [radar_pos, radar_pos + boresight * _RADAR_BORESIGHT_LEN_M]
+    radii = [float(_RADAR_MARKER_RADIUS_M) * 1.1, 0.3]
+    for o in scenario.objects:
+        points.append(np.asarray(o.position, dtype=float))
+        radii.append(_OBJECT_FRAMING_RADIUS_M)
+    cam_pos, centroid = _fit_camera_position(np.asarray(points, dtype=float),
+                                             np.asarray(radii, dtype=float),
+                                             camera_dir=camera_dir, fov_deg=_RENDER_FOV_DEG,
+                                             aspect=resolution[0] / resolution[1])
     camera = rt.Camera(position=cam_pos.tolist(), look_at=centroid.tolist())
 
     rt_scene.scene.render_to_file(camera=camera, filename=str(out_path),
                                   resolution=tuple(resolution), num_samples=num_samples,
-                                  show_devices=True)
+                                  fov=_RENDER_FOV_DEG, show_devices=True)
+
+    if caption:
+        summary = tier_summary(scenario)
+        _caption_render(
+            out_path,
+            [
+                f"{scenario.name}   tier={summary['tier']}   base_scene={summary['base_scene']}",
+                f"objects: spheres={summary['n_spheres']}  cars={summary['n_cars']}  "
+                f"pedestrians={summary['n_pedestrians']}  clutter_boxes={summary['n_clutter_boxes']}",
+                f"radar @ ({radar_pos[0]:.1f}, {radar_pos[1]:.1f}, {radar_pos[2]:.1f}) m "
+                "-- amber marker + boresight rod",
+            ],
+        )
     return out_path
+
+
+def _caption_render(png_path: Path, lines: List[str]) -> None:
+    """Overlay a semi-transparent title bar with `lines` of text on a saved PNG.
+    Best-effort: silently does nothing if Pillow isn't installed (matplotlib does not
+    hard-depend on it in every backend configuration)."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return
+
+    img = Image.open(png_path).convert("RGB")
+    draw = ImageDraw.Draw(img, "RGBA")
+    pad, line_h = 8, 18
+    bar_h = 2 * pad + line_h * len(lines)
+    draw.rectangle([0, 0, img.width, bar_h], fill=(0, 0, 0, 170))
+    for i, line in enumerate(lines):
+        draw.text((pad, pad + i * line_h), line, fill=(255, 255, 255, 255))
+    img.save(png_path)
 
 
 # --------------------------------------------------------------------------------
@@ -360,6 +489,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="ray-trace a single camera PNG of an RT tier instead of an analytic GIF "
                         "(needs Sionna RT; see render_rt_tier_png)")
     p.add_argument("--frame-idx", type=int, default=0, help="RT mode: tier sample index (see rt_scenes)")
+    p.add_argument("--no-local-assets", action="store_true",
+                   help="RT mode: disable the local (unshipped) higher-fidelity mesh pool, "
+                        "use only Sionna-bundled meshes (see render_rt_tier_png)")
+    p.add_argument("--no-caption", action="store_true",
+                   help="RT mode: skip the title-bar caption overlay")
     return p
 
 
@@ -380,7 +514,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
             return 2
         out_path = render_rt_tier_png(args.tier, args.out, cfg=cfg, frame_idx=args.frame_idx,
-                                      seed=args.seed)
+                                      seed=args.seed, use_local_assets=not args.no_local_assets,
+                                      caption=not args.no_caption)
         print(f"wrote {out_path} (RT tier {args.tier} camera render)")
         return 0
 
