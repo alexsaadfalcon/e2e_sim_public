@@ -1,0 +1,892 @@
+"""
+Ray-traced (Sionna RT) raw-ADC generation for the FMCW MIMO radar ML package.
+
+This is the high-fidelity sibling of `e2e.ml.rd_synth`: instead of evaluating the
+closed-form point-target model, it ray-traces the scene with Sionna RT and turns the
+resulting channel frequency response into the **same** dechirped ADC cube --
+`complex64 [n_rx, n_chirps, n_samples]` -- so `e2e.ml.transforms`, `e2e.ml.labels`
+and `e2e.ml.dataset` cannot tell which generator produced a frame. Datasets and
+training code stay source-agnostic; only the fidelity/cost trade changes.
+
+Sionna is imported lazily (inside functions), so `import e2e.ml.rt_gen` works on a
+machine without Sionna/DrJit -- only the generation calls need it.
+
+
+The CFR -> beat mapping (the load-bearing derivation)
+----------------------------------------------------
+An FMCW transmitter emits ``s_t(t) = exp(j2pi(f0 t + S t^2/2))`` (slope
+``S = B / T_sweep``). The echo from a scatterer at round-trip delay ``tau`` is
+``s_t(t - tau)``, and the receiver *dechirps* it against the transmitted ramp. This
+package's convention (see `rd_synth`'s module docstring) is the **positive-exponent**
+one, ``s_b(t) = s_t(t) conj(s_t(t-tau))``:
+
+    s_b(t) = exp(j2pi[ f0 tau + S tau t - S tau^2 / 2 ])
+
+Sampling the ADC at ``t = n / fs`` and dropping the residual video phase
+``-pi S tau^2`` (rd_synth drops it too, `include_rvp=False`) gives
+
+    b[n] = exp(+j2pi (f0 + S n/fs) tau)                                        (1)
+
+i.e. **the dechirped sample n is the channel evaluated at the instantaneous RF
+frequency of the ramp at that sample**, ``f_RF(n) = f0 + S n / fs``.
+
+Sionna's `Paths.cfr(frequencies=f, ...)` returns (paths.py, `cir`/`cfr` docstrings)
+
+    h(f, t) = sum_i a_i exp(-j2pi f_c tau_i) exp(+j2pi f_D,i t) exp(-j2pi f tau_i)
+            = sum_i a_i exp(-j2pi (f_c + f) tau_i) exp(+j2pi f_D,i t)          (2)
+
+where ``f_c = scene.frequency`` (the carrier) and ``f`` is a **baseband offset** from
+it (Sionna's OFDM helper `subcarrier_frequencies` returns offsets centred on 0).
+Comparing (1) and (2): a single path contributes ``exp(-j2pi f_RF tau)`` where (1)
+wants ``exp(+j2pi f_RF tau)``. So the beat cube is the **complex conjugate** of the
+CFR sampled on the ramp:
+
+    b[c, n] = conj( h( f_bb(n), t = c * T_c ) ),   f_bb(n) = f0 + S n/fs - f_c   (3)
+
+with ``f_c = f0 + B/2`` (the chirp centre; chosen so Sionna's array-element spacing,
+which is expressed in wavelengths of ``scene.frequency``, is exactly the
+``cfg.wavelength_m / 2`` that `rd_synth` assumes), ``sampling_frequency = 1/T_c`` and
+``num_time_steps = n_chirps`` -- Sionna's slow-time axis IS the chirp axis.
+
+The same conjugation fixes the Doppler sign automatically, which is why (3) is
+stated as one operation rather than three. Sionna's ``f_D`` is the *physical* Doppler
+shift (positive for an approaching target: for a monostatic link and a target with
+radial velocity ``v_r``, receding-positive, ``f_D = -2 v_r / lambda``). Conjugating
+(2) turns ``exp(+j2pi f_D t)`` into ``exp(+j2pi (2 v_r/lambda) t)`` -- exactly
+rd_synth's chirp-to-chirp phase progression (its beat phase ``2pi f0 tau_c`` with
+``tau_c = 2(R0 + v_r c T_c)/c`` advances by ``2pi (2 v_r/lambda) T_c`` per chirp).
+
+**Element ordering / array handedness.** With the same conjugation, an element
+displaced by ``d`` *towards* the target sees a shorter delay and therefore a beat
+phase ``-2pi d sin(theta)/lambda``. rd_synth uses ``+pi * v * sin(theta)`` for
+virtual element ``v`` (see its "Spatial phase" comment), with ``sin(theta)`` measured
+along ``u = normalise(z_up x boresight)``. The two agree exactly if the element
+*index* runs along ``-u`` -- i.e. this package numbers array elements from the
+positive-azimuth side towards the negative one. That is a labelling (handedness)
+convention, not a physical difference, and we honour it here by **reversing the
+antenna index** of the extracted CFR (`_ANTENNA_INDEX_REVERSED`). Reversing the index
+of a `PlanarArray` is exact, not approximate: its normalized positions are symmetric
+about the array centre (`antenna_array.py`: ``y = d_h*j - (num_cols-1)*d_h/2``), so
+index reversal is a mirror about that centre. Verified empirically: without the
+reversal a target at ``sin(az) = +0.37`` lands at the mirrored angle-FFT bin.
+
+Deliberate approximations (all shared with, or milder than, rd_synth)
+---------------------------------------------------------------------
+* **Native Doppler evolution**: one `PathSolver` solve per frame; the geometry
+  (delays, angles, amplitudes) is frozen over the CPI and only the per-path Doppler
+  phase evolves across chirps. This is Sionna's own ``||v|| << c`` model and the
+  classical stop-and-hop assumption. `rt_retrace_reference` re-solves the geometry
+  per chirp and `doppler_error_study` quantifies the difference -- run it rather than
+  trusting this paragraph.
+* **Intra-frame range migration** is absent from the native path (the beat frequency
+  is not re-derived per chirp), same order of magnitude as rd_synth's constant-
+  amplitude approximation: a 5 m/s target moves 2.4 cm over a 4.8 ms TI CPI, ~0.3 of
+  a 7.5 cm range bin.
+* **float32 delay phase**: DrJit computes ``2pi f_c tau`` in float32 before wrapping;
+  at 78 GHz and 20 m that is ~6.5e4 rad, so the wrapped phase carries ~4e-3 rad of
+  rounding noise (~ -48 dBc). Irrelevant for bin-level validation, relevant if you
+  ever chase >45 dB phase-coherence numbers out of this path.
+* **Ranges are to the reflecting surface**, not to an object's centre: RT reflects
+  off real geometry, so a 1 m-radius sphere at 5.4 m peaks ~1 m closer than the
+  point-target model would predict. Use small scatterers when comparing bin-for-bin
+  against `rd_synth`.
+* **TX/RX leakage**: a monostatic link's direct TX-array -> RX-array path is a real
+  (huge, near-zero-delay) path. `include_leakage=False` (the default) asks the solver
+  for ``los=False``, which removes exactly that path and nothing else -- every target
+  return is a reflection of depth >= 1.
+
+Materials: Sionna's defaults make every object a perfect specular mirror
+(`RadioMaterial.scattering_coefficient` defaults to 0 and the solver's
+`diffuse_reflection` defaults to False), which gives an unrealistic, geometry-
+critical RCS lobe for small targets. This module therefore defaults to
+``scattering_coefficient=0.3`` with a Lambertian pattern and solves with
+``diffuse_reflection=True``; both are exposed as parameters. 0.3 is a plausible
+mid-range value for a rough painted/metallic vehicle surface at mmWave -- it is a
+modelling choice, not a measured one.
+
+CLI
+---
+    python -m e2e.ml.rt_gen [--config ti_iwr1443] [--frames 2] [--chirps 16]
+                            [--samples 128] [--base-scene flat|free|<sionna scene>]
+                            [--target sphere|box] [--no-diffuse]
+runs `doppler_error_study` and prints the native-vs-re-trace table. Use
+`--target box --no-diffuse` for the deterministic (Monte-Carlo-free) comparison.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+import torch
+
+# See the module docstring's "Element ordering / array handedness" section.
+_ANTENNA_INDEX_REVERSED = True
+
+# Material defaults -- deliberately NOT Sionna's (pure specular mirror); see above.
+DEFAULT_SCATTERING_COEFFICIENT = 0.3
+DEFAULT_SCATTERING_PATTERN = "lambertian"
+
+# "flat" base scene: a single large ground rectangle. Mitsuba's built-in `rectangle`
+# shape is the [-1,1]^2 unit plane in z=0 with a +z normal, so one scale transform is
+# the whole scene -- no mesh file, no asset licensing, loads in milliseconds.
+_GROUND_HALF_EXTENT_M = 200.0
+_GROUND_MATERIAL = "concrete"   # ITU table entry valid over 1-100 GHz (77 GHz included)
+
+# Note the id spelling: Sionna names the loaded SceneObject after the shape id with the
+# "mesh-" prefix stripped, so a bsdf id equal to that stem ("e2e-ground") collides with
+# the object and `Scene.add` raises "Name '...' is already used by another item".
+_FLAT_SCENE_XML = f"""<scene version="2.1.0">
+  <bsdf type="itu-radio-material" id="e2e-ground-mat">
+      <string name="type" value="{_GROUND_MATERIAL}"/>
+      <float name="thickness" value="0.1"/>
+  </bsdf>
+  <shape type="rectangle" id="mesh-e2e-ground">
+      <transform name="to_world">
+          <scale x="{_GROUND_HALF_EXTENT_M}" y="{_GROUND_HALF_EXTENT_M}" z="1"/>
+      </transform>
+      <ref id="e2e-ground-mat" name="bsdf"/>
+  </shape>
+</scene>
+"""
+
+# "free": no ground, no clutter -- only the scenario's own objects. Useful when
+# validating bin placement against the point-target model, which has no ground either.
+_FREE_SCENE_XML = """<scene version="2.1.0">
+</scene>
+"""
+
+_SYNTHETIC_SCENE_XML = {"flat": _FLAT_SCENE_XML, "free": _FREE_SCENE_XML}
+_synthetic_scene_paths: Dict[str, str] = {}
+
+
+def _synthetic_scene_path(name: str) -> str:
+    """Write (once per process) and return the path of a built-in synthetic scene XML."""
+    path = _synthetic_scene_paths.get(name)
+    if path is None:
+        d = tempfile.mkdtemp(prefix="e2e-rt-scene-")
+        path = os.path.join(d, f"{name}.xml")
+        with open(path, "w") as f:
+            f.write(_SYNTHETIC_SCENE_XML[name])
+        _synthetic_scene_paths[name] = path
+    return path
+
+
+def _resolve_device(dev):
+    """`None` -> the library device; anything else -> `torch.device(dev)`."""
+    if dev is None:
+        from e2e.ml.rd_synth import device as _lib_device
+
+        return _lib_device
+    return torch.device(dev)
+
+
+# --------------------------------------------------------------------------------
+# Scene construction
+# --------------------------------------------------------------------------------
+@dataclass
+class RTScene:
+    """A built, reusable Sionna RT radar scene.
+
+    `build_rt_scene` returns this rather than the bare `sionna.rt.Scene` so callers
+    (and the re-trace / error-study paths) can move the radar and the individual
+    scatterers between solves without re-parsing the base scene, which is by far the
+    most expensive part of setup. The raw Sionna scene is `.scene`.
+    """
+    scene: Any                        # sionna.rt.Scene
+    tx: Any                           # sionna.rt.Transmitter
+    rx: Any                           # sionna.rt.Receiver
+    objects: Dict[str, Any]           # scenario object name -> sionna.rt.SceneObject
+    cfg: Any                          # RadarConfig
+    base_scene: str
+    f_center_hz: float
+    solver: Any = None                # sionna.rt.PathSolver (created on first solve)
+    materials: Dict[str, Any] = field(default_factory=dict)
+
+
+def _load_base_scene(rt, base_scene: str):
+    """`"flat"` / `"free"` / a Sionna built-in name / a path -> a loaded `Scene`."""
+    if base_scene in _SYNTHETIC_SCENE_XML:
+        return rt.load_scene(_synthetic_scene_path(base_scene), merge_shapes=False)
+    builtin = getattr(rt.scene, base_scene, None)
+    if builtin is not None:
+        return rt.load_scene(builtin, merge_shapes=False)
+    return rt.load_scene(base_scene, merge_shapes=False)
+
+
+def _box_mesh_path(rt) -> str:
+    """Path to Sionna's box *mesh*.
+
+    `rt.scene.box` is the path to a box SCENE (`box/box.xml`), not a mesh, so passing
+    it to `SceneObject(fname=...)` raises "Invalid mesh type" -- the ply lives one
+    level down at `box/meshes/box.ply`. Falls back to the sphere primitive if a future
+    Sionna reorganizes the scene package.
+    """
+    ply = os.path.join(os.path.dirname(rt.scene.box), "meshes", "box.ply")
+    return ply if os.path.isfile(ply) else rt.scene.sphere
+
+
+def _object_mesh(rt, obj):
+    """Mesh source for a scenario `SceneObject` (same dispatch as scenario_runner)."""
+    from e2e.scenario import ObjectKind
+
+    if obj.kind == ObjectKind.SPHERE:
+        return rt.scene.sphere
+    if obj.kind == ObjectKind.BOX:
+        return _box_mesh_path(rt)
+    if not obj.asset:
+        raise ValueError(f"object {obj.name!r} has kind=MESH but no `asset` mesh path")
+    return obj.asset
+
+
+def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 0,
+                   scattering_coefficient: float = DEFAULT_SCATTERING_COEFFICIENT,
+                   scattering_pattern: str = DEFAULT_SCATTERING_PATTERN,
+                   pattern: str = "iso", polarization: str = "V") -> RTScene:
+    """Build a monostatic FMCW-radar Sionna RT scene for `scenario` at `frame_idx`.
+
+    * The scenario's first RADAR node becomes a co-located `Transmitter`/`Receiver`
+      pair at `radar_pose(scenario, frame_idx)`, both aimed along the pose boresight.
+      Their `PlanarArray`s are 1 x `cfg.n_tx` (spacing `n_rx * lambda/2`) and
+      1 x `cfg.n_rx` (spacing `lambda/2`), i.e. the uniform `lambda/2` virtual ULA
+      with element index `v = t*n_rx + r` that `rd_synth` assumes.
+      `synthetic_array=False` at solve time, so every element is really traced.
+    * Every `scenario.objects` entry becomes a `SceneObject` (sphere/box/mesh, same
+      dispatch as `scenario_runner._add_scene_object`) with its declared ITU material
+      but a NON-zero `scattering_coefficient` (see the module docstring) and its
+      per-frame velocity from `frame_scatterers`, so Sionna computes a real per-path
+      Doppler shift for it.
+    * `scene.frequency` is the chirp centre `f0 + B/2`, which makes Sionna's
+      wavelength-normalised element spacing equal `cfg.wavelength_m / 2`.
+
+    `base_scene`: `"flat"` (a 400 m ground plane, the default), `"free"` (no ground --
+    only the scenario's objects, matching the point-target model's environment), any
+    Sionna built-in scene name (`"munich"`, `"etoile"`, ...), or a path to a scene XML.
+    """
+    import sionna.rt as rt
+
+    from e2e.ml.scatterers import frame_scatterers, radar_pose
+
+    pose = radar_pose(scenario, frame_idx)
+    scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))
+    if len(scats) != len(scenario.objects):
+        raise RuntimeError("frame_scatterers/scenario.objects length mismatch")
+
+    f_center = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
+
+    scene = _load_base_scene(rt, base_scene)
+    scene.frequency = f_center
+    # TX elements are spaced n_rx * lambda/2 so the (tx, rx) pairs tile a uniform
+    # lambda/2 virtual ULA -- the geometry rd_synth's `pi * v * sin(theta)` assumes.
+    scene.tx_array = rt.PlanarArray(num_rows=1, num_cols=int(cfg.n_tx),
+                                    horizontal_spacing=0.5 * int(cfg.n_rx),
+                                    pattern=pattern, polarization=polarization)
+    scene.rx_array = rt.PlanarArray(num_rows=1, num_cols=int(cfg.n_rx),
+                                    horizontal_spacing=0.5,
+                                    pattern=pattern, polarization=polarization)
+
+    position = [float(c) for c in pose.position]
+    # look_at aims the device's local +x at the target point; its local +y is then
+    # normalise(z_up x boresight) -- exactly `rd_synth.array_axis`'s ULA axis, which
+    # is what makes the PlanarArray's element axis and the analytic model's agree.
+    aim = [float(p + b) for p, b in zip(pose.position, pose.boresight)]
+    tx = rt.Transmitter(name="e2e-radar-tx", position=position, look_at=aim)
+    rx = rt.Receiver(name="e2e-radar-rx", position=position, look_at=aim)
+    scene.add(tx)
+    scene.add(rx)
+
+    objects: Dict[str, Any] = {}
+    materials: Dict[str, Any] = {}
+    for obj, sc in zip(scenario.objects, scats):
+        mat = rt.ITURadioMaterial(
+            f"e2e-rt-mat-{obj.name}", obj.material, thickness=0.01,
+            scattering_coefficient=float(scattering_coefficient),
+            scattering_pattern=scattering_pattern,
+            color=obj.color if obj.color is not None else (0.8, 0.1, 0.1),
+        )
+        so = rt.SceneObject(fname=_object_mesh(rt, obj), name=f"e2e-rt-obj-{obj.name}",
+                            radio_material=mat)
+        scene.edit(add=[so])
+        so.scaling = float(obj.scaling)
+        so.position = [float(c) for c in sc.position]
+        # Per-object velocity is what `field_calculator._update_doppler_shift` reads at
+        # each scattering interaction; without it every path's Doppler is identically 0.
+        so.velocity = [float(v) for v in sc.velocity]
+        objects[obj.name] = so
+        materials[obj.name] = mat
+
+    return RTScene(scene=scene, tx=tx, rx=rx, objects=objects, cfg=cfg,
+                   base_scene=base_scene, f_center_hz=f_center, materials=materials)
+
+
+# --------------------------------------------------------------------------------
+# Solve + CFR -> beat cube
+# --------------------------------------------------------------------------------
+def beat_frequencies(cfg) -> np.ndarray:
+    """Baseband CFR frequencies for one chirp: `f0 + S n/fs - (f0 + B/2)`, n < n_samples.
+
+    See the module docstring, equation (3): sampling the CFR on this grid IS sampling
+    the dechirped beat signal along the ramp.
+    """
+    n = np.arange(int(cfg.n_samples), dtype=np.float64)
+    f_rf = float(cfg.f0_hz) + float(cfg.ramp_slope_hzps) * n / float(cfg.fs_hz)
+    return f_rf - (float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0)
+
+
+def _solve(rt_scene: RTScene, *, max_depth: int, include_leakage: bool,
+           diffuse_reflection: bool, specular_reflection: bool, refraction: bool,
+           seed: int, samples_per_src: Optional[int] = None):
+    import sionna.rt as rt
+
+    if rt_scene.solver is None:
+        rt_scene.solver = rt.PathSolver()
+    kwargs = dict(
+        scene=rt_scene.scene, max_depth=int(max_depth),
+        los=bool(include_leakage),           # the ONLY los path here is TX->RX leakage
+        specular_reflection=bool(specular_reflection),
+        diffuse_reflection=bool(diffuse_reflection),
+        refraction=bool(refraction),
+        synthetic_array=False, seed=int(seed),
+    )
+    if samples_per_src is not None:
+        kwargs["samples_per_src"] = int(samples_per_src)
+    return rt_scene.solver(**kwargs)
+
+
+def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
+    """`Paths` -> beat cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`, complex64.
+
+    Applies equation (3): CFR on the ramp's frequency grid, conjugated, with the
+    antenna index reversed (see "Element ordering / array handedness").
+
+    `freq_chunk` bounds peak memory: `cfr` materialises a
+    `[rx, rx_ant, tx, tx_ant, num_paths, n_chirps, n_freqs]` tensor *before* summing
+    over paths, so a full 512-sample / 192-chirp / 50-path call needs hundreds of MB.
+    Chunking over frequencies is free -- the expensive ray tracing already happened.
+    """
+    freqs = beat_frequencies(cfg)
+    n_samples = freqs.size
+    chunk = max(1, int(freq_chunk))
+    out: List[np.ndarray] = []
+    for lo in range(0, n_samples, chunk):
+        h = paths.cfr(
+            frequencies=freqs[lo:lo + chunk],
+            sampling_frequency=1.0 / float(cfg.chirp_period_s),
+            num_time_steps=int(n_chirps),
+            normalize_delays=False,   # absolute delay IS the range -- never normalize
+            normalize=False,          # keep physical amplitudes
+            out_type="numpy",
+        )
+        # h: [num_rx, num_rx_ant, num_tx, num_tx_ant, n_chirps, n_freqs]; one tx/rx
+        # device each, so indices 0 select them.
+        out.append(np.asarray(h)[0, :, 0, :, :, :])
+    beat = np.conjugate(np.concatenate(out, axis=-1))
+    if _ANTENNA_INDEX_REVERSED:
+        beat = beat[::-1, ::-1, :, :]
+    return np.ascontiguousarray(beat, dtype=np.complex64)
+
+
+def mimo_combine(cfg, beat: np.ndarray) -> np.ndarray:
+    """Beat cube `[n_rx, n_tx, n_chirps, n_samples]` -> ADC cube `[n_rx, n_chirps, n_samples]`.
+
+    Mirrors `rd_synth.synthesize_adc`'s per-chirp TX factor exactly:
+
+    * `"tdm"` / `"single"`: chirp `c` is transmitted by TX `c % n_tx` alone, so only
+      that TX's column survives -- this is the selection `transforms.tdm_deinterleave`
+      inverts.
+    * `"ddma"`: every TX transmits on every chirp, TX `t` carrying the extra per-chirp
+      phase `2pi t c / n_tx`; the TX columns are summed with that code applied.
+    """
+    mimo = str(cfg.mimo).lower()
+    n_rx, n_tx, n_chirps, n_samples = beat.shape
+    if mimo in ("tdm", "single"):
+        tx_of_chirp = np.arange(n_chirps) % n_tx
+        return beat[:, tx_of_chirp, np.arange(n_chirps), :]
+    if mimo == "ddma":
+        t_idx = np.arange(n_tx)[None, :, None]
+        c_idx = np.arange(n_chirps)[None, None, :]
+        code = np.exp(2j * np.pi * t_idx * c_idx / n_tx)      # [1, n_tx, n_chirps]
+        return np.einsum("rtcn,xtc->rcn", beat, code.astype(np.complex64))
+    raise ValueError(f"unsupported mimo scheme {cfg.mimo!r}")
+
+
+# --------------------------------------------------------------------------------
+# Noise
+# --------------------------------------------------------------------------------
+def _peak_reference_amplitude(cfg, adc: np.ndarray, min_range_m: float) -> float:
+    """Per-sample amplitude of the strongest target, in `rd_synth`'s SNR convention.
+
+    rd_synth defines `snr_db` as the post-2-D-FFT SNR of the strongest scatterer at
+    its peak, with coherent gain `G = n_samples * n_chirps_per_tx` for an *unwindowed*
+    2-D FFT of one RX channel using one TX's chirps, and derives the noise power from
+    that scatterer's per-sample amplitude `A_max`. Ray tracing gives no such scalar,
+    so we invert the same relation: measure the unwindowed 2-D FFT peak `P` and take
+    `A_max = P / G`. Identical convention, measured instead of assumed.
+
+    Range bins closer than `min_range_m` (and their negative-frequency mirrors) are
+    excluded: a monostatic scene's ground bounce / residual coupling sits at near-zero
+    range and would otherwise set the noise floor for a distant target.
+    """
+    mag = np.abs(np.fft.fft2(_snr_reference_chirps(cfg, adc), axes=(1, 2)))
+    n_samples = mag.shape[-1]
+    guard = int(np.ceil(float(min_range_m) / float(cfg.range_resolution_m)))
+    guard = min(guard, n_samples // 2)
+    if guard > 0:
+        mag = mag[:, :, guard:n_samples - guard]
+    if mag.size == 0:
+        return 0.0
+    return float(mag.max()) / _coherent_gain(cfg, adc)
+
+
+def _snr_reference_chirps(cfg, adc):
+    """The chirps of a single TX, i.e. what the SNR convention integrates coherently."""
+    return adc[:, ::int(cfg.n_tx), :] if str(cfg.mimo).lower() == "tdm" else adc
+
+
+def _coherent_gain(cfg, adc) -> float:
+    """`n_samples * n_chirps_per_tx` of the ACTUAL cube (not of `cfg`).
+
+    Reading the chirp count off the array matters because `rt_retrace_reference` and
+    `doppler_error_study` truncate the CPI (`n_chirps_cap`) without necessarily
+    replacing `cfg`; a stale `cfg.n_chirps` would mis-scale the noise.
+    """
+    return float(adc.shape[-1]) * float(_snr_reference_chirps(cfg, adc).shape[1])
+
+
+def _add_awgn(cfg, adc: torch.Tensor, snr_db, seed, min_range_m: float) -> torch.Tensor:
+    """Add calibrated complex AWGN, reusing rd_synth's documented SNR convention."""
+    if snr_db is None:
+        return adc
+    adc_np = adc.cpu().numpy()
+    a_max = _peak_reference_amplitude(cfg, adc_np, min_range_m)
+    coh_gain = _coherent_gain(cfg, adc_np)
+    # An empty (no-path) scene has no reference amplitude; emit unit-variance noise so
+    # the frame is still a usable "background only" sample -- same fallback as rd_synth.
+    sigma2 = (a_max ** 2 * coh_gain / (10.0 ** (float(snr_db) / 10.0))) if a_max > 0 else 1.0
+    gen = torch.Generator(device=adc.device)
+    gen.manual_seed(int(seed) if seed is not None
+                    else int(torch.randint(0, 2 ** 62, (1,)).item()))
+    w = torch.randn(tuple(adc.shape) + (2,), generator=gen, device=adc.device,
+                    dtype=torch.float32) * math.sqrt(sigma2 / 2.0)
+    return adc + torch.view_as_complex(w.contiguous())
+
+
+# --------------------------------------------------------------------------------
+# Native (single-solve) generation
+# --------------------------------------------------------------------------------
+def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
+                      snr_db: Optional[float] = 30.0, seed: Optional[int] = None,
+                      device=None, rt_scene: Optional[RTScene] = None,
+                      max_depth: int = 2, include_leakage: bool = False,
+                      diffuse_reflection: bool = True, specular_reflection: bool = True,
+                      refraction: bool = False, solver_seed: int = 41,
+                      freq_chunk: int = 128,
+                      snr_ref_min_range_m: Optional[float] = None) -> torch.Tensor:
+    """Ray-trace one radar frame and return its dechirped ADC cube.
+
+    Drop-in replacement for `e2e.ml.rd_synth.synthesize_adc(cfg, scatterers, pose, ...)`
+    at the dataset level: same return contract, `complex64 [n_rx, n_chirps, n_samples]`
+    on `device`, consumable by `e2e.ml.transforms` unchanged.
+
+    ONE `PathSolver` solve is performed; the chirp axis comes from Sionna's Doppler
+    time-evolution (`cfr(..., sampling_frequency=1/T_c, num_time_steps=n_chirps)`), not
+    from re-tracing -- see `rt_retrace_reference` / `doppler_error_study` for the
+    ground-truth comparison this trades against.
+
+    Parameters
+    ----------
+    cfg : RadarConfig
+    scenario : e2e.scenario.Scenario   (needs at least one RADAR node)
+    frame_idx : int                    frame to resolve motion at
+    base_scene : str                   see `build_rt_scene`
+    snr_db : float or None             post-2-D-FFT SNR of the strongest target
+                                       (`None` disables noise); see `_peak_reference_amplitude`
+    seed : int or None                 seeds the AWGN only (the RT solve uses `solver_seed`)
+    device : torch device or None      defaults to the library device
+    rt_scene : RTScene or None         reuse a scene built by `build_rt_scene`
+                                       (skips base-scene parsing); built here if None
+    include_leakage : bool             keep the direct TX->RX path (radar TX/RX leakage)
+    snr_ref_min_range_m : float or None
+        Range guard for the noise-calibration peak search; defaults to
+        `3 * cfg.range_resolution_m`.
+    """
+    dev = _resolve_device(device)
+    if rt_scene is None:
+        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
+
+    paths = _solve(rt_scene, max_depth=max_depth, include_leakage=include_leakage,
+                   diffuse_reflection=diffuse_reflection,
+                   specular_reflection=specular_reflection, refraction=refraction,
+                   seed=solver_seed)
+    beat = _beat_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk)
+    adc = torch.as_tensor(mimo_combine(cfg, beat), dtype=torch.complex64, device=dev)
+
+    guard = (3.0 * float(cfg.range_resolution_m) if snr_ref_min_range_m is None
+             else float(snr_ref_min_range_m))
+    return _add_awgn(cfg, adc, snr_db, seed, guard).to(torch.complex64)
+
+
+# --------------------------------------------------------------------------------
+# Ground truth: re-trace the geometry once per chirp
+# --------------------------------------------------------------------------------
+def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
+                         n_chirps_cap: Optional[int] = None, snr_db: Optional[float] = None,
+                         seed: Optional[int] = None, device=None,
+                         rt_scene: Optional[RTScene] = None, max_depth: int = 2,
+                         include_leakage: bool = False, diffuse_reflection: bool = True,
+                         specular_reflection: bool = True, refraction: bool = False,
+                         solver_seed: int = 41, freq_chunk: int = 128,
+                         snr_ref_min_range_m: Optional[float] = None) -> torch.Tensor:
+    """Ground-truth ADC cube: re-solve the scene for **every chirp**.
+
+    Chirp `c` is traced with every moving object advanced to `p0 + v * c * T_c` and
+    `num_time_steps=1`, so the slow-time phase evolution comes entirely from the
+    re-traced geometry (delays, angles, amplitudes all update) instead of from Sionna's
+    first-order Doppler phase rotation. Note that at `num_time_steps=1` the per-path
+    Doppler factor is `exp(j*2pi*f_D*0) = 1`, so the object velocities do not
+    double-count here -- they are consumed purely as the per-chirp displacement.
+
+    The radar itself is held fixed across the CPI, matching `rd_synth` (whose
+    `RadarPose` is per-frame) and `frame_scatterers` (whose velocities are per-object).
+
+    Expensive by design: cost is `n_chirps` solves instead of one. `n_chirps_cap`
+    truncates the CPI (the returned cube then has `min(n_chirps, cap)` chirps, which
+    is what `doppler_error_study` compares against a matching native run). Returns
+    `complex64 [n_rx, n_chirps_used, n_samples]` on `device`.
+    """
+    dev = _resolve_device(device)
+    if rt_scene is None:
+        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
+
+    from e2e.ml.scatterers import frame_scatterers
+
+    scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))
+    base_pos = {obj.name: np.asarray(sc.position, dtype=np.float64)
+                for obj, sc in zip(scenario.objects, scats)}
+    vel = {obj.name: np.asarray(sc.velocity, dtype=np.float64)
+           for obj, sc in zip(scenario.objects, scats)}
+
+    n_chirps = int(cfg.n_chirps) if n_chirps_cap is None else min(int(cfg.n_chirps),
+                                                                  int(n_chirps_cap))
+    t_c = float(cfg.chirp_period_s)
+    n_tx = int(cfg.n_tx)
+
+    frames: List[np.ndarray] = []
+    try:
+        for c in range(n_chirps):
+            for name, so in rt_scene.objects.items():
+                so.position = [float(x) for x in (base_pos[name] + vel[name] * (c * t_c))]
+            paths = _solve(rt_scene, max_depth=max_depth, include_leakage=include_leakage,
+                           diffuse_reflection=diffuse_reflection,
+                           specular_reflection=specular_reflection, refraction=refraction,
+                           seed=solver_seed)
+            # num_time_steps=1 -> [n_rx_ant, n_tx_ant, 1, n_samples]
+            beat = _beat_from_paths(paths, cfg, n_chirps=1, freq_chunk=freq_chunk)
+            frames.append(beat[:, :, 0, :])
+    finally:
+        # Leave the scene at its frame-0 geometry so the handle stays reusable.
+        for name, so in rt_scene.objects.items():
+            so.position = [float(x) for x in base_pos[name]]
+
+    # [n_rx_ant, n_tx_ant, n_chirps, n_samples]
+    beat_cube = np.stack(frames, axis=2)
+    if str(cfg.mimo).lower() in ("tdm", "single"):
+        adc_np = beat_cube[:, np.arange(n_chirps) % n_tx, np.arange(n_chirps), :]
+    else:
+        t_idx = np.arange(n_tx)[None, :, None]
+        c_idx = np.arange(n_chirps)[None, None, :]
+        code = np.exp(2j * np.pi * t_idx * c_idx / n_tx).astype(np.complex64)
+        adc_np = np.einsum("rtcn,xtc->rcn", beat_cube, code)
+
+    adc = torch.as_tensor(np.ascontiguousarray(adc_np), dtype=torch.complex64, device=dev)
+    guard = (3.0 * float(cfg.range_resolution_m) if snr_ref_min_range_m is None
+             else float(snr_ref_min_range_m))
+    return _add_awgn(cfg, adc, snr_db, seed, guard).to(torch.complex64)
+
+
+# --------------------------------------------------------------------------------
+# Doppler error study: native evolution vs per-chirp re-trace
+# --------------------------------------------------------------------------------
+def _rd_peak_bin(cfg, adc: torch.Tensor):
+    """`(range_bin, doppler_bin)` of the strongest cell, through the shipped transforms."""
+    import dataclasses as _dc
+
+    from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+
+    n_chirps = int(adc.shape[1])
+    if str(cfg.mimo).lower() == "tdm":
+        sub = _dc.replace(cfg, n_tx=1, mimo="single", n_chirps=n_chirps // int(cfg.n_tx))
+        rd = adc_to_rd(sub, tdm_deinterleave(_dc.replace(cfg, n_chirps=n_chirps), adc))
+    else:
+        rd = adc_to_rd(_dc.replace(cfg, n_chirps=n_chirps), adc)
+    power = (rd.abs() ** 2).sum(dim=0)                       # [range, doppler]
+    flat = int(power.reshape(-1).argmax())
+    return (flat // power.shape[1], flat % power.shape[1]), rd
+
+
+def doppler_error_study(cfg, scenario, *, n_frames: int = 3, base_scene: str = "flat",
+                        n_chirps_cap: Optional[int] = 16, device=None,
+                        max_depth: int = 2, include_leakage: bool = False,
+                        diffuse_reflection: bool = True, solver_seed: int = 41,
+                        freq_chunk: int = 128, verbose: bool = False) -> Dict[str, Any]:
+    """Quantify the native Doppler-phase model against the per-chirp re-trace.
+
+    For each of the first `n_frames` frames, both paths are run **noise-free** on the
+    same scene handle with the same solver seed, truncated to the same `n_chirps_cap`
+    chirps, and compared three ways:
+
+    * `per_chirp_rel_err[c]` -- `||native[:,c,:] - retrace[:,c,:]|| / ||retrace[:,c,:]||`
+      (chirp 0 must be ~0: identical geometry, Doppler phase `exp(0)=1`);
+    * `rel_rmse` -- the same ratio over the whole cube;
+    * `peak_bin_native` / `peak_bin_retrace` -- the range/Doppler peak cell through
+      `tdm_deinterleave` + `adc_to_rd`, i.e. whether the two agree where it matters.
+
+    Also returns the measured wall-clock cost of each path and their ratio
+    (`cost_multiplier`), which is the price of the ground-truth path.
+
+    **`mc_noise_floor` -- read this before interpreting `rel_rmse`.** Sionna's diffuse
+    reflections are Monte-Carlo sampled, so re-solving a scene whose geometry moved by
+    even a fraction of a millimetre re-randomises which diffuse paths are found. The
+    per-chirp re-trace therefore injects sampling noise of its own, and with
+    `diffuse_reflection=True` that noise typically DOMINATES the Doppler-model
+    difference this study is trying to measure. Each frame is therefore also re-solved
+    once with a perturbed solver seed at unchanged geometry; the resulting
+    `mc_noise_floor` is the level below which `rel_rmse` carries no information. For a
+    clean measurement of the Doppler model alone, run with
+    `diffuse_reflection=False` and a specular-friendly (planar-faced) target, where
+    the floor is ~0.
+
+    Note `n_chirps_cap` chirps of a TDM config still cover `cap // n_tx` chirps per TX,
+    so keep it a multiple of `cfg.n_tx`.
+    """
+    dev = _resolve_device(device)
+    n_chirps = int(cfg.n_chirps) if n_chirps_cap is None else min(int(cfg.n_chirps),
+                                                                  int(n_chirps_cap))
+    import dataclasses as _dc
+
+    capped = _dc.replace(cfg, n_chirps=n_chirps)
+    common = dict(base_scene=base_scene, max_depth=max_depth,
+                  include_leakage=include_leakage, diffuse_reflection=diffuse_reflection,
+                  solver_seed=solver_seed, freq_chunk=freq_chunk, device=dev, snr_db=None)
+
+    frames: List[Dict[str, Any]] = []
+    t_native_total = 0.0
+    t_retrace_total = 0.0
+    n_solves_native = 0
+    n_solves_retrace = 0
+
+    # Untimed warm-up: DrJit compiles (and caches) the trace/CFR kernels on the first
+    # call, which would otherwise be charged entirely to the native path and make the
+    # measured cost multiplier meaningless (it came out < 1 before this).
+    rt_synthesize_adc(capped, scenario, frame_idx=0,
+                      rt_scene=build_rt_scene(scenario, cfg, base_scene=base_scene,
+                                              frame_idx=0),
+                      **common)
+
+    for k in range(int(n_frames)):
+        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=k)
+
+        t0 = time.perf_counter()
+        native = rt_synthesize_adc(capped, scenario, frame_idx=k, rt_scene=rt_scene,
+                                   **common)
+        t_native = time.perf_counter() - t0
+        n_solves_native += 1
+
+        t0 = time.perf_counter()
+        ref = rt_retrace_reference(capped, scenario, frame_idx=k, rt_scene=rt_scene,
+                                   n_chirps_cap=n_chirps, **common)
+        t_retrace = time.perf_counter() - t0
+        n_solves_retrace += n_chirps
+
+        diff = (native - ref)
+        den = ref.abs().pow(2).sum().sqrt().item()
+        rel_rmse = float(diff.abs().pow(2).sum().sqrt().item() / den) if den > 0 else float("nan")
+        per_chirp = []
+        for c in range(n_chirps):
+            d = float(diff[:, c, :].abs().pow(2).sum().sqrt().item())
+            n = float(ref[:, c, :].abs().pow(2).sum().sqrt().item())
+            per_chirp.append(d / n if n > 0 else float("nan"))
+
+        # Monte-Carlo floor: same geometry, different solver seed (see the docstring).
+        alt = rt_synthesize_adc(capped, scenario, frame_idx=k, rt_scene=rt_scene,
+                                **{**common, "solver_seed": solver_seed + 1})
+        alt_den = native.abs().pow(2).sum().sqrt().item()
+        mc_floor = (float((alt - native).abs().pow(2).sum().sqrt().item() / alt_den)
+                    if alt_den > 0 else float("nan"))
+
+        peak_native, rd_native = _rd_peak_bin(capped, native)
+        peak_ref, rd_ref = _rd_peak_bin(capped, ref)
+        rd_den = rd_ref.abs().pow(2).sum().sqrt().item()
+        rd_rel_rmse = float((rd_native - rd_ref).abs().pow(2).sum().sqrt().item() / rd_den) \
+            if rd_den > 0 else float("nan")
+
+        t_native_total += t_native
+        t_retrace_total += t_retrace
+        frames.append({
+            "frame_idx": k,
+            "rel_rmse": rel_rmse,
+            "mc_noise_floor": mc_floor,
+            "per_chirp_rel_err": per_chirp,
+            "peak_bin_native": tuple(int(v) for v in peak_native),
+            "peak_bin_retrace": tuple(int(v) for v in peak_ref),
+            "peak_bin_match": tuple(peak_native) == tuple(peak_ref),
+            "rd_rel_rmse": rd_rel_rmse,
+            "t_native_s": t_native,
+            "t_retrace_s": t_retrace,
+        })
+        if verbose:
+            f = frames[-1]
+            print(f"  frame {k}: rel_rmse={f['rel_rmse']:.4g} "
+                  f"(mc floor {f['mc_noise_floor']:.4g}) "
+                  f"rd_rel_rmse={f['rd_rel_rmse']:.4g} "
+                  f"peak {f['peak_bin_native']} vs {f['peak_bin_retrace']} "
+                  f"({t_native:.2f}s vs {t_retrace:.2f}s)")
+
+    n_ok = sum(1 for f in frames if f["peak_bin_match"])
+    return {
+        "config": cfg.name,
+        "base_scene": base_scene,
+        "n_frames": int(n_frames),
+        "n_chirps": n_chirps,
+        "n_samples": int(cfg.n_samples),
+        "frames": frames,
+        "rel_rmse_mean": float(np.mean([f["rel_rmse"] for f in frames])) if frames else float("nan"),
+        "rel_rmse_max": float(np.max([f["rel_rmse"] for f in frames])) if frames else float("nan"),
+        "rd_rel_rmse_mean": float(np.mean([f["rd_rel_rmse"] for f in frames])) if frames else float("nan"),
+        "mc_noise_floor_mean": float(np.mean([f["mc_noise_floor"] for f in frames])) if frames else float("nan"),
+        "peak_bin_agreement": (n_ok / len(frames)) if frames else float("nan"),
+        "t_native_s": t_native_total,
+        "t_retrace_s": t_retrace_total,
+        "solves_native": n_solves_native,
+        "solves_retrace": n_solves_retrace,
+        "cost_multiplier": (t_retrace_total / t_native_total) if t_native_total > 0 else float("nan"),
+    }
+
+
+def format_error_study(result: Dict[str, Any]) -> str:
+    """Small fixed-width table for `doppler_error_study`'s return value."""
+    lines = [
+        f"doppler error study: config={result['config']} base_scene={result['base_scene']} "
+        f"n_chirps={result['n_chirps']} n_samples={result['n_samples']}",
+        f"{'frame':>5} {'rel_rmse':>11} {'mc_floor':>10} {'rd_rel_rmse':>12} "
+        f"{'err[c=0]':>10} {'err[c=last]':>12} {'peak(native)':>14} {'peak(retrace)':>15} "
+        f"{'t_nat[s]':>9} {'t_ret[s]':>9}",
+    ]
+    for f in result["frames"]:
+        pc = f["per_chirp_rel_err"]
+        lines.append(
+            f"{f['frame_idx']:>5} {f['rel_rmse']:>11.3e} {f['mc_noise_floor']:>10.2e} "
+            f"{f['rd_rel_rmse']:>12.3e} {pc[0]:>10.2e} {pc[-1]:>12.2e} "
+            f"{str(f['peak_bin_native']):>14} {str(f['peak_bin_retrace']):>15} "
+            f"{f['t_native_s']:>9.2f} {f['t_retrace_s']:>9.2f}"
+        )
+    lines.append(
+        f"mean rel_rmse={result['rel_rmse_mean']:.3e}  max={result['rel_rmse_max']:.3e}  "
+        f"rd_rel_rmse={result['rd_rel_rmse_mean']:.3e}  "
+        f"mc noise floor={result['mc_noise_floor_mean']:.3e}  "
+        f"peak-bin agreement={result['peak_bin_agreement']:.0%}"
+    )
+    lines.append(
+        f"cost: native {result['t_native_s']:.2f}s ({result['solves_native']} solves) vs "
+        f"re-trace {result['t_retrace_s']:.2f}s ({result['solves_retrace']} solves) "
+        f"-> {result['cost_multiplier']:.1f}x"
+    )
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------------
+def _demo_scenario(n_frames: int, cfg=None, target: str = "sphere"):
+    """Moving vehicle target(s) in front of a boresight-aimed radar (study scene).
+
+    `Motion.velocity` is a per-FRAME displacement, and `frame_scatterers` converts it
+    with `dt = 1/cfg.frame_rate_hz` -- so the m/frame numbers below are chosen to give
+    -5 and +3 m/s at the default 10 Hz frame rate, comfortably inside the preset's
+    +-12.8 m/s unambiguous Doppler span.
+
+    `target="box"` uses Sionna's box mesh (scaled to a 4x4x2 m slab whose near face is
+    perpendicular to the boresight) instead of spheres. That matters: the specular
+    path solver finds NO monostatic return off a curved sphere at all (verified -- a
+    specular-only solve of a sphere scene returns zero paths), so sphere targets exist
+    only through diffuse scattering, which is Monte-Carlo sampled. A planar-faced box
+    gives a deterministic specular return and is the right target for measuring the
+    Doppler model itself (`--no-diffuse`).
+    """
+    from e2e.ml.scatterers import vehicle
+    from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
+
+    dt = 1.0 / float(cfg.frame_rate_hz) if cfg is not None else 0.1
+    radar = Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 1.5),
+                 look_at=(10.0, 0.0, 1.5))
+    if target == "box":
+        objects = [SceneObject(name="slab", kind=ObjectKind.BOX, position=(8.0, 0.0, 1.0),
+                               scaling=0.4, material="metal", object_class="vehicle",
+                               motion=Motion(velocity=(-5.0 * dt, 0.0, 0.0)))]
+    else:
+        objects = [
+            vehicle("car_a", (6.0, 1.5, 1.0), motion=Motion(velocity=(-5.0 * dt, 0.0, 0.0))),
+            vehicle("car_b", (4.0, -1.0, 1.0), motion=Motion(velocity=(3.0 * dt, 0.0, 0.0))),
+        ]
+    return Scenario(
+        name="rt_gen_demo",
+        base_scene="flat",
+        num_frames=max(2, int(n_frames) + 1),   # >= 2 so motion tracks have a step
+        nodes=[radar],
+        objects=objects,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m e2e.ml.rt_gen",
+        description="Ray-traced FMCW ADC generation: native Doppler vs per-chirp re-trace.",
+    )
+    p.add_argument("--config", default="ti_iwr1443", help="radar preset (e2e.ml.radar_config.PRESETS)")
+    p.add_argument("--frames", type=int, default=2, help="frames to compare")
+    p.add_argument("--chirps", type=int, default=16, help="chirps per frame (CPI truncation)")
+    p.add_argument("--samples", type=int, default=128, help="ADC samples per chirp")
+    p.add_argument("--base-scene", default="flat", help="flat | free | sionna scene name | path")
+    p.add_argument("--max-depth", type=int, default=2, help="PathSolver max_depth")
+    p.add_argument("--no-diffuse", action="store_true", help="specular-only solve")
+    p.add_argument("--target", default="sphere", choices=("sphere", "box"),
+                   help="demo target geometry; 'box' is specular-visible (see _demo_scenario)")
+    return p
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    import dataclasses as _dc
+
+    args = build_arg_parser().parse_args(argv)
+
+    from e2e.ml.radar_config import PRESETS
+
+    if args.config not in PRESETS:
+        print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)
+        return 2
+    cfg = _dc.replace(PRESETS[args.config], n_chirps=int(args.chirps),
+                      n_samples=int(args.samples))
+    problems = cfg.validate()
+    if problems:
+        print(f"invalid derived config: {problems}", file=sys.stderr)
+        return 2
+
+    scenario = _demo_scenario(args.frames, cfg, target=args.target)
+    result = doppler_error_study(
+        cfg, scenario, n_frames=args.frames, base_scene=args.base_scene,
+        n_chirps_cap=int(args.chirps), max_depth=args.max_depth,
+        diffuse_reflection=not args.no_diffuse, verbose=True,
+    )
+    print(format_error_study(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
