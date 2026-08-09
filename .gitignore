@@ -29,3 +29,6 @@ TODO.md
 CLAUDE.md
 # Internal dev tooling (swarm agent/skill definitions reference internal docs + local paths)
 .claude/
+
+# Private orchestration notes (its own git repo, never public)
+notes/
