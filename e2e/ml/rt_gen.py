@@ -134,6 +134,55 @@ _ANTENNA_INDEX_REVERSED = True
 DEFAULT_SCATTERING_COEFFICIENT = 0.3
 DEFAULT_SCATTERING_PATTERN = "lambertian"
 
+# --------------------------------------------------------------------------------
+# Real object meshes (campaign R2): Sionna's bundled cars + a procedural pedestrian
+# placeholder, replacing sphere-as-car/pedestrian scatterers.
+# --------------------------------------------------------------------------------
+# Sionna ships 17 car meshes under its own package data, all under the Sionna project's
+# Apache-2.0 license (`pip show sionna` -> License: Apache-2.0): the standalone
+# `low_poly_car.ply` plus 16 duplicate-geometry, differently-positioned copies used by
+# the `simple_street_canyon_with_cars` demo scene (`car-0..7.ply` / `car_1..8.ply` --
+# same underlying model baked at 8 different scene slots, shipped twice under both
+# naming schemes). `SceneObject.position`'s setter re-centers on the mesh's OWN
+# axis-aligned bbox (see `sionna.rt.SceneObject.position`), so these baked offsets do
+# not leak into placement -- every name below can be positioned anywhere.
+CAR_ASSET_NAMES = (
+    ("low_poly_car",)
+    + tuple(f"car-{i}" for i in range(8))
+    + tuple(f"car_{i}" for i in range(1, 9))
+)
+
+# No bundled human mesh exists (Sionna ships vehicles, buildings, furniture -- no
+# pedestrians). `_pedestrian_mesh_path` procedurally builds a low-poly placeholder
+# instead; this sentinel `asset` value selects it in `_object_mesh`.
+PEDESTRIAN_ASSET_NAME = "pedestrian_placeholder"
+
+# Human skin at ~77 GHz, order-of-magnitude only (mmWave tissue dielectric tables in
+# the Gabriel et al. tradition report skin eps_r roughly 6-8 and conductivity roughly
+# 30-40 S/m in this band). NOT a measured or frequency-fitted value for this project --
+# a documented approximation until a real tissue model is wired in.
+SKIN_RELATIVE_PERMITTIVITY = 6.5
+SKIN_CONDUCTIVITY_SPM = 36.0
+
+ASSET_LICENSES = {
+    "sionna_cars": {
+        "assets": CAR_ASSET_NAMES,
+        "count": len(CAR_ASSET_NAMES),
+        "source": "sionna-rt PyPI package (sionna/rt/scenes/low_poly_car.ply and "
+                  "sionna/rt/scenes/simple_street_canyon_with_cars/meshes/car*.ply)",
+        "license": "Apache-2.0",
+        "attribution": "(c) The Sionna contributors / NVIDIA; bundled with the "
+                       "sionna-rt package, redistributed unmodified.",
+    },
+    PEDESTRIAN_ASSET_NAME: {
+        "source": "procedurally generated at runtime by _pedestrian_mesh_path -- "
+                  "no binary is committed to this repository",
+        "license": "N/A (no third-party asset; this project's own placeholder geometry)",
+        "status": "PLACEHOLDER -- capsule/cylinder primitives, not an artist mesh. "
+                  "Slated for replacement by a CC0 human mesh once one is sourced.",
+    },
+}
+
 # "flat" base scene: a single large ground rectangle. Mitsuba's built-in `rectangle`
 # shape is the [-1,1]^2 unit plane in z=0 with a +z normal, so one scale transform is
 # the whole scene -- no mesh file, no asset licensing, loads in milliseconds.
@@ -233,6 +282,176 @@ def _box_mesh_path(rt) -> str:
     return ply if os.path.isfile(ply) else rt.scene.sphere
 
 
+def _car_mesh_path(rt, name: str) -> str:
+    """Resolve one of `CAR_ASSET_NAMES` to its `.ply` path inside the sionna-rt package.
+
+    `rt.scene.sphere`'s directory is the package's scenes root; the street-canyon demo's
+    car meshes live one level down, under its own `meshes/` subdirectory.
+    """
+    scenes_dir = os.path.dirname(rt.scene.sphere)
+    if name == "low_poly_car":
+        return os.path.join(scenes_dir, "low_poly_car.ply")
+    return os.path.join(scenes_dir, "simple_street_canyon_with_cars", "meshes", f"{name}.ply")
+
+
+# --------------------------------------------------------------------------------
+# Procedural pedestrian placeholder (no bundled mesh exists -- see ASSET_LICENSES).
+# Pure Python/stdlib: no Sionna needed to build the mesh file itself, only to load it.
+# --------------------------------------------------------------------------------
+def _uv_sphere_mesh(radius: float, n_lat: int = 6, n_lon: int = 10):
+    """`(verts, faces)` for a UV sphere of `radius`, centred at the origin."""
+    verts: List[tuple] = []
+    for i in range(n_lat + 1):
+        theta = math.pi * i / n_lat                       # 0 (north pole) .. pi (south)
+        z = radius * math.cos(theta)
+        r = radius * math.sin(theta)
+        for j in range(n_lon):
+            phi = 2.0 * math.pi * j / n_lon
+            verts.append((r * math.cos(phi), r * math.sin(phi), z))
+    faces: List[tuple] = []
+    for i in range(n_lat):
+        for j in range(n_lon):
+            a = i * n_lon + j
+            b = i * n_lon + (j + 1) % n_lon
+            c = (i + 1) * n_lon + (j + 1) % n_lon
+            d = (i + 1) * n_lon + j
+            if i != 0:
+                faces.append((a, b, d))
+            if i != n_lat - 1:
+                faces.append((b, c, d))
+    return verts, faces
+
+
+def _cylinder_mesh(radius: float, length: float, n_seg: int = 8):
+    """`(verts, faces)` for a capped cylinder of `radius`/`length` along z, centred at
+    the origin (z in `[-length/2, length/2]`)."""
+    top, bot = length / 2.0, -length / 2.0
+    verts: List[tuple] = []
+    for z in (bot, top):
+        for j in range(n_seg):
+            phi = 2.0 * math.pi * j / n_seg
+            verts.append((radius * math.cos(phi), radius * math.sin(phi), z))
+    faces: List[tuple] = []
+    for j in range(n_seg):
+        j2 = (j + 1) % n_seg
+        b0, b1, t0, t1 = j, j2, n_seg + j, n_seg + j2
+        faces.append((b0, b1, t1))
+        faces.append((b0, t1, t0))
+    bot_c = len(verts)
+    verts.append((0.0, 0.0, bot))
+    for j in range(n_seg):
+        faces.append((bot_c, (j + 1) % n_seg, j))
+    top_c = len(verts)
+    verts.append((0.0, 0.0, top))
+    for j in range(n_seg):
+        faces.append((top_c, n_seg + j, n_seg + (j + 1) % n_seg))
+    return verts, faces
+
+
+def _capsule_mesh(radius: float, cylinder_length: float, n_lat: int = 8, n_lon: int = 10):
+    """`(verts, faces)` for a capsule (cylinder + two hemispherical caps) along z,
+    centred at the origin. Total end-to-end length is `cylinder_length + 2*radius`.
+
+    Built as a UV sphere split at the equator, with the two hemispheres pulled apart by
+    `cylinder_length` -- the duplicated equator ring (one copy per hemisphere, both at
+    radius `radius`, offset by `+-cylinder_length/2`) becomes the cylindrical side, so
+    no separate cylinder geometry is needed.
+    """
+    if n_lat % 2:
+        n_lat += 1
+    half = n_lat // 2
+    rings = []  # (z, r)
+    for i in range(half + 1):
+        theta = math.pi * i / n_lat
+        rings.append((radius * math.cos(theta) + cylinder_length / 2.0, radius * math.sin(theta)))
+    for i in range(half, n_lat + 1):
+        theta = math.pi * i / n_lat
+        rings.append((radius * math.cos(theta) - cylinder_length / 2.0, radius * math.sin(theta)))
+
+    verts: List[tuple] = []
+    for z, r in rings:
+        for j in range(n_lon):
+            phi = 2.0 * math.pi * j / n_lon
+            verts.append((r * math.cos(phi), r * math.sin(phi), z))
+    faces: List[tuple] = []
+    for i in range(len(rings) - 1):
+        for j in range(n_lon):
+            a = i * n_lon + j
+            b = i * n_lon + (j + 1) % n_lon
+            c = (i + 1) * n_lon + (j + 1) % n_lon
+            d = (i + 1) * n_lon + j
+            if rings[i][1] > 1e-9:
+                faces.append((a, b, d))
+            if rings[i + 1][1] > 1e-9:
+                faces.append((b, c, d))
+    return verts, faces
+
+
+def _merge_mesh_parts(parts):
+    """Merge `[(verts, faces, translate), ...]` into one `(verts, faces)`, index-offset."""
+    verts: List[tuple] = []
+    faces: List[tuple] = []
+    offset = 0
+    for v, f, t in parts:
+        verts.extend((x + t[0], y + t[1], z + t[2]) for (x, y, z) in v)
+        faces.extend((a + offset, b + offset, c + offset) for (a, b, c) in f)
+        offset += len(v)
+    return verts, faces
+
+
+def _write_ply(path: str, verts, faces) -> None:
+    """Minimal ASCII PLY writer (triangle mesh, vertex positions only)."""
+    with open(path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {len(verts)}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write(f"element face {len(faces)}\n")
+        f.write("property list uchar int vertex_indices\n")
+        f.write("end_header\n")
+        for x, y, z in verts:
+            f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
+        for a, b, c in faces:
+            f.write(f"3 {int(a)} {int(b)} {int(c)}\n")
+
+
+_pedestrian_mesh_cache_path: Optional[str] = None
+
+
+def _pedestrian_mesh_path() -> str:
+    """Build (once per process) and return the path to a PLACEHOLDER pedestrian mesh.
+
+    No bundled human mesh ships with Sionna (see `ASSET_LICENSES`), so this
+    procedurally builds a low-poly capsule-torso + head + 4-limb-cylinder human, ~1.74 m
+    tall, and writes it to a temp `.ply` (no binary committed to the repo -- regenerated
+    every process). This is a crude silhouette, not an anatomically accurate mesh: it
+    exists so a pedestrian scatters radar energy at all (a sphere placeholder is at
+    least visibly wrong; this is a documented stand-in) -- a CC0 artist-made mesh should
+    replace it.
+    """
+    global _pedestrian_mesh_cache_path
+    if _pedestrian_mesh_cache_path is not None:
+        return _pedestrian_mesh_cache_path
+
+    parts = []  # (verts, faces, translate)
+    for side in (-1.0, 1.0):                                   # legs: z in [0, 0.85]
+        v, f = _cylinder_mesh(0.08, 0.85, n_seg=8)
+        parts.append((v, f, (0.0, side * 0.10, 0.425)))
+    v, f = _capsule_mesh(0.15, 0.35, n_lat=8, n_lon=10)         # torso: z in [0.85, 1.50]
+    parts.append((v, f, (0.0, 0.0, 0.85 + 0.15 + 0.35 / 2.0)))
+    for side in (-1.0, 1.0):                                   # arms, roughly at the sides
+        v, f = _cylinder_mesh(0.045, 0.55, n_seg=6)
+        parts.append((v, f, (0.0, side * 0.22, 1.175)))
+    v, f = _uv_sphere_mesh(0.12, n_lat=6, n_lon=10)             # head: top at z ~= 1.74
+    parts.append((v, f, (0.0, 0.0, 1.50 + 0.12)))
+
+    verts, faces = _merge_mesh_parts(parts)
+    d = tempfile.mkdtemp(prefix="e2e-rt-pedestrian-")
+    path = os.path.join(d, "pedestrian_placeholder.ply")
+    _write_ply(path, verts, faces)
+    _pedestrian_mesh_cache_path = path
+    return path
+
+
 def _object_mesh(rt, obj):
     """Mesh source for a scenario `SceneObject` (same dispatch as scenario_runner)."""
     from e2e.scenario import ObjectKind
@@ -243,6 +462,10 @@ def _object_mesh(rt, obj):
         return _box_mesh_path(rt)
     if not obj.asset:
         raise ValueError(f"object {obj.name!r} has kind=MESH but no `asset` mesh path")
+    if obj.asset == PEDESTRIAN_ASSET_NAME:
+        return _pedestrian_mesh_path()
+    if obj.asset in CAR_ASSET_NAMES:
+        return _car_mesh_path(rt, obj.asset)
     return obj.asset
 
 
@@ -305,12 +528,24 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
     objects: Dict[str, Any] = {}
     materials: Dict[str, Any] = {}
     for obj, sc in zip(scenario.objects, scats):
-        mat = rt.ITURadioMaterial(
-            f"e2e-rt-mat-{obj.name}", obj.material, thickness=0.01,
-            scattering_coefficient=float(scattering_coefficient),
-            scattering_pattern=scattering_pattern,
-            color=obj.color if obj.color is not None else (0.8, 0.1, 0.1),
-        )
+        if obj.material == "skin":
+            # No ITU table entry for tissue -- a plain RadioMaterial with the
+            # approximate mmWave skin dielectric constants (see SKIN_* above).
+            mat = rt.RadioMaterial(
+                f"e2e-rt-mat-{obj.name}", thickness=0.01,
+                relative_permittivity=SKIN_RELATIVE_PERMITTIVITY,
+                conductivity=SKIN_CONDUCTIVITY_SPM,
+                scattering_coefficient=float(scattering_coefficient),
+                scattering_pattern=scattering_pattern,
+                color=obj.color if obj.color is not None else (0.9, 0.75, 0.65),
+            )
+        else:
+            mat = rt.ITURadioMaterial(
+                f"e2e-rt-mat-{obj.name}", obj.material, thickness=0.01,
+                scattering_coefficient=float(scattering_coefficient),
+                scattering_pattern=scattering_pattern,
+                color=obj.color if obj.color is not None else (0.8, 0.1, 0.1),
+            )
         so = rt.SceneObject(fname=_object_mesh(rt, obj), name=f"e2e-rt-obj-{obj.name}",
                             radio_material=mat)
         scene.edit(add=[so])

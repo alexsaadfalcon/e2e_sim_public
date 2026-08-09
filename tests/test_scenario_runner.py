@@ -820,6 +820,49 @@ def test_cli_loads_scenario_from_json_path(tmp_path):
     assert arr.shape == (2, 1024, 1, 1, 16)
 
 
+# --------------------------------------------------------------------------- real-mesh / object fixes (R2)
+# Ungated, pure-Python pins for the three scenario_runner bug fixes -- see
+# tests/test_ml_rt_meshes.py for the @pytest.mark.sionna end-to-end regressions (a real
+# BOX object building in a scene, a real sphere target actually returning energy).
+
+def test_object_materials_get_a_nonzero_scattering_coefficient():
+    """Bug (a) (part 1): scattering_coefficient was left at Sionna's default (0, a
+    perfect specular mirror), which made curved/irregular scene objects invisible to a
+    monostatic radar. Pin the module-level default directly (no Sionna needed)."""
+    from e2e.environment.scenario_runner import (
+        _OBJECT_SCATTERING_COEFFICIENT, _OBJECT_SCATTERING_PATTERN,
+    )
+
+    assert _OBJECT_SCATTERING_COEFFICIENT > 0.0
+    assert _OBJECT_SCATTERING_PATTERN == "lambertian"
+
+
+def test_real_frame_solver_call_enables_diffuse_reflection():
+    """Bug (a) (part 2): the solver call itself must request diffuse_reflection=True --
+    a nonzero scattering_coefficient alone does nothing if the solver never asked for
+    diffuse paths. Source-inspects `_real_frame` rather than invoking it (which needs
+    Sionna/GPU) so this stays part of the ungated suite."""
+    import inspect
+
+    from e2e.environment.scenario_runner import ScenarioRunner
+
+    src = inspect.getsource(ScenarioRunner._real_frame)
+    assert "diffuse_reflection=True" in src.replace(" ", "")
+
+
+def test_box_mesh_path_is_a_static_method_independent_of_rt_gen():
+    """Bug (b): `ScenarioRunner._box_mesh_path` exists as its own staticmethod (mirrors
+    `e2e.ml.rt_gen._box_mesh_path`'s pattern without importing e2e.ml -- this module
+    must stay independent of that package)."""
+    import inspect
+
+    from e2e.environment import scenario_runner as mod
+
+    assert isinstance(inspect.getattr_static(mod.ScenarioRunner, "_box_mesh_path"), staticmethod)
+    src = open(mod.__file__).read()
+    assert "import e2e.ml" not in src and "from e2e.ml" not in src
+
+
 # --------------------------------------------------------------------------- real Sionna path (gated)
 
 @pytest.mark.sionna

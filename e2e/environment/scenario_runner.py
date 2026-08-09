@@ -109,6 +109,18 @@ from e2e.environment import motion as motion_mod
 # the dry-run free-space-path-loss mock.
 _SPEED_OF_LIGHT = 299_792_458.0
 
+# Object material defaults for the real Sionna path. Sionna's own defaults make every
+# object a perfect specular mirror (`RadioMaterial.scattering_coefficient` defaults to
+# 0, and the solver's `diffuse_reflection` defaulted to False below), which made a
+# monostatic radar link's own scene objects (cars/pedestrians/etc.) effectively
+# invisible: a curved/irregular target has no specular return straight back at the
+# radar, only a diffuse one. Mirrors `e2e.ml.rt_gen`'s
+# `DEFAULT_SCATTERING_COEFFICIENT`/`DEFAULT_SCATTERING_PATTERN` (not imported from
+# there -- this module stays independent of the `e2e.ml` package); 0.3 is a plausible
+# mid-range value for a rough painted/metallic surface at mmWave, not a measured one.
+_OBJECT_SCATTERING_COEFFICIENT = 0.3
+_OBJECT_SCATTERING_PATTERN = "lambertian"
+
 
 # Directory the existing generators / iterator agree on.
 _THIS_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -591,22 +603,41 @@ class ScenarioRunner:
             polarization=cfg.polarization.value,
         )
 
+    @staticmethod
+    def _box_mesh_path(rt) -> str:
+        """Path to Sionna's box *mesh* (mirrors `e2e.ml.rt_gen._box_mesh_path`).
+
+        `rt.scene.box` is the path to a box SCENE (`box/box.xml`), not a mesh, so
+        passing it straight to `SceneObject(fname=...)` raises "Invalid mesh type" --
+        the ply lives one level down at `box/meshes/box.ply`. Falls back to the sphere
+        primitive if a future Sionna reorganizes the scene package.
+        """
+        ply = os.path.join(os.path.dirname(rt.scene.box), "meshes", "box.ply")
+        return ply if os.path.isfile(ply) else rt.scene.sphere
+
     def _add_scene_object(self, rt, scene, obj: SceneObject):
         """Add a SceneObject (sphere/box/mesh) with material/scaling/color.
 
         Names are namespaced with an ``e2e-`` prefix so scenario scatterers cannot collide
         with objects already present in a loaded base scene (e.g. the Munich city model
         ships with its own vehicles named ``car-0`` etc.).
+
+        Sets a non-zero ``scattering_coefficient`` (see ``_OBJECT_SCATTERING_COEFFICIENT``
+        above) -- without it, and with Sionna's own perfect-specular-mirror default, a
+        monostatic radar's own scene objects returned no energy at all (the fix is only
+        useful together with ``diffuse_reflection=True`` at solve time; see ``_real_frame``).
         """
         material = rt.ITURadioMaterial(
             f"e2e-mat-{obj.name}", obj.material, thickness=0.01,
+            scattering_coefficient=_OBJECT_SCATTERING_COEFFICIENT,
+            scattering_pattern=_OBJECT_SCATTERING_PATTERN,
             color=obj.color if obj.color is not None else (0.8, 0.1, 0.1),
         )
         from e2e.scenario import ObjectKind
         if obj.kind == ObjectKind.SPHERE:
             fname = rt.scene.sphere
         elif obj.kind == ObjectKind.BOX:
-            fname = getattr(rt.scene, "box", rt.scene.sphere)
+            fname = self._box_mesh_path(rt)
         else:  # MESH
             fname = obj.asset
         so = rt.SceneObject(fname=fname, name=f"e2e-obj-{obj.name}", radio_material=material)
@@ -655,7 +686,11 @@ class ScenarioRunner:
 
             paths = ls["solver"](
                 scene=ls["scene"], max_depth=5, los=True, specular_reflection=True,
-                diffuse_reflection=False, refraction=True, synthetic_array=False,
+                # diffuse_reflection=True + the non-zero scattering_coefficient set in
+                # _add_scene_object is what makes irregular/curved objects (which have
+                # no specular return straight back at a monostatic radar) visible at
+                # all -- see _OBJECT_SCATTERING_COEFFICIENT above.
+                diffuse_reflection=True, refraction=True, synthetic_array=False,
                 seed=self.seed,
             )
             out[link.name] = self._extract_s_pars(

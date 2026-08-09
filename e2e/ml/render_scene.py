@@ -274,21 +274,92 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
 
 
 # --------------------------------------------------------------------------------
+# RT tier camera renders (D0-D3, real ray-traced meshes -- for human review, not a
+# training-data path). Sionna is imported lazily so this module still imports (and the
+# GIF path above still runs) with no Sionna installed; only `--rt`/`render_rt_tier_png`
+# need it.
+# --------------------------------------------------------------------------------
+def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: int = 0,
+                       resolution=(1280, 720), camera_dir=(-1.0, -1.0, 1.15),
+                       num_samples: int = 128):
+    """Ray-trace `e2e.ml.rt_scenes` tier `tier` and save a camera render (array +
+    objects) as a PNG at `out_path`. Needs Sionna RT; this is a plain geometry render
+    (no path solve -- `Scene.render_to_file` needs no `PathSolver` output unless a
+    `paths=` overlay is requested, which this does not do), so it is comparatively
+    cheap. Purely for human-eyes review of the object meshes/environment, not part of
+    any training-data pipeline.
+
+    `cfg` (a `RadarConfig`, default `e2e.ml.radar_config.PRESETS["ti_iwr1443"]`) only
+    sets the radar's array/frequency for scene construction (`rt_gen.build_rt_scene`);
+    it plays no role in the image itself. The camera auto-frames the radar node AND
+    every object: it looks at their centroid from `centroid + unit(camera_dir) *
+    max(2.2 * scene_radius, 15 m)` (behind-and-above by default), so tiers with
+    different object counts/spreads (D0's single close sphere vs D3's dozen-plus
+    spread-out objects) both stay fully in frame without per-tier tuning.
+    `resolution` is `(width, height)` pixels.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import sionna.rt as rt
+
+    from e2e.ml.radar_config import PRESETS
+    from e2e.ml.rt_gen import build_rt_scene
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    if cfg is None:
+        cfg = PRESETS["ti_iwr1443"]
+
+    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1)
+    rt_scene = build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+
+    # Sionna's device "icon" (the sphere marking tx/rx) auto-sizes from the SCENE's own
+    # bounding box (`renderer.get_overlay_scene`: `radius = max(0.005*scene_scale, 0.5)`)
+    # -- for the "flat" base scene's 400 m ground plane that is a 2 m sphere, which
+    # dwarfs a ~4 m car or ~1.7 m pedestrian at review-camera distance. Pin a small,
+    # tier-independent icon size instead so the array marker stays legible without
+    # occluding the objects it's meant to sit alongside.
+    rt_scene.tx.display_radius = 0.3
+    rt_scene.rx.display_radius = 0.3
+
+    points = np.array([scenario.nodes[0].position] + [o.position for o in scenario.objects],
+                      dtype=float)
+    centroid = points.mean(axis=0)
+    scene_radius = float(np.linalg.norm(points - centroid, axis=1).max()) if len(points) > 1 else 5.0
+    direction = np.asarray(camera_dir, dtype=float)
+    direction /= np.linalg.norm(direction)
+    cam_pos = centroid + direction * max(2.2 * scene_radius, 15.0)
+    camera = rt.Camera(position=cam_pos.tolist(), look_at=centroid.tolist())
+
+    rt_scene.scene.render_to_file(camera=camera, filename=str(out_path),
+                                  resolution=tuple(resolution), num_samples=num_samples,
+                                  show_devices=True)
+    return out_path
+
+
+# --------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m e2e.ml.render_scene",
-        description="Render an animated bird's-eye + radar-view GIF of a sampled e2e.ml scene.",
+        description="Render an animated bird's-eye + radar-view GIF of a sampled e2e.ml scene "
+                    "(or, with --rt, a single ray-traced camera PNG of an e2e.ml.rt_scenes tier).",
     )
-    p.add_argument("--tier", required=True, help="difficulty tier (see e2e.ml.scenes.DIFFICULTY_TIERS)")
+    p.add_argument("--tier", required=True,
+                   help="difficulty tier (e2e.ml.scenes.DIFFICULTY_TIERS, or "
+                        "e2e.ml.rt_scenes.RT_DIFFICULTY_TIERS with --rt)")
     p.add_argument("--config", required=True, help="radar config preset name (see e2e.ml.radar_config.PRESETS)")
-    p.add_argument("--out", required=True, help="output .gif path")
-    p.add_argument("--frames", type=int, default=30, help="animation frame count")
-    p.add_argument("--fps", type=int, default=8, help="GIF playback frame rate")
+    p.add_argument("--out", required=True, help="output path (.gif, or .png with --rt)")
+    p.add_argument("--frames", type=int, default=30, help="animation frame count (GIF mode only)")
+    p.add_argument("--fps", type=int, default=8, help="GIF playback frame rate (GIF mode only)")
     p.add_argument("--seed", type=int, default=0, help="RNG seed (scene sampling + per-frame synthesis noise)")
-    p.add_argument("--snr-db", type=float, default=30.0, help="synthesis SNR in dB (see synthesize_adc)")
-    p.add_argument("--dpi", type=int, default=90, help="figure DPI (lower -> smaller file)")
+    p.add_argument("--snr-db", type=float, default=30.0, help="synthesis SNR in dB (GIF mode only)")
+    p.add_argument("--dpi", type=int, default=90, help="figure DPI (GIF mode only)")
+    p.add_argument("--rt", action="store_true",
+                   help="ray-trace a single camera PNG of an RT tier instead of an analytic GIF "
+                        "(needs Sionna RT; see render_rt_tier_png)")
+    p.add_argument("--frame-idx", type=int, default=0, help="RT mode: tier sample index (see rt_scenes)")
     return p
 
 
@@ -301,6 +372,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)
         return 2
     cfg = PRESETS[args.config]
+
+    if args.rt:
+        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
+
+        if args.tier not in RT_DIFFICULTY_TIERS:
+            print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
+            return 2
+        out_path = render_rt_tier_png(args.tier, args.out, cfg=cfg, frame_idx=args.frame_idx,
+                                      seed=args.seed)
+        print(f"wrote {out_path} (RT tier {args.tier} camera render)")
+        return 0
 
     from e2e.ml.scenes import DIFFICULTY_TIERS, sample_scene
 
