@@ -71,9 +71,10 @@ semantic versioning.
     logic — used to derive the recipe below.
   - `stats_report.py`: a corpus-composition/statistical-validation reporter (targets-
     and clutter-per-frame, veh:ped ratio, footprint-overlap and radial-velocity
-    clamp-saturation checks) run over `corpus_v1` and checked into `report/corpus_v1/`.
-  - `render_scene.py`: bird's-eye + radar-view animated GIFs of `e2e.ml.scenes` scenes,
-    for README/documentation media (not committed by this change).
+    clamp-saturation checks). Reports are generated locally (the `report/` directory is
+    not tracked): `python -m e2e.ml.stats_report --manifest <manifest.json>`.
+  - `render_scene.py`: bird's-eye + radar-view animated GIFs of `e2e.ml.scenes` scenes;
+    three showcase GIFs are committed under `docs/media/` and embedded in the README.
   - **Tuned recipe + confirmed baseline numbers**: a 10-trial sweep on a smaller pilot
     D1 set picked `lr=3e-4`, `gamma=2`, `reg_weight=100` (kept); `gamma=0` was rejected
     after its validation-AP spikes (0.55-0.67) were traced to a near-zero-recall

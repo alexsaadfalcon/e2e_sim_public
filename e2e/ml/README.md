@@ -151,7 +151,8 @@ numbers below (manifest_version 2, raw-ADC storage, scene-grouped `sequences` �
 | D2 | 1500 | 3000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D2 --n 1500 --seed 3000 --out e2e/ml/datasets/corpus_v1` |
 | D3 | 2000 | 4000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D3 --n 2000 --seed 4000 --out e2e/ml/datasets/corpus_v1` |
 
-`e2e.ml.stats_report` (see `report/corpus_v1/`) confirms the ladder is structurally
+`e2e.ml.stats_report` (run it on your regenerated corpus: `python -m e2e.ml.stats_report
+--manifest <manifest.json>`; reports are local, not tracked) confirms the ladder is structurally
 monotone as designed — targets/frame 1 → 7.9 and clutter/frame 0 → 29.6 from D0 to D3,
 zero label-footprint overlaps at every tier — and surfaces the one caveat worth knowing
 before training on D2/D3: 24.7%/22.5% of targets sit at the radial-velocity clamp cap
