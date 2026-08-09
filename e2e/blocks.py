@@ -9,9 +9,20 @@ from e2e.subspace.subspace_utils import subspace_dist_frob
 from e2e.afe.afe_utils import quantizer_fp
 from e2e.circuit.rffe_model import get_RX_config, circuit_model_batch
 from e2e import frames
+from e2e.frames import FrameCapabilities
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Frame-contract shorthands used by the per-block `frame_capabilities` declarations
+# below. Every block/stage that consumes 's_pars' declares one; Simulation validates the
+# incoming frame against it before calling the component (see e2e/frames.py).
+# ELEMENTWISE: acts per element/frequency, so extra TX/chirp axes just ride along.
+_ELEMENTWISE = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
+# PER_CHIRP: single-chirp core, mapped over the chirp axis (results stacked, leading axis).
+_PER_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_BROADCAST)
+# SINGLE_CHIRP: the historical contract -- no MIMO, one chirp.
+_SINGLE_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_SINGLE)
 
 
 class SionnaEnvironmentBlock:
@@ -62,6 +73,11 @@ class SionnaEnvironmentBlock:
 
 # RF Frontend Block
 class RFFEBlock:
+    # The circuit model is element-wise in (rx, tx, chirp) -- circuit_model_batch
+    # flattens those three axes into its batch dim -- so MIMO and multi-chirp frames
+    # pass through natively, one independent noise realization per trace.
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
                  physical_scale=False, chirp_dur=None):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
@@ -82,7 +98,10 @@ class RFFEBlock:
         # Chirp/pol dim size is inferred (-1) rather than hardcoded to 2: this makes
         # the reshape a no-op for whatever n_chirp the caller actually passes (1, the
         # single-chirp frames Simulation feeds via CircuitStage; or 2, as some direct
-        # callers/tests still exercise) instead of assuming a pol pair.
+        # callers/tests still exercise) instead of assuming a pol pair. A MIMO frame's
+        # TX axis folds into the same batch dim (element (r, t, c) -> [r, 0, t*n_chirp+c])
+        # -- correct because the circuit acts independently per trace -- and the final
+        # view restores the caller's shape.
         s_pars_shape = s_pars.shape
         s_pars = s_pars.view(self.n, 1, -1, s_pars.shape[-1])
         frame = torch.fft.ifft(s_pars, dim=-1)
@@ -154,7 +173,12 @@ class InterconnectBlock:
       (band-agnostic). Grid points outside the CSV's frequency range clamp to its endpoints.
 
     `case='case3'` is an identity pass-through in either mode.
+
+    The filter multiplies along the frequency axis and broadcasts over every leading
+    axis, so MIMO and multi-chirp frames pass through natively (declared below).
     """
+
+    frame_capabilities = _ELEMENTWISE
 
     def __init__(self, case=None, transfer_csv=None, band_hz=None):
         self.case = case
@@ -197,6 +221,10 @@ class InterconnectBlock:
 
 # Adaptive Feature Extraction Block
 class AFEBlock:
+    # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
+    # compressed measurement is defined for a single chirp of a single-TX frame.
+    frame_capabilities = _SINGLE_CHIRP
+
     def __init__(self, exp=5, mantissa=6):
         self.exp = exp
         self.mantissa = mantissa
@@ -234,7 +262,13 @@ class AdaOjaBlock:
     It normalizes the gradient to unit norm and takes a fixed-size step carrying NO
     information about the drift magnitude, so it barely rotates the subspace and does
     not track fast drift. See ROADMAP.md.
+
+    The tracker's state is a d-dimensional basis for ONE aperture snapshot, so it
+    declares the single-chirp/no-MIMO contract: a multi-chirp or MIMO frame would
+    silently change what `d` indexes.
     """
+
+    frame_capabilities = _SINGLE_CHIRP
 
     def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1):
         self.oja = Oja(d, k, eta=eta, fixed_step=True)
@@ -276,6 +310,10 @@ class AdaOjaBlock:
 # dict of updates`), but they run in the FIRST loop of Simulation.feed_forward, in
 # series, each one able to (and expected to) update 's_pars' -- they ARE the pipeline,
 # not products of it. See e2e/simulation.py.
+#
+# Each stage mirrors the `frame_capabilities` of the block it wraps (and names that
+# block via `frame_contract_name`) so Simulation's per-component frame validation
+# reports the block the user actually configured, not the wrapper.
 
 class CircuitStage:
     """RF front-end circuit distortion, applied directly to the single-chirp frame.
@@ -288,8 +326,12 @@ class CircuitStage:
     noise realization per element, no wasted compute.
     """
 
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, rffe_block):
         self.rffe_block = rffe_block
+        self.frame_capabilities = frames.capabilities_of(rffe_block)
+        self.frame_contract_name = f"CircuitStage[{type(rffe_block).__name__}]"
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
@@ -297,25 +339,37 @@ class CircuitStage:
 
 
 class GridStage:
-    """Validates the frame (no MIMO, single chirp) and reshapes it onto the physical
-    receive-array grid."""
+    """Reshapes the frame onto the physical receive-array grid.
+
+    The aperture view is receive-only, so this stage cannot express a TX axis (no
+    MIMO); the chirp axis rides along untouched ([rx_x, rx_y, n_chirp, n_freqs]), and
+    from here on dim 1 is ELEVATION, not TX -- which is why it also flips the state's
+    frame layout to LAYOUT_APERTURE for the validation downstream of it.
+    """
+
+    frame_capabilities = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_NATIVE)
 
     def __init__(self, array_shape):
         self.array_shape = array_shape
 
     def apply(self, state):
         s_pars = state["s_pars"]
-        frames.require_no_mimo(s_pars, "Simulation.feed_forward")
-        frames.require_single_chirp(s_pars, "Simulation.feed_forward")
+        # Redundant with Simulation's pre-call validation, but kept so direct callers
+        # get the named contract error instead of a raw view() size mismatch.
+        frames.require_no_mimo(s_pars, "GridStage")
         s_pars = frames.to_aperture_grid(s_pars, self.array_shape)
-        return {"s_pars": s_pars}
+        return {"s_pars": s_pars, "frame_layout": frames.LAYOUT_APERTURE}
 
 
 class InterconnectStage:
     """Interconnect filtering on the aperture grid."""
 
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, interconnect_block):
         self.interconnect_block = interconnect_block
+        self.frame_capabilities = frames.capabilities_of(interconnect_block)
+        self.frame_contract_name = f"InterconnectStage[{type(interconnect_block).__name__}]"
 
     def apply(self, state):
         s_pars = self.interconnect_block.apply_interconnect(state["s_pars"])
@@ -332,9 +386,18 @@ class MeasurementStage:
     unchanged.
     """
 
+    frame_capabilities = _SINGLE_CHIRP
+
     def __init__(self, afe_block, subspace_block):
         self.afe_block = afe_block
         self.subspace_block = subspace_block
+        # The stage's own math (one A per frame, flatten the aperture to [d, n_freqs])
+        # is single-chirp/no-MIMO regardless of what the blocks declare; name the
+        # blocks it drives so the contract error points at what the user configured.
+        wrapped = [b for b in (subspace_block, afe_block) if b is not None]
+        if wrapped:
+            names = "/".join(type(b).__name__ for b in wrapped)
+            self.frame_contract_name = f"MeasurementStage[{names}]"
 
     def apply(self, state):
         s_pars = state["s_pars"]
@@ -428,15 +491,23 @@ class FFTBlock:
     ``window`` optionally tapers the aperture (angle) axes for sidelobe control
     (None / 'hann' / 'hamming'); it never touches the range axis. The default None
     is the untapered map (numbers unchanged from the uniform-aperture case).
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'fft' is
+    ``[bins, bins]`` for the single-chirp frames the pipeline has always produced, and
+    ``[n_chirp, bins, bins]`` ONLY when n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "FFTBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'fft': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         # Full-band range compression (freq -> range); NOT truncated to `bins`.
         range_full = torch.fft.fft(data, dim=2)     # [az, el, n_freqs]
@@ -455,7 +526,7 @@ class FFTBlock:
             ap = torch.fft.fft(torch.fft.fft(blk, self.bins, 0), self.bins, 1)
             ap = torch.fft.fftshift(torch.fft.fftshift(ap, 0), 1)
             acc = acc + torch.sum(torch.abs(ap) ** 2, dim=2)
-        return {'fft': acc}
+        return acc
 
 
 class RangeAzBlock:
@@ -472,15 +543,23 @@ class RangeAzBlock:
     by a COHERENT sum (an implicit broadside beam) that nulled off-broadside targets.
 
     ``window`` optionally tapers the azimuth aperture (None / 'hann' / 'hamming').
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_az' is
+    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
+    n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "RangeAzBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'range_az': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         w_az = _aperture_window(self.window, n_az, data.device)
         # Accumulate power over the collapsed (elevation) axis one element at a
@@ -494,8 +573,7 @@ class RangeAzBlock:
             a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
             r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
             power = power + torch.abs(r) ** 2
-        range_az = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
-        return {'range_az': range_az}
+        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
 
 
 class RangeElBlock:
@@ -506,15 +584,23 @@ class RangeElBlock:
     compression uses the full band and is power-binned to ``bins`` gates.
 
     ``window`` optionally tapers the elevation aperture (None / 'hann' / 'hamming').
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_el' is
+    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
+    n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "RangeElBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'range_el': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         w_el = _aperture_window(self.window, n_el, data.device)
         # Accumulate power over the collapsed (azimuth) axis one element at a time.
@@ -526,11 +612,14 @@ class RangeElBlock:
             a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
             r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
             power = power + torch.abs(r) ** 2
-        range_el = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
-        return {'range_el': range_el}
+        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
 
 
 class SubspaceErrorBlock:
+    # Reads the tracker's basis, not the frame, but it is only meaningful alongside the
+    # single-chirp/no-MIMO subspace path, so it declares that contract.
+    frame_capabilities = _SINGLE_CHIRP
+
     def __init__(self):
         self.metric = subspace_dist_frob
 

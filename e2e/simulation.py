@@ -13,12 +13,32 @@ from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementSt
 _RANK_RTOL = 1e-2
 
 
+def _check_frame_contract(component, state_dict):
+    """Validate the pipeline's current frame against `component`'s declared
+    `frames.FrameCapabilities`, BEFORE handing it the state dict.
+
+    Raises `frames.FrameContractError` naming the component (stages name the block they
+    wrap) and the offending axis. Components that declare nothing get the historical
+    contract (no MIMO, single chirp) -- see frames.DEFAULT_CAPABILITIES. A non-4-D
+    's_pars' is left alone: a custom serial stage may park something the frame contract
+    can't speak to there, and rejecting it would break flows that worked before.
+    """
+    s_pars = state_dict.get('s_pars')
+    if not torch.is_tensor(s_pars) or s_pars.ndim != 4:
+        return
+    frames.check_capabilities(
+        s_pars, component, layout=state_dict.get('frame_layout', frames.LAYOUT_RAW)
+    )
+
+
 def _svd_frame(s_pars):
     """SVD of a single frame's flattened S-parameter matrix, computed once.
 
     Returns (U, S): the full left-singular-vector matrix and the singular values
     (descending). Shared by get_U_true and rank_diagnostic so callers that need both
     the top-k basis and the singular-value spectrum don't pay for two decompositions.
+    Multi-chirp frames are summarized by their FIRST chirp (the subspace path is
+    single-chirp by declaration; see MeasurementStage.frame_capabilities).
     """
     assert len(s_pars.shape) == 4
     s_pars_0 = s_pars[:, :, 0, :]
@@ -192,6 +212,7 @@ class Simulation:
             'PRX': None,
         }
         for stage in self.serial_stages:
+            _check_frame_contract(stage, state_dict)
             state_dict.update(stage.apply(state_dict))
         # Serial stages that touch the subspace tracker (MeasurementStage) refresh
         # 'U' via their return dict; re-read it from the tracker here too so 'U' is
@@ -200,9 +221,10 @@ class Simulation:
         if self.subspace_block is not None:
             state_dict['U'] = self.subspace_block.oja.U
 
-        reserved_keys = {'U', 'U_true', 's_pars', 'PRX'}
+        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout'}
 
         for downstream_block in self.downstream_blocks:
+            _check_frame_contract(downstream_block, state_dict)
             outputs = downstream_block.apply(state_dict)
             for output_name, output in outputs.items():
                 self.outputs[output_name].append(output)
