@@ -58,6 +58,36 @@ semantic versioning.
   - Neither upstream repo ships a `LICENSE` file; both ports carry attribution headers
     and are pending explicit license confirmation before public redistribution (see
     `e2e/ml/README.md`).
+- **Corpus v1 + tuning infrastructure for `e2e/ml`**: `corpus_v1`, a fixed, regeneratable
+  four-tier `ti_iwr1443` dataset (D0 400 / D1 1000 / D2 1500 / D3 2000 frames, ~14 GB;
+  see `e2e/ml/README.md` for the exact regen commands per tier) plus the tooling built to
+  generate, tune against, and validate it:
+  - **v2 manifest format**: `dataset.py` now stores raw ADC (not a precomputed
+    range-Doppler "input") plus scene-grouped `sequences` alongside the flat per-split
+    file lists, so a future sequence-aware loader has frame-order/scene grouping for
+    free; `manifest_version=1` corpora still load unchanged.
+  - `sweep.py`: a `reg_weight`/`lr`/`gamma` hyperparameter sweep driver with a
+    trailing-window objective and an AR-decline guard, plus `pick_best()` selection
+    logic — used to derive the recipe below.
+  - `stats_report.py`: a corpus-composition/statistical-validation reporter (targets-
+    and clutter-per-frame, veh:ped ratio, footprint-overlap and radial-velocity
+    clamp-saturation checks) run over `corpus_v1` and checked into `report/corpus_v1/`.
+  - `render_scene.py`: bird's-eye + radar-view animated GIFs of `e2e.ml.scenes` scenes,
+    for README/documentation media (not committed by this change).
+  - **Tuned recipe + confirmed baseline numbers**: a 10-trial sweep on a smaller pilot
+    D1 set picked `lr=3e-4`, `gamma=2`, `reg_weight=100` (kept); `gamma=0` was rejected
+    after its validation-AP spikes (0.55-0.67) were traced to a near-zero-recall
+    checkpoint whose AP the metric's zero-detection-threshold exclusion inflates — the
+    same mirage reproduces independently in the confirmed `corpus_v1` baseline. FFTRadNet
+    gamma=2 (40 epochs) reaches test AP 0.030-0.177 / AR 0.095-0.183 across the D0-D3
+    tiers (not a difficulty ranking — see `e2e/ml/README.md`); SSMRadNet (12 epochs, same
+    recipe, unswept for that architecture) reaches D1 test AP 0.196 / AR 0.304 / range
+    RMSE 0.070 m on a step-comparable budget, with the appropriate single-seed/
+    single-tier/hyperparameters-not-tuned-for-it caveats.
+  - `metrics.evaluate_dataset` now also returns `n_defined_precision_thresholds`, the
+    count of confidence thresholds with defined (non-NaN) precision backing the AP mean
+    — the diagnostic that surfaced the gamma=0 mirage above (an AP resting on 1-2
+    thresholds is a small-sample artifact, not a quality signal).
 - **Comms head with spatial combining**: `ModemBlock` gains a `combining` mode
   (`"element0"` the historical single-tap SISO shortcut / `"mrc"` full-aperture
   maximum-ratio combining / `"subspace"` broadband combining using the AdaOja

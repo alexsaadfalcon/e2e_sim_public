@@ -112,25 +112,53 @@ contract **self-describing and general** so blocks compose freely and the geomet
   (`FFTRadNet` from valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) sharing one
   train/eval CLI (`e2e.ml.train`); CUDA-smoke-tested end to end (see `e2e/ml/README.md`
   and the changelog). Both model ports are pending explicit upstream license
-  confirmation before public redistribution. Follow-ups:
-  - **Loss-balance / hyperparameter tuning for honest AP.** The ported loss keeps
-    upstream's `reg_weight=100` (tuned for RADIal's real recordings); on our synthetic
-    scenes it visibly starves the objectness term — smoke-scale training reaches real
-    recall and exact matched-pair localization but weak absolute AP (see
-    `e2e/ml/README.md`). A small sweep over `reg_weight`/lr (and possibly a focal-alpha
-    term) is the first thing a serious training effort should do.
+  confirmation before public redistribution.
+  - **Loss-balance / hyperparameter tuning for honest AP. ✅ DONE 2026-08**
+    (`e2e.ml.sweep`): a 10-trial sweep picked `lr=3e-4`/`gamma=2`/`reg_weight=100`
+    (kept); `gamma=0`'s apparently-better validation AP was traced to a near-zero-recall
+    checkpoint and rejected. Confirmed on the full `corpus_v1` corpus (see
+    `e2e/ml/README.md`'s "Corpus v1 + baseline results" for the numbers and caveats).
+  - **Corpus v1 + statistical validation. ✅ DONE 2026-08** (`e2e.ml.stats_report`,
+    `report/corpus_v1/`): a fixed, regeneratable four-tier `ti_iwr1443` corpus
+    (D0–D3, 4900 frames total) with a structurally-monotone target/clutter density
+    ladder confirmed empirically at scale, zero label-footprint overlaps, and the
+    D2/D3 radial-velocity clamp-saturation rate (24.7%/22.5%) surfaced as a documented
+    caveat rather than a silent gap.
+  - **Raw-ADC (v2) dataset format + scene sequences. ✅ DONE 2026-08**: manifests now
+    store raw ADC (not a precomputed range-Doppler input) and group frames into
+    scene-level `sequences`, keeping a scene's frames together across the train/val/test
+    split and setting up sequence-aware consumers. `manifest_version=1` corpora still
+    load unchanged.
   - **Multi-frame tracks / Doppler sequences.** Current samples are independent
     single-instant scenes (`Scenario.num_frames=1` per sample); a multi-frame track
-    generator would let models exploit frame-to-frame motion continuity.
+    generator would let models exploit frame-to-frame motion continuity. The v2
+    manifest's `sequences` field is scene-grouping groundwork for this, but
+    `RadarFrameDataset` itself is still per-frame.
+  - **Sequence-aware loader.** Consume `manifest.json`'s `sequences` field directly
+    (`RadarFrameDataset` currently ignores it) so a model can see frame order within a
+    scene instead of shuffled independent frames.
+  - **Per-frame / per-class-normalized AP for valid cross-tier comparison.** The
+    confirmed `corpus_v1` baselines show recall collapsing to <2% above confidence
+    threshold 0.3 on every tier, so the current pooled, fixed-threshold-grid AP is
+    dominated by a handful of raw detections per tier and is not a valid difficulty
+    ranking across D0–D3 (see `e2e/ml/README.md`). Per-class AP (vehicle vs. pedestrian
+    — `metrics.evaluate_dataset` already carries `object_class` per target) and/or a
+    recall-floor-restricted threshold set are the cheapest fixes; a fixed-FP-rate or
+    fixed-recall operating point is more correct but needs PR-curve interpolation.
+  - **Longer training runs.** The confirmed baselines above (40 epochs FFTRadNet, 12
+    epochs SSMRadNet) are still far from convergence by absolute AP; a serious training
+    effort should budget materially more epochs before drawing capability conclusions.
   - **`mamba_ssm` fast path on Linux.** `SSMRadNet`'s default is a pure-torch parallel
     scan (no Windows wheels for the fused CUDA kernel); validate/benchmark the
     `mamba_ssm`-backed `backend="mamba_ssm"` path on a Linux/CUDA box.
+  - **Multi-seed SSMRadNet-vs-FFTRadNet comparison.** The confirmed SSMRadNet-beats-
+    FFTRadNet-on-D1 result (`e2e/ml/README.md`) is one seed, one tier, with
+    hyperparameters tuned for FFTRadNet, not SSMRadNet; a real comparison needs
+    multiple seeds per model (ideally an SSMRadNet-tuned recipe too) before it can
+    support a general architecture claim.
   - **Richer clutter models.** Static clutter is currently uniform-random low-RCS
     points; structured/correlated clutter (e.g. multipath ground bounce, extended
     objects) would better match real automotive radar returns.
-  - **Per-class AP.** `metrics.evaluate_dataset` currently reports one dataset-wide
-    AP/AR; splitting by `object_class` (vehicle/pedestrian/clutter) would surface
-    class-specific detector weaknesses the aggregate metric hides.
 
 ## Suggested 1.1 milestone
 
