@@ -614,3 +614,37 @@ def test_no_vehicle_extends_back_through_the_radar():
                 closest = min(closest, r - _footprint_radius("vehicle", obj.asset))
 
     assert closest > 1.0, f"a vehicle's near edge comes within {closest:.2f} m of the radar"
+
+
+def test_local_assets_are_classified_by_their_real_class():
+    """A local asset must not be misread as a car.
+
+    The class lookup consulted only the DOWNLOADED pools, and local assets join a pool
+    only when use_local_assets is set — so every local asset fell through to "car". That
+    gave the 16 m tractor-trailer a 4.4 m car footprint, letting it overlap its
+    neighbours and defeating the separation check that depends on this function. It also
+    skewed the vehicle mix: trucks drew at 5.5% against a 12% target.
+    """
+    from e2e.ml.rt_scenes import _asset_vehicle_class, _footprint
+
+    assert _asset_vehicle_class("local_tractor_trailer") == "truck"
+    assert _footprint("vehicle", "local_tractor_trailer")[0] > 10.0
+    assert _asset_vehicle_class("local_mustang") == "car"
+
+
+def test_vehicle_class_mix_matches_its_weights():
+    """The drawn mix must follow VEHICLE_CLASS_WEIGHTS. A misclassification upstream
+    shows up here as a deficit, which is how the tractor-trailer bug surfaced."""
+    import collections
+    import numpy as np
+    from e2e.ml.rt_scenes import (VEHICLE_CLASS_WEIGHTS, _asset_vehicle_class,
+                                  _draw_vehicle_asset)
+
+    rng = np.random.default_rng(0)
+    counts = collections.Counter(
+        _asset_vehicle_class(_draw_vehicle_asset(rng, True)) for _ in range(4000)
+    )
+    total = sum(counts.values())
+    for cls, want in VEHICLE_CLASS_WEIGHTS.items():
+        got = counts[cls] / total
+        assert abs(got - want) < 0.03, f"{cls}: drew {got:.1%}, weights say {want:.0%}"

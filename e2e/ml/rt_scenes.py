@@ -259,8 +259,17 @@ _SEPARATION_MAX_TRIES = 60
 
 
 def _asset_vehicle_class(asset: Optional[str]) -> str:
-    """Which class pool an asset name came from ("car" if unknown/None)."""
+    """Which class an asset name belongs to ("car" if unknown/None).
+
+    The LOCAL pools must be consulted too, not just the downloaded ones. They are added
+    to a class pool only when `use_local_assets` is set, so a lookup against
+    `VEHICLE_CLASS_POOLS` alone silently classified every local asset as a car -- which
+    gave the 16 m tractor-trailer a 4.4 m car footprint and let it overlap its
+    neighbours, defeating the separation check that depends on this function.
+    """
     if asset:
+        if asset in _LOCAL_TRUCK_ASSET_NAMES:
+            return "truck"
         for cls, pool in VEHICLE_CLASS_POOLS.items():
             if asset in pool:
                 return cls
@@ -481,8 +490,16 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
             material="metal", object_class="vehicle", motion=_motion(vel),
         ))
 
-    for i in range(_n_in(rng, spec.n_cars)):
-        asset = _draw_vehicle_asset(rng, use_local_assets)
+    # Draw every vehicle asset first, then place LARGEST FIRST. Placement can fail and
+    # skip an object when a scene is full, and the biggest vehicles fail most often, so
+    # placing in draw order quietly under-represented them: trucks came out at 6.3%
+    # against a 12% target. Largest-first is the standard packing answer and restores the
+    # intended mix without loosening the no-overlap rule.
+    vehicle_assets = [_draw_vehicle_asset(rng, use_local_assets)
+                      for _ in range(_n_in(rng, spec.n_cars))]
+    vehicle_assets.sort(key=lambda a: _footprint("vehicle", a)[0], reverse=True)
+
+    for i, asset in enumerate(vehicle_assets):
         spot = _sample_local_offset(rng, placed, "vehicle", asset)
         if spot is None:
             continue          # scene is full; see _sample_local_offset
