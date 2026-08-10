@@ -66,10 +66,16 @@ with three arrays:
             makes the transform code, not a disk snapshot, the source of truth for
             "input" -- see `RadarFrameDataset`. On-disk size is essentially unchanged
             from the old "input" npz: both are dense, incompressible float/complex data
-            of the same total byte count, just reshaped by the FFT.)
+            of the same total byte count, just reshaped by the FFT. Written/read through
+            `e2e.ml.storage` -- see that module for the measured codec choice/tradeoffs
+            -- so a cube that happens to verify as uniformly quantized compresses
+            substantially further, exactly losslessly; `meta["codec"]` records which
+            representation is actually on disk, and this is invisible to callers of
+            `RadarFrameDataset`, which always returns the reconstructed complex64 array.)
     labels: float32 [3, grid.n_range, grid.n_azimuth]
     meta  : 0-d unicode array holding a JSON string (frame meta + "targets" +
-            "target_extras" + "scene" == `e2e.ml.scenes.scene_summary(scenario)`)
+            "target_extras" + "scene" == `e2e.ml.scenes.scene_summary(scenario)` +
+            "codec"/"codec_meta" -- see `e2e.ml.storage.write_sample_npz`)
 
 ...plus a `manifest.json` describing the run and the deterministic train/val/test
 split (see `_split_bounds`, applied at the SCENE level so a sequence is never split
@@ -117,6 +123,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+
+from e2e.ml import storage
 
 # Gitignored (see .gitignore: `e2e/ml/datasets/`); computed relative to this file so it
 # resolves correctly regardless of the caller's working directory.
@@ -334,11 +342,15 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
             meta["scene"] = scene_meta
 
             fname = f"frame_{i:05d}.npz" if frames_per_scene == 1 else f"frame_{i:05d}_t{t:02d}.npz"
-            np.savez_compressed(
+            # See e2e.ml.storage: compresses "adc" via its measured-best lossless
+            # codec when the array happens to verify as uniformly quantized (this
+            # analytic-fallback path never runs QuantizerBlock, so in practice this
+            # is almost always CODEC_RAW -- unchanged from the old np.savez_compressed
+            # call this replaces -- but the reader's contract stays codec-agnostic).
+            storage.write_sample_npz(
                 dataset_dir / fname,
-                adc=sample["adc"].numpy(),
-                labels=sample["labels"].numpy(),
-                meta=np.array(json.dumps(meta, default=_json_default)),
+                {"adc": sample["adc"].numpy(), "labels": sample["labels"].numpy()},
+                meta, payload_key="adc", json_default=_json_default,
             )
             scene_files.append(fname)
         sequences.append(scene_files)
@@ -478,13 +490,24 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         return self._cfg
 
     def _load_raw(self, idx: int):
-        """`(array, is_adc, meta)`: `array` is either raw ADC ("adc" key, new format)
-        or the precomputed "input" ("input" key, v1 back-compat); `is_adc` says which."""
+        """`(array, is_adc, meta)`: `array` is either raw ADC ("adc" key or, if
+        `e2e.ml.storage`-compressed, "adc_code_re"/"adc_code_im" -- see below) or the
+        precomputed "input" ("input" key, v1 back-compat); `is_adc` says which.
+
+        Format is detected from which ARRAY KEYS are actually present, not from
+        `meta["codec"]` -- `storage.read_payload` already dispatches on that key
+        internally (defaulting to `CODEC_RAW` when absent, see its docstring), so
+        this only needs to know whether an "adc"-shaped payload is on disk at all
+        versus a v1 corpus that only ever wrote "input". Using presence-of-arrays
+        (rather than "codec" in meta) also means a stray/copied `meta["codec"]` value
+        with no matching array (e.g. a hand-built v1 fixture derived from a v2 file)
+        can't be mistaken for an ADC-native corpus.
+        """
         path = self.dataset_dir / self.files[idx]
         with np.load(path) as data:
             meta = json.loads(str(data["meta"].item()))
-            if "adc" in data:
-                return data["adc"], True, data["labels"], meta
+            if "adc" in data or "adc_code_re" in data:
+                return storage.read_payload(data, meta, "adc"), True, data["labels"], meta
             return data["input"], False, data["labels"], meta
 
     def _derive_input(self, array: np.ndarray, is_adc: bool) -> torch.Tensor:

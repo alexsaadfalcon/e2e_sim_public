@@ -39,7 +39,14 @@ once. Each file holds:
     whatever domain was live in `state['signal_domain']` at the point the
     sink was inserted (`'adc'` / `'s_pars'` / `'tx_wave'`) -- so a sink placed
     where `signal_domain == frames.DOMAIN_RX_TIME` writes an `'adc'` array,
-    exactly the key name `e2e.ml.dataset`'s on-disk format already uses;
+    exactly the key name `e2e.ml.dataset`'s on-disk format already uses. The
+    payload is COMPRESSED via `e2e.ml.storage.write_sample_npz` (see that
+    module for the measured codec choice/tradeoffs): if `state["adc_full_scale"]`
+    is present (i.e. this Sink sits downstream of a `QuantizerBlock`, the real
+    corpus path) the payload's on-disk bytes shrink further, exactly losslessly
+    -- `storage.encode_payload` VERIFIES this at write time and transparently
+    falls back to the uncompressed representation otherwise, so this is never a
+    silent precision loss;
   * `'labels'` (only if `state['labels']` is present -- the "training sample"
     flavor; a sink with no labels in scope, e.g. an intermediate artifact,
     omits it);
@@ -73,6 +80,7 @@ import torch.nn as nn
 
 from e2e import frames
 from e2e.frames import FrameCapabilities
+from e2e.ml import storage
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -198,9 +206,15 @@ class SinkBlock:
                         else np.asarray(labels))
             arrays["labels"] = labels_np
 
+        # adc_full_scale (present when this Sink sits right after a QuantizerBlock --
+        # see e2e.chain.receive.QuantizerBlock) is the EXACT scale the payload was
+        # quantized against; passing it lets storage.write_sample_npz's int16-code
+        # codec win losslessly instead of guessing from the data (see that module).
+        full_scale = state.get("adc_full_scale")
         path = _artifact_path(self.out_dir, self.tag, idx)
-        np.savez_compressed(
-            path, meta=np.array(json.dumps(meta, default=_json_default)), **arrays,
+        storage.write_sample_npz(
+            path, arrays, meta, payload_key=payload_key, full_scale=full_scale,
+            json_default=_json_default,
         )
         return {}
 
@@ -264,7 +278,13 @@ class SourceBlock:
         with np.load(path, allow_pickle=False) as data:
             meta = json.loads(str(data["meta"].item()))
             payload_key = meta["payload_key"]
-            payload = torch.from_numpy(data[payload_key]).to(device)
+            payload_np = storage.read_payload(data, meta, payload_key)
+            # storage.read_payload's CODEC_RAW branch returns the npz's own
+            # (read-only, memory-mapped-into-the-zip) array; torch.from_numpy needs a
+            # writable buffer, so copy -- the CODEC_INT16 branch already returns a
+            # freshly computed (writable) array and this copy is then a no-op cost-wise
+            # difference not worth branching on.
+            payload = torch.from_numpy(np.array(payload_np)).to(device)
             extra: Dict[str, Any] = {}
             if "labels" in data:
                 extra["labels"] = torch.from_numpy(data["labels"]).to(device)

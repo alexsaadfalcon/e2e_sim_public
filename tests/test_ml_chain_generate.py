@@ -16,6 +16,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e import frames
+from e2e.ml import storage
 from e2e.blocks import CircuitStage, InterconnectBlock, InterconnectStage, RFFEBlock
 from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import ImpairmentBlock, QuantizerBlock, RadarCubeBlock
@@ -170,12 +171,17 @@ def test_composition_builds_and_runs_end_to_end(tmp_path, fake_env):
     files = sorted(tmp_path.glob("sample_frame_*.npz"))
     assert len(files) == 3
     with np.load(files[0]) as data:
-        assert data["adc"].shape == (_CFG.n_rx, _CFG.n_chirps, _CFG.n_samples)
-        assert "labels" in data
         meta = json.loads(str(data["meta"].item()))
+        # Read through the storage layer rather than the raw key: a chain that runs
+        # QuantizerBlock lands as integer codes plus a scale, which is exactly lossless
+        # and 2.7x smaller, so there is no literal "adc" array to index.
+        adc = storage.read_payload(data, meta, "adc")
+        assert adc.shape == (_CFG.n_rx, _CFG.n_chirps, _CFG.n_samples)
+        assert "labels" in data
         assert meta["domain"] == frames.DOMAIN_RX_TIME
         assert meta["payload_key"] == "adc"
         assert "targets" in meta
+        assert meta["codec"] == storage.CODEC_INT16
 
 
 # --------------------------------------------------------------------------------
