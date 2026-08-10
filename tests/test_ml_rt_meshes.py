@@ -564,46 +564,57 @@ def test_placed_objects_do_not_interpenetrate():
     """Objects must not occupy the same patch of ground.
 
     Before the separation check, a sweep of D2/D3 put 1.4% of object pairs inside one
-    another, the worst being a pedestrian 0.12 m from a vehicle -- standing inside a car.
-    That is not cosmetic: two targets at one place produce a radar return no real scene
-    could produce AND two ground-truth labels at the same range and bearing, training a
-    model to predict something incoherent.
+    another, the worst a pedestrian 0.12 m from a vehicle -- standing inside a car. That
+    produces both an impossible radar return and two ground-truth labels at the same
+    range and bearing.
 
-    The residual tolerance covers vehicles clipping clutter boxes, which are unlabelled
-    background, so a clip degrades the return slightly without corrupting any label.
+    The footprints used here are the module's OWN, so this tracks placement rather than
+    re-guessing it: a semi-trailer reserves 8 m where a car reserves 2.5, and judging a
+    trailer by a car's size is how the first version of this test misread its results.
     """
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint_radius
 
-    def half_extent(obj):
-        if obj.name.startswith("pedestrian"):
-            return 0.4
+    def radius(obj):
         if obj.name.startswith("sphere"):
-            return 0.5
-        if obj.name.startswith("clutter"):
-            return 3.0
-        return 2.5  # real vehicle meshes
+            return 0.5           # a scaled unit sphere, not a full-size vehicle
+        return _footprint_radius(obj.object_class, obj.asset)
 
-    pairs = overlaps = 0
-    worst_label_corrupting = 0.0
+    pairs = overlaps = labelled = 0
     for tier in ("D0", "D1", "D2", "D3"):
-        for frame in range(40):
+        for frame in range(30):
             objects = build_rt_tier_scenario(tier, frame_idx=frame, seed=11).objects
             for i in range(len(objects)):
                 for j in range(i + 1, len(objects)):
                     a, b = objects[i], objects[j]
                     d = ((a.position[0] - b.position[0]) ** 2
                          + (a.position[1] - b.position[1]) ** 2) ** 0.5
-                    need = half_extent(a) + half_extent(b)
                     pairs += 1
-                    if d < need:
+                    if d < radius(a) + radius(b):
                         overlaps += 1
-                        # A clutter box is unlabelled background; two LABELLED targets
-                        # inside one another is the failure that actually corrupts data.
                         if not (a.name.startswith("clutter") or b.name.startswith("clutter")):
-                            worst_label_corrupting = max(worst_label_corrupting, need - d)
+                            labelled += 1
 
     assert overlaps / pairs < 0.01, f"{overlaps}/{pairs} object pairs interpenetrate"
-    assert worst_label_corrupting == 0.0, (
-        f"two labelled targets overlap by {worst_label_corrupting:.2f} m -- their labels "
+    assert labelled == 0, (
+        f"{labelled} pairs of LABELLED targets interpenetrate -- their ground truth "
         "would sit at the same range and bearing"
     )
+
+
+def test_no_vehicle_extends_back_through_the_radar():
+    """A 16 m semi-trailer centred at the 6 m minimum range reaches BEHIND the antenna.
+    A review render caught exactly that. Minimum range now grows with the object's own
+    half-length, so every vehicle's near edge stays in front of the radar."""
+    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint_radius
+
+    closest = float("inf")
+    for tier in ("D1", "D2", "D3"):
+        for frame in range(30):
+            for obj in build_rt_tier_scenario(tier, frame_idx=frame, seed=3,
+                                              use_local_assets=True).objects:
+                if obj.object_class != "vehicle" or obj.name.startswith("sphere"):
+                    continue
+                r = (obj.position[0] ** 2 + obj.position[1] ** 2) ** 0.5
+                closest = min(closest, r - _footprint_radius("vehicle", obj.asset))
+
+    assert closest > 1.0, f"a vehicle's near edge comes within {closest:.2f} m of the radar"

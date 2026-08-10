@@ -33,8 +33,8 @@ downloaded mesh degrades gracefully (see `e2e.ml.assets`/`rt_gen`) to
 `SIONNA_CAR_REPRESENTATIVE` on a machine without the asset cache -- this module's own
 determinism/pool-composition tests hold either way.
 
-  FOLLOW-UP, NOT DONE HERE: the task brief's preferred D3 base was a Sionna built-in
-  city scene (`"munich"`/`"etoile"`), which WAS tried and does not "load cheaply" --
+  RESOLVED (D4): a Sionna built-in city scene IS usable at 77 GHz -- see
+  `e2e.environment.city_scenes`. Kept for the record, the original obstacle was:
   measured empirically, `build_rt_scene`'s `scene.frequency = f0 + B/2` at an automotive
   77 GHz radar preset (`ti_iwr1443`/`radial_like`, both ~77-78 GHz) raises
   `"Properties of ITU material 'marble' are not defined for this frequency"`: munich's
@@ -204,11 +204,20 @@ RT_DIFFICULTY_TIERS: Dict[str, RTTierSpec] = {
         n_spheres=(0, 0), n_cars=(3, 6), n_pedestrians=(2, 5), n_clutter_boxes=(4, 8),
         speed_mps=(0.0, 8.0),
         description="Cars + pedestrians + dense static box clutter on a flat ground "
-                    "plane -- richest tier. FOLLOW-UP: intended to use a Sionna "
-                    "built-in city scene (munich/etoile) instead; see the module "
-                    "docstring for why that base scene fails outright at automotive "
-                    "77 GHz (an ITU-material frequency-validity limit, not something "
-                    "e2e code can patch).",
+                    "plane -- the richest FLAT-GROUND tier. The city lives in D4.",
+    ),
+    "D4": RTTierSpec(
+        name="D4", base_scene="munich",
+        n_spheres=(0, 0), n_cars=(2, 5), n_pedestrians=(2, 4), n_clutter_boxes=(0, 0),
+        speed_mps=(0.0, 8.0),
+        description="Cars + pedestrians in a REAL ray-traced city (Sionna's munich "
+                    "scene) -- the environment axis of the difficulty scale, which "
+                    "flat-ground tiers cannot express. Buildings supply their own "
+                    "multipath and clutter, so no synthetic clutter boxes are added: "
+                    "the city IS the clutter. Loading munich at automotive 77 GHz "
+                    "needs out-of-band ITU materials substituted and removed -- see "
+                    "e2e.environment.city_scenes, which reports what it swapped so a "
+                    "corpus can state what its city was made of.",
     ),
 }
 
@@ -241,16 +250,38 @@ _FOOTPRINT_RADIUS_M = {
     "vehicle": 2.8,      # a 4.4 m car; buses and semis are longer, hence the margin
 }
 _DEFAULT_FOOTPRINT_M = 2.5
-_SEPARATION_MAX_TRIES = 24
+_SEPARATION_MAX_TRIES = 60
 
 
-def _footprint_radius(object_class: str) -> float:
+#: Half-length by vehicle class, metres. A vehicle's footprint is dominated by its
+#: LENGTH, and these differ by 3x across the pool -- a semi-trailer is 16 m where a car
+#: is 4.4 m. Using one radius for all of them let a 16 m trailer centred at the 6 m
+#: minimum range extend backwards THROUGH the radar's own position, which a review
+#: render caught. Both the separation check and the minimum range now use these.
+VEHICLE_CLASS_HALF_LENGTH_M: Dict[str, float] = {
+    "car": 2.5, "truck": 8.0, "bus": 4.5, "trolley": 6.5,
+}
+
+
+def _asset_vehicle_class(asset: Optional[str]) -> str:
+    """Which class pool an asset name came from ("car" if unknown/None)."""
+    if asset:
+        for cls, pool in VEHICLE_CLASS_POOLS.items():
+            if asset in pool:
+                return cls
+    return "car"
+
+
+def _footprint_radius(object_class: str, asset: Optional[str] = None) -> float:
+    if object_class == "vehicle" and asset is not None:
+        return VEHICLE_CLASS_HALF_LENGTH_M[_asset_vehicle_class(asset)]
     return _FOOTPRINT_RADIUS_M.get(object_class, _DEFAULT_FOOTPRINT_M)
 
 
 def _sample_local_offset(rng: np.random.Generator,
                          placed: Sequence[Tuple[float, float, float]] = (),
-                         object_class: str = "vehicle") -> Tuple[float, float]:
+                         object_class: str = "vehicle",
+                         asset: Optional[str] = None) -> Tuple[float, float]:
     """`(dx, dy)` in the radar-centred, +x-boresight local frame (ground-level, z=0),
     kept clear of everything already placed.
 
@@ -262,12 +293,22 @@ def _sample_local_offset(rng: np.random.Generator,
     bearing, so a model is trained to predict something incoherent.
 
     Candidates are resampled until they clear every placed object by the sum of the two
-    footprint radii; after `_SEPARATION_MAX_TRIES` the least-bad candidate is taken
-    rather than looping forever on a crowded scene (and the caller's counts are a
-    request, not a guarantee -- a dense tier may legitimately not fit).
+    footprint radii. If none does within `_SEPARATION_MAX_TRIES`, this returns **None**
+    and the caller SKIPS that object rather than placing it overlapping. That is the
+    honest resolution: a tier's object counts are a request, and a scene that cannot
+    hold them holds fewer. Taking the least-bad candidate instead -- the earlier
+    behaviour -- put vehicles up to 2 m inside one another once footprints became
+    length-aware, which is exactly the corruption this check exists to prevent. Labels
+    come from the scenario, so a skipped object is simply absent from both the geometry
+    and the ground truth; they never disagree.
     """
+    own = _footprint_radius(object_class, asset)
+
     def _draw():
-        r = rng.uniform(_RANGE_M[0], _RANGE_M[1])
+        # Minimum range grows with the object's own half-length so a long vehicle
+        # cannot extend backwards through the radar: a 16 m trailer centred at 6 m
+        # reaches -2 m, i.e. behind the antenna.
+        r = rng.uniform(_RANGE_M[0] + own, _RANGE_M[1])
         sin_az = rng.uniform(_SIN_AZ_RANGE[0], _SIN_AZ_RANGE[1])
         cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
         return (float(r * cos_az), float(r * sin_az))
@@ -275,17 +316,13 @@ def _sample_local_offset(rng: np.random.Generator,
     if not placed:
         return _draw()
 
-    own = _footprint_radius(object_class)
-    best, best_slack = None, -math.inf
     for _ in range(_SEPARATION_MAX_TRIES):
         dx, dy = _draw()
         slack = min(math.hypot(dx - px, dy - py) - (own + pr)
                     for px, py, pr in placed)
         if slack >= 0.0:
             return dx, dy
-        if slack > best_slack:
-            best, best_slack = (dx, dy), slack
-    return best
+    return None
 
 
 def _sample_velocity(rng: np.random.Generator, speed_range: Tuple[float, float]) -> Tuple[float, float, float]:
@@ -323,7 +360,10 @@ def _sample_clutter_offset(rng: np.random.Generator,
 
     target_polar = [_polar(tdx, tdy) for tdx, tdy in target_offsets]
     for _ in range(_CLUTTER_LOS_MAX_TRIES):
-        dx, dy = _sample_local_offset(rng, placed, "scatterer")
+        spot = _sample_local_offset(rng, placed, "scatterer")
+        if spot is None:
+            return None
+        dx, dy = spot
         r, sin_az = _polar(dx, dy)
         blocked = any(
             abs(sin_az - t_sin_az) < _CLUTTER_LOS_MARGIN_SIN_AZ
@@ -349,9 +389,7 @@ def _sample_clutter_offset(rng: np.random.Generator,
         slack = min(math.hypot(dx - px, dy - py) - (own + pr) for px, py, pr in placed)
         if slack >= 0.0:
             return dx, dy
-        if slack > best_slack:
-            best, best_slack = (dx, dy), slack
-    return best
+    return None
 
 
 def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, seed: int = 0,
@@ -421,7 +459,10 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         return Motion(velocity=vel) if num_frames > 1 else Motion()
 
     for i in range(_n_in(rng, spec.n_spheres)):
-        dx, dy = _sample_local_offset(rng, placed, "sphere")
+        spot = _sample_local_offset(rng, placed, "sphere")
+        if spot is None:
+            continue          # scene is full; see _sample_local_offset
+        dx, dy = spot
         target_offsets.append((dx, dy))
         placed.append((dx, dy, _footprint_radius("sphere")))
         vel = _sample_velocity(rng, spec.speed_mps)
@@ -432,11 +473,14 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         ))
 
     for i in range(_n_in(rng, spec.n_cars)):
-        dx, dy = _sample_local_offset(rng, placed, "vehicle")
-        target_offsets.append((dx, dy))
-        placed.append((dx, dy, _footprint_radius("vehicle")))
-        vel = _sample_velocity(rng, spec.speed_mps)
         asset = _draw_vehicle_asset(rng, use_local_assets)
+        spot = _sample_local_offset(rng, placed, "vehicle", asset)
+        if spot is None:
+            continue          # scene is full; see _sample_local_offset
+        dx, dy = spot
+        target_offsets.append((dx, dy))
+        placed.append((dx, dy, _footprint_radius("vehicle", asset)))
+        vel = _sample_velocity(rng, spec.speed_mps)
         pos = _ground_pos(dx, dy, ObjectKind.MESH, asset, 1.0)
         objects.append(SceneObject(
             name=f"vehicle-{i}", kind=ObjectKind.MESH, asset=asset, position=pos,
@@ -444,7 +488,10 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         ))
 
     for i in range(_n_in(rng, spec.n_pedestrians)):
-        dx, dy = _sample_local_offset(rng, placed, "pedestrian")
+        spot = _sample_local_offset(rng, placed, "pedestrian")
+        if spot is None:
+            continue          # scene is full; see _sample_local_offset
+        dx, dy = spot
         target_offsets.append((dx, dy))
         placed.append((dx, dy, _footprint_radius("pedestrian")))
         # pedestrians are slower than vehicles regardless of the tier's vehicle range.
@@ -460,7 +507,10 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     for i in range(_n_in(rng, spec.n_clutter_boxes)):
         # Kept clear of the direct radar-target line of sight (item 5 fix) -- see
         # `_sample_clutter_offset` / `_CLUTTER_LOS_*` above.
-        dx, dy = _sample_clutter_offset(rng, target_offsets, placed)
+        spot = _sample_clutter_offset(rng, target_offsets, placed)
+        if spot is None:
+            continue          # scene is full; see _sample_local_offset
+        dx, dy = spot
         placed.append((dx, dy, _footprint_radius("scatterer")))
         # Sionna's bundled box mesh is a 10x10x5 m primitive (measured from its own
         # bbox) -- scaling by _CLUTTER_BOX_SCALING gives ~3-6 m "parked container"

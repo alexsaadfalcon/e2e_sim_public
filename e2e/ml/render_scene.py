@@ -284,8 +284,11 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
 # object materials (build_rt_scene's default (0.8, 0.1, 0.1)), the gray ground, and
 # Sionna's own (green) device icon -- so the radar reads as unmistakable at a glance.
 _RADAR_MARKER_COLOR = (1.0, 0.85, 0.0)
-_RADAR_MARKER_RADIUS_M = 0.8            # ~1.6 m diameter -- legible, still << a ~4.5 m car
-_RADAR_BORESIGHT_LEN_M = 6.0            # length of the amber "boresight rod" in front of it
+# Raised from 0.8 m after review renders showed no visible marker at all: against a
+# 34 m-deep scene containing a 16 m semi-trailer, a 1.6 m sphere is a few pixels. 2.5 m
+# reads clearly and is still unmistakably smaller than any vehicle.
+_RADAR_MARKER_RADIUS_M = 2.5
+_RADAR_BORESIGHT_LEN_M = 10.0           # length of the amber "boresight rod" in front of it
 _RENDER_FOV_DEG = 50.0                  # explicit (not Sionna's 45 deg default) horizontal FOV
 # Flat per-object framing radius: cheap stand-in for "how big is this thing on screen"
 # (a real car/pedestrian/clutter-box bbox half-extent, generously rounded up so even the
@@ -409,7 +412,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
                                   color=_RADAR_MARKER_COLOR)
     rod = rt.SceneObject(fname=_box_mesh_path(rt), name="e2e-radar-boresight", radio_material=rod_mat)
     rt_scene.scene.edit(add=[rod])
-    rod.scaling = (_RADAR_BORESIGHT_LEN_M / 10.0, 0.03, 0.03)
+    rod.scaling = (_RADAR_BORESIGHT_LEN_M / 10.0, 0.08, 0.08)
     rod.position = (radar_pos + boresight * _RADAR_BORESIGHT_LEN_M / 2.0).tolist()
 
     # Each framed point carries an approximate world-space RADIUS (not just a bare
