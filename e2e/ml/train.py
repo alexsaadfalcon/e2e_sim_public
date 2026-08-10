@@ -190,6 +190,23 @@ def _load_grid(manifest: Dict):
 # --------------------------------------------------------------------------------
 # Training
 # --------------------------------------------------------------------------------
+def release_gpu_memory() -> None:
+    """Drop torch's cached GPU allocation.
+
+    Several models trained back to back in ONE process share torch's caching allocator,
+    and the cache is not returned to the driver between runs. An 8 GB card that has just
+    finished a convolutional detector can therefore refuse a state-space model that would
+    fit on its own -- which is exactly how an overnight sweep lost every SSMRadNet run to
+    an out-of-memory error while each model ran fine in isolation. Call this between runs.
+    """
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
@@ -209,6 +226,7 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     docstring for the artifact layout. `drop_last=False` throughout, so this still
     runs (last batch just smaller) on a split with as few as 1 sample.
     """
+    release_gpu_memory()
     manifest_path = Path(manifest_path)
     device = device if device is not None else _default_device()
     torch.manual_seed(seed)
