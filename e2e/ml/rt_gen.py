@@ -951,6 +951,52 @@ def _solve(rt_scene: RTScene, *, max_depth: int, include_leakage: bool,
     return rt_scene.solver(**kwargs)
 
 
+#: DrJit refuses to allocate an array with more than 2**32 entries. `cfr` materialises
+#: [rx, rx_ant, tx, tx_ant, num_paths, n_chirps, n_freqs] BEFORE summing over paths, so
+#: the safe frequency-chunk size depends on how many paths the solve actually found --
+#: which a fixed default cannot know. Real decimated vehicle meshes with diffuse
+#: scattering produce ~15k paths where the old sphere scenes produced tens, and the
+#: fixed 128-frequency chunk then asked for 4.4e9 entries and failed outright. Budget
+#: at half the hard limit so the peak allocation has room around it.
+_DRJIT_ELEMENT_BUDGET = 2 ** 31
+
+
+def _num_paths(paths) -> int:
+    """Path count of a solved `Paths`, or 0 if it cannot be determined cheaply."""
+    for attr in ("a", "tau"):
+        arr = getattr(paths, attr, None)
+        if arr is None:
+            continue
+        shape = getattr(arr, "shape", None)
+        if shape:
+            # Path axis is the last one for tau ([..., num_paths]) and second-to-last
+            # for a; taking the max is a safe over-estimate for budgeting purposes.
+            return int(max(shape))
+    return 0
+
+
+def _cfr_freq_chunk(paths, cfg, *, n_chirps: int, requested: int) -> int:
+    """Largest frequency chunk that keeps `cfr`'s pre-sum tensor inside DrJit's limit.
+
+    Returns `requested` when the solve is small enough to need no reduction, so ordinary
+    scenes keep their previous behaviour (and previous numbers) exactly.
+    """
+    requested = max(1, int(requested))
+    n_paths = _num_paths(paths)
+    if n_paths <= 0:
+        return requested
+    per_freq = max(1, int(cfg.n_rx) * int(cfg.n_tx) * n_paths * int(n_chirps))
+    allowed = max(1, _DRJIT_ELEMENT_BUDGET // per_freq)
+    if allowed >= requested:
+        return requested
+    if allowed < 1:  # pragma: no cover -- would need ~1e6 paths
+        raise RuntimeError(
+            f"a single frequency bin needs {per_freq} elements, over DrJit's limit; "
+            f"the solve found {n_paths} paths. Reduce max_depth or scene complexity."
+        )
+    return int(allowed)
+
+
 def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
     """`Paths` -> RAW CFR cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`.
 
@@ -968,7 +1014,7 @@ def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.nd
     """
     freqs = beat_frequencies(cfg)
     n_samples = freqs.size
-    chunk = max(1, int(freq_chunk))
+    chunk = _cfr_freq_chunk(paths, cfg, n_chirps=n_chirps, requested=freq_chunk)
     out: List[np.ndarray] = []
     for lo in range(0, n_samples, chunk):
         h = paths.cfr(

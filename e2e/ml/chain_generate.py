@@ -99,7 +99,8 @@ def build_chain_simulation(
     impairment_chain_params=None, impairment_seed: int = 0,
     quant_bits: int = 12, environment_block=None,
     label_grid=None, label_classes: Optional[Sequence[str]] = DEFAULT_LABEL_CLASSES,
-    device=None, k: int = 1,
+    device=None, k: int = 1, base_scene: str = "flat",
+    use_transmit_chain: bool = False, tx_pa_config=None,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
 
@@ -133,10 +134,26 @@ def build_chain_simulation(
     kept small (default 1) to minimize that overhead.
     """
     env = environment_block if environment_block is not None else RTEnvironmentBlock(
-        scenario, cfg, device=device, label_grid=label_grid, label_classes=label_classes,
+        scenario, cfg, base_scene=base_scene, device=device,
+        label_grid=label_grid, label_classes=label_classes,
     )
 
     serial_stages: List[Any] = []
+
+    # The transmit tributary, when enabled: generate the waveform, distort it in the
+    # amplifier, then merge its spectrum into the channel response. These come first
+    # because everything after them is the receive side. Off by default so the composed
+    # chain stays on the long-proven path unless a caller asks for the TX stage.
+    if use_transmit_chain:
+        from e2e.chain.waveform import ModulateBlock, TxPABlock, WaveformBlock
+        from e2e.circuit.tx_pa import TxPA, TxPAConfig
+        pa = TxPA(tx_pa_config if tx_pa_config is not None else TxPAConfig())
+        serial_stages.append(WaveformBlock(
+            kind="fmcw", n_tx=cfg.n_tx, n_chirp=cfg.n_chirps, n_t=cfg.n_samples,
+            bw=float(cfg.bandwidth_hz),
+        ))
+        serial_stages.append(TxPABlock(pa))
+        serial_stages.append(ModulateBlock(tx_pa=pa, bandwidth_hz=float(cfg.bandwidth_hz)))
     if use_rffe:
         kwargs = dict(rffe_kwargs or {})
         kwargs.setdefault("n", int(cfg.n_rx))
@@ -171,6 +188,7 @@ def generate_chain_corpus(
     range_stride: int = 4, n_azimuth: int = 192, device=None,
     label_classes: Optional[Sequence[str]] = DEFAULT_LABEL_CLASSES,
     randomizer: Optional[Callable[[int, "torch.Generator"], Dict[str, Any]]] = None,
+    use_local_assets: bool = True, use_transmit_chain: bool = True,
 ) -> Path:
     """Generate a radar-ML corpus by RUNNING THE COMPOSED CHAIN, one `Simulation` per
     scene (real ray tracing -- needs Sionna; see `build_chain_simulation`).
@@ -190,12 +208,13 @@ def generate_chain_corpus(
     from e2e.ml.dataset import write_manifest
     from e2e.ml.labels import LabelGrid
     from e2e.ml.radar_config import PRESETS
-    from e2e.ml.scenes import DIFFICULTY_TIERS, sample_scene
+    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
 
     if cfg_name not in PRESETS:
         raise ValueError(f"unknown radar config {cfg_name!r}; choices: {sorted(PRESETS)}")
-    if tier not in DIFFICULTY_TIERS:
-        raise ValueError(f"unknown difficulty tier {tier!r}; choices: {sorted(DIFFICULTY_TIERS)}")
+    if tier not in RT_DIFFICULTY_TIERS:
+        raise ValueError(f"unknown RT difficulty tier {tier!r}; "
+                         f"choices: {sorted(RT_DIFFICULTY_TIERS)}")
     if frames_per_scene < 1:
         raise ValueError(f"frames_per_scene must be >= 1, got {frames_per_scene}")
     cfg = PRESETS[cfg_name]
@@ -209,12 +228,20 @@ def generate_chain_corpus(
 
     sequences: List[List[str]] = []
     for i in range(n_scenes):
-        rng = np.random.default_rng(seed + i)
-        scenario = sample_scene(cfg, tier, rng, n_frames=frames_per_scene)
+        # The RAY-TRACED tier builder, not the analytic one: this is what places real
+        # decimated vehicle meshes (car/truck/bus/trolley) and, for the city tier, sets
+        # the base scene. Sampling from e2e.ml.scenes here would have produced a corpus
+        # of spheres with none of the mesh work in it.
+        scenario = build_rt_tier_scenario(
+            tier, frame_idx=i, seed=seed, num_frames=frames_per_scene,
+            use_local_assets=use_local_assets,
+        )
         tag = f"sample_scene{i:05d}"
 
         sim = build_chain_simulation(
             scenario, cfg, dataset_dir, tag=tag,
+            base_scene=RT_DIFFICULTY_TIERS[tier].base_scene,
+            use_transmit_chain=use_transmit_chain,
             use_rffe=use_rffe, use_interconnect=use_interconnect,
             rffe_kwargs=rffe_kwargs, interconnect_kwargs=interconnect_kwargs,
             impairment_chain_params=randomize, impairment_seed=seed + i * frames_per_scene,
