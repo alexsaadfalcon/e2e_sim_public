@@ -207,8 +207,14 @@ class ModulateBlock:
     # frequency domain it was already in. (An earlier design called this a second
     # crossing, symmetric with the dechirp. That was wrong: the transmit waveform joins
     # the chain by multiplication, it does not carry the chain across.)
+    # MIMO and multi-chirp ride along natively: the transmitted spectrum is
+    # [n_tx, n_chirp, n_freqs] and broadcasts against the channel's
+    # [n_rx, n_tx, n_chirp, n_freqs], which is exactly the per-transmitter pairing a
+    # MIMO radar needs. Declaring otherwise blocked the 3-transmit TI preset outright.
     frame_capabilities = FrameCapabilities(
         domain=frames.DOMAIN_CFR,
+        accepts_mimo=True,
+        chirps=frames.CHIRP_NATIVE,
     )
 
     def __init__(self, tx_pa=None, bandwidth_hz=3e9, freqs_hz=None, ideal=False):

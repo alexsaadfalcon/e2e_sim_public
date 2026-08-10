@@ -179,6 +179,179 @@ BLOCKS: List[BlockSpec] = [
                "the tracker's dominant direction; per-element noise is injected "
                "before combining so any reported array gain is real."),
     ),
+
+    # ----------------------------------------------------------------------------
+    # ADC-cube chain (e2e/chain/*, e2e/environment/blocks.py, e2e/ml/blocks.py). A
+    # second, opt-in signal path with two of its own domain bridges: a TX-time
+    # waveform crosses into the frequency domain (ModulateBlock), and the
+    # frequency-domain channel crosses into RX time (DechirpBlock). All ten blocks
+    # default OFF so the existing radar/subspace/comms pipeline above is unaffected
+    # until a user opts in. See webapp/pipeline_runner.py for which of these are
+    # actually wired into a live run vs. registered for visibility only (the TX-time
+    # trio below hits a domain-contract gap in e2e/chain/waveform.py -- see that
+    # module's handoff note in the runner).
+    # ----------------------------------------------------------------------------
+    BlockSpec(
+        id="rt_environment",
+        label="RT Environment (live ray tracing)",
+        toggleable=True,
+        enabled_default=False,
+        category="source",
+        params=[
+            ParamSpec("scenario_name", "Scenario", "choice", "munich_radar",
+                      choices=["munich_radar", "etoile_radar"],
+                      help="Declarative scenario ray-traced fresh every frame "
+                           "(needs Sionna/DrJit) -- an alternative to the "
+                           "precomputed-.pkl 'Sionna Environment' source above."),
+            ParamSpec("base_scene", "Base scene", "choice", "flat",
+                      choices=["flat", "free"],
+                      help="'flat': a ground plane under the scene objects. "
+                           "'free': no ground, objects only."),
+            ParamSpec("max_depth", "Max ray bounces", "int", 2, step=1,
+                      help="Maximum number of reflections/bounces traced per ray."),
+            ParamSpec("include_leakage", "Include TX/RX leakage path", "choice", False,
+                      choices=[False, True],
+                      help="Also trace the direct antenna-coupling path."),
+        ],
+        blurb=("Generates each frame by ray tracing a scene live (instead of "
+               "reading precomputed frames). Slower, needs Sionna installed, but "
+               "reflects the exact scene/target geometry configured below."),
+    ),
+    BlockSpec(
+        id="waveform",
+        label="TX Waveform",
+        toggleable=True,
+        enabled_default=False,
+        category="source",
+        params=[
+            ParamSpec("kind", "Waveform kind", "choice", "fmcw",
+                      choices=["fmcw", "narrowband", "wideband"],
+                      help="Shape of the synthesized transmitted signal."),
+            ParamSpec("bw", "Bandwidth (Hz)", "number", 1e9, step=1e7,
+                      help="Swept bandwidth of the transmitted waveform."),
+            ParamSpec("sample_rate", "Sample rate (Hz)", "number", 3e9, step=1e8),
+            ParamSpec("chirp_duration", "Chirp duration (s)", "number", 1e-6, step=1e-7),
+        ],
+        blurb=("Synthesizes the actual transmitted waveform (e.g. an FMCW chirp) "
+               "instead of assuming an ideal, distortion-free transmitter."),
+    ),
+    BlockSpec(
+        id="tx_pa",
+        label="TX Power Amplifier",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("gain_db", "Small-signal gain (dB)", "number", 20.0, step=1.0),
+            ParamSpec("a_sat", "Saturation amplitude", "number", 1.0, step=0.1,
+                      help="Output amplitude the amplifier compresses toward."),
+        ],
+        blurb=("Distorts the transmit waveform the way a real power amplifier "
+               "would: it compresses (and phase-shifts) strong signals instead of "
+               "scaling them up linearly forever."),
+    ),
+    BlockSpec(
+        id="modulate",
+        label="Modulate (TX -> channel)",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("bandwidth_hz", "Ripple axis bandwidth (Hz)", "number", 3e9, step=1e8,
+                      help="Frequency span used to phase the PA's ripple response "
+                           "(has no effect unless TX Power Amplifier is enabled)."),
+        ],
+        blurb=("BRIDGE: combines the transmitted waveform's spectrum with the "
+               "channel, so downstream stages see what was actually sent, not an "
+               "idealized flat transmitter."),
+    ),
+    BlockSpec(
+        id="dechirp",
+        label="Dechirp (channel -> ADC)",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("preset", "Radar preset", "choice", "ti_iwr1443",
+                      choices=["ti_iwr1443", "radial_like"],
+                      help="Chirp/frame timing preset shared by this whole ADC-cube "
+                           "chain (RT Environment's ray-traced dimensions, this "
+                           "block, Impairments, and Radar Cube below)."),
+            ParamSpec("mimo", "MIMO scheme", "choice", "tdm",
+                      choices=["tdm", "ddma", "single"],
+                      help="How multiple transmit antennas share the array; "
+                           "overrides the preset's own default."),
+        ],
+        blurb=("BRIDGE: turns the channel's frequency response into the "
+               "dechirped ADC samples a real radar receiver would digitize -- the "
+               "entry point of the ADC-cube chain below."),
+    ),
+    BlockSpec(
+        id="impairment",
+        label="ADC Impairments",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("seed", "Random seed", "int", 0, step=1,
+                      help="Seeds the per-frame randomness (deterministic reruns)."),
+        ],
+        blurb=("Adds realistic receiver imperfections to the digitized signal: "
+               "oscillator phase noise, TX/RX antenna leakage, and ground "
+               "clutter, all with default physical severities."),
+    ),
+    BlockSpec(
+        id="quantizer",
+        label="ADC Quantizer",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("bits", "ADC bits", "int", 12, step=1),
+            ParamSpec("full_scale", "Full-scale amplitude", "number", 1.0, step=0.1,
+                      help="Amplitude (real/imag independently) that hard-clips."),
+        ],
+        blurb=("Digitizes the signal the way a real analog-to-digital converter "
+               "would: a limited number of bits and a hard clip past full scale."),
+    ),
+    BlockSpec(
+        id="radar_cube",
+        label="Radar Cube (Range-Doppler)",
+        toggleable=True,
+        enabled_default=False,
+        category="product",
+        params=[],
+        blurb="Range-Doppler product computed from the digitized ADC samples "
+              "(shares the Dechirp block's radar preset).",
+    ),
+    BlockSpec(
+        id="detector",
+        label="Neural Detector",
+        toggleable=True,
+        enabled_default=False,
+        category="product",
+        params=[
+            ParamSpec("input_format", "Model input", "choice", "rd",
+                      choices=["rd", "adc"],
+                      help="'rd': range-Doppler cube input. 'adc': raw digitized "
+                           "samples input."),
+            ParamSpec("threshold", "Detection threshold", "number", 0.5, step=0.05),
+        ],
+        blurb=("Runs a trained neural network (FFTRadNet/SSMRadNet) on the "
+               "digitized signal to find targets directly. Needs a trained model "
+               "checkpoint, which is not yet selectable from this screen."),
+    ),
+    BlockSpec(
+        id="sink",
+        label="Frame Sink (save to disk)",
+        toggleable=True,
+        enabled_default=False,
+        category="product",
+        params=[],
+        blurb="Saves each frame at this point in the chain to disk, for later "
+              "reuse (e.g. to build a training dataset) without rerunning the "
+              "chain above it.",
+    ),
 ]
 
 # Directed dataflow edges (source id -> target id). These define the diagram and
@@ -193,6 +366,29 @@ EDGES: List[tuple] = [
     ("subspace", "range_el"),
     ("subspace", "subspace_err"),
     ("subspace", "comms"),
+
+    # ADC-cube chain (see the BLOCKS comment above it). Presentational: this is a
+    # DAG for the diagram, not a claim that pipeline_runner assembles every one of
+    # these edges into one live Simulation call (it does not for the TX-time trio;
+    # see pipeline_runner.py). TX-time domain (waveform -> PA) feeds the modulate
+    # bridge alongside an existing frequency-domain source (either precomputed
+    # 'environment' frames or the live-ray-traced 'rt_environment'); modulate hands
+    # back into the same frequency-domain stages (rffe/interconnect) the original
+    # pipeline already has; 'interconnect' is also where the RX-time dechirp bridge
+    # branches off, continuing through impairments/quantization to the RX-time
+    # products (radar cube / neural detector / frame sink).
+    ("waveform", "tx_pa"),
+    ("tx_pa", "modulate"),
+    ("environment", "modulate"),
+    ("rt_environment", "modulate"),
+    ("rt_environment", "rffe"),
+    ("modulate", "rffe"),
+    ("interconnect", "dechirp"),
+    ("dechirp", "impairment"),
+    ("impairment", "quantizer"),
+    ("quantizer", "radar_cube"),
+    ("quantizer", "detector"),
+    ("quantizer", "sink"),
 ]
 
 
