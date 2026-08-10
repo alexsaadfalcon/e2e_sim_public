@@ -57,6 +57,11 @@ from e2e.simulation import Simulation
 
 DEFAULT_LABEL_CLASSES = ("vehicle", "pedestrian")
 
+#: Interconnect transfer function used for ML corpora. See build_chain_simulation for why
+#: the block's own placeholder default is not used here.
+DEFAULT_INTERCONNECT_CSV = (Path(__file__).resolve().parent.parent
+                            / "data" / "interconnect" / "tessera_case3_s21_77ghz.csv")
+
 
 # --------------------------------------------------------------------------------
 # ImpairmentBlock -> SinkBlock provenance glue
@@ -159,7 +164,16 @@ def build_chain_simulation(
         kwargs.setdefault("n", int(cfg.n_rx))
         serial_stages.append(CircuitStage(RFFEBlock(**kwargs)))
     if use_interconnect:
-        serial_stages.append(InterconnectStage(InterconnectBlock(**(interconnect_kwargs or {}))))
+        # The block's own default is an unnormalised 11-tap boxcar placeholder, which
+        # convolves the range profile with an 11-sample boxcar: a point target smears
+        # across 11 bins with 0 dB sidelobes, destroying range resolution. Measured, then
+        # replaced here with a real simulated interconnect (0.51-0.55 dB passive loss,
+        # 0.034 dB ripple in band) that leaves the range response intact -- width 1 bin,
+        # sidelobes -75 dB. The classic pipeline's default is deliberately untouched.
+        ic_kwargs = dict(interconnect_kwargs) if interconnect_kwargs else {}
+        ic_kwargs.setdefault("transfer_csv", str(DEFAULT_INTERCONNECT_CSV))
+        ic_kwargs.setdefault("band_hz", (75e9, 81e9))
+        serial_stages.append(InterconnectStage(InterconnectBlock(**ic_kwargs)))
     serial_stages.append(DechirpBlock(cfg))
     serial_stages.append(
         ImpairmentBlock(cfg, impairment_chain_params, seed=impairment_seed)
