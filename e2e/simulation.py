@@ -18,16 +18,24 @@ def _check_frame_contract(component, state_dict):
     `frames.FrameCapabilities`, BEFORE handing it the state dict.
 
     Raises `frames.FrameContractError` naming the component (stages name the block they
-    wrap) and the offending axis. Components that declare nothing get the historical
-    contract (no MIMO, single chirp) -- see frames.DEFAULT_CAPABILITIES. A non-4-D
-    's_pars' is left alone: a custom serial stage may park something the frame contract
-    can't speak to there, and rejecting it would break flows that worked before.
+    wrap) and the offending domain or axis. Components that declare nothing get the
+    historical contract (frequency domain, no MIMO, single chirp) -- see
+    frames.DEFAULT_CAPABILITIES.
+
+    The DOMAIN check always runs: it is what catches a mis-ordered chain (an impairment
+    before the dechirp) and it does not depend on the payload's rank. The AXIS checks
+    additionally need a 4-D S-parameter frame; a non-4-D payload skips them, because a
+    custom serial stage may park something the frame contract can't speak to in
+    's_pars' and rejecting it would break flows that worked before.
     """
-    s_pars = state_dict.get('s_pars')
-    if not torch.is_tensor(s_pars) or s_pars.ndim != 4:
+    domain = state_dict.get('signal_domain', frames.DOMAIN_CFR)
+    frames.require_domain(domain, component)
+    payload = state_dict.get(frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'))
+    if not torch.is_tensor(payload) or payload.ndim != 4:
         return
     frames.check_capabilities(
-        s_pars, component, layout=state_dict.get('frame_layout', frames.LAYOUT_RAW)
+        payload, component, layout=state_dict.get('frame_layout', frames.LAYOUT_RAW),
+        domain=domain,
     )
 
 
@@ -221,7 +229,8 @@ class Simulation:
         if self.subspace_block is not None:
             state_dict['U'] = self.subspace_block.oja.U
 
-        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout'}
+        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
+                         'signal_domain', 'tx_wave', 'adc'}
 
         for downstream_block in self.downstream_blocks:
             _check_frame_contract(downstream_block, state_dict)

@@ -237,3 +237,70 @@ def test_broadcast_over_chirps_stacks_only_when_multichirp():
     # Chirp c carries value c+1 across 8 frequency bins.
     for c in range(3):
         assert torch.allclose(out[c], torch.full((4, 1), 8.0 * (c + 1)))
+
+
+# ------------------------------------------------------------------- signal domains
+
+from e2e.frames import (  # noqa: E402
+    DOMAIN_CFR,
+    DOMAIN_PAYLOAD_KEY,
+    DOMAIN_RX_TIME,
+    DOMAIN_TX_TIME,
+    require_domain,
+)
+
+
+class _RxTimeBlock:
+    frame_capabilities = FrameCapabilities(domain=DOMAIN_RX_TIME, chirps=CHIRP_NATIVE)
+
+
+class _Bridge:
+    frame_capabilities = FrameCapabilities(
+        domain=DOMAIN_CFR, emits_domain=DOMAIN_RX_TIME,
+        accepts_mimo=True, chirps=CHIRP_NATIVE,
+    )
+
+
+def test_default_domain_is_the_frequency_domain():
+    """Every block that predates the domain field must keep working untouched."""
+    assert capabilities_of(_Undeclared()).domain == DOMAIN_CFR
+    assert capabilities_of(_Undeclared()).emits_domain is None
+    assert capabilities_of(_Undeclared()).is_bridge is False
+
+
+def test_unknown_domain_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="unknown signal domain"):
+        FrameCapabilities(domain="sideways")
+    with pytest.raises(ValueError, match="unknown emitted signal domain"):
+        FrameCapabilities(emits_domain="sideways")
+
+
+def test_bridge_blocks_identify_themselves():
+    assert _Bridge.frame_capabilities.is_bridge is True
+    # Declaring the same domain in and out is not a crossing.
+    assert FrameCapabilities(domain=DOMAIN_CFR, emits_domain=DOMAIN_CFR).is_bridge is False
+
+
+def test_misordered_chain_names_the_bridge_that_would_fix_it():
+    """The whole point of the domain field: an impairment placed before the dechirp
+    must say so, not fail later inside a transform."""
+    with pytest.raises(FrameContractError, match=r"expects the rx_time domain.*insert a DechirpBlock"):
+        require_domain(DOMAIN_CFR, _RxTimeBlock())
+
+
+def test_domain_check_passes_when_the_chain_is_in_the_right_domain():
+    require_domain(DOMAIN_RX_TIME, _RxTimeBlock())
+    require_domain(DOMAIN_CFR, _Undeclared())
+
+
+def test_axis_checks_do_not_apply_outside_the_frequency_domain():
+    """MIMO/chirp checks describe the 4-D S-parameter frame; a time-domain payload has
+    its own shape and must not be judged against them."""
+    cube = torch.zeros(4, 8, 16, dtype=torch.complex64)  # [n_rx, n_chirp, n_sample]
+    check_capabilities(cube, _RxTimeBlock(), domain=DOMAIN_RX_TIME)
+
+
+def test_every_domain_names_its_payload_key():
+    for d in (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME):
+        assert DOMAIN_PAYLOAD_KEY[d]
+    assert DOMAIN_PAYLOAD_KEY[DOMAIN_CFR] == "s_pars"

@@ -98,6 +98,36 @@ LAYOUT_RAW = "raw"            # [n_rx, n_tx, n_chirp, n_freqs] -- straight from 
 LAYOUT_APERTURE = "aperture"  # [rx_x, rx_y, n_chirp, n_freqs] -- after to_aperture_grid
 
 
+# ----------------------------------------------------------------- signal domains
+# The chain is symmetric: a transmitted waveform in time, a frequency-domain middle
+# where propagation and every analog transfer function live, and a received waveform
+# back in time. Blocks declare which domain they consume; the two BRIDGE blocks (the
+# modulate and dechirp steps) also declare the domain they emit.
+#
+# Each domain names the state key carrying its payload, because the tensors genuinely
+# differ in rank and meaning -- a 4-D S-parameter frame and a 3-D ADC cube are not the
+# same object with a flag on it.
+DOMAIN_TX_TIME = "tx_time"   # tx_wave [n_tx, n_chirp, n_t]           -- transmitted envelope
+DOMAIN_CFR     = "cfr"       # s_pars  [n_rx, n_tx, n_chirp, n_freqs] -- transfer functions
+DOMAIN_RX_TIME = "rx_time"   # adc     [n_rx, n_chirp, n_samples]     -- dechirped beat samples
+
+_DOMAINS = (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME)
+
+#: State key carrying each domain's payload. `Simulation` uses this to find the tensor a
+#: block is about to consume without every block agreeing on one name for everything.
+DOMAIN_PAYLOAD_KEY = {
+    DOMAIN_TX_TIME: "tx_wave",
+    DOMAIN_CFR: "s_pars",
+    DOMAIN_RX_TIME: "adc",
+}
+
+#: Human-readable hint naming the block that crosses INTO each domain, used in errors.
+_DOMAIN_BRIDGE = {
+    DOMAIN_CFR: "ModulateBlock",
+    DOMAIN_RX_TIME: "DechirpBlock",
+}
+
+
 @dataclass(frozen=True)
 class FrameCapabilities:
     """What frame shapes a pipeline block/stage declares it can consume.
@@ -108,23 +138,44 @@ class FrameCapabilities:
       element-wise physical blocks), CHIRP_BROADCAST (single-chirp core mapped over the
       axis by `broadcast_over_chirps`, stacking results on a leading chirp axis), or
       CHIRP_SINGLE (rejects `n_chirp > 1`).
+    - `domain`: which signal domain the component consumes (see DOMAIN_* above).
+    - `emits_domain`: set ONLY by the two bridge blocks, naming the domain they hand
+      downstream. `None` means the component leaves the domain as it found it.
 
-    The default is the historical contract -- no MIMO, single chirp -- so a component
-    that declares nothing keeps exactly the old behavior.
+    The defaults are the historical contract -- no MIMO, single chirp, frequency domain
+    -- so a component that declares nothing keeps exactly the old behavior. The axis
+    checks (MIMO, chirps) describe the 4-D S-parameter frame and are applied only in
+    DOMAIN_CFR; the time-domain payloads carry their own shapes.
     """
 
     accepts_mimo: bool = False
     chirps: str = CHIRP_SINGLE
+    domain: str = DOMAIN_CFR
+    emits_domain: str = None
 
     def __post_init__(self):
         if self.chirps not in _CHIRP_MODES:
             raise ValueError(
                 f"unknown chirp capability {self.chirps!r}; expected one of {_CHIRP_MODES}"
             )
+        if self.domain not in _DOMAINS:
+            raise ValueError(
+                f"unknown signal domain {self.domain!r}; expected one of {_DOMAINS}"
+            )
+        if self.emits_domain is not None and self.emits_domain not in _DOMAINS:
+            raise ValueError(
+                f"unknown emitted signal domain {self.emits_domain!r}; expected one of "
+                f"{_DOMAINS} or None"
+            )
 
     @property
     def accepts_multichirp(self):
         return self.chirps != CHIRP_SINGLE
+
+    @property
+    def is_bridge(self):
+        """True for the blocks that carry the chain from one domain into another."""
+        return self.emits_domain is not None and self.emits_domain != self.domain
 
 
 #: Conservative fallback for components that declare nothing (legacy custom stages,
@@ -144,14 +195,40 @@ def component_name(component):
     return getattr(component, "frame_contract_name", None) or type(component).__name__
 
 
-def check_capabilities(s_pars, component, layout=LAYOUT_RAW, who=None):
-    """Validate `s_pars` against `component`'s declared `FrameCapabilities`.
+def require_domain(current_domain, component, who=None):
+    """Raise FrameContractError unless `component` consumes `current_domain`.
 
-    Raises FrameContractError naming the component and the offending axis. The MIMO
-    (dim 1) check is skipped for non-raw layouts, where dim 1 is not a TX axis.
+    This is the check that catches a mis-ordered chain -- an impairment placed before
+    the dechirp, say -- and names the bridge block that would fix it, rather than
+    letting the mistake surface as a shape error deep inside a transform.
     """
     caps = capabilities_of(component)
     who = who or component_name(component)
+    if caps.domain != current_domain:
+        bridge = _DOMAIN_BRIDGE.get(caps.domain)
+        remedy = (f"insert a {bridge} before it" if bridge
+                  else f"it must run before the chain leaves the {caps.domain} domain")
+        raise FrameContractError(
+            f"{who} expects the {caps.domain} domain, but the chain is in the "
+            f"{current_domain} domain -- {remedy}."
+        )
+
+
+def check_capabilities(s_pars, component, layout=LAYOUT_RAW, who=None,
+                       domain=DOMAIN_CFR):
+    """Validate `s_pars` against `component`'s declared `FrameCapabilities`.
+
+    Raises FrameContractError naming the component and the offending axis or domain.
+    The domain is checked first: it is the coarser error and produces the more
+    actionable message. The MIMO (dim 1) check is skipped for non-raw layouts, where
+    dim 1 is not a TX axis; both axis checks apply only in DOMAIN_CFR, since they
+    describe the 4-D S-parameter frame specifically.
+    """
+    caps = capabilities_of(component)
+    who = who or component_name(component)
+    require_domain(domain, component, who)
+    if domain != DOMAIN_CFR:
+        return
     if layout == LAYOUT_RAW and not caps.accepts_mimo:
         require_no_mimo(s_pars, who, hint="this block declares accepts_mimo=False")
     if not caps.accepts_multichirp:
