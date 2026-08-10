@@ -138,6 +138,14 @@ class Simulation:
         # (composability hook -- e.g. inserting a custom stage).
         if serial_stages is not None:
             self.serial_stages = serial_stages
+        elif getattr(environment_block, 'signal_domain', frames.DOMAIN_CFR) != frames.DOMAIN_CFR:
+            # The default stages below (circuit, aperture grid, measurement) are the
+            # frequency-domain imaging path. An environment that starts the chain in
+            # another domain -- a SourceBlock replaying a stored ADC cube -- has already
+            # passed the point where they apply, so building them would only produce a
+            # contract error naming a stage the caller never asked for. Such a chain
+            # supplies its own stages, or none.
+            self.serial_stages = []
         else:
             self.serial_stages = []
             if circuit_block is not None:
@@ -167,15 +175,30 @@ class Simulation:
         # run() starts fresh.
         self._subspace_started = False
         self._rank_warned = False
-        # Downstream blocks with per-run state (e.g. ModemBlock's frame-indexed
-        # noise counter) expose reset(); rewind them so repeated run() calls on
-        # the same Simulation are reproducible.
-        for block in self.downstream_blocks:
+        # Blocks with per-run state (e.g. ModemBlock's frame-indexed noise counter, a
+        # SinkBlock's frame counter, an ImpairmentBlock's per-frame seed) expose
+        # reset(); rewind them so repeated run() calls on the same Simulation are
+        # reproducible. Serial stages need this as much as downstream blocks do -- a
+        # sink placed mid-chain would otherwise keep counting across runs and write a
+        # second run's frames under the first run's numbering.
+        for block in list(self.serial_stages) + list(self.downstream_blocks):
             if hasattr(block, "reset"):
                 block.reset()
 
     def feed_forward(self):
-        s_pars = self.environment_block.get_S_pars()
+        payload = self.environment_block.get_S_pars()
+
+        # Which signal domain does the chain START in? Normally the frequency domain --
+        # an environment block hands over an S-parameter frame. But a SourceBlock
+        # replaying a stored artifact may start the chain mid-way, already past the
+        # dechirp, in which case the payload is an ADC cube and the frequency-domain
+        # machinery below (the SVD, the subspace ground truth) has nothing to say about
+        # it. Blocks that advertise nothing get the historical frequency-domain start.
+        domain = getattr(self.environment_block, 'signal_domain', frames.DOMAIN_CFR)
+        if domain != frames.DOMAIN_CFR:
+            return self._feed_forward_from(domain, payload)
+
+        s_pars = payload
         U, S = _svd_frame(s_pars)
         U_true = U[:, :self.k]
 
@@ -218,7 +241,9 @@ class Simulation:
             's_pars': s_pars,
             'U_true': U_true,
             'PRX': None,
+            'signal_domain': frames.DOMAIN_CFR,
         }
+        state_dict.update(self._environment_state_updates())
         for stage in self.serial_stages:
             _check_frame_contract(stage, state_dict)
             state_dict.update(stage.apply(state_dict))
@@ -249,6 +274,52 @@ class Simulation:
                     )
             state_dict.update(outputs)
         
+    def _environment_state_updates(self):
+        """Extra state an environment block wants to seed the chain with.
+
+        A ray-traced environment carries ground-truth labels alongside the frame, and a
+        SourceBlock carries whatever metadata the stored artifact held. Attaching them
+        HERE, at the source, is what lets labels travel with their frame through the
+        chain instead of being recomputed at the far end against a scene that may since
+        have moved.
+        """
+        getter = getattr(self.environment_block, 'get_state_updates', None)
+        return dict(getter() or {}) if callable(getter) else {}
+
+    def _feed_forward_from(self, domain, payload):
+        """Run a chain that starts in a domain other than the frequency domain.
+
+        This is the replay path: a stored ADC cube injected part-way down the chain, so
+        impairments or products can be re-derived without paying for ray tracing again.
+        The subspace ground truth is deliberately absent -- it is a property of an
+        S-parameter frame, and inventing one here would be a fiction downstream blocks
+        could not distinguish from the real thing.
+        """
+        state_dict = {
+            frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'): payload,
+            'PRX': None,
+            'signal_domain': domain,
+        }
+        state_dict.update(self._environment_state_updates())
+
+        for stage in self.serial_stages:
+            _check_frame_contract(stage, state_dict)
+            state_dict.update(stage.apply(state_dict))
+
+        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
+                         'signal_domain', 'tx_wave', 'adc'}
+        for downstream_block in self.downstream_blocks:
+            _check_frame_contract(downstream_block, state_dict)
+            outputs = downstream_block.apply(state_dict)
+            for output_name, output in outputs.items():
+                self.outputs[output_name].append(output)
+            for key in outputs:
+                if key in reserved_keys:
+                    raise ValueError(
+                        f"downstream block {downstream_block} emitted reserved key {key!r}"
+                    )
+            state_dict.update(outputs)
+
     def get_outputs(self):
         return self.outputs
 

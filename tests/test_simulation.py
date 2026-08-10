@@ -455,3 +455,106 @@ def test_multichirp_frame_stops_at_the_first_single_chirp_component(make_env_blo
     sim.reset()
     with pytest.raises(ValueError, match=r"MeasurementStage\[AdaOjaBlock/AFEBlock\]"):
         sim.feed_forward()
+
+
+# ------------------------------------------------- replay: a chain that starts mid-way
+
+class _AdcSource:
+    """Minimal environment block that replays a stored ADC cube, as SourceBlock does:
+    it starts the chain already past the dechirp, in the RX-time domain."""
+
+    def __init__(self, cube, labels=None):
+        from e2e import frames as _frames
+        self.signal_domain = _frames.DOMAIN_RX_TIME
+        self._cube = cube
+        self._labels = labels
+
+    def get_S_pars(self):
+        return self._cube
+
+    def get_state_updates(self):
+        return {"labels": self._labels} if self._labels is not None else {}
+
+    def step(self):
+        pass
+
+    def reset(self):
+        pass
+
+
+class _AdcProduct:
+    """Downstream product block consuming the RX-time cube."""
+
+    def __init__(self):
+        from e2e import frames as _frames
+        self.frame_capabilities = _frames.FrameCapabilities(
+            domain=_frames.DOMAIN_RX_TIME, chirps=_frames.CHIRP_NATIVE
+        )
+
+    def apply(self, state):
+        return {"cube_power": float(torch.sum(torch.abs(state["adc"]) ** 2))}
+
+
+def test_chain_can_start_in_the_rx_time_domain_without_ray_tracing():
+    """Replay: a stored cube injected part-way down the chain must flow to the products
+    without the frequency-domain machinery (the SVD / subspace ground truth) running or
+    crashing on a 3-D payload."""
+    cube = torch.ones(4, 2, 8, dtype=torch.complex64)
+    sim = Simulation(_AdcSource(cube), [_AdcProduct()], K)
+    sim.reset()
+    sim.feed_forward()
+    out = sim.get_outputs()
+    assert out["cube_power"][0] == pytest.approx(4 * 2 * 8)
+    # The subspace ground truth is deliberately absent rather than invented.
+    assert "subspace_err" not in out
+
+
+def test_replay_carries_environment_state_into_the_chain():
+    """Labels attached at the source must reach the blocks, which is what lets a label
+    travel with its frame instead of being recomputed downstream."""
+    seen = {}
+
+    class _LabelReader:
+        def __init__(self):
+            from e2e import frames as _frames
+            self.frame_capabilities = _frames.FrameCapabilities(
+                domain=_frames.DOMAIN_RX_TIME, chirps=_frames.CHIRP_NATIVE
+            )
+
+        def apply(self, state):
+            seen["labels"] = state.get("labels")
+            return {}
+
+    cube = torch.zeros(2, 1, 4, dtype=torch.complex64)
+    sim = Simulation(_AdcSource(cube, labels=[{"range_m": 12.0}]), [_LabelReader()], K)
+    sim.reset()
+    sim.feed_forward()
+    assert seen["labels"] == [{"range_m": 12.0}]
+
+
+def test_reset_rewinds_serial_stages_not_only_downstream_blocks():
+    """A sink placed mid-chain must be rewound between runs, or a second run writes its
+    frames under the first run's numbering."""
+    class _CountingStage:
+        def __init__(self):
+            from e2e import frames as _frames
+            self.frame_capabilities = _frames.FrameCapabilities(
+                domain=_frames.DOMAIN_RX_TIME, chirps=_frames.CHIRP_NATIVE
+            )
+            self.frames_seen = 0
+
+        def apply(self, state):
+            self.frames_seen += 1
+            return {}
+
+        def reset(self):
+            self.frames_seen = 0
+
+    stage = _CountingStage()
+    env = _AdcSource(torch.zeros(2, 1, 4, dtype=torch.complex64))
+    sim = Simulation(env, [], K, serial_stages=[stage])
+    sim.reset()
+    sim.feed_forward()
+    assert stage.frames_seen == 1
+    sim.reset()
+    assert stage.frames_seen == 0
