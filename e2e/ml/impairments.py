@@ -12,7 +12,8 @@ spectrum whose bin `k` is delay `tau(k) = k / bandwidth_hz` (derived in
 Three impairments, ranked the top realism gaps by an external audit pass:
 
 1. `apply_phase_noise`   -- range-correlated oscillator phase noise (near-range
-   cancellation, far-range less).
+   cancellation, far-range less), applied both within a chirp (range-axis skirts)
+   and chirp-to-chirp (Doppler-axis skirts).
 2. `apply_leakage`       -- TX-RX direct coupling + a short-range bumper/radome
    reflection.
 3. `apply_clutter`       -- heavy-tailed (K-distributed) diffuse ground clutter,
@@ -129,79 +130,155 @@ class PhaseNoiseParams:
 
     psd_dbc_hz_at_ref: float = -85.0   # dBc/Hz at ref_offset_hz
     ref_offset_hz: float = 1.0e6       # reference offset, Hz
+    n_range_bands: int = 8             # fast-time range-segmentation fidelity/cost knob;
+                                        # see `apply_phase_noise` STEP A
 
 
 def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
                        seed: int) -> torch.Tensor:
-    """Range-correlated FMCW phase-noise residual.
+    """Range-correlated FMCW phase-noise residual -- now smears BOTH range and Doppler.
 
-    An FMCW dechirp mixes the echo (delayed by `tau`) against the live TX ramp, so the
-    oscillator's phase noise phi(t) appears as the *residual* `phi(t) - phi(t - tau)`:
-    near ranges (`tau` small) largely cancel, far ranges see nearly the full phase
-    noise -- the textbook FMCW "range correlation" effect. This is implemented in the
-    range-FFT domain: FFT the fast-time axis (per chirp) to get range gates, multiply
-    gate `k`'s spectrum by `exp(j*dphi(k, chirp))`, IFFT back.
+    An FMCW dechirp mixes the echo (delayed by `tau`) against the live TX ramp, so a
+    noisy oscillator's phase `phi(t)` (`t` = FAST time, i.e. within one chirp) appears
+    as the *residual* `phi(t) - phi(t - tau)` on the beat signal (this module's
+    `s_b(t) = s_t(t) conj(s_t(t-tau))` convention with `phi(t)` added to the TX phase
+    reduces exactly to this; `rt_gen`'s eq. (1) is the noise-free special case): near
+    ranges (`tau` small) largely cancel, far ranges see nearly the full phase noise --
+    the textbook FMCW "range correlation" effect. `phi` varies WITHIN a chirp, so a
+    faithful application multiplies the beat SAMPLES by `exp(j(phi(t)-phi(t-tau)))` in
+    the TIME domain -- that is what genuinely convolves/smears the range spectrum
+    ("skirts" around a target). STEP A below does that; STEP B keeps the original
+    per-gate, chirp-to-chirp treatment for Doppler skirts, unchanged.
 
+    STEP A -- within-chirp (fast-time) residual, range-segmented.
+    A single time-domain multiply cannot give every range gate its own delay `tau(k)`
+    (all gates coexist at every fast-time sample). Compromise adopted here: split the
+    `n_samples` range gates into `params.n_range_bands` contiguous bands and give each
+    band ONE fast-time residual keyed to its band-mean delay `tau_b`. For band `b`
+    covering gates `[k_lo, k_hi)`:
+      1. mask the fast-time DFT to just that band's gates and IFFT -> the band's own
+         time-domain contribution `y_b[n]` (bands are disjoint in frequency, so this
+         is an exact decomposition: `sum_b y_b == adc`, Parseval-orthogonal);
+      2. synthesize a real process `dphi_b[chirp, n]` on the ADC fast-time frequency
+         axis (0 to `fs_hz/2`) with variance-density
+         `S_phi(f) * |1 - exp(-j2pi f tau_b)|^2` -- the SAME oscillator PSD and
+         correlation-factor formula STEP B uses, just moved onto the fast-time axis,
+         which is actually the MORE faithful axis for a PSD stated as "offset from
+         carrier": ADC rates are MHz-scale, close to the usual 1 MHz `ref_offset_hz`,
+         whereas STEP B's chirp-rate axis (kHz-scale) is itself an approximation --
+         see STEP B's note below;
+      3. multiply `y_b` by `exp(j dphi_b)` (broadcast over rx) and re-sum the bands.
+    With `n_range_bands=1` this degenerates to the simplest version: one reference
+    delay (the whole window's mean tau) applied uniformly to the entire cube.
+
+    STEP B -- per-gate, chirp-to-chirp residual (unchanged from the original model).
     Per-gate delay: FFT bin `k` of one chirp's fast-time samples corresponds to beat
     frequency `f_beat = k * fs / n_samples`; combined with `f_beat = slope * tau`
     (`b[n] = exp(j2pi(f0 + slope*n/fs) tau)`, `rt_gen`'s eq. (1)) and
     `slope = bandwidth / (n_samples/fs)`, this simplifies to `tau(k) = k / bandwidth_hz`
-    -- delay grows linearly with gate index, independent of `fs`.
-
-    `dphi(k, chirp)` is synthesized as a colored (chirp-to-chirp correlated) random
-    process per gate, with variance-density `S_phi(f) * |1 - exp(-j2pi f tau(k))|^2`,
-    `f` the chirp-to-chirp (slow-time) frequency axis and `S_phi(f) = S_phi(ref) *
-    (ref/f)^2` the -20 dB/decade oscillator PSD.
+    -- delay grows linearly with gate index, independent of `fs`. `dphi(k, chirp)` is
+    synthesized as a colored (chirp-to-chirp correlated) random process per gate, with
+    variance-density `S_phi(f) * |1 - exp(-j2pi f tau(k))|^2`, `f` the chirp-to-chirp
+    (slow-time) frequency axis and `S_phi(f) = S_phi(ref) * (ref/f)^2` the
+    -20 dB/decade oscillator PSD.
 
     APPROXIMATIONS (documented, not hidden):
-    * This is a **per-gate aggregate** treatment, not per-path: every scatterer
-      landing in range gate `k` (and any two-way leakage there) shares one phase-noise
-      draw, rather than each physical path getting its own delay-correlated residual.
-      Correct in the common case of one dominant scatterer per gate; approximate for
-      overlapping multipath within a gate.
-    * The oscillator PSD's "frequency offset from carrier" axis is repurposed here as
-      the CPI's chirp-to-chirp (slow-time, i.e. Doppler) frequency axis, because that
-      is the only frequency axis this discretized, single-solve ADC cube can resolve
-      chirp-to-chirp correlation on. Real oscillator phase-noise masks extend to much
-      higher offsets than a radar CPI's slow-time Nyquist (PRF/2); this module only
-      reproduces the part of the phase-noise spectrum that is *observable* as
-      chirp-to-chirp drift within the frame, which is what corrupts Doppler/subspace
-      processing downstream. CONSEQUENCE, stated plainly: because the residual enters
-      as a unit-modulus phasor on each range BIN, every chirp's range-magnitude
-      spectrum is preserved exactly -- so this reproduces the Doppler-axis skirts and
-      none of the range-axis skirts real phase noise smears around a strong target.
-      Modeling those needs a within-chirp (fast-time) residual; see notes/TODO.md.
-    * The correlation factor is applied exactly (`2 - 2cos(2*pi*f*tau)`), not just the
-      small-angle approximation quoted in the design note -- but for radar-scale
-      delays (`tau` at most `n_samples/bandwidth`, microseconds or less) and slow-time
-      frequencies up to the chirp-rate Nyquist, `f*tau` is normally << 1 and the two
-      agree.
+    * STEP A is per-BAND, not per-gate: within a band, every gate gets the same
+      fast-time residual regardless of its exact delay. Range correlation is
+      preserved only at the band's granularity -- coarser than the true continuum,
+      finer as `n_range_bands` grows (at proportionally higher synthesis cost).
+    * STEP A draws an INDEPENDENT fast-time realization per chirp -- physically the
+      same oscillator's phase is continuous across chirps, but the low-frequency
+      (chirp-to-chirp-observable) part of that continuity is exactly what STEP B
+      already models. Splitting the process into "resolved within one ramp" (A) and
+      "resolved across ramps" (B) is a spectral split-of-convenience, not a claim
+      that the oscillator literally resets phase every chirp.
+    * STEP B remains a **per-gate aggregate**, not per-path: every scatterer (and any
+      two-way leakage) landing in gate `k` shares one chirp-to-chirp phase-noise
+      draw, rather than each physical path getting its own residual. Correct for one
+      dominant scatterer per gate; approximate for overlapping multipath in a gate.
+      STEP B's frequency axis is still the CPI's chirp-to-chirp (slow-time) axis
+      repurposed as "offset from carrier", because that is the only axis this
+      discretized, single-solve ADC cube can resolve chirp-to-chirp correlation on --
+      real phase-noise masks extend to much higher offsets than a CPI's slow-time
+      Nyquist (PRF/2). STEP A supplies the genuinely-offset-from-carrier fast-time
+      axis; STEP B's axis remains an approximation, now clearly scoped to the
+      Doppler-visible part of the spectrum. This is the part of the original honesty
+      debt that is NARROWED rather than eliminated by this change.
+    * The correlation factor (both steps) is applied exactly (`2 - 2cos(2*pi*f*tau)`),
+      not just the small-angle approximation quoted in the design note -- but for
+      radar-scale delays and frequencies up to each axis's own Nyquist, `f*tau` is
+      normally << 1 and the two agree.
 
-    Energy is exactly conserved (up to float rounding): each gate's spectrum is
-    multiplied by a unit-modulus phasor, so Parseval holds through the IFFT.
+    Energy is now only APPROXIMATELY conserved (previously exact): STEP B's
+    unit-modulus per-gate multiply is exactly energy-preserving (Parseval), but
+    STEP A's per-band phasors make previously-orthogonal (disjoint-frequency) bands'
+    time-domain signals interfere -- a second-order-in-phase-noise-variance leakage,
+    small for the physically-small `psd_dbc_hz_at_ref` values this module expects
+    (verified empirically in the test suite, well under 0.5 dB for defaults).
     """
     n_rx, n_chirps, n_samples = adc.shape
     device, dtype = adc.device, adc.dtype
 
-    x = torch.fft.fft(adc, dim=-1)  # range-gate domain, per chirp: [n_rx, n_chirps, n_samples]
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed))
 
     k_idx = torch.arange(n_samples, device=device, dtype=torch.float64)
-    tau = k_idx / float(cfg.bandwidth_hz)  # [n_samples], see docstring derivation
+    tau_gate = k_idx / float(cfg.bandwidth_hz)  # [n_samples], tau(k), see STEP B derivation above
 
+    l_ref_lin = 10.0 ** (float(params.psd_dbc_hz_at_ref) / 10.0)
+
+    # ---- STEP A: within-chirp (fast-time) residual, applied per range band ---------
+    n_bands = max(1, min(int(params.n_range_bands), n_samples))
+    f_fast = torch.fft.rfftfreq(n_samples, d=1.0 / float(cfg.fs_hz)).to(device=device, dtype=torch.float64)
+    n_freq_fast = f_fast.numel()
+    f_fast_min = float(cfg.fs_hz) / n_samples  # fundamental fast-time frequency spacing
+    f_fast_safe = f_fast.clamp_min(f_fast_min)  # avoid the 1/f^2 singularity at DC
+    s_phi_fast = l_ref_lin * (float(params.ref_offset_hz) / f_fast_safe) ** 2  # [n_freq_fast]
+
+    x = torch.fft.fft(adc, dim=-1)  # range-gate domain, per chirp: [n_rx, n_chirps, n_samples]
+    y_time = torch.zeros_like(adc)  # accumulates STEP A's band-recombined, time-domain output
+
+    band_edges = [round(b * n_samples / n_bands) for b in range(n_bands + 1)]
+    for b in range(n_bands):
+        k_lo, k_hi = band_edges[b], band_edges[b + 1]
+        if k_hi <= k_lo:
+            continue
+        mask = torch.zeros(n_samples, dtype=torch.bool, device=device)
+        mask[k_lo:k_hi] = True
+        y_band = torch.fft.ifft(x * mask.view(1, 1, n_samples), dim=-1)  # this band's time-domain content
+
+        tau_b = float(tau_gate[k_lo:k_hi].mean().item())  # band-representative delay
+        corr_b = 2.0 - 2.0 * torch.cos(2.0 * math.pi * f_fast_safe * tau_b)  # [n_freq_fast]
+        s_shaped_fast = s_phi_fast * corr_b
+
+        real = torch.randn((n_chirps, n_freq_fast), generator=gen, device=device, dtype=torch.float64)
+        imag = torch.randn((n_chirps, n_freq_fast), generator=gen, device=device, dtype=torch.float64)
+        # Standard PSD-to-DFT-coefficient-variance synthesis: E[|Y[f]|^2] = S(f)*N/dt.
+        scale = torch.sqrt(s_shaped_fast * n_samples * float(cfg.fs_hz) / 2.0)
+        yfreq = (real + 1j * imag) * scale
+        yfreq[:, 0] = yfreq[:, 0].real  # rfft DC bin of a real signal must be real
+        if n_samples % 2 == 0:
+            yfreq[:, -1] = yfreq[:, -1].real  # ...and the Nyquist bin, if it exists
+        dphi_b = torch.fft.irfft(yfreq, n=n_samples, dim=-1)  # [n_chirps, n_samples], real
+
+        phasor_b = torch.exp(1j * dphi_b.to(torch.float32)).to(dtype)  # [n_chirps, n_samples]
+        y_time = y_time + y_band * phasor_b.unsqueeze(0)  # broadcast over rx; shared LO across the array
+
+    x = torch.fft.fft(y_time, dim=-1)  # back to range-gate domain, now fast-time-smeared
+
+    # ---- STEP B: per-gate, chirp-to-chirp (slow-time / Doppler) residual, unchanged --
     n_freq = n_chirps // 2 + 1
     f = torch.fft.rfftfreq(n_chirps, d=float(cfg.chirp_period_s)).to(device=device, dtype=torch.float64)
     f_min = 1.0 / (n_chirps * float(cfg.chirp_period_s))
     f_safe = f.clamp_min(f_min)  # avoid the 1/f^2 singularity at DC
 
-    l_ref_lin = 10.0 ** (float(params.psd_dbc_hz_at_ref) / 10.0)
     s_phi = l_ref_lin * (float(params.ref_offset_hz) / f_safe) ** 2  # [n_freq], rad^2/Hz
 
-    phase = 2.0 * math.pi * torch.outer(tau, f_safe)  # [n_samples, n_freq]
+    phase = 2.0 * math.pi * torch.outer(tau_gate, f_safe)  # [n_samples, n_freq]
     corr = 2.0 - 2.0 * torch.cos(phase)
     s_shaped = s_phi.unsqueeze(0) * corr  # [n_samples, n_freq]
 
-    gen = torch.Generator(device=device)
-    gen.manual_seed(int(seed))
     real = torch.randn((n_samples, n_freq), generator=gen, device=device, dtype=torch.float64)
     imag = torch.randn((n_samples, n_freq), generator=gen, device=device, dtype=torch.float64)
     # Standard PSD-to-DFT-coefficient-variance synthesis: E[|Y[f]|^2] = S(f)*N/dt.

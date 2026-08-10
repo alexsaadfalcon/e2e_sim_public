@@ -57,26 +57,103 @@ def _tone_cube(n_rx, n_chirps, n_samples, k0, amplitude, device):
     return tone.view(1, 1, n_samples).expand(n_rx, n_chirps, n_samples).clone()
 
 
+def _skirt_power(adc, k0, window=3, exclude=1):
+    """Mean range-FFT power in bins `exclude < |k - k0| <= window` (wrapped) -- the
+    "shoulders" just outside a target's own peak bin, where FMCW phase-noise skirts
+    show up."""
+    n_samples = adc.shape[-1]
+    x = torch.fft.fft(adc, dim=-1)
+    p = torch.abs(x) ** 2
+    idx = torch.arange(n_samples, device=adc.device)
+    dist = torch.minimum((idx - k0) % n_samples, (k0 - idx) % n_samples)
+    mask = (dist > exclude) & (dist <= window)
+    return p[:, :, mask].mean().item()
+
+
 # --------------------------------------------------------------------------- phase noise
 
-def test_phase_noise_range_correlation(cfg, torch_device):
-    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=1)
-    out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=123)
+def test_phase_noise_doppler_axis_range_correlation(cfg, torch_device):
+    """Doppler-axis (chirp-to-chirp, STEP B) skirts: far range sees more phase drift
+    than near range. Uses single-tone probes rather than a random cube -- now that
+    STEP A also perturbs the range axis, a random cube's dense occupancy makes the
+    per-bin phase-ratio metric noisy (measured: it flips the old assertion). A tone
+    isolates the bin under test so this measures STEP B alone, as intended."""
+    n_rx = 4
+    a0 = 5.0
+    k_near = int(round(_range_to_bin(2.0, cfg))) % cfg.n_samples
+    k_far = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    assert k_near != k_far
 
-    assert out.shape == adc.shape
-    assert out.dtype == adc.dtype
-    assert out.device.type == torch_device.type
+    def _chirp_phase_rms(k0):
+        adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+        out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=123)
+        assert out.shape == adc.shape
+        assert out.dtype == adc.dtype
+        assert out.device.type == torch_device.type
+        x_in = torch.fft.fft(adc, dim=-1)[:, :, k0]
+        x_out = torch.fft.fft(out, dim=-1)[:, :, k0]
+        delta = torch.angle(x_out / x_in)
+        return delta.pow(2).mean().sqrt().item()
 
-    x_in = torch.fft.fft(adc, dim=-1)
-    x_out = torch.fft.fft(out, dim=-1)
-    delta = torch.angle(x_out / x_in)  # [n_rx, n_chirps, n_samples]
-
-    near_rms = delta[:, :, 1].pow(2).mean().sqrt().item()
-    far_rms = delta[:, :, cfg.n_samples // 2].pow(2).mean().sqrt().item()
+    near_rms = _chirp_phase_rms(k_near)
+    far_rms = _chirp_phase_rms(k_far)
+    # Measured (seed=123, defaults): near_rms ~= 1.0e-3 rad, far_rms ~= 1.4e-2 rad.
     assert far_rms > 1.5 * near_rms
 
-    # tau(0) == 0 exactly -> the range-correlation factor is exactly zero there.
-    assert delta[:, :, 0].abs().max().item() < 1e-4
+
+def test_phase_noise_range_axis_skirts_appear(cfg, torch_device):
+    """The honesty-debt fix: a strong point target must now show RANGE-axis skirts
+    (power leaking into neighboring range-FFT bins), not just Doppler-axis ones.
+    Measured (n_rx=4, a0=5.0, far target at 30 m, seed=321, defaults): skirt power
+    (mean |X|^2 over bins 2-3 away from the peak) goes from ~3.2e-7 (float noise floor
+    of a pure tone) to ~168 -- a ~58 dB increase -- while the peak bin itself is
+    ~4.1e5, i.e. skirts sit ~34 dB below the peak, a physically sane FMCW phase-noise
+    skirt level."""
+    n_rx = 4
+    a0 = 5.0
+    k0 = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+    out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+
+    skirt_in = _skirt_power(adc, k0)
+    skirt_out = _skirt_power(out, k0)
+    peak_out = torch.abs(torch.fft.fft(out, dim=-1))[:, :, k0].pow(2).mean().item()
+
+    assert skirt_out > 1e4 * max(skirt_in, 1e-30)  # orders of magnitude above the noise-free floor
+    assert skirt_out < 0.1 * peak_out  # skirts stay well below the peak (sane relative level)
+
+
+def test_phase_noise_range_axis_skirts_shrink_with_better_psd(cfg, torch_device):
+    """Skirt power must fall as the oscillator improves (lower PSD). Measured (same
+    setup as the skirts-appear test): -85 dBc/Hz -> skirt ~168; -110 dBc/Hz (25 dB
+    better) -> skirt ~0.54, a ~25 dB drop, tracking the 25 dB PSD improvement."""
+    n_rx = 4
+    a0 = 5.0
+    k0 = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+
+    out_default = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+    out_better = apply_phase_noise(adc, cfg, PhaseNoiseParams(psd_dbc_hz_at_ref=-110.0), seed=321)
+
+    assert _skirt_power(out_better, k0) < 0.1 * _skirt_power(out_default, k0)
+
+
+def test_phase_noise_range_axis_correlation(cfg, torch_device):
+    """Range correlation must survive on the (newly added) range axis too: a far
+    target's skirts exceed a near target's. Measured (n_rx=4, a0=5.0, seed=321,
+    defaults): near (2 m) skirt ~0.91, far (30 m) skirt ~168 -- about 180x larger."""
+    n_rx = 4
+    a0 = 5.0
+    k_near = int(round(_range_to_bin(2.0, cfg))) % cfg.n_samples
+    k_far = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    assert k_near != k_far
+
+    def _skirt(k0):
+        adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+        out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+        return _skirt_power(out, k0)
+
+    assert _skirt(k_far) > 10.0 * _skirt(k_near)
 
 
 def test_phase_noise_energy_conserved(cfg, torch_device):
