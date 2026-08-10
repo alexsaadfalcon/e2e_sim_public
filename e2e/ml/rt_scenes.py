@@ -237,30 +237,25 @@ def _stable_seed(tier: str, frame_idx: int, seed: int) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
-#: Ground-plane footprint radius, metres, used to keep placed objects from occupying the
-#: same patch of ground. Generous rather than exact: a bus is ~8 m long, so half its
-#: length plus margin keeps a neighbour clear of it whatever its heading.
-#: Half the object's real ground extent plus a small margin -- NOT a generous safety
-#: bubble. Two vehicles 6 m apart are ordinary traffic, not a defect; what must never
-#: happen is interpenetration, which is what these radii actually prevent.
-_FOOTPRINT_RADIUS_M = {
-    "pedestrian": 0.5,   # a person is ~0.6 m across
-    "sphere": 0.7,
-    "scatterer": 3.2,    # clutter boxes are 3-6 m primitives
-    "vehicle": 2.8,      # a 4.4 m car; buses and semis are longer, hence the margin
+#: Ground-plane footprint as (length, width) in metres -- a BOX, not a circle. Circles
+#: were the first attempt and they let corners overlap: a 3.2 m radius inscribed in a
+#: 6x6 m clutter box leaves the corners exposed, so two boxes could clear the distance
+#: test and still intersect. Measured after the fix: box overlap fell from 0.57% of
+#: pairs to zero.
+_FOOTPRINT_M = {
+    "pedestrian": (0.8, 0.6),
+    "sphere": (1.0, 1.0),
+    "scatterer": (6.0, 6.0),      # Sionna's box primitive at our clutter scaling
 }
-_DEFAULT_FOOTPRINT_M = 2.5
+#: Vehicles vary threefold in length, so they are keyed by class rather than lumped.
+VEHICLE_FOOTPRINT_M: Dict[str, Tuple[float, float]] = {
+    "car": (4.4, 2.0), "truck": (15.7, 2.9), "bus": (8.0, 2.9), "trolley": (11.9, 3.5),
+}
+_DEFAULT_FOOTPRINT = (4.4, 2.0)
+#: Gap left between footprints. Vehicles in traffic sit closer than this, but the point
+#: is to guarantee no INTERSECTION, not to model a car park.
+_SEPARATION_MARGIN_M = 0.5
 _SEPARATION_MAX_TRIES = 60
-
-
-#: Half-length by vehicle class, metres. A vehicle's footprint is dominated by its
-#: LENGTH, and these differ by 3x across the pool -- a semi-trailer is 16 m where a car
-#: is 4.4 m. Using one radius for all of them let a 16 m trailer centred at the 6 m
-#: minimum range extend backwards THROUGH the radar's own position, which a review
-#: render caught. Both the separation check and the minimum range now use these.
-VEHICLE_CLASS_HALF_LENGTH_M: Dict[str, float] = {
-    "car": 2.5, "truck": 8.0, "bus": 4.5, "trolley": 6.5,
-}
 
 
 def _asset_vehicle_class(asset: Optional[str]) -> str:
@@ -272,14 +267,33 @@ def _asset_vehicle_class(asset: Optional[str]) -> str:
     return "car"
 
 
+def _footprint(object_class: str, asset: Optional[str] = None) -> Tuple[float, float]:
+    """(length, width) in metres for an object about to be placed."""
+    if object_class in _FOOTPRINT_M:
+        return _FOOTPRINT_M[object_class]
+    if object_class == "vehicle":
+        return VEHICLE_FOOTPRINT_M.get(_asset_vehicle_class(asset), _DEFAULT_FOOTPRINT)
+    return _DEFAULT_FOOTPRINT
+
+
 def _footprint_radius(object_class: str, asset: Optional[str] = None) -> float:
-    if object_class == "vehicle" and asset is not None:
-        return VEHICLE_CLASS_HALF_LENGTH_M[_asset_vehicle_class(asset)]
-    return _FOOTPRINT_RADIUS_M.get(object_class, _DEFAULT_FOOTPRINT_M)
+    """Half-length, kept for the minimum-range rule and for callers that want a scalar."""
+    return _footprint(object_class, asset)[0] / 2.0
+
+
+def _boxes_clear(ax, ay, a_ext, bx, by, b_ext, margin=_SEPARATION_MARGIN_M) -> bool:
+    """True when two axis-aligned footprints do not intersect (with margin).
+
+    Axis-aligned rather than oriented: headings are random, so an AABB sized to the
+    object's full length in both axes would be pessimistic, while this is the simple,
+    checkable thing the scene actually needs -- objects must not be inside one another.
+    """
+    return (abs(ax - bx) >= (a_ext[0] + b_ext[0]) / 2.0 + margin
+            or abs(ay - by) >= (a_ext[1] + b_ext[1]) / 2.0 + margin)
 
 
 def _sample_local_offset(rng: np.random.Generator,
-                         placed: Sequence[Tuple[float, float, float]] = (),
+                         placed: Sequence[Tuple[float, float, Tuple[float, float]]] = (),
                          object_class: str = "vehicle",
                          asset: Optional[str] = None) -> Tuple[float, float]:
     """`(dx, dy)` in the radar-centred, +x-boresight local frame (ground-level, z=0),
@@ -302,13 +316,13 @@ def _sample_local_offset(rng: np.random.Generator,
     come from the scenario, so a skipped object is simply absent from both the geometry
     and the ground truth; they never disagree.
     """
-    own = _footprint_radius(object_class, asset)
+    own = _footprint(object_class, asset)
 
     def _draw():
         # Minimum range grows with the object's own half-length so a long vehicle
         # cannot extend backwards through the radar: a 16 m trailer centred at 6 m
         # reaches -2 m, i.e. behind the antenna.
-        r = rng.uniform(_RANGE_M[0] + own, _RANGE_M[1])
+        r = rng.uniform(_RANGE_M[0] + own[0] / 2.0, _RANGE_M[1])
         sin_az = rng.uniform(_SIN_AZ_RANGE[0], _SIN_AZ_RANGE[1])
         cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
         return (float(r * cos_az), float(r * sin_az))
@@ -318,9 +332,7 @@ def _sample_local_offset(rng: np.random.Generator,
 
     for _ in range(_SEPARATION_MAX_TRIES):
         dx, dy = _draw()
-        slack = min(math.hypot(dx - px, dy - py) - (own + pr)
-                    for px, py, pr in placed)
-        if slack >= 0.0:
+        if all(_boxes_clear(dx, dy, own, px, py, pext) for px, py, pext in placed):
             return dx, dy
     return None
 
@@ -345,7 +357,7 @@ def _n_in(rng: np.random.Generator, lo_hi: Tuple[int, int]) -> int:
 
 def _sample_clutter_offset(rng: np.random.Generator,
                            target_offsets: Sequence[Tuple[float, float]],
-                           placed: Sequence[Tuple[float, float, float]] = ()) -> Tuple[float, float]:
+                           placed: Sequence[Tuple[float, float, Tuple[float, float]]] = ()) -> Tuple[float, float]:
     """`(dx, dy)` for a clutter box, avoiding the direct radar-to-target line of sight
     (item 5 fix -- see `_CLUTTER_LOS_*` above): resamples up to `_CLUTTER_LOS_MAX_TRIES`
     times, rejecting any candidate whose bearing is within `_CLUTTER_LOS_MARGIN_SIN_AZ`
@@ -377,17 +389,14 @@ def _sample_clutter_offset(rng: np.random.Generator,
     # Pin to the FOV edge, but still pick the candidate that sits FURTHEST from anything
     # already placed -- an earlier version returned the first edge draw unconditionally,
     # which is where the surviving object overlaps came from.
-    own = _footprint_radius("scatterer")
-    best, best_slack = None, -math.inf
+    own = _footprint("scatterer")
     for _ in range(_SEPARATION_MAX_TRIES):
         r = float(rng.uniform(_RANGE_M[0], _RANGE_M[1]))
         sin_az = math.copysign(0.9, float(rng.uniform(-1.0, 1.0)))
         cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
         dx, dy = r * cos_az, r * sin_az
-        if not placed:
-            return dx, dy
-        slack = min(math.hypot(dx - px, dy - py) - (own + pr) for px, py, pr in placed)
-        if slack >= 0.0:
+        if not placed or all(_boxes_clear(dx, dy, own, px, py, pext)
+                             for px, py, pext in placed):
             return dx, dy
     return None
 
@@ -453,7 +462,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     target_offsets: List[Tuple[float, float]] = []
     # (dx, dy, footprint_radius) of EVERYTHING placed so far, including clutter, so no
     # two objects end up occupying the same patch of ground -- see _sample_local_offset.
-    placed: List[Tuple[float, float, float]] = []
+    placed: List[Tuple[float, float, Tuple[float, float]]] = []
 
     def _motion(vel):
         return Motion(velocity=vel) if num_frames > 1 else Motion()
@@ -464,7 +473,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
             continue          # scene is full; see _sample_local_offset
         dx, dy = spot
         target_offsets.append((dx, dy))
-        placed.append((dx, dy, _footprint_radius("sphere")))
+        placed.append((dx, dy, _footprint("sphere")))
         vel = _sample_velocity(rng, spec.speed_mps)
         pos = _ground_pos(dx, dy, ObjectKind.SPHERE, None, 0.5)
         objects.append(SceneObject(
@@ -479,7 +488,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
             continue          # scene is full; see _sample_local_offset
         dx, dy = spot
         target_offsets.append((dx, dy))
-        placed.append((dx, dy, _footprint_radius("vehicle", asset)))
+        placed.append((dx, dy, _footprint("vehicle", asset)))
         vel = _sample_velocity(rng, spec.speed_mps)
         pos = _ground_pos(dx, dy, ObjectKind.MESH, asset, 1.0)
         objects.append(SceneObject(
@@ -493,7 +502,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
             continue          # scene is full; see _sample_local_offset
         dx, dy = spot
         target_offsets.append((dx, dy))
-        placed.append((dx, dy, _footprint_radius("pedestrian")))
+        placed.append((dx, dy, _footprint("pedestrian")))
         # pedestrians are slower than vehicles regardless of the tier's vehicle range.
         vel = _sample_velocity(rng, (0.0, min(2.0, spec.speed_mps[1])))
         asset = pedestrian_pool[int(rng.integers(0, len(pedestrian_pool)))]
@@ -511,7 +520,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         if spot is None:
             continue          # scene is full; see _sample_local_offset
         dx, dy = spot
-        placed.append((dx, dy, _footprint_radius("scatterer")))
+        placed.append((dx, dy, _footprint("scatterer")))
         # Sionna's bundled box mesh is a 10x10x5 m primitive (measured from its own
         # bbox) -- scaling by _CLUTTER_BOX_SCALING gives ~3-6 m "parked container"
         # sized clutter, not (unscaled) building-sized blocks.

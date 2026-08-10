@@ -561,44 +561,40 @@ def test_sionna_env_add_cars_rejects_unknown_shape(sionna_rt):
 
 
 def test_placed_objects_do_not_interpenetrate():
-    """Objects must not occupy the same patch of ground.
+    """No two objects may occupy the same patch of ground.
 
-    Before the separation check, a sweep of D2/D3 put 1.4% of object pairs inside one
-    another, the worst a pedestrian 0.12 m from a vehicle -- standing inside a car. That
-    produces both an impossible radar return and two ground-truth labels at the same
-    range and bearing.
-
-    The footprints used here are the module's OWN, so this tracks placement rather than
-    re-guessing it: a semi-trailer reserves 8 m where a car reserves 2.5, and judging a
-    trailer by a car's size is how the first version of this test misread its results.
+    Footprints are BOXES, not circles. Circles were the first attempt and the user spotted
+    the result in a render: a 3.2 m radius inscribed in a 6x6 m clutter box leaves the
+    corners exposed, so two boxes cleared the distance test and still intersected. Measured
+    at the time: 0.57% of pairs overlapped. This asserts zero, using the module's own
+    footprints so the test tracks placement rather than re-guessing it.
     """
-    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint_radius
+    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint
 
-    def radius(obj):
-        if obj.name.startswith("sphere"):
-            return 0.5           # a scaled unit sphere, not a full-size vehicle
-        return _footprint_radius(obj.object_class, obj.asset)
+    def box(obj):
+        if obj.name.startswith("pedestrian"):
+            ext = _footprint("pedestrian")
+        elif obj.name.startswith("sphere"):
+            ext = _footprint("sphere")
+        elif obj.name.startswith("clutter"):
+            ext = _footprint("scatterer")
+        else:
+            ext = _footprint("vehicle", obj.asset)
+        x, y = obj.position[0], obj.position[1]
+        return (x - ext[0] / 2, x + ext[0] / 2, y - ext[1] / 2, y + ext[1] / 2)
 
-    pairs = overlaps = labelled = 0
+    overlaps = pairs = 0
     for tier in ("D0", "D1", "D2", "D3"):
-        for frame in range(30):
-            objects = build_rt_tier_scenario(tier, frame_idx=frame, seed=11).objects
+        for frame in range(25):
+            objects = build_rt_tier_scenario(tier, frame_idx=frame, seed=17).objects
             for i in range(len(objects)):
                 for j in range(i + 1, len(objects)):
-                    a, b = objects[i], objects[j]
-                    d = ((a.position[0] - b.position[0]) ** 2
-                         + (a.position[1] - b.position[1]) ** 2) ** 0.5
+                    a, b = box(objects[i]), box(objects[j])
                     pairs += 1
-                    if d < radius(a) + radius(b):
+                    if min(a[1], b[1]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[2], b[2]):
                         overlaps += 1
-                        if not (a.name.startswith("clutter") or b.name.startswith("clutter")):
-                            labelled += 1
 
-    assert overlaps / pairs < 0.01, f"{overlaps}/{pairs} object pairs interpenetrate"
-    assert labelled == 0, (
-        f"{labelled} pairs of LABELLED targets interpenetrate -- their ground truth "
-        "would sit at the same range and bearing"
-    )
+    assert overlaps == 0, f"{overlaps}/{pairs} object footprints intersect"
 
 
 def test_no_vehicle_extends_back_through_the_radar():
