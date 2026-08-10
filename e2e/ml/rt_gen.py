@@ -895,11 +895,15 @@ def _solve(rt_scene: RTScene, *, max_depth: int, include_leakage: bool,
     return rt_scene.solver(**kwargs)
 
 
-def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
-    """`Paths` -> beat cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`, complex64.
+def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
+    """`Paths` -> RAW CFR cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`.
 
-    Applies equation (3): CFR on the ramp's frequency grid, conjugated, with the
-    antenna index reversed (see "Element ordering / array handedness").
+    Sionna-specific half of what used to be a single `_beat_from_paths`: samples the
+    CFR on the ramp's frequency grid (`beat_frequencies`) but does NOT conjugate or
+    antenna-reverse -- that generic tensor mapping is `e2e.chain.dechirp.beat_from_cfr`,
+    the ONE implementation both `_beat_from_paths` (below) and `RTEnvironmentBlock`
+    delegate to. dtype/scale are whatever `paths.cfr` returns (typically complex64),
+    unchanged from before this split.
 
     `freq_chunk` bounds peak memory: `cfr` materialises a
     `[rx, rx_ant, tx, tx_ant, num_paths, n_chirps, n_freqs]` tensor *before* summing
@@ -922,34 +926,36 @@ def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.
         # h: [num_rx, num_rx_ant, num_tx, num_tx_ant, n_chirps, n_freqs]; one tx/rx
         # device each, so indices 0 select them.
         out.append(np.asarray(h)[0, :, 0, :, :, :])
-    beat = np.conjugate(np.concatenate(out, axis=-1))
-    if _ANTENNA_INDEX_REVERSED:
-        beat = beat[::-1, ::-1, :, :]
-    return np.ascontiguousarray(beat, dtype=np.complex64)
+    return np.ascontiguousarray(np.concatenate(out, axis=-1))
+
+
+def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
+    """`Paths` -> beat cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`, complex64.
+
+    Applies equation (3): CFR on the ramp's frequency grid (`cfr_from_paths`),
+    conjugated, with the antenna index reversed (see "Element ordering / array
+    handedness") -- via `e2e.chain.dechirp.beat_from_cfr`, so this and
+    `RTEnvironmentBlock` share exactly one implementation of that mapping.
+    """
+    raw = cfr_from_paths(paths, cfg, n_chirps=n_chirps, freq_chunk=freq_chunk)
+    from e2e.chain.dechirp import beat_from_cfr
+
+    beat = beat_from_cfr(torch.from_numpy(raw))
+    return np.ascontiguousarray(beat.numpy(), dtype=np.complex64)
 
 
 def mimo_combine(cfg, beat: np.ndarray) -> np.ndarray:
     """Beat cube `[n_rx, n_tx, n_chirps, n_samples]` -> ADC cube `[n_rx, n_chirps, n_samples]`.
 
-    Mirrors `rd_synth.synthesize_adc`'s per-chirp TX factor exactly:
-
-    * `"tdm"` / `"single"`: chirp `c` is transmitted by TX `c % n_tx` alone, so only
-      that TX's column survives -- this is the selection `transforms.tdm_deinterleave`
-      inverts.
-    * `"ddma"`: every TX transmits on every chirp, TX `t` carrying the extra per-chirp
-      phase `2pi t c / n_tx`; the TX columns are summed with that code applied.
+    Thin numpy<->torch wrapper around `e2e.chain.dechirp.mimo_combine` -- the ONE
+    implementation of the TDM/DDMA combine (see that function's docstring for the
+    scheme semantics, which mirror `rd_synth.synthesize_adc`'s per-chirp TX factor).
     """
-    mimo = str(cfg.mimo).lower()
-    n_rx, n_tx, n_chirps, n_samples = beat.shape
-    if mimo in ("tdm", "single"):
-        tx_of_chirp = np.arange(n_chirps) % n_tx
-        return beat[:, tx_of_chirp, np.arange(n_chirps), :]
-    if mimo == "ddma":
-        t_idx = np.arange(n_tx)[None, :, None]
-        c_idx = np.arange(n_chirps)[None, None, :]
-        code = np.exp(2j * np.pi * t_idx * c_idx / n_tx)      # [1, n_tx, n_chirps]
-        return np.einsum("rtcn,xtc->rcn", beat, code.astype(np.complex64))
-    raise ValueError(f"unsupported mimo scheme {cfg.mimo!r}")
+    from e2e.chain.dechirp import mimo_combine as _mimo_combine_torch
+
+    beat_t = torch.from_numpy(np.ascontiguousarray(beat))
+    adc_t = _mimo_combine_torch(cfg, beat_t)
+    return np.ascontiguousarray(adc_t.numpy())
 
 
 # --------------------------------------------------------------------------------
@@ -1016,6 +1022,35 @@ def _add_awgn(cfg, adc: torch.Tensor, snr_db, seed, min_range_m: float) -> torch
 # --------------------------------------------------------------------------------
 # Native (single-solve) generation
 # --------------------------------------------------------------------------------
+def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
+                 device=None, rt_scene: Optional[RTScene] = None, max_depth: int = 2,
+                 include_leakage: bool = False, diffuse_reflection: bool = True,
+                 specular_reflection: bool = True, refraction: bool = False,
+                 solver_seed: int = 41, freq_chunk: int = 128) -> torch.Tensor:
+    """Ray-trace one radar frame and return its RAW channel frequency response.
+
+    `complex64 [n_rx, n_tx, n_chirps, n_samples]` on `device` -- the pipeline's
+    DOMAIN_CFR contract (see `e2e.frames`), sampled on the FMCW ramp's beat-frequency
+    grid (`beat_frequencies(cfg)`) but NOT YET conjugated, antenna-reversed or
+    MIMO-combined. `e2e.chain.dechirp.DechirpBlock(cfg)` is the bridge from here to a
+    dechirped ADC cube; `rt_synthesize_adc` (below) and `e2e.environment.blocks.
+    RTEnvironmentBlock` both build on this one extraction path so the ray-tracing +
+    CFR-sampling logic exists exactly once. See `build_rt_scene` for the scene/`rt_scene`
+    parameters and `_solve` for the solver ones (both shared verbatim with
+    `rt_synthesize_adc`).
+    """
+    dev = _resolve_device(device)
+    if rt_scene is None:
+        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
+
+    paths = _solve(rt_scene, max_depth=max_depth, include_leakage=include_leakage,
+                   diffuse_reflection=diffuse_reflection,
+                   specular_reflection=specular_reflection, refraction=refraction,
+                   seed=solver_seed)
+    raw = cfr_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk)
+    return torch.as_tensor(raw, dtype=torch.complex64, device=dev)
+
+
 def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                       snr_db: Optional[float] = 30.0, seed: Optional[int] = None,
                       device=None, rt_scene: Optional[RTScene] = None,
@@ -1053,15 +1088,16 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
         `3 * cfg.range_resolution_m`.
     """
     dev = _resolve_device(device)
-    if rt_scene is None:
-        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
+    s_pars = rt_cfr_frame(cfg, scenario, frame_idx=frame_idx, base_scene=base_scene,
+                          device=dev, rt_scene=rt_scene, max_depth=max_depth,
+                          include_leakage=include_leakage,
+                          diffuse_reflection=diffuse_reflection,
+                          specular_reflection=specular_reflection, refraction=refraction,
+                          solver_seed=solver_seed, freq_chunk=freq_chunk)
 
-    paths = _solve(rt_scene, max_depth=max_depth, include_leakage=include_leakage,
-                   diffuse_reflection=diffuse_reflection,
-                   specular_reflection=specular_reflection, refraction=refraction,
-                   seed=solver_seed)
-    beat = _beat_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk)
-    adc = torch.as_tensor(mimo_combine(cfg, beat), dtype=torch.complex64, device=dev)
+    from e2e.chain.dechirp import DechirpBlock
+
+    adc = DechirpBlock(cfg).apply({"s_pars": s_pars})["adc"]
 
     guard = (3.0 * float(cfg.range_resolution_m) if snr_ref_min_range_m is None
              else float(snr_ref_min_range_m))
@@ -1111,7 +1147,6 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
     n_chirps = int(cfg.n_chirps) if n_chirps_cap is None else min(int(cfg.n_chirps),
                                                                   int(n_chirps_cap))
     t_c = float(cfg.chirp_period_s)
-    n_tx = int(cfg.n_tx)
 
     frames: List[np.ndarray] = []
     try:
@@ -1130,15 +1165,11 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
         for name, so in rt_scene.objects.items():
             so.position = [float(x) for x in base_pos[name]]
 
-    # [n_rx_ant, n_tx_ant, n_chirps, n_samples]
+    # [n_rx_ant, n_tx_ant, n_chirps, n_samples] -- same TDM/DDMA combine as the native
+    # path, via `mimo_combine` (the one implementation; see its docstring), rather than
+    # a second hand-rolled copy of the same math.
     beat_cube = np.stack(frames, axis=2)
-    if str(cfg.mimo).lower() in ("tdm", "single"):
-        adc_np = beat_cube[:, np.arange(n_chirps) % n_tx, np.arange(n_chirps), :]
-    else:
-        t_idx = np.arange(n_tx)[None, :, None]
-        c_idx = np.arange(n_chirps)[None, None, :]
-        code = np.exp(2j * np.pi * t_idx * c_idx / n_tx).astype(np.complex64)
-        adc_np = np.einsum("rtcn,xtc->rcn", beat_cube, code)
+    adc_np = mimo_combine(cfg, beat_cube)
 
     adc = torch.as_tensor(np.ascontiguousarray(adc_np), dtype=torch.complex64, device=dev)
     guard = (3.0 * float(cfg.range_resolution_m) if snr_ref_min_range_m is None
