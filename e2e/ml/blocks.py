@@ -92,7 +92,15 @@ def _json_default(obj):
     (a private helper of a sibling module; see the module docstring's
     dependency rule -- `dataset.py` must never import from here, so sharing
     code the other direction, importing dataset's private helper, is the only
-    option, and this is cheap enough not to bother)."""
+    option, and this is cheap enough not to bother).
+
+    Dataclasses are handled first because `ImpairmentBlock` records this frame's
+    impairment settings as dataclass INSTANCES, and those are exactly the provenance a
+    written sample needs to be self-describing. Without this the very first frame of a
+    chain run dies with a TypeError from the JSON encoder.
+    """
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return dataclasses.asdict(obj)
     if isinstance(obj, np.integer):
         return int(obj)
     if isinstance(obj, np.floating):

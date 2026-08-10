@@ -18,6 +18,8 @@ Three blocks:
   Downstream product block: reads `adc`, emits `radar_cube`, never rewrites `adc`.
 """
 
+import dataclasses
+
 import torch
 
 from e2e import frames
@@ -242,7 +244,16 @@ class RadarCubeBlock:
 
     def apply(self, state):
         adc = state["adc"]
-        if getattr(self.cfg, "mimo", None) == "tdm":
-            adc = tdm_deinterleave(self.cfg, adc)
-        radar_cube = adc_to_rd(self.cfg, adc)
+        cfg = self.cfg
+        if getattr(cfg, "mimo", None) == "tdm":
+            adc = tdm_deinterleave(cfg, adc)
+            # De-interleaving consumes the transmit multiplexing: the cube now has one
+            # virtual array and cfg.n_chirps_per_tx slow-time samples. Handing the
+            # ORIGINAL cfg to adc_to_rd then fails its own shape check, which blocked
+            # the ti_iwr1443 preset -- the flagship configuration -- outright. Describe
+            # the de-interleaved cube instead. Same pattern dataset.py already uses.
+            cfg = dataclasses.replace(
+                cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx
+            )
+        radar_cube = adc_to_rd(cfg, adc)
         return {"radar_cube": radar_cube}

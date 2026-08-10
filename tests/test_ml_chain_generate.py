@@ -266,24 +266,22 @@ def test_fixed_impairment_params_are_identical_across_frames(tmp_path, fake_env)
 # --------------------------------------------------------------------------------
 # Known blocker: RadarCubeBlock mishandles TDM mimo (out-of-scope file)
 # --------------------------------------------------------------------------------
-def test_radar_cube_block_tdm_bug_is_a_known_blocker(tmp_path, torch_device):
-    """`e2e.chain.receive.RadarCubeBlock.apply` de-interleaves TDM adc (shrinking the
-    chirp axis to n_chirps_per_tx) but then calls `adc_to_rd` with the ORIGINAL cfg
-    (n_chirps still the pre-deinterleave count), which raises. `e2e.ml.dataset.
-    generate_sample`, `RadarFrameDataset._derive_input`, and `NeuralDetectorBlock.
-    _derive_input` all build a `dataclasses.replace(cfg, n_tx=1, mimo='single',
-    n_chirps=cfg.n_chirps_per_tx)` sub_cfg before calling `adc_to_rd` post-deinterleave
-    -- RadarCubeBlock is missing that step. This blocks the composed chain's
-    downstream radar-cube product for the project's flagship TDM preset
-    (`ti_iwr1443`). `e2e/chain/receive.py` is outside this shard's owned files (see
-    the shard brief) -- reported as a handoff item, not worked around here. This test
-    pins the CURRENT (broken) behavior so a future fix there is visible as a test
-    change, not a silent behavior shift.
+def test_tdm_config_runs_the_whole_chain_and_produces_a_radar_cube(tmp_path, torch_device):
+    """The project's flagship preset is TDM, so the composed chain must survive it.
+
+    RadarCubeBlock used to de-interleave the cube -- collapsing the transmit
+    multiplexing into one virtual array with n_chirps_per_tx slow-time samples -- and
+    then describe it to adc_to_rd with the ORIGINAL config, whose chirp count no longer
+    matched. That raised, blocking the downstream product for every TDM configuration.
     """
     grid_tdm = LabelGrid.for_config(_TDM_CFG, range_stride=1, n_azimuth=8)
     env = _FakeRTEnvironment(_TDM_CFG, grid_tdm, n_frames=1, device=torch_device, seed=0)
     sim = chain_generate.build_chain_simulation(
         scenario=None, cfg=_TDM_CFG, out_dir=tmp_path, environment_block=env,
     )
-    with pytest.raises(ValueError, match="chirps but cfg.n_chirps"):
-        sim.run(n_steps=1)
+    sim.run(n_steps=1)
+
+    cube = sim.get_outputs()["radar_cube"][0]
+    # One virtual array of n_rx*n_tx elements; Doppler axis is the per-transmit count.
+    assert cube.shape == (_TDM_CFG.n_rx * _TDM_CFG.n_tx, _TDM_CFG.n_samples,
+                          _TDM_CFG.n_chirps_per_tx)

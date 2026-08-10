@@ -7,6 +7,18 @@ This module is the top of the `e2e.ml` stack: it wires together `radar_config`
 input), and `labels` (targets -> a dense detection-label grid) into a reusable,
 on-disk training dataset.
 
+NOT THE CORPUS PATH ANYMORE. `generate_sample`/`generate_dataset` below call the
+closed-form point-target synthesizer (`rd_synth.synthesize_adc`) directly -- no RFFE,
+no interconnect, no dechirp block, none of the chain. They are kept as an explicit,
+labelled CI/offline FALLBACK (fast, no GPU, no Sionna) for tests and quick shape/plumbing
+checks. The real corpus generation path is `e2e.ml.chain_generate`, which composes the
+SAME block chain (`e2e.environment.blocks.RTEnvironmentBlock` -> `e2e.blocks.CircuitStage`/
+`InterconnectStage` -> `e2e.chain.dechirp.DechirpBlock` -> impairments/quantizer ->
+`e2e.chain.receive.RadarCubeBlock` -> `e2e.ml.blocks.SinkBlock`) as an `e2e.simulation.
+Simulation` run -- see `report/chain_integration_design.html`. `write_manifest` below is
+the shared manifest-writing tail both paths use, so the two producers agree on one
+on-disk schema (see "On-disk dataset layout").
+
 Sample format
 -------------
 `generate_sample(cfg, scenario, grid, ...)` returns one frame as a dict:
@@ -178,6 +190,13 @@ def generate_sample(cfg, scenario, grid, *, frame_idx: int = 0, snr_db: Optional
                     label_classes: Sequence[str] = LABEL_CLASSES) -> Dict[str, Any]:
     """Synthesize one labeled frame: `scenario` @ `frame_idx` -> network input + labels.
 
+    ANALYTIC FALLBACK, NOT THE CORPUS PATH: this calls `rd_synth.synthesize_adc`'s
+    closed-form point-target model directly -- it realizes none of the RFFE/
+    interconnect/dechirp chain stages (see the module docstring). Kept for CI/offline
+    use (fast, no GPU/Sionna needed) and as the reference the chain path's output
+    shape/schema must stay compatible with. Real corpus generation is
+    `e2e.ml.chain_generate.generate_chain_corpus`.
+
     `grid` is an `e2e.ml.labels.LabelGrid` (typically `LabelGrid.for_config(cfg)`).
     Only scatterers whose class is in `label_classes` become ground truth (see
     `LABEL_CLASSES`); pass `None` to label everything, clutter included.
@@ -254,6 +273,12 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
                      frames_per_scene: int = 1) -> Path:
     """Generate `n_frames` independent SCENES for `(cfg_name, tier)` and write a manifest.
 
+    ANALYTIC FALLBACK, NOT THE CORPUS PATH -- see `generate_sample`'s docstring and the
+    module docstring's "NOT THE CORPUS PATH ANYMORE" note. Real corpus generation is
+    `e2e.ml.chain_generate.generate_chain_corpus`, which writes the SAME on-disk schema
+    (via `write_manifest`, the manifest-writing tail factored out below) by running the
+    composed block chain instead of calling `generate_sample` per frame.
+
     Each scene draws its own `rng = np.random.default_rng(seed + i)` and
     `scenario = sample_scene(cfg, tier, rng, n_frames=frames_per_scene)`; when
     `frames_per_scene == 1` (default) this is exactly the original one-frame-per-scene
@@ -318,24 +343,50 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
             scene_files.append(fname)
         sequences.append(scene_files)
 
-    bounds = _split_bounds(n_frames, splits)  # scene-level bounds
+    return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
+                          snr_db=snr_db, frames_per_scene=frames_per_scene, splits=splits)
+
+
+def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
+                   grid=None, seed: int = 0, snr_db: Optional[float] = None,
+                   frames_per_scene: int = 1, splits: Tuple[float, ...] = (0.8, 0.1, 0.1),
+                   label_classes: Sequence[str] = LABEL_CLASSES) -> Path:
+    """Write a manifest_version-2 `manifest.json` for a corpus already written to
+    `dataset_dir` -- the manifest-writing tail factored out of `generate_dataset` so
+    OTHER producers of the same on-disk schema (namely `e2e.ml.chain_generate`, which
+    writes frames by running the composed block chain instead of calling
+    `generate_sample`) share exactly one manifest contract instead of duplicating it.
+
+    `sequences` is a list of per-scene filename lists (frame order within a scene),
+    exactly `generate_dataset`'s own `sequences` structure (see the module docstring's
+    "On-disk dataset layout") -- filenames relative to `dataset_dir`, files not
+    validated/touched here. The split (`_split_bounds`) is applied at the SCENE level,
+    same as `generate_dataset`. `grid` is optional (an `e2e.ml.labels.LabelGrid` or
+    None if the caller has none to record).
+    """
+    dataset_dir = Path(dataset_dir)
+    bounds = _split_bounds(len(sequences), splits)  # scene-level bounds
     files = {
         "train": [f for scene_files in sequences[bounds[0]:bounds[1]] for f in scene_files],
         "val": [f for scene_files in sequences[bounds[1]:bounds[2]] for f in scene_files],
         "test": [f for scene_files in sequences[bounds[2]:bounds[3]] for f in scene_files],
     }
+    if grid is None:
+        grid_dict = {}
+    elif dataclasses.is_dataclass(grid):
+        grid_dict = dataclasses.asdict(grid)
+    else:
+        grid_dict = {"n_range": grid.n_range, "n_azimuth": grid.n_azimuth}
 
     manifest = {
         "manifest_version": 2,
         "config": cfg.to_dict(),
         "tier": tier,
-        "grid": dataclasses.asdict(grid) if dataclasses.is_dataclass(grid) else {
-            "n_range": grid.n_range, "n_azimuth": grid.n_azimuth,
-        },
+        "grid": grid_dict,
         "snr_db": snr_db,
         "seed": seed,
         "frames_per_scene": frames_per_scene,
-        "label_classes": list(LABEL_CLASSES),
+        "label_classes": list(label_classes) if label_classes is not None else None,
         "files": files,
         "sequences": sequences,
     }
