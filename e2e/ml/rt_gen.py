@@ -585,13 +585,27 @@ class RTScene:
 
 
 def _load_base_scene(rt, base_scene: str):
-    """`"flat"` / `"free"` / a Sionna built-in name / a path -> a loaded `Scene`."""
+    """`"flat"` / `"free"` / a Sionna built-in name / a path -> a loaded `Scene`.
+
+    City scenes are loaded with `merge_shapes=True`, which is the difference between a
+    city tier being affordable and not. Munich ships as ~1150 individually meshed
+    shapes; solving it unmerged costs 45-56 s per frame against 0.07 s for the flat
+    scene. Merging collapses it to about 11 objects and the same solve takes ~0.07 s
+    while finding the IDENTICAL path set -- measured, not assumed. The merge only
+    affects the base scene's own static geometry; scenario objects are added afterwards
+    via `scene.edit`, so their per-object velocities (and hence Doppler) are untouched,
+    which the tests below check rather than take on trust.
+
+    Synthetic scenes stay unmerged: `flat` is a single rectangle, so merging would be a
+    no-op, and leaving the call identical keeps every existing flat-scene result
+    byte-for-byte unchanged.
+    """
     if base_scene in _SYNTHETIC_SCENE_XML:
         return rt.load_scene(_synthetic_scene_path(base_scene), merge_shapes=False)
     builtin = getattr(rt.scene, base_scene, None)
     if builtin is not None:
-        return rt.load_scene(builtin, merge_shapes=False)
-    return rt.load_scene(base_scene, merge_shapes=False)
+        return rt.load_scene(builtin, merge_shapes=True)
+    return rt.load_scene(base_scene, merge_shapes=True)
 
 
 def _box_mesh_path(rt) -> str:

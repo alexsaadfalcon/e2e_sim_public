@@ -488,17 +488,37 @@ def decimate_to_budget(verts: np.ndarray, faces: np.ndarray,
 # pipeline independent of rt_gen's dispatch/licensing layer).
 # --------------------------------------------------------------------------------
 def _write_ply(path: str, verts: np.ndarray, faces: np.ndarray) -> None:
-    with open(path, "w") as f:
-        f.write("ply\nformat ascii 1.0\n")
-        f.write(f"element vertex {verts.shape[0]}\n")
-        f.write("property float x\nproperty float y\nproperty float z\n")
-        f.write(f"element face {faces.shape[0]}\n")
-        f.write("property list uchar int vertex_indices\n")
-        f.write("end_header\n")
-        for x, y, z in verts:
-            f.write(f"{x:.6f} {y:.6f} {z:.6f}\n")
-        for a, b, c in faces:
-            f.write(f"3 {int(a)} {int(b)} {int(c)}\n")
+    """Write a minimal BINARY little-endian PLY.
+
+    Binary rather than ASCII because the scene is rebuilt every frame, so mesh parsing
+    is a per-frame cost paid thousands of times over a corpus -- and Mitsuba logs a
+    performance warning for ASCII PLY on every single load, which is how this surfaced.
+    Binary also writes exact float32 rather than the 6-decimal text rounding the ASCII
+    path applied, so the geometry that reaches the ray tracer is the geometry that came
+    out of decimation.
+    """
+    verts = np.ascontiguousarray(verts, dtype="<f4")
+    faces = np.ascontiguousarray(faces, dtype="<i4")
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        f"element vertex {verts.shape[0]}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        f"element face {faces.shape[0]}\n"
+        "property list uchar int vertex_indices\n"
+        "end_header\n"
+    )
+    # Each face record is a uchar count (always 3) followed by three int32 indices, so
+    # the rows are built as a structured array rather than concatenated by hand.
+    face_records = np.empty(
+        faces.shape[0], dtype=[("n", "u1"), ("v", "<i4", (3,))]
+    )
+    face_records["n"] = 3
+    face_records["v"] = faces
+    with open(path, "wb") as f:
+        f.write(header.encode("ascii"))
+        f.write(verts.tobytes())
+        f.write(face_records.tobytes())
 
 
 # --------------------------------------------------------------------------------

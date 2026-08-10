@@ -12,6 +12,13 @@ is the bridge from there to a dechirped ADC cube.
 Sionna is imported LAZILY (inside `get_S_pars`, via `e2e.ml.rt_gen`'s own lazy
 imports) so `import e2e.environment.blocks` never requires DrJit/Sionna -- matching
 `e2e.environment.scenario_runner`'s disciplined pattern.
+
+`base_scene="munich"`/`"etoile"` (or any other Sionna built-in city scene / custom
+scene path) works here at whatever frequency `cfg` describes -- including automotive
+mmWave, where Sionna's bundled ITU materials would otherwise hard-raise -- via
+`e2e.environment.city_scenes` (see that module's docstring for the mechanism and the
+`material_policy` trade-off). `"flat"`, the default, is unaffected: it never enters
+that path.
 """
 
 from __future__ import annotations
@@ -48,6 +55,13 @@ class RTEnvironmentBlock:
     reading a scene that has since stepped. A caller driving this block directly can
     still read `last_labels`/`last_targets` after `get_S_pars()`.
 
+    City-scene material provenance: when `base_scene` is not `"flat"`/`"free"`,
+    `get_S_pars()` also runs `e2e.environment.city_scenes.prepare_scene_for_frequency`
+    on the loaded scene (see that module) and caches its report on
+    `self.last_material_report` (`{material_name: MaterialSubstitution}`, empty if
+    nothing needed substituting) -- read alongside `last_labels`/`last_targets` for a
+    corpus's provenance of what its city was actually made of.
+
     A fresh scene is ray-traced (via `e2e.ml.rt_gen.build_rt_scene` + `rt_cfr_frame`) on
     every `get_S_pars()` call -- the same per-frame rebuild `rt_synthesize_adc` does by
     default (not an incremental/cached scene) -- so moving-object geometry is always
@@ -60,12 +74,18 @@ class RTEnvironmentBlock:
                 refraction: bool = False, solver_seed: int = 41, freq_chunk: int = 128,
                 scattering_coefficient: Optional[float] = None,
                 scattering_pattern: Optional[str] = None,
+                material_policy: str = "extrapolated",
+                stand_in_material: str = "concrete",
                 label_grid=None,
                 label_classes: Optional[Sequence[str]] = ("vehicle", "pedestrian")):
         self.scenario = scenario
         self.cfg = cfg
         self.base_scene = base_scene
         self.device = device
+        # Only consulted for city scenes (base_scene not "flat"/"free") -- see
+        # `e2e.environment.city_scenes.EXTRAPOLATED`/`STAND_IN`.
+        self.material_policy = material_policy
+        self.stand_in_material = stand_in_material
         self.max_depth = max_depth
         self.include_leakage = include_leakage
         self.diffuse_reflection = diffuse_reflection
@@ -88,6 +108,9 @@ class RTEnvironmentBlock:
         # Populated by get_S_pars(); see the class docstring's "Ground truth labels".
         self.last_labels = None
         self.last_targets = None
+        # Populated by get_S_pars() for city scenes; see "City-scene material
+        # provenance" above. Stays None for "flat"/"free".
+        self.last_material_report = None
 
     def get_state_updates(self):
         """Per-frame state `Simulation` seeds the chain with, alongside the frame.
@@ -103,6 +126,7 @@ class RTEnvironmentBlock:
         self.frame_counter = 0
         self.last_labels = None
         self.last_targets = None
+        self.last_material_report = None
 
     def step(self):
         self.frame_counter += 1
@@ -128,11 +152,27 @@ class RTEnvironmentBlock:
         sc_pattern = (DEFAULT_SCATTERING_PATTERN if self.scattering_pattern is None
                      else self.scattering_pattern)
 
-        rt_scene = build_rt_scene(
-            self.scenario, self.cfg, base_scene=self.base_scene,
-            frame_idx=self.frame_counter, scattering_coefficient=sc_coeff,
-            scattering_pattern=sc_pattern,
-        )
+        build_kwargs = dict(base_scene=self.base_scene, frame_idx=self.frame_counter,
+                           scattering_coefficient=sc_coeff, scattering_pattern=sc_pattern)
+        if self.base_scene in ("flat", "free"):
+            # Synthetic scenes only ever use in-band materials (see
+            # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, so "flat" (the
+            # default) stays exactly as it was before city scenes existed.
+            rt_scene = build_rt_scene(self.scenario, self.cfg, **build_kwargs)
+        else:
+            # A Sionna built-in city scene (or a custom scene path): repair its
+            # materials for this radar's frequency one Python frame before
+            # `build_rt_scene` sets `scene.frequency` -- see
+            # `city_scenes.patched_builtin_loader`'s docstring for why this is a
+            # monkeypatch rather than a direct call.
+            from e2e.environment.city_scenes import patched_builtin_loader
+
+            f_center_hz = float(self.cfg.f0_hz) + float(self.cfg.bandwidth_hz) / 2.0
+            self.last_material_report = {}
+            with patched_builtin_loader(f_center_hz, policy=self.material_policy,
+                                        stand_in_itu_type=self.stand_in_material,
+                                        report_sink=self.last_material_report):
+                rt_scene = build_rt_scene(self.scenario, self.cfg, **build_kwargs)
         s_pars = rt_cfr_frame(
             self.cfg, self.scenario, frame_idx=self.frame_counter,
             base_scene=self.base_scene, device=dev, rt_scene=rt_scene,
