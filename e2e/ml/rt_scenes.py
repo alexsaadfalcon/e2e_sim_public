@@ -3,19 +3,35 @@ Ray-traced (Sionna RT) difficulty tiers D0-D3 for the radar-ML data campaign.
 
 This is the RT sibling of `e2e.ml.scenes` (which samples scenes for the analytic
 point-target synthesizer, `rd_synth`): it draws a `e2e.scenario.Scenario` whose objects
-are REAL meshes -- Sionna's bundled car models and the procedural pedestrian
-placeholder (see `e2e.ml.rt_gen.CAR_ASSET_NAMES`/`PEDESTRIAN_ASSET_NAME`) -- instead of
-sphere-as-target scatterers, for consumption by `e2e.ml.rt_gen.build_rt_scene` /
-`rt_synthesize_adc` or `e2e.environment.scenario_runner`.
+are REAL meshes -- one representative Sionna car plus real downloaded vehicle meshes
+(cars/trucks/buses/trolleys, see `VEHICLE_CLASS_POOLS` and `e2e.ml.assets`) and the
+procedural pedestrian placeholder -- instead of sphere-as-target scatterers, for
+consumption by `e2e.ml.rt_gen.build_rt_scene` / `rt_synthesize_adc` or
+`e2e.environment.scenario_runner`.
 
 Difficulty ramps along TWO axes, not just target count:
 
 * **scatterer type**: D0 is bare metal spheres (a specular-visibility sanity check --
   see `rt_gen`'s module docstring on why a curved target needs diffuse scattering to be
-  visible at all), D1 promotes to real car meshes, D2/D3 add the pedestrian placeholder.
+  visible at all), D1 promotes to real vehicle meshes, D2/D3 add the pedestrian
+  placeholder.
 * **environment**: D0/D1 are a bare flat ground plane (`base_scene="flat"`, see
   `rt_gen._FLAT_SCENE_XML`); D2/D3 both add static box "clutter" (parked-container-style
   obstacles) to a flat ground, D3 denser than D2 -- a richer-but-still-cheap scene.
+  Clutter boxes are kept clear of the direct radar-target line of sight (see
+  `_sample_clutter_offset`) so they add background return without hiding the tier's
+  actual targets.
+
+Vehicle variety: `CAR_ASSET_NAMES` (`e2e.ml.rt_gen`) is 17 Sionna mesh NAMES sharing ONE
+geometry, so drawing uniformly from it (the pre-campaign-R3 behaviour) put the SAME car
+shape in a scene ~85% of the time. `VEHICLE_CLASS_POOLS` instead keeps exactly ONE
+representative Sionna name (`SIONNA_CAR_REPRESENTATIVE`) and fills variety from real,
+decimated, metre-scaled downloaded meshes (`e2e.ml.assets.DOWNLOADED_ASSET_SPECS`),
+grouped by class (car/truck/bus/trolley) so a tier's vehicle draws are a realistic MIX
+of vehicle types, not a uniform draw over every available name regardless of size. Every
+downloaded mesh degrades gracefully (see `e2e.ml.assets`/`rt_gen`) to
+`SIONNA_CAR_REPRESENTATIVE` on a machine without the asset cache -- this module's own
+determinism/pool-composition tests hold either way.
 
   FOLLOW-UP, NOT DONE HERE: the task brief's preferred D3 base was a Sionna built-in
   city scene (`"munich"`/`"etoile"`), which WAS tried and does not "load cheaply" --
@@ -48,12 +64,14 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from e2e.ml.rt_gen import (CAR_ASSET_NAMES, LOCAL_PEDESTRIAN_ASSET_NAMES,
-                          LOCAL_VEHICLE_ASSET_NAMES, PEDESTRIAN_ASSET_NAME,
+from e2e.ml.assets import (DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
+                          DOWNLOADED_TROLLEY_ASSET_NAMES, DOWNLOADED_TRUCK_ASSET_NAMES)
+from e2e.ml.rt_gen import (LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
+                          PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
                           object_local_height_m)
 from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 
@@ -62,13 +80,76 @@ from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObje
 # are computed in a radar-centred, +x-boresight LOCAL frame and then translated (not
 # rotated -- boresight is always +x here) by the radar's world position; see
 # `build_rt_tier_scenario`.
-_RANGE_M = (6.0, 25.0)
+# Widened from (6, 25) once the separation check exposed the envelope as
+# over-subscribed: D3 asks for ~19 objects, and the old span simply did not contain
+# that many non-overlapping footprints. 34 m stays inside the ti_iwr1443 preset's
+# 38.4 m unambiguous range, so nothing wraps.
+_RANGE_M = (6.0, 34.0)
 _SIN_AZ_RANGE = (-0.6, 0.6)
 
 # Sionna's bundled box mesh (`rt_gen._box_mesh_path`) is a 10x10x5 m primitive; these
 # scalings give ~3-6 m clutter boxes (see the clutter-box loop in
 # `build_rt_tier_scenario`).
 _CLUTTER_BOX_SCALING = (0.3, 0.6)
+
+# Clutter-box line-of-sight avoidance (fix for the occlusion bug: a box sampled from the
+# SAME range/angle envelope as the tier's own vehicle/pedestrian targets could -- and, in
+# an earlier draw, did -- sit directly between the radar and a target it shared a scene
+# with, hiding it from a monostatic return entirely). `_sample_clutter_offset` rejects a
+# candidate whose bearing is within this angular half-width of an already-placed target
+# AND whose range doesn't clear that target by the margin below; `_CLUTTER_LOS_MAX_TRIES`
+# bounds the resample loop (falls back to the FOV edge -- see that function).
+_CLUTTER_LOS_MARGIN_SIN_AZ = 0.06
+_CLUTTER_LOS_RANGE_MARGIN_M = 1.5
+_CLUTTER_LOS_MAX_TRIES = 12
+
+# --------------------------------------------------------------------------------
+# Vehicle mesh pool: ONE representative Sionna car (see rt_gen.SIONNA_CAR_REPRESENTATIVE)
+# plus every downloaded mesh of that class -- replaces the old "uniform draw over 17
+# duplicate-geometry names" (see module docstring). A class with no downloaded mesh (none
+# today) would be an empty tuple; `_draw_vehicle_asset` never lets a class pool go empty
+# in practice since every non-"car" class here has >= 1 real mesh.
+# --------------------------------------------------------------------------------
+VEHICLE_CLASS_POOLS: Dict[str, Tuple[str, ...]] = {
+    "car": (SIONNA_CAR_REPRESENTATIVE,) + DOWNLOADED_CAR_ASSET_NAMES,
+    "truck": DOWNLOADED_TRUCK_ASSET_NAMES,
+    "bus": DOWNLOADED_BUS_ASSET_NAMES,
+    "trolley": DOWNLOADED_TROLLEY_ASSET_NAMES,
+}
+
+# Realistic road mix for a tier's vehicle draws: mostly cars, with a believable sprinkle
+# of larger vehicle types -- NOT a uniform draw across classes (a scene that's 25% buses
+# would be as unrealistic as the old 85%-duplicate-car problem this replaces).
+VEHICLE_CLASS_WEIGHTS: Dict[str, float] = {"car": 0.70, "truck": 0.12, "bus": 0.10, "trolley": 0.08}
+_VEHICLE_CLASSES = tuple(VEHICLE_CLASS_WEIGHTS)
+_VEHICLE_CLASS_CUM = np.cumsum([VEHICLE_CLASS_WEIGHTS[c] for c in _VEHICLE_CLASSES])
+_VEHICLE_CLASS_CUM = _VEHICLE_CLASS_CUM / _VEHICLE_CLASS_CUM[-1]
+
+# `local_tractor_trailer` (see rt_gen.LOCAL_ASSET_SPECS) is a real semi -- when
+# use_local_assets=True it augments the "truck" pool, not "car" like the other two
+# local vehicle names (mustang/dodge charger).
+_LOCAL_TRUCK_ASSET_NAMES = tuple(n for n in LOCAL_VEHICLE_ASSET_NAMES if "trailer" in n)
+_LOCAL_CAR_ASSET_NAMES = tuple(n for n in LOCAL_VEHICLE_ASSET_NAMES if n not in _LOCAL_TRUCK_ASSET_NAMES)
+
+
+def _draw_vehicle_class(rng: np.random.Generator) -> str:
+    r = float(rng.random())
+    i = int(np.searchsorted(_VEHICLE_CLASS_CUM, r, side="right"))
+    return _VEHICLE_CLASSES[min(i, len(_VEHICLE_CLASSES) - 1)]
+
+
+def _draw_vehicle_asset(rng: np.random.Generator, use_local_assets: bool) -> str:
+    """One asset name, drawn class-weighted (`VEHICLE_CLASS_WEIGHTS`) then
+    uniformly within that class's pool (`VEHICLE_CLASS_POOLS`, expanded with the
+    matching local assets when `use_local_assets`)."""
+    vclass = _draw_vehicle_class(rng)
+    pool = VEHICLE_CLASS_POOLS[vclass]
+    if use_local_assets:
+        if vclass == "car":
+            pool = pool + _LOCAL_CAR_ASSET_NAMES
+        elif vclass == "truck":
+            pool = pool + _LOCAL_TRUCK_ASSET_NAMES
+    return pool[int(rng.integers(0, len(pool)))]
 
 # Default (world position, boresight +x via a +x-offset look_at) per base scene: a
 # synthetic "flat"/"free" ground plane is uniform, so the origin is as good a spot as
@@ -147,12 +228,64 @@ def _stable_seed(tier: str, frame_idx: int, seed: int) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
-def _sample_local_offset(rng: np.random.Generator) -> Tuple[float, float]:
-    """`(dx, dy)` in the radar-centred, +x-boresight local frame (ground-level, z=0)."""
-    r = rng.uniform(_RANGE_M[0], _RANGE_M[1])
-    sin_az = rng.uniform(_SIN_AZ_RANGE[0], _SIN_AZ_RANGE[1])
-    cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
-    return (float(r * cos_az), float(r * sin_az))
+#: Ground-plane footprint radius, metres, used to keep placed objects from occupying the
+#: same patch of ground. Generous rather than exact: a bus is ~8 m long, so half its
+#: length plus margin keeps a neighbour clear of it whatever its heading.
+#: Half the object's real ground extent plus a small margin -- NOT a generous safety
+#: bubble. Two vehicles 6 m apart are ordinary traffic, not a defect; what must never
+#: happen is interpenetration, which is what these radii actually prevent.
+_FOOTPRINT_RADIUS_M = {
+    "pedestrian": 0.5,   # a person is ~0.6 m across
+    "sphere": 0.7,
+    "scatterer": 3.2,    # clutter boxes are 3-6 m primitives
+    "vehicle": 2.8,      # a 4.4 m car; buses and semis are longer, hence the margin
+}
+_DEFAULT_FOOTPRINT_M = 2.5
+_SEPARATION_MAX_TRIES = 24
+
+
+def _footprint_radius(object_class: str) -> float:
+    return _FOOTPRINT_RADIUS_M.get(object_class, _DEFAULT_FOOTPRINT_M)
+
+
+def _sample_local_offset(rng: np.random.Generator,
+                         placed: Sequence[Tuple[float, float, float]] = (),
+                         object_class: str = "vehicle") -> Tuple[float, float]:
+    """`(dx, dy)` in the radar-centred, +x-boresight local frame (ground-level, z=0),
+    kept clear of everything already placed.
+
+    Without the separation check objects interpenetrate: a sweep of 40 frames each of
+    D2 and D3 put 73 of 5284 object pairs inside one another, the worst being a
+    pedestrian 0.12 m from a vehicle -- i.e. standing inside a car. That is not a
+    cosmetic problem. Two targets occupying one patch of ground produce a radar return
+    no real scene could produce AND two ground-truth labels at the same range and
+    bearing, so a model is trained to predict something incoherent.
+
+    Candidates are resampled until they clear every placed object by the sum of the two
+    footprint radii; after `_SEPARATION_MAX_TRIES` the least-bad candidate is taken
+    rather than looping forever on a crowded scene (and the caller's counts are a
+    request, not a guarantee -- a dense tier may legitimately not fit).
+    """
+    def _draw():
+        r = rng.uniform(_RANGE_M[0], _RANGE_M[1])
+        sin_az = rng.uniform(_SIN_AZ_RANGE[0], _SIN_AZ_RANGE[1])
+        cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
+        return (float(r * cos_az), float(r * sin_az))
+
+    if not placed:
+        return _draw()
+
+    own = _footprint_radius(object_class)
+    best, best_slack = None, -math.inf
+    for _ in range(_SEPARATION_MAX_TRIES):
+        dx, dy = _draw()
+        slack = min(math.hypot(dx - px, dy - py) - (own + pr)
+                    for px, py, pr in placed)
+        if slack >= 0.0:
+            return dx, dy
+        if slack > best_slack:
+            best, best_slack = (dx, dy), slack
+    return best
 
 
 def _sample_velocity(rng: np.random.Generator, speed_range: Tuple[float, float]) -> Tuple[float, float, float]:
@@ -171,6 +304,54 @@ def _sample_velocity(rng: np.random.Generator, speed_range: Tuple[float, float])
 def _n_in(rng: np.random.Generator, lo_hi: Tuple[int, int]) -> int:
     lo, hi = lo_hi
     return int(rng.integers(lo, hi + 1))
+
+
+def _sample_clutter_offset(rng: np.random.Generator,
+                           target_offsets: Sequence[Tuple[float, float]],
+                           placed: Sequence[Tuple[float, float, float]] = ()) -> Tuple[float, float]:
+    """`(dx, dy)` for a clutter box, avoiding the direct radar-to-target line of sight
+    (item 5 fix -- see `_CLUTTER_LOS_*` above): resamples up to `_CLUTTER_LOS_MAX_TRIES`
+    times, rejecting any candidate whose bearing is within `_CLUTTER_LOS_MARGIN_SIN_AZ`
+    of an already-placed target's bearing AND whose range doesn't clear that target's
+    range by `_CLUTTER_LOS_RANGE_MARGIN_M` (i.e. would sit at or in front of it, blocking
+    it). Falls back to a position pinned to the FOV edge -- well clear of the
+    `_SIN_AZ_RANGE` span targets are drawn from -- rather than looping unboundedly if a
+    scene is too crowded for a clear spot."""
+    def _polar(dx: float, dy: float) -> Tuple[float, float]:
+        r = math.hypot(dx, dy)
+        return r, (dy / r if r > 1e-6 else 0.0)
+
+    target_polar = [_polar(tdx, tdy) for tdx, tdy in target_offsets]
+    for _ in range(_CLUTTER_LOS_MAX_TRIES):
+        dx, dy = _sample_local_offset(rng, placed, "scatterer")
+        r, sin_az = _polar(dx, dy)
+        blocked = any(
+            abs(sin_az - t_sin_az) < _CLUTTER_LOS_MARGIN_SIN_AZ
+            and r < t_r + _CLUTTER_LOS_RANGE_MARGIN_M
+            for t_r, t_sin_az in target_polar
+        )
+        if not blocked:
+            return dx, dy
+
+    # Fallback: the scene is too crowded for a spot that clears every line of sight.
+    # Pin to the FOV edge, but still pick the candidate that sits FURTHEST from anything
+    # already placed -- an earlier version returned the first edge draw unconditionally,
+    # which is where the surviving object overlaps came from.
+    own = _footprint_radius("scatterer")
+    best, best_slack = None, -math.inf
+    for _ in range(_SEPARATION_MAX_TRIES):
+        r = float(rng.uniform(_RANGE_M[0], _RANGE_M[1]))
+        sin_az = math.copysign(0.9, float(rng.uniform(-1.0, 1.0)))
+        cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
+        dx, dy = r * cos_az, r * sin_az
+        if not placed:
+            return dx, dy
+        slack = min(math.hypot(dx - px, dy - py) - (own + pr) for px, py, pr in placed)
+        if slack >= 0.0:
+            return dx, dy
+        if slack > best_slack:
+            best, best_slack = (dx, dy), slack
+    return best
 
 
 def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, seed: int = 0,
@@ -199,14 +380,17 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     on the given point, so this is the centre height that makes the bbox rest ON the
     z=0 ground plane rather than sink half its height below it.
 
-    `use_local_assets`: when True, cars/pedestrians are drawn from an EXPANDED pool
-    that also includes `e2e.ml.rt_gen.LOCAL_VEHICLE_ASSET_NAMES` /
-    `LOCAL_PEDESTRIAN_ASSET_NAMES` -- higher-fidelity meshes that live only on this
-    workstation (see that module's docstring); on any other machine those names
-    degrade gracefully to a Sionna-bundled mesh at `build_rt_scene` time. Defaults to
-    False so every existing caller/test (including this module's own determinism
-    tests) keeps drawing from exactly `CAR_ASSET_NAMES`/`PEDESTRIAN_ASSET_NAME`, byte-
-    for-byte unchanged.
+    Vehicles are drawn class-weighted (`VEHICLE_CLASS_WEIGHTS`) then uniformly within
+    that class's `VEHICLE_CLASS_POOLS` entry -- see the module docstring's "Vehicle
+    variety" section; this is the default (not gated behind `use_local_assets`), since
+    the duplicate-Sionna-geometry problem it fixes existed by default.
+
+    `use_local_assets`: when True, vehicles/pedestrians ADDITIONALLY draw from
+    `e2e.ml.rt_gen.LOCAL_VEHICLE_ASSET_NAMES` / `LOCAL_PEDESTRIAN_ASSET_NAMES` --
+    higher-fidelity meshes that live only on this workstation (see that module's
+    docstring), layered on top of the class pools above (`local_tractor_trailer` joins
+    "truck", the rest join "car"); on any other machine those names degrade gracefully
+    to a Sionna-bundled mesh at `build_rt_scene` time. Defaults to False.
 
     Raises `KeyError` for an unknown tier name (see `RT_DIFFICULTY_TIERS`).
     """
@@ -222,17 +406,24 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         z = 0.5 * object_local_height_m(kind, asset) * float(scaling)
         return (rx0 + dx, ry0 + dy, z)
 
-    car_pool = CAR_ASSET_NAMES + LOCAL_VEHICLE_ASSET_NAMES if use_local_assets else CAR_ASSET_NAMES
     pedestrian_pool = ((PEDESTRIAN_ASSET_NAME,) + LOCAL_PEDESTRIAN_ASSET_NAMES
                        if use_local_assets else (PEDESTRIAN_ASSET_NAME,))
 
     objects = []
+    # (dx, dy) of every vehicle/pedestrian/sphere target placed so far, in the same
+    # radar-centred local frame -- feeds `_sample_clutter_offset`'s line-of-sight check.
+    target_offsets: List[Tuple[float, float]] = []
+    # (dx, dy, footprint_radius) of EVERYTHING placed so far, including clutter, so no
+    # two objects end up occupying the same patch of ground -- see _sample_local_offset.
+    placed: List[Tuple[float, float, float]] = []
 
     def _motion(vel):
         return Motion(velocity=vel) if num_frames > 1 else Motion()
 
     for i in range(_n_in(rng, spec.n_spheres)):
-        dx, dy = _sample_local_offset(rng)
+        dx, dy = _sample_local_offset(rng, placed, "sphere")
+        target_offsets.append((dx, dy))
+        placed.append((dx, dy, _footprint_radius("sphere")))
         vel = _sample_velocity(rng, spec.speed_mps)
         pos = _ground_pos(dx, dy, ObjectKind.SPHERE, None, 0.5)
         objects.append(SceneObject(
@@ -241,17 +432,21 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         ))
 
     for i in range(_n_in(rng, spec.n_cars)):
-        dx, dy = _sample_local_offset(rng)
+        dx, dy = _sample_local_offset(rng, placed, "vehicle")
+        target_offsets.append((dx, dy))
+        placed.append((dx, dy, _footprint_radius("vehicle")))
         vel = _sample_velocity(rng, spec.speed_mps)
-        asset = car_pool[int(rng.integers(0, len(car_pool)))]
+        asset = _draw_vehicle_asset(rng, use_local_assets)
         pos = _ground_pos(dx, dy, ObjectKind.MESH, asset, 1.0)
         objects.append(SceneObject(
-            name=f"car-{i}", kind=ObjectKind.MESH, asset=asset, position=pos,
+            name=f"vehicle-{i}", kind=ObjectKind.MESH, asset=asset, position=pos,
             scaling=1.0, material="metal", object_class="vehicle", motion=_motion(vel),
         ))
 
     for i in range(_n_in(rng, spec.n_pedestrians)):
-        dx, dy = _sample_local_offset(rng)
+        dx, dy = _sample_local_offset(rng, placed, "pedestrian")
+        target_offsets.append((dx, dy))
+        placed.append((dx, dy, _footprint_radius("pedestrian")))
         # pedestrians are slower than vehicles regardless of the tier's vehicle range.
         vel = _sample_velocity(rng, (0.0, min(2.0, spec.speed_mps[1])))
         asset = pedestrian_pool[int(rng.integers(0, len(pedestrian_pool)))]
@@ -263,7 +458,10 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         ))
 
     for i in range(_n_in(rng, spec.n_clutter_boxes)):
-        dx, dy = _sample_local_offset(rng)
+        # Kept clear of the direct radar-target line of sight (item 5 fix) -- see
+        # `_sample_clutter_offset` / `_CLUTTER_LOS_*` above.
+        dx, dy = _sample_clutter_offset(rng, target_offsets, placed)
+        placed.append((dx, dy, _footprint_radius("scatterer")))
         # Sionna's bundled box mesh is a 10x10x5 m primitive (measured from its own
         # bbox) -- scaling by _CLUTTER_BOX_SCALING gives ~3-6 m "parked container"
         # sized clutter, not (unscaled) building-sized blocks.
@@ -287,15 +485,34 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     )
 
 
+def vehicle_asset_class(asset: Optional[str]) -> str:
+    """Which `VEHICLE_CLASS_POOLS` key `asset` belongs to ("car" for anything not
+    otherwise recognized, including the local mustang/dodge-charger names and any raw
+    `CAR_ASSET_NAMES` entry -- see `_LOCAL_TRUCK_ASSET_NAMES`'s "trailer" special case)."""
+    if asset in _LOCAL_TRUCK_ASSET_NAMES:
+        return "truck"
+    for vclass, pool in VEHICLE_CLASS_POOLS.items():
+        if asset in pool:
+            return vclass
+    return "car"
+
+
 def tier_summary(scenario: Scenario) -> dict:
     """Compact per-class object counts for manifests/debugging (mirrors
-    `e2e.ml.scenes.scene_summary`'s spirit, RT-specific fields)."""
+    `e2e.ml.scenes.scene_summary`'s spirit, RT-specific fields). `n_cars` is the total
+    vehicle-mesh count (kept for back-compat with earlier callers/captions); each
+    vehicle's actual class (car/truck/bus/trolley) is broken out in
+    `n_vehicles_by_class`."""
+    vehicles = [o for o in scenario.objects if o.kind == ObjectKind.MESH and o.object_class == "vehicle"]
+    by_class: Dict[str, int] = {"car": 0, "truck": 0, "bus": 0, "trolley": 0}
+    for o in vehicles:
+        by_class[vehicle_asset_class(o.asset)] += 1
     return {
         "tier": scenario.metadata.get("tier"),
         "base_scene": scenario.base_scene,
         "n_spheres": sum(1 for o in scenario.objects if o.kind == ObjectKind.SPHERE),
-        "n_cars": sum(1 for o in scenario.objects
-                      if o.kind == ObjectKind.MESH and o.object_class == "vehicle"),
+        "n_cars": len(vehicles),
+        "n_vehicles_by_class": by_class,
         "n_pedestrians": sum(1 for o in scenario.objects if o.object_class == "pedestrian"),
         "n_clutter_boxes": sum(1 for o in scenario.objects if o.kind == ObjectKind.BOX),
     }

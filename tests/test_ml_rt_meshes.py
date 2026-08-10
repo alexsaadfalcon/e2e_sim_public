@@ -24,11 +24,20 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
 from e2e.ml.rt_gen import (ASSET_LICENSES, CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
                           LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
-                          PEDESTRIAN_ASSET_NAME, object_local_height_m)
-from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario, tier_summary
+                          PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
+                          object_local_height_m)
+from e2e.ml.rt_scenes import (RT_DIFFICULTY_TIERS, VEHICLE_CLASS_POOLS,
+                             build_rt_tier_scenario, tier_summary, vehicle_asset_class)
 from e2e.scenario import ObjectKind
+
+# Every asset name a "vehicle" object can legitimately carry in the DEFAULT (use_local_
+# assets=False) pool -- one Sionna representative + every downloaded car/truck/bus/
+# trolley mesh (present or not on this machine; a missing raw source is a LOAD-time
+# degrade, not a name-pool restriction -- see rt_gen._object_mesh).
+_DEFAULT_VEHICLE_POOL = frozenset(n for pool in VEHICLE_CLASS_POOLS.values() for n in pool)
 
 
 @pytest.fixture(scope="session")
@@ -140,7 +149,7 @@ def test_d0_is_spheres_only_d1_is_cars_only():
 
     d1 = build_rt_tier_scenario("D1", frame_idx=0, seed=0)
     assert len(d1.objects) > 0
-    assert all(o.kind == ObjectKind.MESH and o.asset in CAR_ASSET_NAMES for o in d1.objects)
+    assert all(o.kind == ObjectKind.MESH and o.asset in _DEFAULT_VEHICLE_POOL for o in d1.objects)
 
 
 def test_d2_and_d3_mix_cars_and_pedestrians():
@@ -157,12 +166,86 @@ def test_d2_and_d3_mix_cars_and_pedestrians():
             assert p.material == "skin"
 
 
-def test_car_objects_reference_a_real_bundled_asset_name():
+def test_car_objects_reference_a_known_vehicle_asset_name():
     sc = build_rt_tier_scenario("D3", frame_idx=4, seed=9)
     cars = [o for o in sc.objects if o.object_class == "vehicle" and o.kind == ObjectKind.MESH]
-    assert cars, "expected at least one car in this draw"
+    assert cars, "expected at least one vehicle in this draw"
     for c in cars:
-        assert c.asset in CAR_ASSET_NAMES
+        assert c.asset in _DEFAULT_VEHICLE_POOL
+
+
+# --------------------------------------------------------------------------------
+# Pool composition (ungated -- regression for "17 names, ONE geometry": a car-class
+# draw must be able to land on more than one distinct mesh, and a tier's vehicles must
+# be a MIX of classes, not always "car").
+# --------------------------------------------------------------------------------
+def test_duplicate_sionna_car_name_problem_cannot_come_back():
+    """Across many draws, the car CLASS specifically (not just "any vehicle") must
+    produce more than one distinct asset name -- the exact failure mode this campaign
+    fixes (17 Sionna names, all `low_poly_car.ply`, drawn uniformly)."""
+    seen = set()
+    for tier in ("D2", "D3"):
+        for seed in range(30):
+            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            for o in sc.objects:
+                if o.object_class == "vehicle" and o.kind == ObjectKind.MESH \
+                        and vehicle_asset_class(o.asset) == "car":
+                    seen.add(o.asset)
+    assert len(seen) > 1, f"only ever drew {seen!r} for the car class"
+
+
+def test_no_uniform_draw_over_all_seventeen_sionna_names():
+    """None of the 16 duplicate-geometry Sionna scene-slot names (car-0..7/car_1..8)
+    should appear in a default-pool draw -- only the one kept representative."""
+    dup_names = set(CAR_ASSET_NAMES) - {SIONNA_CAR_REPRESENTATIVE}
+    for tier in ("D1", "D2", "D3"):
+        for seed in range(20):
+            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            for o in sc.objects:
+                if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
+                    assert o.asset not in dup_names
+
+
+def test_a_tier_draws_more_than_just_cars_over_many_seeds():
+    """D3 (widest n_cars range) should, over enough draws, produce at least one
+    non-"car" vehicle class (truck/bus/trolley) -- the "realistic mix" fix."""
+    classes_seen = set()
+    for seed in range(60):
+        sc = build_rt_tier_scenario("D3", frame_idx=0, seed=seed)
+        for o in sc.objects:
+            if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
+                classes_seen.add(vehicle_asset_class(o.asset))
+    assert classes_seen - {"car"}, f"never drew a non-car vehicle class: {classes_seen!r}"
+
+
+# --------------------------------------------------------------------------------
+# Clutter-box occlusion (ungated -- pure geometry, item 5 fix)
+# --------------------------------------------------------------------------------
+def test_clutter_boxes_do_not_sit_in_a_targets_line_of_sight():
+    import math
+
+    from e2e.ml.rt_scenes import _CLUTTER_LOS_MARGIN_SIN_AZ, _CLUTTER_LOS_RANGE_MARGIN_M
+
+    def _polar(dx, dy):
+        r = math.hypot(dx, dy)
+        return r, (dy / r if r > 1e-6 else 0.0)
+
+    for tier in ("D2", "D3"):
+        for seed in range(40):
+            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            rx0, ry0, _ = sc.nodes[0].position
+            targets = [(o.position[0] - rx0, o.position[1] - ry0) for o in sc.objects
+                      if o.object_class in ("vehicle", "pedestrian")]
+            boxes = [(o.position[0] - rx0, o.position[1] - ry0) for o in sc.objects
+                    if o.kind == ObjectKind.BOX]
+            target_polar = [_polar(*t) for t in targets]
+            for b in boxes:
+                br, bsin = _polar(*b)
+                for tr, tsin in target_polar:
+                    occludes = (abs(bsin - tsin) < _CLUTTER_LOS_MARGIN_SIN_AZ
+                               and br < tr + _CLUTTER_LOS_RANGE_MARGIN_M)
+                    assert not occludes, \
+                        f"{tier}/seed={seed}: a clutter box occludes a target"
 
 
 # --------------------------------------------------------------------------------
@@ -208,24 +291,35 @@ def test_local_asset_specs_are_recorded_with_unknown_license():
         == set(LOCAL_ASSET_SPECS)
 
 
-def test_use_local_assets_false_matches_the_sionna_only_pool_exactly():
-    """Default behaviour (use_local_assets=False, every existing caller) must draw
-    ONLY from CAR_ASSET_NAMES/PEDESTRIAN_ASSET_NAME -- never a local asset name --
-    regardless of whether this happens to be a machine that HAS the local files."""
+def test_downloaded_asset_licenses_recorded_as_unverified():
+    for name, spec in DOWNLOADED_ASSET_SPECS.items():
+        assert name in ASSET_LICENSES
+        lic = ASSET_LICENSES[name]["license"]
+        assert "UNKNOWN" in lic and "INTERNAL-ONLY" in lic
+        assert ASSET_LICENSES[name]["category"] == spec.vehicle_class
+
+
+def test_use_local_assets_false_stays_within_the_default_pool():
+    """Default behaviour (use_local_assets=False) must draw ONLY from the default
+    vehicle pool (SIONNA_CAR_REPRESENTATIVE + downloaded car/truck/bus/trolley meshes)
+    / PEDESTRIAN_ASSET_NAME -- never a `LOCAL_ASSET_SPECS` (workstation-only,
+    non-downloaded) name -- regardless of whether this machine happens to have those
+    local files."""
     for tier in sorted(RT_DIFFICULTY_TIERS):
         sc = build_rt_tier_scenario(tier, frame_idx=2, seed=5, num_frames=1)
         for o in sc.objects:
             if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
-                assert o.asset in CAR_ASSET_NAMES
+                assert o.asset in _DEFAULT_VEHICLE_POOL
+                assert o.asset not in LOCAL_VEHICLE_ASSET_NAMES
             if o.object_class == "pedestrian":
                 assert o.asset == PEDESTRIAN_ASSET_NAME
 
 
 def test_use_local_assets_true_stays_within_the_expanded_pool():
-    """use_local_assets=True may draw local names (if this machine has the files) but
-    must never draw anything OUTSIDE the expanded pool -- works whether or not the
-    local files are actually present (graceful degrade)."""
-    car_pool = set(CAR_ASSET_NAMES) | set(LOCAL_VEHICLE_ASSET_NAMES)
+    """use_local_assets=True may ADDITIONALLY draw `LOCAL_ASSET_SPECS` names (if this
+    machine has the files) but must never draw anything OUTSIDE the expanded pool --
+    works whether or not the local files are actually present (graceful degrade)."""
+    car_pool = _DEFAULT_VEHICLE_POOL | set(LOCAL_VEHICLE_ASSET_NAMES)
     ped_pool = {PEDESTRIAN_ASSET_NAME} | set(LOCAL_PEDESTRIAN_ASSET_NAMES)
     for tier in ("D1", "D2", "D3"):
         for seed in range(5):
@@ -288,6 +382,20 @@ def test_object_mesh_dispatch_resolves_cars_and_pedestrian(sionna_rt):
 
     raw = _object_mesh(sionna_rt, SceneObject(name="r", kind=ObjectKind.MESH, asset="/some/path.ply"))
     assert raw == "/some/path.ply"
+
+
+@pytest.mark.sionna
+@pytest.mark.parametrize("name", sorted(DOWNLOADED_ASSET_SPECS))
+def test_object_mesh_dispatch_resolves_downloaded_assets(sionna_rt, name):
+    """`rt_gen._object_mesh` for a downloaded (car/truck/bus/trolley) asset name --
+    either the real processed PLY (if the source is present on this machine) or a
+    graceful degrade to `SIONNA_CAR_REPRESENTATIVE`, either way a loadable mesh."""
+    from e2e.ml.rt_gen import _object_mesh
+    from e2e.scenario import SceneObject
+
+    path = _object_mesh(sionna_rt, SceneObject(name="v", kind=ObjectKind.MESH, asset=name))
+    mesh = sionna_rt.load_mesh(path)  # raises if not a loadable mesh
+    assert float(mesh.bbox().max.x) > float(mesh.bbox().min.x)
 
 
 # --------------------------------------------------------------------------------
@@ -450,3 +558,52 @@ def test_sionna_env_add_cars_rejects_unknown_shape(sionna_rt):
                             car_center=(0.0, 0.0, 0.0))
     with pytest.raises(ValueError):
         env.add_cars(shape="not_a_real_shape")
+
+
+def test_placed_objects_do_not_interpenetrate():
+    """Objects must not occupy the same patch of ground.
+
+    Before the separation check, a sweep of D2/D3 put 1.4% of object pairs inside one
+    another, the worst being a pedestrian 0.12 m from a vehicle -- standing inside a car.
+    That is not cosmetic: two targets at one place produce a radar return no real scene
+    could produce AND two ground-truth labels at the same range and bearing, training a
+    model to predict something incoherent.
+
+    The residual tolerance covers vehicles clipping clutter boxes, which are unlabelled
+    background, so a clip degrades the return slightly without corrupting any label.
+    """
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    def half_extent(obj):
+        if obj.name.startswith("pedestrian"):
+            return 0.4
+        if obj.name.startswith("sphere"):
+            return 0.5
+        if obj.name.startswith("clutter"):
+            return 3.0
+        return 2.5  # real vehicle meshes
+
+    pairs = overlaps = 0
+    worst_label_corrupting = 0.0
+    for tier in ("D0", "D1", "D2", "D3"):
+        for frame in range(40):
+            objects = build_rt_tier_scenario(tier, frame_idx=frame, seed=11).objects
+            for i in range(len(objects)):
+                for j in range(i + 1, len(objects)):
+                    a, b = objects[i], objects[j]
+                    d = ((a.position[0] - b.position[0]) ** 2
+                         + (a.position[1] - b.position[1]) ** 2) ** 0.5
+                    need = half_extent(a) + half_extent(b)
+                    pairs += 1
+                    if d < need:
+                        overlaps += 1
+                        # A clutter box is unlabelled background; two LABELLED targets
+                        # inside one another is the failure that actually corrupts data.
+                        if not (a.name.startswith("clutter") or b.name.startswith("clutter")):
+                            worst_label_corrupting = max(worst_label_corrupting, need - d)
+
+    assert overlaps / pairs < 0.01, f"{overlaps}/{pairs} object pairs interpenetrate"
+    assert worst_label_corrupting == 0.0, (
+        f"two labelled targets overlap by {worst_label_corrupting:.2f} m -- their labels "
+        "would sit at the same range and bearing"
+    )

@@ -438,7 +438,8 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
             out_path,
             [
                 f"{scenario.name}   tier={summary['tier']}   base_scene={summary['base_scene']}",
-                f"objects: spheres={summary['n_spheres']}  cars={summary['n_cars']}  "
+                f"objects: spheres={summary['n_spheres']}  "
+                f"vehicles={summary['n_cars']} {summary['n_vehicles_by_class']}  "
                 f"pedestrians={summary['n_pedestrians']}  clutter_boxes={summary['n_clutter_boxes']}",
                 f"radar @ ({radar_pos[0]:.1f}, {radar_pos[1]:.1f}, {radar_pos[2]:.1f}) m "
                 "-- amber marker + boresight rod",

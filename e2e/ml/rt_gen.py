@@ -143,6 +143,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from e2e.ml.assets import DOWNLOADED_ASSET_SPECS, process_asset
+
 # See the module docstring's "Element ordering / array handedness" section.
 _ANTENNA_INDEX_REVERSED = True
 
@@ -167,6 +169,14 @@ CAR_ASSET_NAMES = (
     + tuple(f"car-{i}" for i in range(8))
     + tuple(f"car_{i}" for i in range(1, 9))
 )
+
+# `CAR_ASSET_NAMES` is kept above at its full 17-name inventory (mesh-path resolution,
+# license bookkeeping, and any existing scenario that references one of the 16
+# scene-slot names by name all still need it) -- but drawing a scene's cars UNIFORMLY
+# from all 17 draws the SAME geometry ~85% of the time (see `e2e.ml.rt_scenes`'
+# `VEHICLE_CLASS_POOLS`, which uses only this one name plus real downloaded meshes for
+# variety; campaign R3).
+SIONNA_CAR_REPRESENTATIVE = CAR_ASSET_NAMES[0]  # "low_poly_car"
 
 # No bundled human mesh exists (Sionna ships vehicles, buildings, furniture -- no
 # pedestrians). `_pedestrian_mesh_path` procedurally builds a low-poly placeholder
@@ -198,6 +208,22 @@ ASSET_LICENSES = {
                   "Slated for replacement by a CC0 human mesh once one is sourced.",
     },
 }
+
+# Downloaded vehicle meshes (campaign R3, see `e2e.ml.assets`): real car/truck/bus/
+# trolley geometry, decimated + normalized by that module. Every one of these is a
+# user-supplied file whose redistribution terms have NOT been checked -- see the
+# "license" text below, applied uniformly. No mesh binary is committed to this
+# repository (see `e2e.ml.assets`' cache-directory docstring); every consumer degrades
+# gracefully to `SIONNA_CAR_REPRESENTATIVE` when the cache/source archive is absent.
+for _name, _spec in DOWNLOADED_ASSET_SPECS.items():
+    ASSET_LICENSES[_name] = {
+        "source": _spec.source,
+        "license": "UNKNOWN -- user-supplied; terms not verified; corpus using these is "
+                  "INTERNAL-ONLY until cleared",
+        "category": _spec.vehicle_class,
+        "derivation": _spec.derivation,
+    }
+del _name, _spec
 
 # --------------------------------------------------------------------------------
 # Ground-rest placement: unscaled local mesh z-extents (bbox height), so a caller can
@@ -243,6 +269,13 @@ def object_local_height_m(kind, asset: Optional[str] = None) -> float:
         # (keeps placement and the mesh actually loaded consistent).
         return (CAR_LOCAL_HEIGHT_M if LOCAL_ASSET_SPECS[asset].category == "vehicle"
                 else PEDESTRIAN_LOCAL_HEIGHT_M)
+    if asset in DOWNLOADED_ASSET_SPECS:
+        result = process_asset(asset)
+        if result is not None:
+            return result.height_m
+        # Raw source not found on this machine: `_object_mesh` ALSO falls back to
+        # SIONNA_CAR_REPRESENTATIVE at load time (see there) -- match its height here.
+        return CAR_LOCAL_HEIGHT_M
     raise ValueError(f"no known local height for kind={kind!r} asset={asset!r}")
 
 
@@ -766,6 +799,15 @@ def _object_mesh(rt, obj):
         spec = LOCAL_ASSET_SPECS[obj.asset]
         return _pedestrian_mesh_path() if spec.category == "pedestrian" \
             else _car_mesh_path(rt, "low_poly_car")
+    if obj.asset in DOWNLOADED_ASSET_SPECS:
+        result = process_asset(obj.asset)
+        if result is not None:
+            return result.ply_path
+        # Raw archive/cache not found on this machine (or `7z` unavailable): every
+        # DOWNLOADED_ASSET_SPECS entry is a vehicle (no pedestrian among them), so
+        # degrade to the one representative Sionna car mesh -- same precedent as
+        # LOCAL_ASSET_SPECS above.
+        return _car_mesh_path(rt, SIONNA_CAR_REPRESENTATIVE)
     return obj.asset
 
 
