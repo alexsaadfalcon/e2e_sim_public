@@ -27,6 +27,7 @@ chains all three. Everything is torch/numpy only (no Sionna), deterministic give
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -347,17 +348,25 @@ _STAGES = (
 )
 
 
-#: Per-stage seed offsets, keyed by stage NAME rather than position. Deriving them from
-#: the stage's index would mean reordering `_STAGES` silently changed every noise
-#: realization in every corpus ever generated -- a reordering is a physics decision, and
-#: it should not also be a data change. These numbers are arbitrary but must stay fixed.
-_STAGE_SEED_OFFSET = {"phase_noise": 0, "leakage": 1, "clutter": 2}
-
-
 def stage_seed(seed: int, stage: str) -> int:
-    """The sub-seed a given impairment stage runs with, so the three do not share a
-    realization. Stable across reorderings of `_STAGES` (see `_STAGE_SEED_OFFSET`)."""
-    return int(seed) + _STAGE_SEED_OFFSET[stage]
+    """The sub-seed a given impairment stage runs with, derived by HASHING the
+    (seed, stage) pair rather than adding a small per-stage offset.
+
+    Small offsets are the obvious implementation and they are wrong here. With
+    `offset = {phase_noise: 0, leakage: 1, clutter: 2}` and a caller that advances the
+    frame seed by one per frame -- which `ImpairmentBlock` does -- frame `i`'s LEAKAGE
+    sub-seed (`seed+i+1`) is exactly frame `i+1`'s PHASE-NOISE sub-seed. Identical
+    seeds mean identical generator state, so a corpus quietly carries the same noise
+    realization under two different labels, one frame apart. An adversarial review
+    demonstrated the collision; this hash removes the arithmetic that caused it.
+
+    SHA-256 rather than Python's `hash()`, which is salted per process and would make
+    a corpus unreproducible across runs. Stable across reorderings of `_STAGES` too:
+    a stage's seed depends on its NAME, so changing the physics order does not silently
+    change every realization ever generated.
+    """
+    digest = hashlib.sha256(f"{int(seed)}:{stage}".encode()).digest()
+    return int.from_bytes(digest[:8], "little") % (2 ** 63)
 
 
 def apply_all(adc: torch.Tensor, cfg, chain_params: Optional[Dict[str, Any]] = None, *,

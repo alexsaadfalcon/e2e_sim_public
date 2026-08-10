@@ -2,6 +2,8 @@
 
 import math
 
+import os
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -244,3 +246,38 @@ def test_clutter_passes_through_the_oscillator_phase_noise(cfg, torch_device):
     # phase noise, so the chain output differs from the un-phase-noised composite.
     chained = apply_all(silent, cfg, {"leakage": None}, seed=1)
     assert not torch.equal(chained, apply_clutter(silent, cfg, ClutterParams(), seed=2))
+
+
+def test_stage_seeds_never_collide_across_frames_or_stages():
+    """The corpus advances the frame seed by one per frame. With small per-stage
+    offsets that made frame i's leakage seed identical to frame i+1's phase-noise
+    seed -- the same noise realization filed under two different labels, which
+    quietly correlates a corpus. Sweep frames and stages and assert every sub-seed
+    is distinct."""
+    from e2e.ml.impairments import stage_seed
+
+    stages = ("phase_noise", "leakage", "clutter")
+    seeds = {}
+    for frame in range(200):
+        for stage in stages:
+            s = stage_seed(1000 + frame, stage)
+            assert s not in seeds, (
+                f"collision: (frame {frame}, {stage}) reuses the seed of {seeds[s]}"
+            )
+            seeds[s] = (frame, stage)
+
+
+def test_stage_seed_is_stable_across_processes():
+    """Reproducibility of a corpus depends on this being independent of PYTHONHASHSEED
+    -- Python's built-in hash() is salted per process and would break it."""
+    import subprocess
+    import sys
+
+    code = ("from e2e.ml.impairments import stage_seed;"
+            "print(stage_seed(7, 'clutter'))")
+    runs = {
+        subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env={**os.environ, "PYTHONHASHSEED": seed}).stdout.strip()
+        for seed in ("0", "1", "12345")
+    }
+    assert len(runs) == 1, f"stage_seed varies with PYTHONHASHSEED: {runs}"
