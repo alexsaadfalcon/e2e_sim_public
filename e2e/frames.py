@@ -113,6 +113,16 @@ DOMAIN_RX_TIME = "rx_time"   # adc     [n_rx, n_chirp, n_samples]     -- dechirp
 
 _DOMAINS = (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME)
 
+#: Declared by blocks that do NOT consume the chain's current payload at all: they work
+#: on a side channel of their own. The transmit waveform is the motivating case -- it is
+#: a TRIBUTARY that joins the chain rather than a segment of it. A waveform generator
+#: and the amplifier that distorts it produce and modify `tx_wave` while the main chain
+#: still carries the channel's frequency response; the two merge where the transmitted
+#: spectrum multiplies the channel, and only THEN does one signal continue.
+#: Blocks declaring this are exempt from the domain check (they must still validate
+#: their own inputs, and say so clearly when those are missing).
+DOMAIN_ANY = "any"
+
 #: State key carrying each domain's payload. `Simulation` uses this to find the tensor a
 #: block is about to consume without every block agreeing on one name for everything.
 DOMAIN_PAYLOAD_KEY = {
@@ -158,9 +168,10 @@ class FrameCapabilities:
             raise ValueError(
                 f"unknown chirp capability {self.chirps!r}; expected one of {_CHIRP_MODES}"
             )
-        if self.domain not in _DOMAINS:
+        if self.domain not in _DOMAINS + (DOMAIN_ANY,):
             raise ValueError(
-                f"unknown signal domain {self.domain!r}; expected one of {_DOMAINS}"
+                f"unknown signal domain {self.domain!r}; expected one of "
+                f"{_DOMAINS + (DOMAIN_ANY,)}"
             )
         if self.emits_domain is not None and self.emits_domain not in _DOMAINS:
             raise ValueError(
@@ -204,6 +215,8 @@ def require_domain(current_domain, component, who=None):
     """
     caps = capabilities_of(component)
     who = who or component_name(component)
+    if caps.domain == DOMAIN_ANY:
+        return
     if caps.domain != current_domain:
         bridge = _DOMAIN_BRIDGE.get(caps.domain)
         remedy = (f"insert a {bridge} before it" if bridge
@@ -227,7 +240,7 @@ def check_capabilities(s_pars, component, layout=LAYOUT_RAW, who=None,
     caps = capabilities_of(component)
     who = who or component_name(component)
     require_domain(domain, component, who)
-    if domain != DOMAIN_CFR:
+    if domain != DOMAIN_CFR or caps.domain == DOMAIN_ANY:
         return
     if layout == LAYOUT_RAW and not caps.accepts_mimo:
         require_no_mimo(s_pars, who, hint="this block declares accepts_mimo=False")

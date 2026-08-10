@@ -217,15 +217,11 @@ class SourceBlock:
     at `DOMAIN_RX_TIME`) -- check `self.signal_domain` to know what it
     actually returned.
 
-    NOTE (handoff item, not fixed here -- `e2e/simulation.py` is outside this
-    shard): today's `Simulation.feed_forward` only calls
-    `environment_block.get_S_pars()`/`step()`/`reset()` and always seeds
-    `state_dict['s_pars']` -- it does not yet read `signal_domain` or call
-    `get_state_updates()`. Wiring those into `Simulation` (so a `SourceBlock`
-    genuinely resumes a non-CFR chain, and its labels travel with the frame)
-    is exactly the extension the chain-integration design notes describe;
-    this class exposes what such a change would consume, but does not modify
-    `Simulation` itself.
+    `Simulation` reads both of these: `signal_domain` decides which state key the
+    replayed payload is seeded under and whether the frequency-domain machinery
+    (the SVD and subspace ground truth) applies at all, and `get_state_updates()`
+    supplies the stored metadata -- labels included -- so they travel with the
+    frame. See `Simulation._environment_state_updates` and `_feed_forward_from`.
     """
 
     def __init__(self, in_dir, tag: str = "sample"):

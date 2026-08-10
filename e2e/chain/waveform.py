@@ -112,8 +112,12 @@ class WaveformBlock:
     domain, not a crossing between domains.
     """
 
+    # The transmit path is a TRIBUTARY of the chain, not a segment of it: this block
+    # produces `tx_wave` alongside whatever the chain is carrying, and the two merge at
+    # ModulateBlock. Declaring DOMAIN_ANY says exactly that -- it consumes no chain
+    # payload, so it is legal wherever it is placed before the merge.
     frame_capabilities = FrameCapabilities(
-        domain=frames.DOMAIN_TX_TIME, emits_domain=frames.DOMAIN_TX_TIME,
+        domain=frames.DOMAIN_ANY,
     )
 
     def __init__(self, kind="fmcw", fc=0.0, bw=1e9, sample_rate=3e9,
@@ -162,12 +166,20 @@ class TxPABlock:
     envelope-varying waveforms respond so differently to it).
     """
 
-    frame_capabilities = FrameCapabilities(domain=frames.DOMAIN_TX_TIME)
+    # Also on the transmit tributary: it rewrites `tx_wave` in place and never touches
+    # the chain's payload, so it too is domain-agnostic. It does require the waveform to
+    # exist, which it checks itself with an actionable error.
+    frame_capabilities = FrameCapabilities(domain=frames.DOMAIN_ANY)
 
     def __init__(self, tx_pa=None, config=None):
         self.tx_pa = tx_pa if tx_pa is not None else TxPA(config)
 
     def apply(self, state):
+        if "tx_wave" not in state:
+            raise frames.FrameContractError(
+                "TxPABlock needs a transmitted waveform to distort, but none is in "
+                "state -- put a WaveformBlock before it."
+            )
         return {"tx_wave": self.tx_pa.apply(state["tx_wave"])}
 
 
@@ -190,8 +202,13 @@ class ModulateBlock:
     from the pipeline.
     """
 
+    # The merge point, and therefore NOT a domain bridge: it folds the transmitted
+    # spectrum into the channel's frequency response and leaves the chain in the
+    # frequency domain it was already in. (An earlier design called this a second
+    # crossing, symmetric with the dechirp. That was wrong: the transmit waveform joins
+    # the chain by multiplication, it does not carry the chain across.)
     frame_capabilities = FrameCapabilities(
-        domain=frames.DOMAIN_TX_TIME, emits_domain=frames.DOMAIN_CFR,
+        domain=frames.DOMAIN_CFR,
     )
 
     def __init__(self, tx_pa=None, bandwidth_hz=3e9, freqs_hz=None, ideal=False):
@@ -206,13 +223,28 @@ class ModulateBlock:
             # passes through untouched -- bit-for-bit (see module docstring).
             return {"signal_domain": frames.DOMAIN_CFR}
 
+        if "s_pars" not in state:
+            raise frames.FrameContractError(
+                "ModulateBlock folds the transmitted spectrum into a channel response, "
+                "but no 's_pars' frame is in state -- it must run while the chain is in "
+                "the cfr domain, after an environment block has supplied a frame."
+            )
         s_pars = state["s_pars"]
         tx_wave = state["tx_wave"]
         n_freqs = frames.dims(s_pars).n_freqs
 
-        # TX spectrum on the SAME n_freqs-point DFT grid as s_pars's frequency axis
-        # (see "Modulate convention"); [n_tx, n_chirp, n_freqs].
+        # TX spectrum on the SAME n_freqs-point grid as s_pars's frequency axis.
+        #
+        # The fftshift is load-bearing and was missing: torch.fft.fft returns natural
+        # DFT order (DC, +f, ..., Nyquist, -f, ..., -df), while EVERY s_pars frequency
+        # axis in this repo ascends monotonically from -B/2 to +B/2 (rt_gen's
+        # beat_frequencies, and the linspace grids the classic pipeline builds). Without
+        # the shift, the chirp's negative-frequency half multiplies the channel's
+        # POSITIVE half and vice versa -- an adversarial review measured the resulting
+        # misalignment at exactly B/2 (1.5 GHz on a 3 GHz band), which scrambles range
+        # and Doppler rather than degrading them subtly.
         X = torch.fft.fft(tx_wave.to(torch.complex64), n=n_freqs, dim=-1)
+        X = torch.fft.fftshift(X, dim=-1)
         X = X.to(device=s_pars.device)
         s_pars = s_pars * X.view(1, *X.shape)
 

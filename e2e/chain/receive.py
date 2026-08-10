@@ -124,7 +124,7 @@ class QuantizerBlock:
     """ADC digitization: full-scale hard clip (saturation) + UNIFORM quantization.
     Serial stage: rewrites `adc`.
 
-    FULL-SCALE CONVENTION: `full_scale` (default 1.0) is the clip level applied
+    FULL-SCALE CONVENTION: `full_scale` is the clip level applied
     INDEPENDENTLY to the real and imaginary parts, in `adc`'s own units -- i.e. the
     ADC's representable range is `Re, Im in [-full_scale, full_scale]`, matching an
     IQ receiver's pair of converters. Values outside are hard-clipped before
@@ -149,24 +149,49 @@ class QuantizerBlock:
     full-scale clip -- 0 when nothing saturates) and `quant_snr_db` (measured: power of
     the clipped-but-unquantized input over the power of the quantization error added on
     top of it).
+
+    FULL SCALE DEFAULTS TO AUTOMATIC GAIN, and that default matters more than it looks.
+    Ray-traced cubes carry PHYSICAL amplitudes -- `rt_gen` deliberately does not
+    normalize -- and at 77 GHz over tens of metres a return lands around 1e-7..1e-6,
+    while a 12-bit converter spanning +-1.0 has an LSB near 2.4e-4. A fixed
+    `full_scale=1.0` therefore quantizes a realistic cube to EXACTLY ZERO, silently,
+    with `clipped_fraction` reporting 0.0 as if all were well. An adversarial review
+    caught this. Passing `full_scale=None` (the default) instead sets the range from the
+    frame's own peak with `headroom_db` of margin -- a crude AGC, which is what real
+    receivers use for the same reason. Pass a float only when the absolute scale is
+    genuinely known and fixed.
     """
 
     frame_capabilities = _RX_TIME
 
-    def __init__(self, bits=12, full_scale=1.0):
+    def __init__(self, bits=12, full_scale=None, headroom_db=6.0):
         if int(bits) < 2:
             raise ValueError(f"bits must be >= 2 (got {bits}); one bit is the sign")
         self.bits = int(bits)
-        self.full_scale = float(full_scale)
+        self.full_scale = None if full_scale is None else float(full_scale)
+        self.headroom_db = float(headroom_db)
+        self._last_full_scale = self.full_scale
+
+    def _resolve_full_scale(self, adc):
+        """The converter's range for this frame: fixed if given, else AGC from the peak."""
+        if self.full_scale is not None:
+            return self.full_scale
+        peak = torch.max(torch.stack([adc.real.abs().max(), adc.imag.abs().max()]))
+        peak = float(peak.item())
+        if peak <= 0.0:
+            return 1.0
+        return peak * (10.0 ** (self.headroom_db / 20.0))
 
     @property
     def lsb(self):
-        """Quantization step: full scale divided by the codes available per sign."""
-        return self.full_scale / (2 ** (self.bits - 1))
+        """Quantization step of the LAST frame: full scale over the codes per sign."""
+        fs = self._last_full_scale if self._last_full_scale is not None else 1.0
+        return fs / (2 ** (self.bits - 1))
 
     def apply(self, state):
         adc = state["adc"]
-        fs = self.full_scale
+        fs = self._resolve_full_scale(adc)
+        self._last_full_scale = fs
         over_re = adc.real.abs() > fs
         over_im = adc.imag.abs() > fs
         clipped_fraction = float(torch.cat([over_re.flatten(), over_im.flatten()])
@@ -176,7 +201,7 @@ class QuantizerBlock:
 
         # Mid-tread uniform quantization, then clamp the top code so a sample sitting
         # exactly at +full_scale does not round to a code the converter cannot output.
-        lsb = self.lsb
+        lsb = fs / (2 ** (self.bits - 1))
         top = 2 ** (self.bits - 1) - 1
         re_q = torch.round(re_clip / lsb).clamp(-top - 1, top) * lsb
         im_q = torch.round(im_clip / lsb).clamp(-top - 1, top) * lsb
@@ -188,7 +213,8 @@ class QuantizerBlock:
         eps = torch.finfo(torch.float32).tiny
         quant_snr_db = float(10.0 * torch.log10(sig_power / noise_power.clamp_min(eps)))
 
-        return {"adc": out, "clipped_fraction": clipped_fraction, "quant_snr_db": quant_snr_db}
+        return {"adc": out, "clipped_fraction": clipped_fraction,
+                "quant_snr_db": quant_snr_db, "adc_full_scale": fs}
 
 
 class RadarCubeBlock:

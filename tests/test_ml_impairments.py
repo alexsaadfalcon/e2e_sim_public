@@ -208,8 +208,10 @@ def test_apply_all_defaults_and_skip(cfg, torch_device):
     assert out_all.dtype == adc.dtype
     assert not torch.allclose(out_all, adc)
 
+    from e2e.ml.impairments import stage_seed
     out_skip = apply_all(adc, cfg, {"leakage": None, "clutter": None}, seed=1)
-    out_phase_only = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=1)
+    out_phase_only = apply_phase_noise(adc, cfg, PhaseNoiseParams(),
+                                       seed=stage_seed(1, "phase_noise"))
     assert torch.allclose(out_skip, out_phase_only, atol=1e-6)
 
 
@@ -218,3 +220,27 @@ def test_apply_all_deterministic(cfg, torch_device):
     out1 = apply_all(adc, cfg, seed=99)
     out2 = apply_all(adc, cfg, seed=99)
     assert torch.allclose(out1, out2, atol=1e-6)
+
+
+def test_clutter_passes_through_the_oscillator_phase_noise(cfg, torch_device):
+    """Leakage and clutter are RETURNS: they reach the mixer with the echoes and must be
+    subject to the same phase noise. With phase noise applied first they escaped it
+    entirely. Test: inject clutter alone into a silent cube, then check the composite is
+    modified by the phase-noise stage rather than passing through untouched."""
+    import torch
+    from e2e.ml.impairments import (ClutterParams, PhaseNoiseParams, apply_all,
+                                    apply_clutter, apply_phase_noise)
+
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples,
+                         dtype=torch.complex64, device=torch_device)
+    # Give the cube one strong return so clutter power has something to scale against.
+    silent[:, :, 0] = 1.0
+
+    cluttered = apply_clutter(silent, cfg, ClutterParams(), seed=1)
+    both = apply_phase_noise(cluttered, cfg, PhaseNoiseParams(), seed=3)
+    assert not torch.equal(both, cluttered), "phase noise must act on the clutter too"
+
+    # And the chained order must reach the same arrangement: the last stage applied is
+    # phase noise, so the chain output differs from the un-phase-noised composite.
+    chained = apply_all(silent, cfg, {"leakage": None}, seed=1)
+    assert not torch.equal(chained, apply_clutter(silent, cfg, ClutterParams(), seed=2))

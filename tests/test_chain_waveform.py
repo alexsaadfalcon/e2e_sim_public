@@ -154,16 +154,49 @@ def test_modulate_fast_path_ideal_flag_is_bit_identical(synthetic_frame_np, torc
 
 def test_capability_declarations_match_docstrings():
     wf_caps = WaveformBlock.frame_capabilities
-    assert wf_caps.domain == frames.DOMAIN_TX_TIME
-    assert wf_caps.emits_domain == frames.DOMAIN_TX_TIME
+    assert wf_caps.domain == frames.DOMAIN_ANY
+    assert wf_caps.emits_domain is None  # a tributary source, not a bridge
     assert wf_caps.is_bridge is False  # source, not a bridge (domain == emits_domain)
 
     pa_caps = TxPABlock.frame_capabilities
-    assert pa_caps.domain == frames.DOMAIN_TX_TIME
+    assert pa_caps.domain == frames.DOMAIN_ANY
     assert pa_caps.emits_domain is None
     assert pa_caps.is_bridge is False
 
+    # The merge point consumes the channel frame and leaves the chain in the frequency
+    # domain it was already in -- so it is NOT a bridge. The transmit waveform joins by
+    # multiplication; it does not carry the chain across a domain.
     mod_caps = ModulateBlock.frame_capabilities
-    assert mod_caps.domain == frames.DOMAIN_TX_TIME
-    assert mod_caps.emits_domain == frames.DOMAIN_CFR
-    assert mod_caps.is_bridge is True
+    assert mod_caps.domain == frames.DOMAIN_CFR
+    assert mod_caps.emits_domain is None
+    assert mod_caps.is_bridge is False
+
+
+def test_tx_spectrum_aligns_with_the_channels_ascending_frequency_axis():
+    """The transmitted spectrum must line up with s_pars's frequency axis, which
+    ascends from -B/2 to +B/2. torch.fft.fft returns natural DFT order instead, so the
+    shift is required; without it the chirp's negative half multiplies the channel's
+    positive half (measured misalignment: exactly B/2).
+
+    Probe: a channel that is zero everywhere except one frequency bin picks out the TX
+    spectrum's content at THAT bin. Feeding a pure complex tone whose frequency is
+    known, the surviving energy must land in the bin the ascending axis assigns it.
+    """
+    import torch
+    from e2e.chain.waveform import ModulateBlock
+
+    n_freqs, n_t = 64, 64
+    # A tone at DFT index +5 in natural order; on an ascending (fftshifted) axis its
+    # energy belongs at index n_freqs//2 + 5.
+    k = 5
+    t = torch.arange(n_t, dtype=torch.float32)
+    tx = torch.exp(2j * torch.pi * k * t / n_t).to(torch.complex64).view(1, 1, n_t)
+
+    s_pars = torch.ones(1, 1, 1, n_freqs, dtype=torch.complex64)
+    out = ModulateBlock().apply({"s_pars": s_pars, "tx_wave": tx})
+    mag = out["s_pars"][0, 0, 0].abs()
+
+    assert int(torch.argmax(mag)) == n_freqs // 2 + k, (
+        f"tone landed in bin {int(torch.argmax(mag))}, expected {n_freqs // 2 + k} on "
+        "the ascending frequency axis"
+    )

@@ -39,6 +39,36 @@ def _check_frame_contract(component, state_dict):
     )
 
 
+def _advance_domain(component, state_dict, before):
+    """Enforce what a component promised about the chain's domain, AFTER it ran.
+
+    Two jobs, both of which exist because an adversarial review found them missing:
+
+    1. A block declaring `emits_domain` must actually deliver it. Without this, a bridge
+       that forgets to set `signal_domain` produces a misleading error at the NEXT block
+       ("insert a DechirpBlock") even though the dechirp already ran and its output is
+       sitting right there.
+    2. When the domain changes, the previous domain's payload is DROPPED from state.
+       Otherwise `s_pars` outlives the crossing, and a block that declares the RX-time
+       domain but reads `state['s_pars']` by mistake computes happily on stale
+       pre-dechirp data with no error anywhere -- a silent wrong answer, which is the
+       worst failure mode a contract can have.
+    """
+    caps = frames.capabilities_of(component)
+    after = state_dict.get('signal_domain', before)
+    if caps.emits_domain is not None and after != caps.emits_domain:
+        raise frames.FrameContractError(
+            f"{frames.component_name(component)} declares it emits the "
+            f"{caps.emits_domain} domain but left the chain in {after!r}; a bridge block "
+            f"must set state['signal_domain'] to the domain it hands downstream."
+        )
+    if after != before:
+        stale_key = frames.DOMAIN_PAYLOAD_KEY.get(before)
+        if stale_key and stale_key in state_dict:
+            del state_dict[stale_key]
+    return after
+
+
 def _svd_frame(s_pars):
     """SVD of a single frame's flattened S-parameter matrix, computed once.
 
@@ -246,7 +276,9 @@ class Simulation:
         state_dict.update(self._environment_state_updates())
         for stage in self.serial_stages:
             _check_frame_contract(stage, state_dict)
+            before = state_dict.get('signal_domain', frames.DOMAIN_CFR)
             state_dict.update(stage.apply(state_dict))
+            _advance_domain(stage, state_dict, before)
         # Serial stages that touch the subspace tracker (MeasurementStage) refresh
         # 'U' via their return dict; re-read it from the tracker here too so 'U' is
         # always current. Guarded: a serial_stages override may legitimately run
@@ -304,7 +336,9 @@ class Simulation:
 
         for stage in self.serial_stages:
             _check_frame_contract(stage, state_dict)
+            before = state_dict.get('signal_domain', domain)
             state_dict.update(stage.apply(state_dict))
+            _advance_domain(stage, state_dict, before)
 
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
                          'signal_domain', 'tx_wave', 'adc'}

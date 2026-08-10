@@ -220,3 +220,23 @@ def test_weak_signal_sits_at_the_quantization_floor_not_below_it():
     tiny = (blk.lsb / 100) * torch.ones(2, 2, 64, dtype=torch.complex64)
     out = blk.apply({"adc": tiny})
     assert torch.count_nonzero(out["adc"]) == 0
+
+
+def test_default_full_scale_survives_physically_small_ray_traced_amplitudes():
+    """Ray-traced cubes carry physical amplitudes around 1e-7..1e-6, far below a
+    12-bit converter's LSB on a +-1.0 range. With a FIXED full scale such a frame
+    quantizes to exactly zero and nothing reports a problem. The automatic default
+    must instead scale to the frame and preserve it."""
+    from e2e.chain.receive import QuantizerBlock
+
+    torch.manual_seed(0)
+    tiny = ((torch.randn(4, 2, 128) + 1j * torch.randn(4, 2, 128)) * 1e-7).to(torch.complex64)
+
+    fixed = QuantizerBlock(bits=12, full_scale=1.0).apply({"adc": tiny})
+    assert torch.count_nonzero(fixed["adc"]) == 0, "precondition: fixed scale destroys it"
+
+    auto = QuantizerBlock(bits=12).apply({"adc": tiny})
+    assert torch.count_nonzero(auto["adc"]) > 0
+    assert auto["quant_snr_db"] > 50.0
+    assert auto["adc_full_scale"] < 1e-5  # scaled to the frame, not to 1.0
+    assert auto["clipped_fraction"] == 0.0  # headroom means the peak does not clip

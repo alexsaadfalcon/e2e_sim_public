@@ -332,30 +332,56 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
 # --------------------------------------------------------------------------------
 # Chain
 # --------------------------------------------------------------------------------
+# ORDER IS PHYSICS, not preference. Leakage and clutter are RETURNS -- they arrive at
+# the mixer alongside the target echoes and are therefore subject to the same
+# oscillator phase noise. Applying phase noise first (as this chain originally did) let
+# them escape it entirely, which matters most for far-range clutter: the module's own
+# range-correlation argument says a distant return sees nearly the full phase noise, and
+# it was seeing none. Adding the returns first and passing the composite through the
+# noisy LO last also gives leakage its correct behaviour for free -- at near-zero delay
+# the residual cancels, which is exactly why direct coupling stays coherent in hardware.
 _STAGES = (
-    ("phase_noise", PhaseNoiseParams, apply_phase_noise),
     ("leakage", LeakageParams, apply_leakage),
     ("clutter", ClutterParams, apply_clutter),
+    ("phase_noise", PhaseNoiseParams, apply_phase_noise),
 )
+
+
+#: Per-stage seed offsets, keyed by stage NAME rather than position. Deriving them from
+#: the stage's index would mean reordering `_STAGES` silently changed every noise
+#: realization in every corpus ever generated -- a reordering is a physics decision, and
+#: it should not also be a data change. These numbers are arbitrary but must stay fixed.
+_STAGE_SEED_OFFSET = {"phase_noise": 0, "leakage": 1, "clutter": 2}
+
+
+def stage_seed(seed: int, stage: str) -> int:
+    """The sub-seed a given impairment stage runs with, so the three do not share a
+    realization. Stable across reorderings of `_STAGES` (see `_STAGE_SEED_OFFSET`)."""
+    return int(seed) + _STAGE_SEED_OFFSET[stage]
 
 
 def apply_all(adc: torch.Tensor, cfg, chain_params: Optional[Dict[str, Any]] = None, *,
               seed: int = 0) -> torch.Tensor:
-    """Apply phase noise, then leakage, then clutter, in that order.
+    """Apply leakage, then clutter, then phase noise -- see `_STAGES` for why.
+
+    Stage order is leakage -> clutter -> phase noise, and that order is physical rather
+    than arbitrary: the first two ADD returns, and the last passes the whole composite
+    through the oscillator's noisy phase, exactly as a real mixer does. See `_STAGES`.
 
     `chain_params` maps a subset of `{"phase_noise", "leakage", "clutter"}` to either
     a params dataclass instance, a plain dict of constructor kwargs (the JSON-
     round-trip case), or `None` to explicitly skip that stage. A stage absent from
     `chain_params` (or `chain_params=None` entirely) runs with its default params.
-    Each stage gets a distinct, deterministic sub-seed (`seed + stage_index`) so the
-    three impairments don't share identical noise realizations.
+    Each stage gets a distinct, deterministic sub-seed keyed to its NAME (see
+    `stage_seed`) so the three never share a realization and a reordering of the chain
+    does not change any of them.
     """
     chain_params = dict(chain_params) if chain_params else {}
     out = adc
-    for i, (name, cls, fn) in enumerate(_STAGES):
+    for name, cls, fn in _STAGES:
         if name in chain_params and chain_params[name] is None:
             continue
         val = chain_params.get(name, cls())
         p = val if isinstance(val, cls) else cls(**val)
-        out = fn(out, cfg, p, seed=int(seed) + i)
+        out = fn(out, cfg, p, seed=stage_seed(seed, name))
     return out
