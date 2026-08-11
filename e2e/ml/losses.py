@@ -108,23 +108,53 @@ def masked_regression_loss(pred_reg: Tensor, target_reg: Tensor, mask: Tensor, *
 # Total detection loss
 # --------------------------------------------------------------------------------
 def detection_loss(pred: Tensor, target: Tensor, *, gamma: float = 2.0,
-                    reg_weight: float = 100.0, kind: str = "smooth_l1"
+                    reg_weight: float = 100.0, kind: str = "smooth_l1",
+                    cls_normalize: str = "positives"
                     ) -> Tuple[Tensor, Dict[str, float]]:
     """Total detection loss = focal(classification) + `reg_weight` * masked regression.
 
     `pred`/`target` : `[B, 3, n_range, n_azimuth]` (see module docstring for the
-    channel layout). Both loss terms are summed over the whole batch (not
-    averaged), matching upstream's `pixor_loss` + the `weight=[1, 100, 100]`
-    scaling in its training config (segmentation weight has no equivalent
-    here, there is no segmentation head).
+    channel layout).
+
+    `cls_normalize` selects how the summed focal term is scaled:
+
+    * `"positives"` (default) divides it by the number of positive cells, exactly
+      as `masked_regression_loss` already normalizes the regression term. This is
+      the RetinaNet convention and it is what makes the two terms commensurate, so
+      `reg_weight` means what it says.
+    * `"none"` reproduces the earlier raw batch sum (upstream `pixor_loss`'s
+      un-normalized form). Kept so old runs stay reproducible -- but see below.
+
+    WHY THE DEFAULT CHANGED (measured 2026-08-10, `v_gentle_fftradnet`): with
+    `"none"` on this package's label grid the classification term is a bare sum over
+    `B * n_range * n_azimuth` cells of which ~18 per frame are positive -- a 1365:1
+    negative-to-positive ratio on a 128x192 grid. It contributed 33105 of a 33181
+    total loss (99.8%), swamping the per-positive-normalized regression term (0.76)
+    by ~400x even at `reg_weight=100`. Gradient descent then minimizes it the easy
+    way: predict background everywhere. Training collapsed inside two epochs --
+    `val_AR` pinned at 0.1111, `val_range_rmse_m` was 0.0 (an EMPTY detection set)
+    for 8 of 10 epochs, and the best `val_AP` (0.0030) occurred at epoch 2, near
+    initialization, decaying to 0.0008 thereafter while `train_cls_loss` fell 63x.
+    Upstream's own grid/positive ratio differs, so inheriting its reduction was not
+    safe here.
 
     Returns `(total, {"cls": float, "reg": float})` -- the dict values are
-    detached scalars for logging, not part of the autograd graph.
+    detached scalars for logging, not part of the autograd graph. The reported
+    `"cls"` is the value actually added to `total` (i.e. post-normalization).
     """
+    if cls_normalize not in ("positives", "none"):
+        raise ValueError(f"cls_normalize must be 'positives' or 'none', got {cls_normalize!r}")
+
     cls_pred, cls_target = pred[:, 0], target[:, 0]
     reg_pred, reg_target = pred[:, 1:], target[:, 1:]
 
     cls_loss = focal_loss(cls_pred, cls_target, gamma=gamma, reduction="sum")
+    if cls_normalize == "positives":
+        # Same denominator convention as masked_regression_loss: positive CELLS over
+        # the whole batch, clamped to >= 1 so an all-negative batch stays finite (it
+        # still carries a real gradient, unlike the regression term which is exactly
+        # zero there).
+        cls_loss = cls_loss / cls_target.sum().clamp_min(1.0)
     reg_loss = masked_regression_loss(reg_pred, reg_target, mask=cls_target, kind=kind)
     total = cls_loss + reg_weight * reg_loss
 

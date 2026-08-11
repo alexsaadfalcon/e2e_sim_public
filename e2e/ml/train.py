@@ -210,7 +210,7 @@ def release_gpu_memory() -> None:
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
-          num_workers: Optional[int] = None) -> Dict:
+          cls_normalize: str = "positives", num_workers: Optional[int] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
 
     `input_format` ("rd" default | "adc") selects the range-Doppler vs. raw-ADC input
@@ -218,9 +218,11 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     it overrides the manifest's own `input_format` for both the dataset and the model
     built from it (a manifest may hold both formats' derivable inputs -- see
     `e2e.ml.dataset` -- so this is a legitimate per-run choice, not just a mirror of
-    the manifest). `reg_weight`/`gamma` are forwarded to `detection_loss` (see that
-    function and `e2e.ml.losses`'s module docstring for the upstream-inherited
-    defaults `reg_weight=100, gamma=2` this overrides).
+    the manifest). `reg_weight`/`gamma`/`cls_normalize` are forwarded to
+    `detection_loss` (see that function and `e2e.ml.losses`'s module docstring for the
+    upstream-inherited defaults `reg_weight=100, gamma=2` this overrides).
+    `cls_normalize="none"` reproduces pre-2026-08-10 runs, which collapsed to an
+    all-background predictor -- see `detection_loss`'s "WHY THE DEFAULT CHANGED".
 
     Returns the `history` dict (also written to `history.json`); see the module
     docstring for the artifact layout. `drop_last=False` throughout, so this still
@@ -274,7 +276,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             pred = model(x)["detection"]
-            loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight)
+            loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
+                                         cls_normalize=cls_normalize)
 
             optimizer.zero_grad()
             loss.backward()
@@ -380,6 +383,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="detection_loss regression-term weight (see e2e.ml.losses)")
     p.add_argument("--gamma", type=float, default=2.0,
                    help="focal-loss gamma for the classification term (0 == plain BCE)")
+    p.add_argument("--cls-normalize", choices=("positives", "none"), default="positives",
+                   help="scale the summed focal term by the positive-cell count "
+                        "(default) or not at all; 'none' reproduces pre-2026-08-10 runs, "
+                        "which collapsed to an all-background predictor (see e2e.ml.losses)")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -400,7 +407,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--model is required when training (omit it only with --eval-only)")
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
           seed=args.seed, out_dir=args.out, input_format=args.input_format,
-          reg_weight=args.reg_weight, gamma=args.gamma)
+          reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize)
     return 0
 
 
