@@ -23,6 +23,31 @@ a roughly constant phase rotation, and `frequency_response()` still reshapes the
 transfer function across the chirp bandwidth. For envelope-varying waveforms
 (OFDM / ISAC), both AM/AM and AM/PM matter far more, since the instantaneous envelope
 sweeps a wide dynamic range and drives the operating point across the whole curve.
+
+KNOWN LIMITATIONS (reviewed 2026-08-10; read before using this for comms/ISAC work)
+------------------------------------------------------------------------------------
+1. **Memoryless is a comms/ISAC-specific weakness, not a general one.** At this repo's
+   own bandwidths (750 MHz for the `radial_like` preset, 2 GHz for `ti_iwr1443`,
+   `WaveformBlock`'s 1 GHz default) matching-network group delay and bias-network
+   dynamics are first-order effects for a wideband modulated signal, so:
+     * spectral regrowth / ACPR predicted here is ALWAYS SYMMETRIC about the carrier --
+       a structural property of any memoryless polar model, since the output depends only
+       on the instantaneous envelope. Real PAs show asymmetric regrowth. Do not use this
+       model to support an ACPR-asymmetry or spectral-mask-compliance claim.
+     * EVM versus backoff is optimistic near the compression knee.
+     * **digital-predistortion studies against this model are near-tautological** -- a
+       static memoryless predistorter inverts a static memoryless PA almost exactly, so
+       any "DPD improved ACPR by X dB" result here flatters DPD relative to hardware.
+   The constant-envelope radar path is genuinely unaffected. ISAC is the exposed case: it
+   reuses high-PAPR OFDM (8-12 dB) for both functions, so it inherits the comms weakness
+   without the radar excuse. Smallest fix: a memory polynomial (order ~5, depth 2-3 taps).
+2. **No gain tilt or roll-off.** `frequency_response()` is normalized to unit mean gain
+   over a ripple period, so a monotonic tilt across the band -- plausibly the dominant
+   real frequency-domain effect over a 750 MHz-2 GHz sweep -- is absent BY CONSTRUCTION,
+   not merely approximated.
+3. **The mismatch is not coupled to an actual load.** `gamma_load` is a free parameter;
+   nothing ties it to the antenna's real frequency- and scan-angle-dependent VSWR, nor to
+   `InterconnectBlock`'s own S11. Changing the interconnect does not change this ripple.
 """
 from __future__ import annotations
 
@@ -32,6 +57,10 @@ from dataclasses import dataclass
 import torch
 
 
+#: Speed of light, m/s -- used to turn a physical mismatch length into a ripple period.
+_C_LIGHT = 299792458.0
+
+
 @dataclass
 class TxPAConfig:
     """Plain-float, JSON-serializable (via dataclasses.asdict) PA configuration."""
@@ -39,9 +68,32 @@ class TxPAConfig:
     a_sat: float = 1.0                   # output saturation level (linear amplitude units)
     am_pm_deg_at_sat: float = 5.0        # AM/PM phase shift approached deep in saturation, deg
     rapp_p: float = 2.0                  # Rapp smoothness/knee-sharpness parameter
+
+    # --- Output-mismatch frequency response (see TxPA.frequency_response) ---------
+    ripple_model: str = "mismatch"       # "mismatch" (physical) | "sinusoid" (legacy)
+    ripple_phase_rad: float = 0.0        # ripple starting phase, rad (both models)
+
+    # "mismatch" model: a line of one-way electrical length `mismatch_length_m` in a
+    # medium of `eps_eff`, terminated by reflection coefficients gamma_source/gamma_load.
+    # Ripple PERIOD = c / (2 * l * sqrt(eps_eff)); ripple DEPTH is set by |Gs*GL|.
+    # Defaults describe an 8 mm on-package PA-to-antenna transition on a substrate with
+    # eps_eff = 3.0 -> a ~10.8 GHz period, i.e. LESS THAN ONE CYCLE across a 1-2 GHz
+    # sweep, which is what an on-package 77 GHz transition actually looks like: a gentle
+    # tilt, not a multi-cycle wobble. |Gs*GL| = 0.058 matches the legacy 0.5 dB depth and
+    # corresponds to ~15-17 dB return loss per port (VSWR ~1.3-1.4:1), a reasonable match.
+    mismatch_length_m: float = 8e-3
+    eps_eff: float = 3.0
+    gamma_source: float = 0.24           # |Gs| ~ 0.24 -> ~12.4 dB return loss
+    gamma_load: float = 0.24             # |GL| ~ 0.24; product 0.058 == legacy 0.5 dB
+
+    # "sinusoid" (legacy) model only.
     ripple_db: float = 0.5               # peak frequency-ripple amplitude, dB (0-to-peak)
     ripple_period_hz: float = 100e6      # ripple period across frequency, Hz
-    ripple_phase_rad: float = 0.0        # ripple starting phase, rad
+
+    @property
+    def mismatch_period_hz(self) -> float:
+        """Ripple period of the `"mismatch"` model, Hz -- `c / (2*l*sqrt(eps_eff))`."""
+        return _C_LIGHT / (2.0 * self.mismatch_length_m * math.sqrt(self.eps_eff))
 
 
 class TxPA:
@@ -99,23 +151,68 @@ class TxPA:
         return torch.polar(g, theta + phi)
 
     def frequency_response(self, freqs_hz: torch.Tensor) -> torch.Tensor:
-        """Complex, unit-mean-gain sinusoidal ripple across frequency, in the CFR domain.
+        """Complex frequency response of the PA output mismatch, in the CFR domain.
 
+        Two models, selected by `TxPAConfig.ripple_model`:
+
+        `"mismatch"` (default) -- the physical multiple-reflection (Fabry-Perot) response
+        of a PA output looking into a mismatched load through a line of one-way electrical
+        length `l`:
+
+            H(f) = 1 / (1 - Gs*GL * exp(-j * 4*pi*f*l*sqrt(eps_eff) / c))
+
+        periodic in `f` with period `c / (2*l*sqrt(eps_eff))` and depth set by the product
+        of the two reflection coefficients `|Gs*GL|`. This is complex by construction, so
+        amplitude ripple comes with the group-delay ripple causality demands -- which is
+        the reason to prefer it here: for an FMCW sweep a group-delay error IS a range
+        bias, and the magnitude-only model below sets that bias to exactly zero by
+        assumption.
+
+        `"sinusoid"` -- the legacy magnitude-only form, retained for reproducibility:
         |H(f)| = exp(A*sin(2*pi*f/period + phase) - log(I0(A))), A = ripple_db*ln(10)/20,
-        which is the Rapp-independent normalization that gives E[|H|] == 1 exactly when
-        averaged over a full ripple period (I0 = modified Bessel function of the first
-        kind, order 0 -- the exact mean of exp(A*sin(theta)) over a period). Phase is
-        left at 0 (magnitude-only ripple); returned as complex64 for direct
-        multiplication against a complex S-parameter/CFR tensor.
+        normalized by the modified Bessel function I0 so E[|H|] == 1 over a full period,
+        and phase identically zero. This is the small-|Gs*GL| linearization of the
+        mismatch form (log|H| ~= 2*Re(Gs*GL*exp(-j*theta)) is a pure sinusoid in dB), so
+        the two agree closely while the ripple is shallow -- at the shipped 0.5 dB they
+        differ by ~0.01 dB peak-to-peak -- and diverge once it is not, because the true
+        response develops sharp resonant notches that a sinusoid cannot represent.
+
+        VALIDITY BOUND: the sinusoid model is only physical for |Gs*GL| << 1, i.e. roughly
+        `ripple_db` below ~1-2 dB. Beyond that use `"mismatch"`.
+
+        Returned as complex64 for direct multiplication against a complex S-parameter/CFR
+        tensor. Both models are normalized to unit mean gain over a ripple period, so this
+        function contributes ripple ONLY -- any average gain belongs to
+        `small_signal_gain_db`, and note that neither model produces a gain TILT across
+        the band (see the class docstring's limitations).
         """
         cfg = self.config
         if not torch.is_tensor(freqs_hz):
             freqs_hz = torch.as_tensor(freqs_hz, dtype=torch.float32)
         freqs_hz = freqs_hz.to(torch.float32)
 
-        theta = 2.0 * math.pi * freqs_hz / cfg.ripple_period_hz + cfg.ripple_phase_rad
-        A = cfg.ripple_db * math.log(10.0) / 20.0
-        log_i0 = torch.special.i0(torch.tensor(A, dtype=torch.float32)).log().item()
-        log_mag = A * torch.sin(theta) - log_i0
-        mag = torch.exp(log_mag)
-        return torch.polar(mag, torch.zeros_like(mag))
+        if cfg.ripple_model == "sinusoid":
+            theta = 2.0 * math.pi * freqs_hz / cfg.ripple_period_hz + cfg.ripple_phase_rad
+            A = cfg.ripple_db * math.log(10.0) / 20.0
+            log_i0 = torch.special.i0(torch.tensor(A, dtype=torch.float32)).log().item()
+            log_mag = A * torch.sin(theta) - log_i0
+            mag = torch.exp(log_mag)
+            return torch.polar(mag, torch.zeros_like(mag))
+
+        if cfg.ripple_model != "mismatch":
+            raise ValueError(
+                f"ripple_model must be 'mismatch' or 'sinusoid', got {cfg.ripple_model!r}")
+
+        # Round-trip phase 2*beta*l, with beta = 2*pi*f*sqrt(eps_eff)/c.
+        theta = (4.0 * math.pi * freqs_hz * cfg.mismatch_length_m
+                 * math.sqrt(cfg.eps_eff) / _C_LIGHT + cfg.ripple_phase_rad)
+        gamma_prod = cfg.gamma_source * cfg.gamma_load
+        h = 1.0 / (1.0 - gamma_prod * torch.polar(torch.ones_like(theta), -theta))
+
+        # No normalization is applied, and none is needed: expanding the geometric series
+        # gives H = sum_n (g*exp(-j*theta))^n, and every n >= 1 term integrates to zero
+        # over a full period, so the COMPLEX mean E[H] over a ripple period is exactly 1
+        # for |g| < 1. (Note this is E[H] == 1, not E[|H|] == 1 -- the legacy sinusoid
+        # normalizes the magnitude instead. The two conventions differ by O(|g|^2), i.e.
+        # ~0.3% at the shipped defaults.) Any average gain belongs to small_signal_gain_db.
+        return h.to(torch.complex64)
