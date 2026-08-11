@@ -130,13 +130,21 @@ def detection_loss(pred: Tensor, target: Tensor, *, gamma: float = 2.0,
     `B * n_range * n_azimuth` cells of which ~18 per frame are positive -- a 1365:1
     negative-to-positive ratio on a 128x192 grid. It contributed 33105 of a 33181
     total loss (99.8%), swamping the per-positive-normalized regression term (0.76)
-    by ~400x even at `reg_weight=100`. Gradient descent then minimizes it the easy
-    way: predict background everywhere. Training collapsed inside two epochs --
-    `val_AR` pinned at 0.1111, `val_range_rmse_m` was 0.0 (an EMPTY detection set)
-    for 8 of 10 epochs, and the best `val_AP` (0.0030) occurred at epoch 2, near
-    initialization, decaying to 0.0008 thereafter while `train_cls_loss` fell 63x.
-    Upstream's own grid/positive ratio differs, so inheriting its reduction was not
-    safe here.
+    by ~400x even at `reg_weight=100`, so `reg_weight` had no practical effect at all.
+    Normalizing makes the two terms scale together, which is the whole claim.
+
+    WHAT THIS IS **NOT**, stated because an earlier version of this docstring got it
+    wrong and someone will otherwise repeat the chase: this is NOT a fix for the low
+    detection AP, and it does not prevent the all-background collapse those runs showed.
+    Dividing the summed focal term by the positive count scales the positive and
+    negative contributions EQUALLY, so it changes the classifier's effective learning
+    rate and its balance against the regression term -- it cannot change a
+    positive/negative imbalance. Measured head-to-head on identical data and seed:
+    `"none"` reached best val_AP 0.00835, `"positives"` 0.00827, and BOTH pinned
+    `val_AR` at 0.1111 with an empty detection set at 9 of 10 epochs. A dead heat.
+    The actual cause of the low AP was elsewhere entirely -- the evaluation harness
+    demanded finer azimuth accuracy than the modelled array can resolve; see
+    `e2e.ml.baseline.resolution_report`.
 
     Returns `(total, {"cls": float, "reg": float})` -- the dict values are
     detached scalars for logging, not part of the autograd graph. The reported

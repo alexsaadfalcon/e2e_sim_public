@@ -106,7 +106,7 @@ modelling choice, not a measured one.
 
 CLI
 ---
-    python -m e2e.ml.rt_gen [--config ti_iwr1443] [--frames 2] [--chirps 16]
+    python -m e2e.ml.rt_gen [--config radial_like] [--frames 2] [--chirps 16]
                             [--samples 128] [--base-scene flat|free|<sionna scene>]
                             [--target sphere|box] [--no-diffuse]
 runs `doppler_error_study` and prints the native-vs-re-trace table. Use
@@ -933,11 +933,11 @@ def doppler_validity(cfg, radial_speed_mps: float, *, rel_rmse_target: float = 0
     advance right but holds each path's delay `tau_0` fixed inside the BASEBAND term, so
     intra-frame range migration is missing. The residual phase error at chirp `c` is
     ~`2*pi*f_baseband*dtau(c)` with `dtau(c) = 2*v_r*c*T_c / c_light`, giving an RMS
-    relative error that grows LINEARLY in chirp index at a rate
+    relative error that grows LINEARLY in chirp index at a (dimensionless) rate
 
-        slope = 2*pi*B*v_r / (sqrt(3)*c_light)   per chirp
+        slope = 2*pi*B*v_r*T_c / (sqrt(3)*c_light)   per chirp
 
-    and therefore a usable chirp count
+    and therefore a usable chirp count `N(eps) = eps / slope`, i.e.
 
         N(eps) = eps*sqrt(3)*c_light / (2*pi*B*v_r*T_c).
 
@@ -957,16 +957,18 @@ def doppler_validity(cfg, radial_speed_mps: float, *, rel_rmse_target: float = 0
     v = abs(float(radial_speed_mps))
     b = float(cfg.bandwidth_hz)
     t_c = float(cfg.chirp_period_s)
-    if v == 0.0:
-        n_ok = float("inf")
-        slope = 0.0
-    else:
-        slope = 2.0 * math.pi * b * v / (math.sqrt(3.0) * _C_LIGHT_MPS)
-        n_ok = float(rel_rmse_target) * math.sqrt(3.0) * _C_LIGHT_MPS / (
-            2.0 * math.pi * b * v * t_c)
+    eps = float(rel_rmse_target)
+    # Per-chirp slope is DIMENSIONLESS: the delay advances by dtau = 2*v*T_c/c each
+    # chirp, and the RMS of 2*pi*f_bb*dtau over a uniform baseband spanning +-B/2
+    # contributes the 1/sqrt(3). The T_c belongs here -- an earlier version omitted it
+    # and reported a slope in Hz, ~1/T_c (13158x) too large.
+    slope = 2.0 * math.pi * b * v * t_c / (math.sqrt(3.0) * _C_LIGHT_MPS)
+    # usable_chirps is just eps/slope; deriving it rather than repeating the algebra
+    # keeps the two from drifting apart (they had).
+    n_ok = float("inf") if slope == 0.0 else eps / slope
     return {
         "radial_speed_mps": v,
-        "rel_rmse_target": float(rel_rmse_target),
+        "rel_rmse_target": eps,
         "rel_rmse_slope_per_chirp": slope,
         "usable_chirps": n_ok,
         "n_chirps": int(cfg.n_chirps),

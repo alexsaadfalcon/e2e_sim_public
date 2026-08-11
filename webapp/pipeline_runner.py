@@ -372,6 +372,22 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # crossed into RX time; replace them with the RX-time products instead.
         downstream_blocks = []
         if _enabled(state, "radar_cube"):
+            # The radar cube folds the chirp axis, so it needs a frame carrying the
+            # preset's full chirp count. Precomputed .pkl frames are always SINGLE-chirp,
+            # so this pairing fails deep inside adc_to_rd with a bare shape mismatch
+            # ("adc has 1 chirps but cfg.n_chirps=252"), which reads as a bug rather than
+            # a configuration error. Say what is actually wrong, as the comms-head guard
+            # below does. Not caused by the preset default -- it failed identically at
+            # the old preset's 192 chirps.
+            if not _enabled(state, "rt_environment"):
+                raise PipelineError(
+                    "The Radar Cube product needs a multi-chirp frame, but the "
+                    "Environment source replays precomputed .pkl frames, which are "
+                    "single-chirp. Enable the RT Environment source (it ray-traces "
+                    f"{adc_cfg.n_chirps} chirps to match the '{_p(state, 'dechirp', 'preset')}' "
+                    "preset), or turn off Radar Cube and use the frequency-domain "
+                    "products instead."
+                )
             try:
                 from e2e.chain.receive import RadarCubeBlock
             except ImportError as e:

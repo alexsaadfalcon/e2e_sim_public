@@ -49,6 +49,28 @@ def test_doppler_validity_flags_the_shipped_frame_length():
     assert doppler_validity(PRESETS["radial_like"], 1.0)["within_target"] is False
 
 
+def test_doppler_validity_slope_is_dimensionless_and_consistent():
+    """REGRESSION (found in pre-merge review): the per-chirp slope must be
+    DIMENSIONLESS -- it omitted the chirp period and was reported in Hz, a factor
+    ~1/T_c (13158x) too large. Two independent invariants pin it:
+    usable_chirps == eps / slope, and the error at frame end == slope * n_chirps.
+    Both would have caught the missing factor; neither existed before."""
+    from e2e.ml.radar_config import PRESETS
+    from e2e.ml.rt_gen import doppler_validity
+
+    cfg = PRESETS["radial_like"]
+    d = doppler_validity(cfg, 20.0, rel_rmse_target=0.05)
+
+    assert d["usable_chirps"] == pytest.approx(d["rel_rmse_target"] /
+                                                d["rel_rmse_slope_per_chirp"], rel=1e-12)
+    assert d["rel_rmse_at_frame_end"] == pytest.approx(
+        d["rel_rmse_slope_per_chirp"] * d["n_chirps"], rel=1e-12)
+    # Sanity on magnitude: ~4 usable chirps at 20 m/s means a per-chirp slope of order
+    # 1e-2, NOT the ~181 the Hz-valued version returned.
+    assert 1e-3 < d["rel_rmse_slope_per_chirp"] < 1e-1
+    assert d["rel_rmse_at_frame_end"] > 1.0            # 252 chirps is far past the bound
+
+
 def test_doppler_validity_static_target_is_exact():
     from e2e.ml.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity

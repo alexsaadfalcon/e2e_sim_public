@@ -282,3 +282,30 @@ def test_compress_before_dechirp_is_refused_not_silently_wrong():
     assert DechirpBlock.frame_capabilities.dimension == DIMENSION_FULL
     with pytest.raises(FrameContractError, match="DecompressBlock"):
         frames.require_dimension(DIMENSION_REDUCED, DechirpBlock.__new__(DechirpBlock))
+
+
+def test_reduced_dimension_still_enforces_the_chirp_axis(torch_device):
+    """REGRESSION (found in pre-merge review): `check_capabilities` used to return early
+    on reduced-dimension data, dropping the MIMO check (justified -- dim 1 is no longer
+    TX) AND the chirp check (not justified -- CompressBlock preserves the chirp axis
+    exactly). A chirp-restricted block placed after compression was therefore handed
+    multi-chirp frames silently, which is precisely the 'plausible wrong answer' the
+    contract exists to prevent."""
+    class SingleChirpCompressed:
+        frame_capabilities = FrameCapabilities(dimension=DIMENSION_REDUCED,
+                                                chirps=frames.CHIRP_SINGLE,
+                                                accepts_mimo=True)
+
+    multi_chirp_reduced = _frame(n_rx=5, n_tx=1, n_chirp=3, n_freqs=8, device=torch_device)
+    with pytest.raises(FrameContractError, match="multiple chirps"):
+        frames.check_capabilities(multi_chirp_reduced, SingleChirpCompressed(),
+                                  dimension=DIMENSION_REDUCED)
+
+    # ...while the MIMO check IS still correctly skipped, since dim 1 no longer means TX.
+    class MimoRestrictedCompressed:
+        frame_capabilities = FrameCapabilities(dimension=DIMENSION_REDUCED,
+                                                chirps=frames.CHIRP_NATIVE,
+                                                accepts_mimo=False)
+
+    frames.check_capabilities(_frame(n_rx=5, n_tx=4, n_chirp=2, n_freqs=8, device=torch_device),
+                              MimoRestrictedCompressed(), dimension=DIMENSION_REDUCED)

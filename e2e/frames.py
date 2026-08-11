@@ -310,9 +310,13 @@ def check_capabilities(s_pars, component, layout=LAYOUT_RAW, who=None,
     require_dimension(dimension, component, who)
     if domain != DOMAIN_CFR or caps.domain == DOMAIN_ANY:
         return
-    if dimension != DIMENSION_FULL:
-        return
-    if layout == LAYOUT_RAW and not caps.accepts_mimo:
+    # The MIMO check is skipped in reduced dimension because dim 1 no longer indexes TX
+    # (compression collapses the aperture into a measurement axis). The CHIRP check is
+    # NOT skipped: compression preserves the chirp axis untouched, so a chirp-restricted
+    # block must still be protected from a multi-chirp frame. An earlier version returned
+    # early on reduced dimension and dropped both, which would have let a compressed
+    # multi-chirp frame reach a CHIRP_SINGLE block silently.
+    if layout == LAYOUT_RAW and dimension == DIMENSION_FULL and not caps.accepts_mimo:
         require_no_mimo(s_pars, who, hint="this block declares accepts_mimo=False")
     if not caps.accepts_multichirp:
         require_single_chirp(

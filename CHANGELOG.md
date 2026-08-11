@@ -22,8 +22,10 @@ semantic versioning.
   causality requires -- a range bias the magnitude-only model set to exactly zero. The
   old model is retained as `ripple_model="sinusoid"` since it is its small-mismatch
   linearization.
-- Mixed precision in `train.py` (`amp`, default on for CUDA). This is a memory decision:
-  SSMRadNet does not fit in 8 GiB without it.
+- Mixed precision in `train.py` (`amp`, default on for CUDA). Measured saving on
+  SSMRadNet is ~5% of peak memory (6.02 -> 5.74 GiB on an 8 GiB card), not the halving
+  an activation-memory argument predicts, and it does not buy a larger batch. Batch size
+  is what decides whether that model fits.
 
 ### Added
 - **`e2e/ml/baseline.py` -- a classical (no-learning) CFAR detector**, scored through

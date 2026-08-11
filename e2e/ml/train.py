@@ -6,9 +6,11 @@ Ties together `e2e.ml.dataset` (`RadarFrameDataset` / a `generate_dataset` manif
 `e2e.ml.metrics` (`evaluate_dataset`) into one reference training script. This is a
 tutorial/reference implementation, not a training framework: plain SGD-style Adam, no
 LR schedule, no checkpoint resumption, no distributed support -- read it top to bottom.
-Mixed precision IS supported (`amp`, default "auto" = on for CUDA), because it is the
-difference between SSMRadNet fitting and OOM-ing on an 8 GiB card rather than a
-performance nicety.
+Mixed precision is supported (`amp`, default "auto" = on for CUDA). MEASURED, because
+the first version of this note overstated it: on an 8 GiB card SSMRadNet peaks at
+6.02 GiB with AMP off and 5.74 GiB with it on -- a 4.6% saving, NOT a halving, and not
+enough to buy a larger batch (batch 4 still OOMs either way). What actually makes
+SSMRadNet fit is the BATCH SIZE (2, not 8). Treat AMP as a modest speed/memory bonus.
 
 Artifact layout
 ----------------
@@ -173,23 +175,30 @@ def _make_dataset(manifest_path, split: str, input_format: str) -> RadarFrameDat
 # --------------------------------------------------------------------------------
 # Evaluation helper (shared by train()'s per-epoch val pass and evaluate())
 # --------------------------------------------------------------------------------
-def _predict_split(model: nn.Module, ds: RadarFrameDataset, *, device, batch_size: int = 8
-                    ) -> List[torch.Tensor]:
-    """Batched `no_grad` forward pass over every frame in `ds`; returns CPU pred maps."""
+def _predict_split(model: nn.Module, ds: RadarFrameDataset, *, device, batch_size: int = 8,
+                    amp: bool = False) -> List[torch.Tensor]:
+    """Batched `no_grad` forward pass over every frame in `ds`; returns CPU pred maps.
+
+    `amp` mirrors the training pass. Validation runs every epoch at the same batch size,
+    so evaluating in fp32 while training autocasts would leave the eval pass as the
+    memory high-water mark on a card that needed AMP in the first place. Predictions are
+    cast back to float32 before leaving, so downstream metrics see one dtype regardless.
+    """
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=False)
     model.eval()
     pred_maps: List[torch.Tensor] = []
     with torch.no_grad():
         for x, _y in loader:
-            pred = model(x.to(device))["detection"].cpu()
-            pred_maps.extend(pred.unbind(0))
+            with _autocast(amp):
+                pred = model(x.to(device))["detection"]
+            pred_maps.extend(pred.float().cpu().unbind(0))
     return pred_maps
 
 
 def _evaluate_split(model: nn.Module, ds: RadarFrameDataset, grid, *, device,
-                     batch_size: int = 8) -> Dict:
+                     batch_size: int = 8, amp: bool = False) -> Dict:
     """`metrics.evaluate_dataset` over every frame of `ds` (predictions from `model`)."""
-    pred_maps = _predict_split(model, ds, device=device, batch_size=batch_size)
+    pred_maps = _predict_split(model, ds, device=device, batch_size=batch_size, amp=amp)
     target_lists = [ds.targets(i) for i in range(len(ds))]
     return evaluate_dataset(pred_maps, target_lists, grid)
 
@@ -280,9 +289,11 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     out_dir = Path(out_dir) if out_dir is not None else manifest_path.parent / "runs" / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Mixed precision. "auto" enables it on CUDA only -- it is the difference between
-    # SSMRadNet fitting and OOM-ing on an 8 GiB card, since activations dominate its
-    # footprint and halving them is worth far more than any batch-size juggling.
+    # Mixed precision. "auto" enables it on CUDA only. Measured on this box's 8 GiB
+    # cards: SSMRadNet peaks at 6.02 GiB with AMP off, 5.74 GiB with it on -- 4.6%, not
+    # the halving the activation-memory argument would predict (its footprint is not
+    # activation-dominated), and batch 4 OOMs with or without it. Batch size is the
+    # lever that decides whether it fits; this is a bonus on top.
     use_amp = (device.type == "cuda") if amp == "auto" else bool(amp)
     if use_amp and device.type != "cuda":
         raise ValueError("amp=True requires a CUDA device; got " + str(device))
@@ -322,7 +333,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         train_cls_loss = total_cls / max(n_batches, 1)
         train_reg_loss = total_reg / max(n_batches, 1)
 
-        val_metrics = _evaluate_split(model, val_ds, grid, device=device, batch_size=batch_size)
+        val_metrics = _evaluate_split(model, val_ds, grid, device=device,
+                                       batch_size=batch_size, amp=use_amp)
 
         history["epoch"].append(epoch)
         history["train_loss"].append(train_loss)
@@ -419,9 +431,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(default) or not at all; 'none' reproduces pre-2026-08-10 runs, "
                         "which collapsed to an all-background predictor (see e2e.ml.losses)")
     p.add_argument("--amp", choices=("auto", "on", "off"), default="auto",
-                   help="mixed precision: 'auto' (default) enables it on CUDA. This is a "
-                        "memory decision, not a speed one -- SSMRadNet does not fit in "
-                        "8 GiB without it")
+                   help="mixed precision: 'auto' (default) enables it on CUDA. Measured "
+                        "saving on SSMRadNet is ~5%% of peak memory (6.02 -> 5.74 GiB), "
+                        "not a halving; batch size is what decides whether it fits")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",

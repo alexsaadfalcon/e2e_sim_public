@@ -357,14 +357,24 @@ class Simulation:
             frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'): payload,
             'PRX': None,
             'signal_domain': domain,
+            # Seeded explicitly, like signal_domain above. A replayed payload is stored
+            # post-digitization and therefore full-dimension; leaving it to the .get()
+            # default elsewhere would mean the replay path silently disagreed with the
+            # main path about what the contract's starting state even is.
+            'signal_dimension': frames.DIMENSION_FULL,
         }
         state_dict.update(self._environment_state_updates())
 
         for stage in self.serial_stages:
             _check_frame_contract(stage, state_dict)
             before = state_dict.get('signal_domain', domain)
+            before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
             state_dict.update(stage.apply(state_dict))
             _advance_domain(stage, state_dict, before)
+            # The main loop enforces this; the replay loop must too, or a stage that
+            # declares emits_dimension gets its promise checked on one path and not the
+            # other -- the asymmetry is the bug, not whether it is reachable today.
+            _advance_dimension(stage, state_dict, before_dim)
 
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
                          'signal_domain', 'signal_dimension', 'sensing_matrix',

@@ -172,10 +172,12 @@ class TxPA:
         |H(f)| = exp(A*sin(2*pi*f/period + phase) - log(I0(A))), A = ripple_db*ln(10)/20,
         normalized by the modified Bessel function I0 so E[|H|] == 1 over a full period,
         and phase identically zero. This is the small-|Gs*GL| linearization of the
-        mismatch form (log|H| ~= 2*Re(Gs*GL*exp(-j*theta)) is a pure sinusoid in dB), so
-        the two agree closely while the ripple is shallow -- at the shipped 0.5 dB they
-        differ by ~0.01 dB peak-to-peak -- and diverge once it is not, because the true
-        response develops sharp resonant notches that a sinusoid cannot represent.
+        mismatch form: expanding `-log(1 - g*exp(-j*theta))` as a geometric series gives
+        a leading term `g*cos(theta)` -- a pure sinusoid in dB, with coefficient 1, not
+        2. So the two agree closely while the ripple is shallow (at the shipped defaults
+        their peak-to-peak depths differ by 0.0017 dB: 0.515 dB for the mismatch model
+        against the legacy 0.5 dB nominal) and diverge once it is not, because the true
+        response develops sharp resonant notches a sinusoid cannot represent.
 
         VALIDITY BOUND: the sinusoid model is only physical for |Gs*GL| << 1, i.e. roughly
         `ripple_db` below ~1-2 dB. Beyond that use `"mismatch"`.
