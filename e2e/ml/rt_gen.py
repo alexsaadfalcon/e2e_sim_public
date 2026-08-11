@@ -1106,6 +1106,17 @@ def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: fl
     Shapes: `a`/`tau`/`doppler` are `[..., n_paths]` (Sionna resolves all three per
     antenna pair); `freqs` is `[n_freqs]` of baseband offsets. Returns
     `[..., n_chirps, n_freqs]` with the path axis summed away.
+
+    VALIDATED END-TO-END 2026-08-11 against a per-chirp re-trace (planar box target,
+    free space, max_depth=1, radial_like config, 48 chirps, 5 m/s radial): native
+    whole-cube rel-RMSE 8.52e-2 -> 2.30e-3 with `range_migration=True` (37x), and the
+    residual growth rate matches `doppler_validity`'s analytic coefficient to 0.3% at
+    the noise-floor-free end of the frame. One nuance from that measurement: on a DDMA
+    config the range-Doppler argmax can land on a different CODE REPLICA than the
+    re-trace's (replicas sit n_chirps/n_tx Doppler bins apart and are near-equal in
+    power at 2.3e-3 cube agreement) -- the range bin is identical, so compare cubes,
+    not argmaxes. `range_migration` stays False until `cfr_from_paths`'s call sites
+    adopt it deliberately; enabling it changes every generated corpus.
     """
     a = np.asarray(a)
     tau = np.asarray(tau)
