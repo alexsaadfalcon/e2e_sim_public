@@ -1076,6 +1076,54 @@ def _cfr_freq_chunk(paths, cfg, *, n_chirps: int, requested: int) -> int:
     return int(allowed)
 
 
+def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: float,
+                       n_chirps: int, range_migration: bool = False) -> np.ndarray:
+    """Closed-form CFR from per-path `(a, tau, doppler)`. Pure numpy, no Sionna.
+
+    Reproduces what `Paths.cfr` computes:
+
+        h(f, t) = sum_i a_i * exp(-j2pi (f_c + f) tau_i) * exp(j2pi f_D,i t)
+
+    VERIFIED against Sionna's own `cfr()` at 2.3e-4 relative error (float32 rounding);
+    the variant WITHOUT the carrier in the delay term is wrong by 1.44, so `paths.a`
+    definitively does not carry it. That check is what licenses summing over paths here
+    instead of calling `cfr()` -- which we must do, because the correction below is
+    per-path and `cfr()` sums internally.
+
+    `range_migration=True` adds the term the one-solve model is missing. Each path's
+    delay actually drifts, `tau_i(t) = tau_i - (f_D,i / f_c) t`, and the native model
+    freezes it, so intra-frame range migration is absent (see `doppler_validity`).
+
+    THE TRAP, and why this is not a one-line substitution: putting `tau_i(t)` into the
+    FULL `(f_c + f)` term expands to
+    `exp(-j2pi f_c tau_i) * exp(+j2pi f_D,i t) * (baseband)` -- reproducing the explicit
+    Doppler factor a SECOND time. The carrier's share of the drift IS the Doppler term.
+    So the drift is applied to the BASEBAND term only, and the carrier term keeps the
+    frozen delay. A static target (`doppler == 0`) is therefore unchanged, exactly.
+
+    Shapes: `a`/`tau`/`doppler` are `[..., n_paths]` (Sionna resolves all three per
+    antenna pair); `freqs` is `[n_freqs]` of baseband offsets. Returns
+    `[..., n_chirps, n_freqs]` with the path axis summed away.
+    """
+    a = np.asarray(a)
+    tau = np.asarray(tau)
+    doppler = np.asarray(doppler)
+    freqs = np.asarray(freqs, dtype=np.float64)
+
+    a_b = a[..., :, None, None]
+    tau_b = tau[..., :, None, None].astype(np.float64)
+    dop_b = doppler[..., :, None, None].astype(np.float64)
+    f_b = freqs.reshape((1,) * (a.ndim - 1) + (1, 1, freqs.size))
+    t_b = (np.arange(int(n_chirps), dtype=np.float64) * float(chirp_period_s)).reshape(
+        (1,) * (a.ndim - 1) + (1, int(n_chirps), 1))
+
+    tau_baseband = tau_b - (dop_b / float(f_c)) * t_b if range_migration else tau_b
+    phase = (np.exp(-2j * np.pi * float(f_c) * tau_b)          # carrier: frozen delay --
+             * np.exp(2j * np.pi * dop_b * t_b)                # its drift IS this term
+             * np.exp(-2j * np.pi * f_b * tau_baseband))       # baseband: drifting delay
+    return (a_b * phase).sum(axis=-3)
+
+
 def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
     """`Paths` -> RAW CFR cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`.
 
