@@ -5,8 +5,10 @@ Ties together `e2e.ml.dataset` (`RadarFrameDataset` / a `generate_dataset` manif
 `e2e.ml.models` (`FFTRadNet`, `SSMRadNet`), `e2e.ml.losses` (`detection_loss`), and
 `e2e.ml.metrics` (`evaluate_dataset`) into one reference training script. This is a
 tutorial/reference implementation, not a training framework: plain SGD-style Adam, no
-LR schedule, no checkpoint resumption, no distributed/mixed-precision support -- read
-it top to bottom.
+LR schedule, no checkpoint resumption, no distributed support -- read it top to bottom.
+Mixed precision IS supported (`amp`, default "auto" = on for CUDA), because it is the
+difference between SSMRadNet fitting and OOM-ing on an 8 GiB card rather than a
+performance nicety.
 
 Artifact layout
 ----------------
@@ -27,12 +29,14 @@ CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]
         [--batch-size 8] [--lr 1e-4] [--seed 0] [--reg-weight 100.0] [--gamma 2.0]
-        [--input-format rd|adc] [--out DIR] [--eval-only CKPT] [--split test]
+        [--input-format rd|adc] [--amp auto|on|off] [--out DIR] [--eval-only CKPT]
+        [--split test]
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -48,6 +52,17 @@ from e2e.ml.metrics import evaluate_dataset
 from e2e.ml.radar_config import RadarConfig
 
 _MODEL_NAMES = ("fftradnet", "ssmradnet")
+
+
+def _autocast(enabled: bool):
+    """`torch.cuda.amp.autocast` when enabled, else a no-op context.
+
+    Wrapped rather than used directly so the training loop reads the same whether or not
+    mixed precision is on, and so the CPU path never touches a CUDA-only API.
+    """
+    if enabled:
+        return torch.cuda.amp.autocast()
+    return contextlib.nullcontext()
 
 
 def _default_device() -> torch.device:
@@ -210,7 +225,8 @@ def release_gpu_memory() -> None:
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
-          cls_normalize: str = "positives", num_workers: Optional[int] = None) -> Dict:
+          cls_normalize: str = "positives", amp="auto",
+          num_workers: Optional[int] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
 
     `input_format` ("rd" default | "adc") selects the range-Doppler vs. raw-ADC input
@@ -264,6 +280,14 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     out_dir = Path(out_dir) if out_dir is not None else manifest_path.parent / "runs" / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Mixed precision. "auto" enables it on CUDA only -- it is the difference between
+    # SSMRadNet fitting and OOM-ing on an 8 GiB card, since activations dominate its
+    # footprint and halving them is worth far more than any batch-size juggling.
+    use_amp = (device.type == "cuda") if amp == "auto" else bool(amp)
+    if use_amp and device.type != "cuda":
+        raise ValueError("amp=True requires a CUDA device; got " + str(device))
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+
     history: Dict[str, list] = {"epoch": [], "train_loss": [], "train_cls_loss": [],
                                  "train_reg_loss": [], "val_AP": [], "val_AR": [],
                                  "val_range_rmse_m": []}
@@ -275,13 +299,20 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         total_loss, total_cls, total_reg, n_batches = 0.0, 0.0, 0.0, 0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
-            pred = model(x)["detection"]
-            loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
-                                         cls_normalize=cls_normalize)
-
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            with _autocast(use_amp):
+                pred = model(x)["detection"]
+                loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
+                                             cls_normalize=cls_normalize)
+            if scaler is not None:
+                # Half-precision gradients underflow to zero without loss scaling; the
+                # scaler also skips the step on any inf/NaN it detects.
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             total_loss += float(loss.detach().item())
             total_cls += parts["cls"]
@@ -387,6 +418,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="scale the summed focal term by the positive-cell count "
                         "(default) or not at all; 'none' reproduces pre-2026-08-10 runs, "
                         "which collapsed to an all-background predictor (see e2e.ml.losses)")
+    p.add_argument("--amp", choices=("auto", "on", "off"), default="auto",
+                   help="mixed precision: 'auto' (default) enables it on CUDA. This is a "
+                        "memory decision, not a speed one -- SSMRadNet does not fit in "
+                        "8 GiB without it")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -407,7 +442,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--model is required when training (omit it only with --eval-only)")
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
           seed=args.seed, out_dir=args.out, input_format=args.input_format,
-          reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize)
+          reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize,
+          amp={"auto": "auto", "on": True, "off": False}[args.amp])
     return 0
 
 

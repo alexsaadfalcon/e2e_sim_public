@@ -132,6 +132,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import warnings
 import os
 import struct
 import sys
@@ -920,6 +921,84 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
 # --------------------------------------------------------------------------------
 # Solve + CFR -> beat cube
 # --------------------------------------------------------------------------------
+#: Speed of light, m/s -- fixes the range/delay/Doppler conversions below.
+_C_LIGHT_MPS = 299792458.0
+
+
+def doppler_validity(cfg, radial_speed_mps: float, *, rel_rmse_target: float = 0.05) -> dict:
+    """How many chirps the ONE-SOLVE Doppler model is good for at a given target speed.
+
+    The generator ray-traces once per frame and evolves slow time with Sionna's
+    first-order per-path Doppler phase (see `rt_cfr_frame`). That gets the CARRIER phase
+    advance right but holds each path's delay `tau_0` fixed inside the BASEBAND term, so
+    intra-frame range migration is missing. The residual phase error at chirp `c` is
+    ~`2*pi*f_baseband*dtau(c)` with `dtau(c) = 2*v_r*c*T_c / c_light`, giving an RMS
+    relative error that grows LINEARLY in chirp index at a rate
+
+        slope = 2*pi*B*v_r / (sqrt(3)*c_light)   per chirp
+
+    and therefore a usable chirp count
+
+        N(eps) = eps*sqrt(3)*c_light / (2*pi*B*v_r*T_c).
+
+    MEASURED 2026-08-11 on a stable-path-set scene (single planar target, free space,
+    max_depth=1, specular only, so the re-trace path set provably cannot change): the
+    per-chirp error is smooth and monotonic with a fitted power-law exponent of
+    0.93 +/- 0.07 (R^2 = 0.998, i.e. linear), and the measured slope agreed with the
+    formula above to 2.3%. The erratic, non-monotonic curves seen on sphere targets are
+    a RE-TRACE artifact -- a triangulated sphere's specular return flickers as facets
+    turn under sub-millimetre motion, and Sionna marks the path invalid -- not evidence
+    about this model. Use a planar target when measuring Doppler fidelity.
+
+    Returns the slope, the usable chirp count, the config's own `n_chirps`, and whether
+    the frame stays inside `rel_rmse_target`. Cheap and Sionna-free: call it before
+    generating a corpus rather than discovering the problem in the data.
+    """
+    v = abs(float(radial_speed_mps))
+    b = float(cfg.bandwidth_hz)
+    t_c = float(cfg.chirp_period_s)
+    if v == 0.0:
+        n_ok = float("inf")
+        slope = 0.0
+    else:
+        slope = 2.0 * math.pi * b * v / (math.sqrt(3.0) * _C_LIGHT_MPS)
+        n_ok = float(rel_rmse_target) * math.sqrt(3.0) * _C_LIGHT_MPS / (
+            2.0 * math.pi * b * v * t_c)
+    return {
+        "radial_speed_mps": v,
+        "rel_rmse_target": float(rel_rmse_target),
+        "rel_rmse_slope_per_chirp": slope,
+        "usable_chirps": n_ok,
+        "n_chirps": int(cfg.n_chirps),
+        "within_target": n_ok >= float(cfg.n_chirps),
+        "rel_rmse_at_frame_end": slope * float(cfg.n_chirps),
+    }
+
+
+def warn_if_doppler_invalid(cfg, radial_speed_mps: float, *, rel_rmse_target: float = 0.05):
+    """Emit a UserWarning when `doppler_validity` says the frame outruns the model.
+
+    Deliberately a warning and not an error: the approximation is still the right
+    default (it is ~40x cheaper than re-tracing per chirp), and plenty of useful
+    scenarios sit inside it. What is not acceptable is generating a corpus that silently
+    violates it -- at `radial_like`'s 749.5 MHz bandwidth a 20 m/s closing target
+    outruns 5% RMS in under 4 chirps of a 252-chirp frame.
+    """
+    v = doppler_validity(cfg, radial_speed_mps, rel_rmse_target=rel_rmse_target)
+    if not v["within_target"]:
+        warnings.warn(
+            f"one-solve Doppler model: at {v['radial_speed_mps']:.1f} m/s radial speed "
+            f"this config is good for ~{v['usable_chirps']:.0f} chirps at "
+            f"{v['rel_rmse_target']:.0%} RMS, but the frame has {v['n_chirps']}. "
+            f"Intra-frame range migration is not modelled; expect range-Doppler peak "
+            f"error. Shorten the frame, slow the targets, or re-trace per chirp "
+            f"(see doppler_error_study).",
+            UserWarning,
+            stacklevel=2,
+        )
+    return v
+
+
 def beat_frequencies(cfg) -> np.ndarray:
     """Baseband CFR frequencies for one chirp: `f0 + S n/fs - (f0 + B/2)`, n < n_samples.
 
