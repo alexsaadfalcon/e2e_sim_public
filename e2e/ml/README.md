@@ -289,8 +289,6 @@ inline, and are used under research-community attribution norms. Status:
 
 * **SSMRadNet — approved.** The authors gave written approval for this adaptation's
   redistribution (2026-08-07), on top of having requested the integration.
-* **RADIal — inquiry sent (2026-08-07), proceeding with attribution.** The upstream
-  project's code and paper evidence open-research intent; this non-commercial,
-  attributed adaptation proceeds on that basis and **will be removed or relicensed
-  promptly if the authors object**. (If you fork this repo for commercial use, obtain
-  your own clarity from the RADIal authors first.)
+* **RADIal — approved.** The publishing author and repository publisher confirmed in
+  writing (2026-08-10) that the missing `LICENSE` was an oversight, and granted
+  permission to reuse and share the code. Used with attribution on that basis.
