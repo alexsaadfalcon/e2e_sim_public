@@ -281,6 +281,11 @@ def main(backoff_db_list=None, aggressive_backoff_db=None, fft_size=64, cp_len=1
     papr_lin = torch.max(torch.abs(data_up) ** 2) / torch.mean(torch.abs(data_up) ** 2)
     papr_db = 10 * torch.log10(papr_lin).item()
 
+    # ATTRIBUTION (a reviewer asked whether the EVM rise is lower gain -> worse
+    # SNR, or nonlinearity): apply_channel references noise power to the RECEIVED
+    # signal power (e2e/comms/channel.py), so PA gain compression cannot change
+    # SNR. The noise+estimation floor is constant by construction; the entire EVM
+    # rise with drive is nonlinear distortion, sqrt(EVM^2 - floor^2).
     # Fixed noise seed across EVERY backoff and BOTH arms: the only thing that
     # changes between arms/backoffs is the (deterministic) PA drive level, so any
     # EVM difference is attributable to the PA, not to a different noise draw.
