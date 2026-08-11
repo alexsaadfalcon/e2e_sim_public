@@ -20,16 +20,37 @@ must be preceded by `DecompressBlock`. Before this contract existed the pipeline
 reconstructed unconditionally and immediately, so reduced-dimension processing could
 not be expressed at all and the reconstruction cost was paid even when nothing needed it.
 
-ANALOG, NOT DIGITAL
---------------------
+ANALOG, NOT DIGITAL -- AND WHAT THAT DOES NOT YET BUY
+------------------------------------------------------
 The compression modelled here happens BEFORE digitization. That is why the sensing
 matrix itself is quantized (`weight_bits`): its entries are physical analog combining
 weights -- attenuator/phase-shifter settings -- realizable only to finite precision, and
-that imprecision is part of the measurement, not a rounding of the data. The signal
-being combined is still analog and unquantized at this point; `QuantizerBlock` digitizes
-what comes out. (If you instead want digital dimensionality reduction after the ADC,
-place this block after the quantizer and set `weight_bits=None` -- but then it is a data
-compression scheme, not a converter-count saving, and it cannot reduce ADC count.)
+that imprecision is part of the measurement, not a rounding of the data.
+
+**LIMITATION, stated plainly because the obvious reading of the paragraph above is
+wrong today.** You cannot currently place this block upstream of the dechirp and have
+`QuantizerBlock` digitize `M` compressed measurements, which is the architecture the
+"analog compression saves converters" story implies. Two things in the receive chain
+index PHYSICAL ANTENNAS and are meaningless on linear combinations of them:
+
+* `chain.dechirp.beat_from_cfr` reverses the RX/TX antenna axes (dims 0/1) to fix array
+  handedness -- reversing an arbitrary measurement basis is not a handedness fix;
+* `chain.dechirp.mimo_combine` applies a per-TX code down dim 1, which after compression
+  is not a TX axis at all.
+
+So `DechirpBlock` declares `DIMENSION_FULL`, and `CompressBlock -> DechirpBlock` raises
+a `FrameContractError` by design rather than silently producing a plausible wrong cube.
+That is the contract doing its job on its own author. What works today is compression
+feeding CFR-domain consumers that are basis-agnostic -- above all the subspace tracker,
+which is the case the AFE exists for.
+
+Making the converter-count saving real means teaching the dechirp/MIMO stage to carry
+the aperture's basis alongside the data (or compressing after dechirp, per RX channel,
+which saves data rate but NOT converters). That is deliberately not attempted here.
+
+(For digital dimensionality reduction after the ADC instead, place this block after the
+quantizer with `weight_bits=None` -- but then it is a data-rate saving, not a converter
+saving, and the same antenna-indexing caveat applies to anything downstream that beamforms.)
 
 RECONSTRUCTION IS LOSSY AND SAYS SO
 ------------------------------------

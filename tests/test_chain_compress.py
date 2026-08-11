@@ -263,3 +263,22 @@ def test_simulation_allows_a_reduced_dimension_stage_after_compression(make_env_
     sim.run(n_steps=1)
 
     assert seen["shape"][0] == 5          # saw the measurements, not the antennas
+
+
+def test_compress_before_dechirp_is_refused_not_silently_wrong():
+    """PINS A KNOWN LIMITATION, so it is documented behaviour rather than a surprise.
+
+    The "analog compression saves ADCs" architecture wants CompressBlock upstream of the
+    dechirp. It does not work today and must not appear to: `beat_from_cfr` reverses the
+    RX/TX antenna axes and `mimo_combine` applies a per-TX code down dim 1, and neither
+    means anything once dim 0/1 index linear combinations of the aperture rather than
+    antennas. DechirpBlock therefore declares DIMENSION_FULL and this composition raises.
+
+    If someone later teaches the dechirp stage to carry the aperture basis, this test is
+    the one to change -- deliberately, with the physics argued -- not to delete.
+    """
+    from e2e.chain.dechirp import DechirpBlock
+
+    assert DechirpBlock.frame_capabilities.dimension == DIMENSION_FULL
+    with pytest.raises(FrameContractError, match="DecompressBlock"):
+        frames.require_dimension(DIMENSION_REDUCED, DechirpBlock.__new__(DechirpBlock))
