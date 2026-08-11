@@ -29,6 +29,15 @@ semantic versioning.
   is what decides whether that model fits.
 
 ### Added
+- **`e2e/main/main_tx_nonideality.py` -- ideal vs non-ideal transmitter, side by side.**
+  The TX PA was wired into the radar corpus generator and the webapp but into none of the
+  comms/ISAC examples, so the domain where a high-PAPR waveform stresses a PA hardest
+  never exercised it. Runs one OFDM frame through two otherwise-identical transmit paths:
+  EVM 3.56% (ideal) vs 22.02% (non-ideal) at 0 dB backoff, converging to 3.71% at 12 dB;
+  ACPR -148 dB vs -20.4 dB; sensing PSL 19.1 -> 18.3 dB; measured PAPR 9.27 dB. The
+  printed summary and the PSD figure both state that the ~0 ACPR asymmetry is structural,
+  because the PA model is memoryless, so the plot is not mistaken for a hardware
+  prediction.
 - **`e2e/ml/baseline.py` -- a classical (no-learning) CFAR detector**, scored through
   the identical metric as the networks, because a detection AP means nothing on its own.
   On the pre-switch `ti_iwr1443` corpus it scored AP 0.0241 where a trained FFTRadNet

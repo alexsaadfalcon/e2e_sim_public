@@ -186,10 +186,11 @@ BLOCKS: List[BlockSpec] = [
     # waveform crosses into the frequency domain (ModulateBlock), and the
     # frequency-domain channel crosses into RX time (DechirpBlock). All ten blocks
     # default OFF so the existing radar/subspace/comms pipeline above is unaffected
-    # until a user opts in. See webapp/pipeline_runner.py for which of these are
-    # actually wired into a live run vs. registered for visibility only (the TX-time
-    # trio below hits a domain-contract gap in e2e/chain/waveform.py -- see that
-    # module's handoff note in the runner).
+    # until a user opts in. See webapp/pipeline_runner.py for how each is wired. The
+    # TX-time trio (waveform/tx_pa/modulate) IS wired and runs; an earlier version of
+    # this comment claimed it hit a "domain-contract gap", which was wrong -- the note it
+    # referred to is a CPU-device-placement workaround for RandomWidebandSignal, not a
+    # contract blocker.
     # ----------------------------------------------------------------------------
     BlockSpec(
         id="rt_environment",

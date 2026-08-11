@@ -19,6 +19,14 @@ e2e/environment/sionna_sims/
 e2e/environment/sionna_frames/
 e2e/ml/datasets/
 *.pkl
+# Frame dumps: SinkBlock writes .npz, and its webapp default lands INSIDE the tracked
+# package dir. Both were reachable by a plain `git add -A` (report/ alone was 156 MB).
+*.npz
+webapp/_sink_output/
+
+# Training/report artifacts: figures, metrics JSON, corpus statistics. CHANGELOG already
+# stated these were untracked -- this is what actually makes that true.
+report/
 
 # Presentation assets (large, not part of the code deliverable)
 slides/

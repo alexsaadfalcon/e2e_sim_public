@@ -43,6 +43,7 @@ python -m e2e.main.main_comms_link            # OFDM link, BER vs SNR + constell
 python -m e2e.main.main_channel_estimation    # pilot-based estimation, MSE vs SNR
 python -m e2e.main.main_isac                  # joint radar+comm in one multi-node scene
 python -m e2e.main.main_comms_head            # SAME pipeline, swappable radar/comms heads
+python -m e2e.main.main_tx_nonideality        # ideal vs non-ideal TX: EVM, ACPR, sensing cost
 ```
 
 **3. Launch the web UI** (block diagram + scenario editor) — see
@@ -239,6 +240,7 @@ python -m e2e.main.main_comms_link            # OFDM link, BER vs SNR + constell
 python -m e2e.main.main_channel_estimation    # pilot-based estimation, MSE vs SNR
 python -m e2e.main.main_isac                  # joint radar+comm in one multi-node scene
 python -m e2e.main.main_isac_multilink        # consume a multi-link .pkl: radar + comm legs per link
+python -m e2e.main.main_tx_nonideality        # ideal vs non-ideal TX: EVM, ACPR, sensing cost
 ```
 
 `main_isac_multilink` is the end-to-end demo of the **multi-link export**: it generates
