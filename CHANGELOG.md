@@ -34,7 +34,7 @@ semantic versioning.
   comms/ISAC examples, so the domain where a high-PAPR waveform stresses a PA hardest
   never exercised it. Runs one OFDM frame through two otherwise-identical transmit paths:
   EVM 3.56% (ideal) vs 22.02% (non-ideal) at 0 dB backoff, converging to 3.71% at 12 dB;
-  ACPR -148 dB vs -20.4 dB; sensing PSL 19.1 -> 18.3 dB; measured PAPR 9.27 dB. The
+  ACPR -20.4 dB non-ideal, vs an ideal path at the numerical floor (<= -140 dB; the exact floor varies a few dB with device/BLAS, so no precise figure is quoted); sensing PSL 19.1 -> 18.3 dB; measured PAPR 9.27 dB. The
   printed summary and the PSD figure both state that the ~0 ACPR asymmetry is structural,
   because the PA model is memoryless, so the plot is not mistaken for a hardware
   prediction.
