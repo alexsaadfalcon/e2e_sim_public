@@ -190,3 +190,76 @@ def test_compress_then_decompress_declares_a_round_trip(torch_device):
     assert DecompressBlock().frame_capabilities.is_dimension_bridge
     assert CompressBlock(n_measurements=2).frame_capabilities.emits_dimension == DIMENSION_REDUCED
     assert DecompressBlock().frame_capabilities.emits_dimension == DIMENSION_FULL
+
+
+# --------------------------------------------------------------------------------
+# End-to-end through a real Simulation -- the contract must fire in the pipeline,
+# not merely in isolation.
+# --------------------------------------------------------------------------------
+def test_simulation_enforces_dimension_on_a_full_dimension_stage(make_env_block):
+    """A stage that needs the full aperture, placed after compression, must be stopped
+    by Simulation with a named error -- the whole point of the contract."""
+    from e2e.simulation import Simulation
+
+    class NeedsFullAperture:
+        frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                                                dimension=DIMENSION_FULL)
+
+        def apply(self, state):                      # pragma: no cover -- must not run
+            raise AssertionError("ran on compressed data")
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    sim = Simulation(env, [], 2)
+    sim.serial_stages = [CompressBlock(n_measurements=4), NeedsFullAperture()]
+
+    with pytest.raises(FrameContractError, match="DecompressBlock"):
+        sim.run(n_steps=1)
+
+
+def test_simulation_round_trips_compress_then_decompress(make_env_block):
+    """Compress -> decompress leaves the chain back in full dimension with the original
+    frame shape, so downstream full-dimension blocks run normally."""
+    from e2e.simulation import Simulation
+
+    seen = {}
+
+    class Recorder:
+        frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                                                dimension=DIMENSION_FULL)
+
+        def apply(self, state):
+            seen["shape"] = tuple(state["s_pars"].shape)
+            seen["dimension"] = state.get("signal_dimension")
+            return {}
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    original = tuple(env.get_S_pars().shape)
+    sim = Simulation(env, [], 2)
+    sim.serial_stages = [CompressBlock(n_measurements=4), DecompressBlock(), Recorder()]
+    sim.run(n_steps=1)
+
+    assert seen["dimension"] == DIMENSION_FULL
+    assert seen["shape"] == original
+
+
+def test_simulation_allows_a_reduced_dimension_stage_after_compression(make_env_block):
+    """The capability this exists to enable: a block that declares DIMENSION_REDUCED
+    runs on the compressed measurements, with no decompression inserted and no error."""
+    from e2e.simulation import Simulation
+
+    seen = {}
+
+    class WorksCompressed:
+        frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                                                dimension=DIMENSION_REDUCED)
+
+        def apply(self, state):
+            seen["shape"] = tuple(state["s_pars"].shape)
+            return {}
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    sim = Simulation(env, [], 2)
+    sim.serial_stages = [CompressBlock(n_measurements=5), WorksCompressed()]
+    sim.run(n_steps=1)
+
+    assert seen["shape"][0] == 5          # saw the measurements, not the antennas
