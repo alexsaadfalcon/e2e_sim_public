@@ -13,10 +13,10 @@ synthesis. Two panels, side by side, one frame per animation tick:
            SAME frame's synthesized ADC, with ground-truth (vehicle/pedestrian) targets
            overlaid as markers.
 
-Motion: `e2e.ml.scenes.sample_scene` currently returns a single-frame (`num_frames=1`)
-`Scenario` -- there is no per-frame motion track to resolve yet. `render_scene_gif`
-checks `scenario.num_frames` at call time and takes one of two paths so it keeps working
-either way:
+Motion: `e2e.ml.scenes.sample_scene` accepts `n_frames` and can return a real per-frame
+motion track (the CLI passes `--frames` through when the installed `sample_scene`
+supports it). A `Scenario` built elsewhere may still be single-frame, so
+`render_scene_gif` checks `scenario.num_frames` at call time and takes one of two paths:
   * `scenario.num_frames >= n_frames`: a true motion track exists -- resolve each
     animation frame directly via `frame_scatterers(scenario, k, dt=dt)` /
     `radar_pose(scenario, k)` (no re-derivation, no dead reckoning).

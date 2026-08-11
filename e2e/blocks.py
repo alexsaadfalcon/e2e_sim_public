@@ -433,6 +433,14 @@ class MeasurementStage:
         self.afe_block = afe_block
         self.subspace_block = subspace_block
         self.reconstruct = bool(reconstruct)
+        if afe_block is None and not self.reconstruct:
+            # Without an AFE there is no compression to keep, so the flag would silently
+            # do nothing. Refuse rather than accept a request we cannot honour.
+            raise ValueError(
+                "reconstruct=False requires an afe_block: without one, MeasurementStage "
+                "feeds the tracker directly and never compresses `s_pars`, so there is "
+                "no reduced dimension to stay in."
+            )
         if afe_block is not None and not self.reconstruct:
             # Declared per-instance: the same class either preserves the dimension or
             # crosses it, depending on configuration, so the capability cannot be a
@@ -679,9 +687,22 @@ class RangeElBlock:
 
 
 class SubspaceErrorBlock:
-    # Reads the tracker's basis, not the frame, but it is only meaningful alongside the
-    # single-chirp/no-MIMO subspace path, so it declares that contract.
-    frame_capabilities = _SINGLE_CHIRP
+    # Reads the tracker's basis (state['U'] / state['U_true']), not the frame, but it is
+    # only meaningful alongside the single-chirp/no-MIMO subspace path, so it declares
+    # that contract for the frame AXES.
+    #
+    # DIMENSION_ANY, though, and deliberately: this block never touches `s_pars`, so
+    # whether the aperture has been compressed is none of its business. Declaring
+    # full-dimension (the default) made it reject the very configuration
+    # `MeasurementStage(reconstruct=False)` exists to enable -- tracking a subspace from
+    # compressed measurements and then measuring the error -- which would have forced a
+    # pointless, lossy DecompressBlock in front of a block that reads no frame at all.
+    frame_capabilities = frames.FrameCapabilities(
+        accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
+        chirps=_SINGLE_CHIRP.chirps,
+        domain=_SINGLE_CHIRP.domain,
+        dimension=frames.DIMENSION_ANY,
+    )
 
     def __init__(self):
         self.metric = subspace_dist_frob

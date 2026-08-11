@@ -648,3 +648,29 @@ def test_vehicle_class_mix_matches_its_weights():
     for cls, want in VEHICLE_CLASS_WEIGHTS.items():
         got = counts[cls] / total
         assert abs(got - want) < 0.03, f"{cls}: drew {got:.1%}, weights say {want:.0%}"
+
+
+def test_draw_vehicle_asset_survives_an_empty_class_pool():
+    """REGRESSION: every non-car class has exactly ONE mesh, so removing a single
+    UNKNOWN-licence asset -- the project's own stated plan -- empties that pool and used
+    to crash inside numpy with `ValueError: high <= 0` and nothing naming the cause.
+    Generation must degrade the vehicle MIX, loudly, not break."""
+    import warnings
+
+    import numpy as np
+
+    from e2e.ml import rt_scenes
+
+    original = dict(rt_scenes.VEHICLE_CLASS_POOLS)
+    try:
+        rt_scenes.VEHICLE_CLASS_POOLS["truck"] = ()
+        rng = np.random.default_rng(0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            names = [rt_scenes._draw_vehicle_asset(rng, False) for _ in range(400)]
+        assert all(isinstance(n, str) and n for n in names)
+        assert any("empty asset pool" in str(w.message) for w in caught), \
+            "falling back silently would hide a changed vehicle mix"
+    finally:
+        rt_scenes.VEHICLE_CLASS_POOLS.clear()
+        rt_scenes.VEHICLE_CLASS_POOLS.update(original)

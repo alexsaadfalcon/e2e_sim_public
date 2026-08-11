@@ -51,7 +51,7 @@ Documented deviations
 
 Raw-ADC input mode (`input_mode="adc"`)
 ----------------------------------------
-`e2e.ml.dataset`'s `input_format="adc"` (see `e2e.ml.transforms.adc_to_input`) serves the
+`e2e.ml.dataset`'s `input_format="adc"` (see `e2e.ml.dataset.RadarFrameDataset._derive_input`) serves the
 raw, un-deinterleaved physical-channel ADC cube `[2*n_rx, n_samples, n_chirps]` instead of
 the post-RD-FFT tensor described above. This restores upstream's literal "no FFT" premise
 for the fast axis (it now scans real ADC samples, not range bins) -- but the RD stem above
@@ -161,7 +161,7 @@ class SSMRadNet(nn.Module):
         Shape of the input tensor `[B, in_channels, n_range_in, n_doppler_in]`. For
         `input_mode="rd"` (default) this is the `[2*n_rx, range_bin, doppler_bin]` layout
         produced by `e2e.ml.transforms.rd_to_input`; for `input_mode="adc"` it is the raw
-        `[2*n_rx, n_samples, n_chirps]` layout produced by `e2e.ml.transforms.adc_to_input`
+        `[2*n_rx, n_samples, n_chirps]` layout produced by `e2e.ml.dataset.RadarFrameDataset._derive_input`
         -- same tensor rank/argument order, different physical axis meaning (samples
         instead of range bins, chirps instead of Doppler bins). See "Raw-ADC input mode"
         in the module docstring.

@@ -47,8 +47,15 @@ raises a `FrameContractError` rather than silently producing a plausible wrong c
 the contract catching its own author. The fix is ordering, not a missing feature:
 resolve array handedness and TX de-multiplexing while the antenna axes still mean
 something, and compress after. Compression then feeds consumers that are basis-agnostic,
-above all the subspace tracker -- which is exactly what the AFE does, and why
-`MeasurementStage(reconstruct=False)` is the wired-up path today.
+above all the subspace tracker -- which is exactly what the AFE does, via
+`MeasurementStage(reconstruct=False)`.
+
+STATUS, stated plainly rather than implied: `AFEBlock`/`MeasurementStage` (the adaptive
+variant) IS reachable and exercised end to end. `CompressBlock`/`DecompressBlock` (the
+static-matrix variant) are NOT yet constructed by the webapp or by any script under
+`e2e/main/` -- they are infrastructure ahead of use, kept because the static combining
+network is the architecture the AFE's adaptive draw is compared against. Do not read
+their presence as evidence that a static-compression pipeline has been run.
 
 RECONSTRUCTION IS LOSSY AND SAYS SO
 ------------------------------------

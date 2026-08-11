@@ -439,7 +439,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
       reference's literal DDMA raw-ADC premise for TDM configs (`ti_iwr1443`):
       adjacent chirps in the raw sequence come from different, non-simultaneous TX
       antennas with an abrupt `n_tx`-chirp periodicity baked in raw -- an open
-      research question, not resolved here (see the "adc_to_input"-adjacent design
+      research question, not resolved here (see the raw-ADC input-format design
       notes; flagged, not silently smoothed over).
 
     Per-`input_format` note: RD and raw-ADC have very different per-channel

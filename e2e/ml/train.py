@@ -82,7 +82,7 @@ def _input_dims(cfg: RadarConfig, input_format: str = "rd"):
     (`C = n_rx`, `D = n_chirps`). `R` is always `cfg.n_samples`.
 
     `input_format="adc"` is the raw, un-deinterleaved physical-channel ADC cube
-    (`e2e.ml.transforms.adc_to_input`): `(2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps)`
+    (derived inline by `e2e.ml.dataset.RadarFrameDataset._derive_input`): `(2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps)`
     regardless of `mimo` -- there is no virtual-array formation on this path (see
     `e2e.ml.models.ssmradnet`'s "Raw-ADC input mode" for why deinterleaving is skipped
     deliberately, not just not-yet-implemented).

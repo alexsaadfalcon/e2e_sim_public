@@ -8,8 +8,9 @@ semantic versioning.
 
 ### Changed
 - **The detection path now defaults to the `radial_like` preset (12 TX x 16 RX, 192
-  virtual elements).** The 192-bin azimuth label grid and the 0.06 sin(az) match
-  tolerance were inherited from RADIal, where 192 *is* the virtual-element count.
+  virtual elements).** The 192-bin azimuth label grid is inherited from RADIal, where
+  192 *is* the virtual-element count; the 0.06 sin(az) match tolerance is this project's
+  own choice for a polar criterion (RADIal itself matches on cartesian box IoU >= 0.5).
   Pointing that harness at `ti_iwr1443` (12 virtual elements, Rayleigh 0.167) demanded
   azimuth accuracy 2.8x finer than the array can resolve, capping AP and AR by geometry
   rather than by model or corpus quality. `ti_iwr1443` remains available and remains
@@ -30,9 +31,12 @@ semantic versioning.
 ### Added
 - **`e2e/ml/baseline.py` -- a classical (no-learning) CFAR detector**, scored through
   the identical metric as the networks, because a detection AP means nothing on its own.
-  On the pre-switch corpus it scored AP 0.0241 where a trained FFTRadNet reached 0.0084:
-  the learned detectors were losing to an FFT, which had been invisible for the whole
-  campaign. `resolution_report()` states whether a config's evaluation harness is
+  On the pre-switch `ti_iwr1443` corpus it scored AP 0.0241 where a trained FFTRadNet
+  reached 0.0084: the learned detector was losing to an FFT, which had been invisible for
+  the whole campaign. On a `radial_like` pilot corpus -- where the harness is physically
+  answerable -- the ordering FLIPS: baseline AP 0.0044 against the model's 0.0168, a ~3.9x
+  win for the model. That is the result that justifies the preset switch. (400 frames,
+  12 epochs; an early number, not a headline.) `resolution_report()` states whether a config's evaluation harness is
   physically answerable at all and warns when it is not.
 - **Full-vs-reduced dimension contract** (`frames.DIMENSION_*`, `require_dimension`)
   plus standalone `CompressBlock`/`DecompressBlock` (`e2e/chain/compress.py`).

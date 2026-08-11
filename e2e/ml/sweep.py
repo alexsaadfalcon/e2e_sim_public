@@ -85,6 +85,17 @@ CLI
 to 2.0). `--dry-run` prints the (deterministic) stage-1 trial list, notes stage 2's
 trial count (its exact params are only known after stage 1 finishes), and prints a
 rough wall-clock estimate -- WITHOUT calling `train()` -- then exits 0.
+
+READ THIS BEFORE RUNNING IT (added 2026-08-11). The low-AP diagnosis this module was
+built around -- a loss/class-imbalance problem to be swept out -- was investigated and
+RETRACTED by the same campaign. Normalizing the focal term changed nothing measurable
+(best val_AP 0.00835 vs 0.00827, both collapsing identically); see
+`e2e.ml.losses.detection_loss`'s "WHAT THIS IS NOT". The actual cause was the evaluation
+harness demanding finer azimuth accuracy than the modelled array can resolve --
+`e2e.ml.baseline.resolution_report` reports it in one call, for free, and should be your
+FIRST check on any new config. Sweeping hyperparameters against an unanswerable harness
+burns GPU-hours to measure the harness. This module remains useful for sweeps on a config
+that `resolution_report` says is answerable.
 """
 
 from __future__ import annotations

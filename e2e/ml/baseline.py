@@ -3,12 +3,28 @@ Classical (no-learning) radar detector, scored through the same metric as the ne
 
 WHY THIS EXISTS
 ---------------
-A detection AP has no meaning on its own. Measured 2026-08-10, this baseline scored
-AP 0.0186 / AR 0.6381 on the `v_gentle` RT corpus while a trained FFTRadNet on the SAME
-data reached only 0.0084 -- i.e. the learned detectors were losing to an FFT. Without a
-reference point that fact stayed invisible for the whole campaign, and low AP kept getting
-attributed to the data (impairments, the interconnect, ray tracing) instead of to the
-harness. Every reported model AP should be quoted next to this number.
+A detection AP has no meaning on its own. Two measurements, both reproducible from the
+shipped code, make the case -- and note that they point in OPPOSITE directions, which is
+exactly why the reference is worth having:
+
+* On the `ti_iwr1443` corpus, where the evaluation harness demands finer azimuth accuracy
+  than the array can resolve (see below), this baseline scored **AP 0.0241 / AR 0.0596**
+  while a trained FFTRadNet on the SAME data reached only **0.0084**. The learned
+  detector was losing to an FFT. Without a reference point that stayed invisible for the
+  whole campaign, and low AP kept being attributed to the data -- impairments, the
+  interconnect, ray tracing -- instead of to the harness.
+* On a `radial_like` pilot corpus, where the harness IS answerable, the ordering flips:
+  baseline **AP 0.0044**, trained FFTRadNet **AP 0.0168**. The model beats classical
+  processing by ~3.9x. (400 frames, 12 epochs -- an early number, not a headline result.)
+
+Reproduce the first with
+`python -m e2e.ml.baseline --manifest <ti_iwr1443 corpus>/manifest.json --split val`.
+Every reported model AP should be quoted next to whichever of these applies.
+
+HISTORICAL NOTE, because an earlier version of this docstring cited it as if it were the
+above: a pre-CFAR prototype of this module scored AP 0.0186 / AR 0.6381. That number came
+from thresholding a raw dB map with no CFAR stage, so its recall is not comparable to the
+shipped detector's -- quoting it would overstate the classical floor's recall by ~10x.
 
 It also exposes a hard ceiling that no model can pass. The label grid asks for a target's
 azimuth to within `MatchCriterion.max_sin_az_err` (0.06 by default), but an array of

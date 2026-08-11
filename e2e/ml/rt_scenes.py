@@ -66,6 +66,8 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+import warnings
+
 import numpy as np
 
 from e2e.ml.assets import (DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
@@ -106,9 +108,10 @@ _CLUTTER_LOS_MAX_TRIES = 12
 # --------------------------------------------------------------------------------
 # Vehicle mesh pool: ONE representative Sionna car (see rt_gen.SIONNA_CAR_REPRESENTATIVE)
 # plus every downloaded mesh of that class -- replaces the old "uniform draw over 17
-# duplicate-geometry names" (see module docstring). A class with no downloaded mesh (none
-# today) would be an empty tuple; `_draw_vehicle_asset` never lets a class pool go empty
-# in practice since every non-"car" class here has >= 1 real mesh.
+# duplicate-geometry names" (see module docstring). Every non-"car" class here has
+# EXACTLY ONE member today, so removing a single mesh -- which is the stated plan for the
+# UNKNOWN-licence ones -- empties that class's pool. `_draw_vehicle_asset` handles that
+# explicitly (warn + fall back to the car pool) rather than relying on it not happening.
 # --------------------------------------------------------------------------------
 VEHICLE_CLASS_POOLS: Dict[str, Tuple[str, ...]] = {
     "car": (SIONNA_CAR_REPRESENTATIVE,) + DOWNLOADED_CAR_ASSET_NAMES,
@@ -149,6 +152,26 @@ def _draw_vehicle_asset(rng: np.random.Generator, use_local_assets: bool) -> str
             pool = pool + _LOCAL_CAR_ASSET_NAMES
         elif vclass == "truck":
             pool = pool + _LOCAL_TRUCK_ASSET_NAMES
+    if not pool:
+        # Every non-car class currently has exactly ONE member, so removing a single
+        # downloaded mesh empties its pool -- and doing exactly that is the project's own
+        # stated plan for the UNKNOWN-licence meshes. Without this guard the draw fails
+        # deep inside numpy (`ValueError: high <= 0`) with nothing naming the cause.
+        # Fall back to the car pool, which always holds the Apache-2.0 Sionna mesh, so a
+        # licence-driven removal degrades the vehicle MIX rather than breaking generation.
+        fallback = VEHICLE_CLASS_POOLS["car"] + (
+            _LOCAL_CAR_ASSET_NAMES if use_local_assets else ())
+        if not fallback:
+            raise ValueError(
+                f"vehicle class {vclass!r} has an empty asset pool and so does 'car'; "
+                "at least one vehicle mesh must be available to build a scene."
+            )
+        warnings.warn(
+            f"vehicle class {vclass!r} has an empty asset pool (its meshes were removed "
+            f"or are unavailable); falling back to the car pool. The generated vehicle "
+            f"mix will not match VEHICLE_CLASS_WEIGHTS.",
+            RuntimeWarning, stacklevel=2)
+        pool = fallback
     return pool[int(rng.integers(0, len(pool)))]
 
 # Default (world position, boresight +x via a +x-offset look_at) per base scene: a
