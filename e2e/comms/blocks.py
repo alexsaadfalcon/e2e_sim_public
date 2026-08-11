@@ -64,6 +64,12 @@ class ModemBlock:
     `combining` selects how the array's 1024 elements feed the comms head:
       - "element0" (default): the historical SISO tap -- element (0, 0) only,
         via `_cfr_from_state`. Bit-exact with the pre-`combining` `ModemBlock`.
+      - "egc": full-aperture equal-gain combining -- the naive beamforming
+        baseline. Same per-element AWGN + combine machinery as "mrc" below,
+        but the weights (`beamforming.egc_weights`) are phase-only (unit
+        magnitude, co-phasing each element's channel) instead of amplitude-
+        weighted, so it uses spatial/phase information without the
+        matched-filter amplitude weighting that makes MRC optimal.
       - "mrc": full-aperture maximum-ratio combining. Builds a per-element
         channel `H` (`beamforming.element_channels`) from `state['s_pars']`,
         injects INDEPENDENT per-element AWGN, and coherently combines
@@ -87,10 +93,10 @@ class ModemBlock:
         self.equalizer = equalizer
         self.estimator = estimator
         self.seed = seed
-        if combining not in ("element0", "mrc", "subspace"):
+        if combining not in ("element0", "egc", "mrc", "subspace"):
             raise ValueError(
                 f"unknown combining mode {combining!r} (expected 'element0', "
-                "'mrc' or 'subspace')"
+                "'egc', 'mrc' or 'subspace')"
             )
         self.combining = combining
         self.modem = OFDMModem(fft_size=fft_size, cp_len=cp_len, n_active=n_active,
@@ -135,7 +141,7 @@ class ModemBlock:
             rx_freq, _ = ch.apply_channel(tx_freq, H_sc, self.snr_db, rng_seed=noise_seed)
             extra = {}
         else:
-            # full-aperture spatial combining (mrc / subspace): see
+            # full-aperture spatial combining (egc / mrc / subspace): see
             # `_combine_spatial`. `H_sc` here is the EFFECTIVE (post-combining)
             # channel `w^H H`, reported the same way element0 reports its
             # single-tap channel.
@@ -175,7 +181,8 @@ class ModemBlock:
         return out
 
     def _combine_spatial(self, state_dict, tx_freq, noise_seed):
-        """Full-aperture receive beamforming for `combining in ('mrc', 'subspace')`.
+        """Full-aperture receive beamforming for
+        `combining in ('egc', 'mrc', 'subspace')`.
 
         Builds the per-element channel `H` [N, fft_size] from `state['s_pars']`
         (`beamforming.element_channels`), injects INDEPENDENT complex AWGN per
@@ -209,7 +216,9 @@ class ModemBlock:
 
         H = bf.element_channels(s_pars, self.freqs, sc_freqs)     # [N, fft_size]
 
-        if self.combining == "mrc":
+        if self.combining == "egc":
+            w = bf.egc_weights(H)                                 # [N, fft_size]
+        elif self.combining == "mrc":
             w = bf.mrc_weights(H)                                 # [N, fft_size]
         else:   # "subspace"
             if "U" not in state_dict:
