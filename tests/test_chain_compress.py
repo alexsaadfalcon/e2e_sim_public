@@ -266,16 +266,14 @@ def test_simulation_allows_a_reduced_dimension_stage_after_compression(make_env_
 
 
 def test_compress_before_dechirp_is_refused_not_silently_wrong():
-    """PINS A KNOWN LIMITATION, so it is documented behaviour rather than a surprise.
+    """PINS A PHYSICAL ORDERING CONSTRAINT, not an implementation gap.
 
-    The "analog compression saves ADCs" architecture wants CompressBlock upstream of the
-    dechirp. It does not work today and must not appear to: `beat_from_cfr` reverses the
-    RX/TX antenna axes and `mimo_combine` applies a per-TX code down dim 1, and neither
-    means anything once dim 0/1 index linear combinations of the aperture rather than
-    antennas. DechirpBlock therefore declares DIMENSION_FULL and this composition raises.
-
-    If someone later teaches the dechirp stage to carry the aperture basis, this test is
-    the one to change -- deliberately, with the physics argued -- not to delete.
+    `beat_from_cfr` reverses the RX/TX antenna axes to fix array handedness and
+    `mimo_combine` applies a per-TX code down dim 1; neither means anything once dim 0/1
+    index linear combinations of the aperture. Both are properties of the ARRAY, so they
+    must be settled while the antenna axes still exist -- i.e. compress AFTER dechirp and
+    TX de-multiplexing, not before. DechirpBlock declares DIMENSION_FULL and this
+    composition raises rather than producing a plausible wrong cube.
     """
     from e2e.chain.dechirp import DechirpBlock
 
@@ -309,3 +307,103 @@ def test_reduced_dimension_still_enforces_the_chirp_axis(torch_device):
 
     frames.check_capabilities(_frame(n_rx=5, n_tx=4, n_chirp=2, n_freqs=8, device=torch_device),
                               MimoRestrictedCompressed(), dimension=DIMENSION_REDUCED)
+
+
+# --------------------------------------------------------------------------------
+# One compression concept: the AFE is the ADAPTIVE variant, sharing the same math.
+# --------------------------------------------------------------------------------
+def test_afe_shares_the_compression_math(torch_device):
+    """AFEBlock must not carry a second implementation of combine/reconstruct. Pinned by
+    behaviour: its outputs equal the shared primitives applied to the same quantized
+    matrix."""
+    from e2e.blocks import AFEBlock
+    from e2e.chain.compress import WEIGHT_FLOAT, combine, quantize_weights, reconstruct_aperture
+
+    afe = AFEBlock(exp=5, mantissa=6)
+    g = torch.Generator(device="cpu").manual_seed(0)
+    a = torch.complex(torch.randn(6, 20, generator=g), torch.randn(6, 20, generator=g)).to(torch_device)
+    v = torch.complex(torch.randn(20, 9, generator=g), torch.randn(20, 9, generator=g)).to(torch_device)
+
+    aq, x = afe.apply_mat_mul(a, v)
+    expect_aq = quantize_weights(a, model=WEIGHT_FLOAT, exp=5, mantissa=6)
+    assert torch.equal(aq, expect_aq)
+    assert torch.equal(x, combine(expect_aq, v))
+    assert torch.allclose(afe.reconstruct(aq, x), reconstruct_aperture(aq, x), atol=1e-6)
+
+
+def test_weight_models_are_distinct_and_named(torch_device):
+    """The two models describe different hardware -- uniform for analog control settings
+    (constant ABSOLUTE step), float for a digital datapath (constant RELATIVE error).
+    They must not silently coincide, or the distinction the docstrings draw is fiction."""
+    from e2e.chain.compress import WEIGHT_FLOAT, WEIGHT_UNIFORM, quantize_weights
+
+    g = torch.Generator(device="cpu").manual_seed(1)
+    # Wide dynamic range: this is exactly where absolute- and relative-error models part.
+    a = torch.complex(torch.randn(4, 64, generator=g), torch.randn(4, 64, generator=g))
+    a = (a * torch.logspace(0, -4, 64)).to(torch_device)
+
+    uni = quantize_weights(a, bits=6, model=WEIGHT_UNIFORM)
+    flt = quantize_weights(a, model=WEIGHT_FLOAT, exp=5, mantissa=6)
+    assert not torch.allclose(uni, flt, atol=1e-9)
+
+    def rel_err(q):
+        small = torch.abs(a) < torch.quantile(torch.abs(a), 0.2)
+        return float((torch.abs(q - a)[small] / torch.abs(a)[small]).mean())
+
+    # The smallest weights are hit far harder by the uniform model -- the physical point.
+    # Uniform relative error SATURATES at 1.0 (those weights quantize to exactly zero, so
+    # 100% of them is lost); the float model keeps them at ~22%. Assert both the ordering
+    # and that saturation, rather than a ratio the saturation makes impossible.
+    assert rel_err(uni) == pytest.approx(1.0, abs=1e-6)
+    assert rel_err(flt) < 0.5
+    assert rel_err(uni) > 3.0 * rel_err(flt)
+
+
+def test_quantize_weights_rejects_unknown_model(torch_device):
+    from e2e.chain.compress import quantize_weights
+
+    with pytest.raises(ValueError, match="model must be"):
+        quantize_weights(torch.complex(torch.randn(2, 2), torch.randn(2, 2)).to(torch_device),
+                         bits=6, model="bogus")
+
+
+def test_measurement_stage_can_stay_in_reduced_dimension(make_env_block):
+    """The architectural choice the user asked for: digitizing 1024 elements needs 1024
+    converters, combining to M first needs M. reconstruct=False keeps the chain in the
+    measurement space and says so, instead of paying a lossy pinv nobody asked for."""
+    from e2e.blocks import AFEBlock, MeasurementStage
+    from e2e.simulation import Simulation
+    from e2e.subspace.algorithms import Oja
+
+    class Tracker:
+        def __init__(self, d, k):
+            self.oja = Oja(d, k)
+            self.n_refine = 1
+        def gen_A_ada(self):
+            from e2e.subspace.algorithms import gen_A_ada
+            return gen_A_ada(self.oja.U, 8)
+        def update(self, X, A):
+            pass
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    s = env.get_S_pars()
+    tracker = Tracker(s.shape[0] * s.shape[1], 2)
+    stage = MeasurementStage(AFEBlock(), tracker, reconstruct=False)
+    assert stage.frame_capabilities.emits_dimension == DIMENSION_REDUCED
+
+    seen = {}
+
+    class Recorder:
+        frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                                                dimension=DIMENSION_REDUCED)
+        def apply(self, state):
+            seen["shape"] = tuple(state["s_pars"].shape)
+            seen["dim"] = state.get("signal_dimension")
+            return {}
+
+    sim = Simulation(env, [], 2)
+    sim.serial_stages = [stage, Recorder()]
+    sim.run(n_steps=1)
+
+    assert seen["dim"] == DIMENSION_REDUCED
+    assert seen["shape"][0] == 8            # measurements, not the 1024-ish aperture

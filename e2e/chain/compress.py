@@ -1,15 +1,20 @@
 """
 Analog aperture compression and its inverse, as standalone chain blocks.
 
-WHY THESE ARE SEPARATE BLOCKS
-------------------------------
-Digitizing an N-element aperture needs N converters. The alternative this package
-models is to combine the aperture in the ANALOG domain first -- `M < N` weighted sums,
-each digitized by one converter -- so the ADC count, and every downstream data rate,
-drops by `N/M`. Whether that compression happens is an architectural choice independent
-of how many bits the converter has, which is why compression and quantization are two
-blocks rather than one: `CompressBlock` -> `QuantizerBlock` digitizes `M` compressed
-measurements, `QuantizerBlock` alone digitizes all `N` elements.
+THE ARCHITECTURE THIS MODELS
+-----------------------------
+A large analog receive aperture -- hundreds to a thousand elements; this package's array
+is 32x32 = 1024 -- feeding a far smaller number of digitized channels, typically 16 to
+64. The combining happens in the ANALOG domain and the compressed channels are what get
+digitized, so compression and digitization are one operation on the hardware: you never
+build 1024 converters. That `N/M` of 16x to 64x is the whole point, and it is why
+DIGITAL compression is not modelled here -- if every element has already been digitized,
+the converters have been paid for and compressing afterwards saves only data rate.
+
+Whether that compression happens is an architectural choice independent of how many bits
+each converter has, which is why compression and quantization are two blocks rather than
+one: `CompressBlock` feeding a quantizer digitizes `M` combined channels, a quantizer
+alone digitizes all `N` elements.
 
 The consequence propagates. After compression the chain carries `M` measurements in an
 arbitrary basis, and `frames.DIMENSION_REDUCED` says so. Some algorithms are content
@@ -27,30 +32,23 @@ matrix itself is quantized (`weight_bits`): its entries are physical analog comb
 weights -- attenuator/phase-shifter settings -- realizable only to finite precision, and
 that imprecision is part of the measurement, not a rounding of the data.
 
-**LIMITATION, stated plainly because the obvious reading of the paragraph above is
-wrong today.** You cannot currently place this block upstream of the dechirp and have
-`QuantizerBlock` digitize `M` compressed measurements, which is the architecture the
-"analog compression saves converters" story implies. Two things in the receive chain
-index PHYSICAL ANTENNAS and are meaningless on linear combinations of them:
+**ORDERING CONSTRAINT, and it is a physical one, not an implementation gap.** Two steps
+in the receive chain index PHYSICAL ANTENNAS and are therefore meaningless once dim 0
+counts linear combinations of them:
 
-* `chain.dechirp.beat_from_cfr` reverses the RX/TX antenna axes (dims 0/1) to fix array
-  handedness -- reversing an arbitrary measurement basis is not a handedness fix;
+* `chain.dechirp.beat_from_cfr` reverses the RX/TX antenna axes to fix array handedness
+  -- a property of the ARRAY, so it belongs to the aperture and must be settled before
+  the aperture is combined away;
 * `chain.dechirp.mimo_combine` applies a per-TX code down dim 1, which after compression
   is not a TX axis at all.
 
-So `DechirpBlock` declares `DIMENSION_FULL`, and `CompressBlock -> DechirpBlock` raises
-a `FrameContractError` by design rather than silently producing a plausible wrong cube.
-That is the contract doing its job on its own author. What works today is compression
-feeding CFR-domain consumers that are basis-agnostic -- above all the subspace tracker,
-which is the case the AFE exists for.
-
-Making the converter-count saving real means teaching the dechirp/MIMO stage to carry
-the aperture's basis alongside the data (or compressing after dechirp, per RX channel,
-which saves data rate but NOT converters). That is deliberately not attempted here.
-
-(For digital dimensionality reduction after the ADC instead, place this block after the
-quantizer with `weight_bits=None` -- but then it is a data-rate saving, not a converter
-saving, and the same antenna-indexing caveat applies to anything downstream that beamforms.)
+`DechirpBlock` therefore declares `DIMENSION_FULL`, and `CompressBlock -> DechirpBlock`
+raises a `FrameContractError` rather than silently producing a plausible wrong cube --
+the contract catching its own author. The fix is ordering, not a missing feature:
+resolve array handedness and TX de-multiplexing while the antenna axes still mean
+something, and compress after. Compression then feeds consumers that are basis-agnostic,
+above all the subspace tracker -- which is exactly what the AFE does, and why
+`MeasurementStage(reconstruct=False)` is the wired-up path today.
 
 RECONSTRUCTION IS LOSSY AND SAYS SO
 ------------------------------------
@@ -78,8 +76,49 @@ from e2e.frames import (
 )
 
 
-def quantize_weights(a: torch.Tensor, bits: int) -> torch.Tensor:
-    """Uniform mid-tread quantization of complex combining weights to `bits` bits.
+#: Weight-quantization models. These describe DIFFERENT HARDWARE and are not
+#: interchangeable, which is why the choice is explicit rather than a default.
+WEIGHT_UNIFORM = "uniform"   # analog control settings: constant ABSOLUTE step
+WEIGHT_FLOAT = "float"       # digital compute datapath: constant RELATIVE error
+
+
+def combine(a: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Apply a `[M, N]` sensing matrix to a flattened `[N, ...]` aperture.
+
+    Trivial on its own -- it exists so that the analog-combining step has ONE
+    implementation shared by `CompressBlock` (static matrix) and `e2e.blocks.AFEBlock`
+    (matrix redrawn per frame from the subspace tracker). Those two differ in how the
+    matrix is CHOSEN and how its weights are quantized, not in what combining means.
+    """
+    return a @ v
+
+
+def reconstruct_aperture(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Minimum-norm least-squares aperture from measurements `x` and weights `a`.
+
+    Exact only when `M >= N` and `a` is well conditioned; for `M < N` it recovers the
+    component of the aperture in `a`'s row space and zeroes the rest. Shared by
+    `DecompressBlock` and `AFEBlock.reconstruct` so there is one reconstruction.
+    """
+    return torch.linalg.pinv(a) @ x
+
+
+def quantize_weights(a: torch.Tensor, bits: int = None, *, model: str = WEIGHT_UNIFORM,
+                     exp: int = 5, mantissa: int = 6) -> torch.Tensor:
+    """Quantize complex combining weights under one of two hardware models.
+
+    `model=WEIGHT_UNIFORM` (default, `bits`) is the analog case: the weights are
+    attenuator/phase-shifter settings with a constant step, so the error floor is
+    constant in ABSOLUTE terms and small weights are hit proportionally hardest. That is
+    what a physical combining network does, and it is the model for `CompressBlock`.
+
+    `model=WEIGHT_FLOAT` (`exp`/`mantissa`) is the digital case: a low-precision
+    floating-point format whose error is roughly constant in RELATIVE terms. That is
+    right for a compute datapath and wrong for an analog control, and it is what
+    `e2e.blocks.AFEBlock` has always used. The two are kept distinct deliberately --
+    swapping them would flatter or penalise weak measurements by construction.
+
+    Below, the uniform case.
 
     Real and imaginary parts are quantized INDEPENDENTLY against a shared full scale
     (the max absolute part over the whole matrix), matching how an IQ combining network
@@ -95,6 +134,16 @@ def quantize_weights(a: torch.Tensor, bits: int) -> torch.Tensor:
     top code. Every weight is then within half an LSB, with no code wasted and no
     spurious clamp on the extreme.
     """
+    if model == WEIGHT_FLOAT:
+        # Imported lazily: e2e.afe is the AFE's own package and pulling it in at module
+        # scope would tie this chain module to it for a branch most callers never take.
+        from e2e.afe.afe_utils import quantizer_fp
+
+        return torch.complex(quantizer_fp(a.real, exp, mantissa),
+                             quantizer_fp(a.imag, exp, mantissa))
+    if model != WEIGHT_UNIFORM:
+        raise ValueError(
+            f"model must be {WEIGHT_UNIFORM!r} or {WEIGHT_FLOAT!r}, got {model!r}")
     if bits is None:
         return a
     if bits < 2:

@@ -221,6 +221,29 @@ class InterconnectBlock:
 
 # Adaptive Feature Extraction Block
 class AFEBlock:
+    """Analog feature extraction: the ADAPTIVE variant of `e2e.chain.compress`.
+
+    Same physical idea as `CompressBlock` -- a large analog receive aperture (this
+    package's array is 32x32 = 1024 elements) is combined down to a far smaller number
+    of digitized channels, so the converter count and every downstream data rate fall by
+    N/M. The two differ in exactly two respects, and share everything else:
+
+    * **How the matrix is chosen.** `CompressBlock` draws one static matrix and keeps it,
+      modelling a fixed combining network. The AFE redraws `A` each frame from the
+      subspace tracker's current estimate (`MeasurementStage` -> `gen_A_ada`), so the
+      measurements steer onto the signal subspace -- the "adaptive" in the name.
+    * **How the weights are quantized.** The AFE uses the low-precision FLOATING-POINT
+      model (constant relative error, a compute-datapath format), which is why `exp`
+      and `mantissa` rather than a bit count. `CompressBlock` uses the uniform model
+      (constant absolute step) appropriate to analog control settings. See
+      `e2e.chain.compress.quantize_weights` -- both live there now, named and
+      contrasted, so the choice is visible instead of implied by which class you picked.
+
+    The combining and reconstruction MATH is shared (`compress.combine` /
+    `compress.reconstruct_aperture`); this class contributes the adaptive draw and the
+    float weight model, not a second implementation of compression.
+    """
+
     # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
     # compressed measurement is defined for a single chirp of a single-TX frame.
     frame_capabilities = _SINGLE_CHIRP
@@ -230,14 +253,18 @@ class AFEBlock:
         self.mantissa = mantissa
 
     def apply_mat_mul(self, A, V):
-        Aq_real = quantizer_fp(A.real, self.exp, self.mantissa)
-        Aq_imag = quantizer_fp(A.imag, self.exp, self.mantissa)
-        Aq = Aq_real + 1j * Aq_imag
-        X = Aq @ V
-        return Aq, X
+        """Quantize `A` (float model) and combine: returns `(Aq, Aq @ V)`."""
+        from e2e.chain.compress import WEIGHT_FLOAT, combine, quantize_weights
+
+        Aq = quantize_weights(A, model=WEIGHT_FLOAT, exp=self.exp, mantissa=self.mantissa)
+        return Aq, combine(Aq, V)
 
     def reconstruct(self, Aq, X):
-        return torch.linalg.pinv(Aq) @ X
+        """Least-squares aperture from the compressed measurements. LOSSY for M < N --
+        see `compress.reconstruct_aperture`."""
+        from e2e.chain.compress import reconstruct_aperture
+
+        return reconstruct_aperture(Aq, X)
 
 
 # Adaptive subspace-tracking block feeding the AFE.
@@ -380,17 +407,42 @@ class MeasurementStage:
     """Adaptive compression (optional AFE) + online subspace tracking.
 
     With an AFE block: quantized measurement matrix, quantized matmul, subspace
-    update, then reconstruction -- the reconstructed grid replaces 's_pars'.
+    update, then -- if `reconstruct=True` -- reconstruction, with the reconstructed grid
+    replacing 's_pars'.
     Without an AFE block: the subspace tracker is fed the full-precision compressed
     measurements directly (same A-generation, no quantization); 's_pars' is left
     unchanged.
+
+    `reconstruct` (default True, the historical behaviour) decides whether the chain
+    continues in FULL or REDUCED dimension, which is the architectural choice this
+    stage exists to express. Digitizing a 1024-element aperture needs 1024 converters;
+    combining it down to 16-64 measurements first means that many, and everything
+    downstream then works in the measurement space. Reconstructing immediately -- which
+    this stage used to do unconditionally -- throws that away, pays a lossy pseudo-inverse
+    for M < N, and hides the choice. Set `reconstruct=False` to keep the measurements:
+    's_pars' stays `[M, 1, n_chirp, n_freqs]`, `state['signal_dimension']` becomes
+    `DIMENSION_REDUCED`, and blocks that index physical antennas will be stopped by the
+    frame contract rather than quietly imaging random projections. The subspace tracker
+    itself is content either way -- estimating a subspace from projections is the entire
+    premise of the AFE.
     """
 
     frame_capabilities = _SINGLE_CHIRP
 
-    def __init__(self, afe_block, subspace_block):
+    def __init__(self, afe_block, subspace_block, reconstruct: bool = True):
         self.afe_block = afe_block
         self.subspace_block = subspace_block
+        self.reconstruct = bool(reconstruct)
+        if afe_block is not None and not self.reconstruct:
+            # Declared per-instance: the same class either preserves the dimension or
+            # crosses it, depending on configuration, so the capability cannot be a
+            # class attribute the way a fixed-behaviour block's can.
+            self.frame_capabilities = frames.FrameCapabilities(
+                accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
+                chirps=_SINGLE_CHIRP.chirps,
+                domain=_SINGLE_CHIRP.domain,
+                emits_dimension=frames.DIMENSION_REDUCED,
+            )
         # The stage's own math (one A per frame, flatten the aperture to [d, n_freqs])
         # is single-chirp/no-MIMO regardless of what the blocks declare; name the
         # blocks it drives so the contract error points at what the user configured.
@@ -412,9 +464,20 @@ class MeasurementStage:
                 A = self.subspace_block.gen_A_ada()
                 Aq, X = self.afe_block.apply_mat_mul(A, V)
                 self.subspace_block.update(X, Aq)
-            # Final measurement + reconstruction with the converged basis.
+            # Final measurement with the converged basis.
             A = self.subspace_block.gen_A_ada()
             Aq, X = self.afe_block.apply_mat_mul(A, V)
+            if not self.reconstruct:
+                # Stay in the measurement space: dim 0 now counts MEASUREMENTS, not
+                # antennas, and the contract says so for everything downstream.
+                n_chirp, n_freqs = s_pars.shape[2], s_pars.shape[3]
+                return {
+                    "s_pars": X.view(X.shape[0], 1, n_chirp, n_freqs),
+                    "U": self.subspace_block.oja.U,
+                    "sensing_matrix": Aq,
+                    "aperture_shape": (s_pars.shape[0], s_pars.shape[1]),
+                    "signal_dimension": frames.DIMENSION_REDUCED,
+                }
             Xt = self.afe_block.reconstruct(Aq, X)
             s_pars = Xt.view(s_pars.shape)
             return {"s_pars": s_pars, "U": self.subspace_block.oja.U}
