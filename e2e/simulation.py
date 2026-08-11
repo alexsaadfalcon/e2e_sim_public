@@ -29,13 +29,15 @@ def _check_frame_contract(component, state_dict):
     's_pars' and rejecting it would break flows that worked before.
     """
     domain = state_dict.get('signal_domain', frames.DOMAIN_CFR)
+    dimension = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
     frames.require_domain(domain, component)
+    frames.require_dimension(dimension, component)
     payload = state_dict.get(frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'))
     if not torch.is_tensor(payload) or payload.ndim != 4:
         return
     frames.check_capabilities(
         payload, component, layout=state_dict.get('frame_layout', frames.LAYOUT_RAW),
-        domain=domain,
+        domain=domain, dimension=dimension,
     )
 
 
@@ -66,6 +68,26 @@ def _advance_domain(component, state_dict, before):
         stale_key = frames.DOMAIN_PAYLOAD_KEY.get(before)
         if stale_key and stale_key in state_dict:
             del state_dict[stale_key]
+    return after
+
+
+def _advance_dimension(component, state_dict, before):
+    """Enforce what a component promised about full-vs-reduced dimension, AFTER it ran.
+
+    The dimension counterpart of `_advance_domain`'s first job: a block declaring
+    `emits_dimension` must actually deliver it, so a compress/decompress step that
+    forgets to set `signal_dimension` fails where the mistake is rather than at the next
+    block. There is no stale-payload half here -- both dimensions live in `s_pars`, and
+    a compressed frame REPLACES the full one rather than sitting beside it.
+    """
+    caps = frames.capabilities_of(component)
+    after = state_dict.get('signal_dimension', before)
+    if caps.emits_dimension is not None and after != caps.emits_dimension:
+        raise frames.FrameContractError(
+            f"{frames.component_name(component)} declares it emits {caps.emits_dimension} "
+            f"dimension but left the chain in {after!r}; a compress/decompress block must "
+            f"set state['signal_dimension'] to what it hands downstream."
+        )
     return after
 
 
@@ -272,13 +294,16 @@ class Simulation:
             'U_true': U_true,
             'PRX': None,
             'signal_domain': frames.DOMAIN_CFR,
+            'signal_dimension': frames.DIMENSION_FULL,
         }
         state_dict.update(self._environment_state_updates())
         for stage in self.serial_stages:
             _check_frame_contract(stage, state_dict)
             before = state_dict.get('signal_domain', frames.DOMAIN_CFR)
+            before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
             state_dict.update(stage.apply(state_dict))
             _advance_domain(stage, state_dict, before)
+            _advance_dimension(stage, state_dict, before_dim)
         # Serial stages that touch the subspace tracker (MeasurementStage) refresh
         # 'U' via their return dict; re-read it from the tracker here too so 'U' is
         # always current. Guarded: a serial_stages override may legitimately run
@@ -287,7 +312,8 @@ class Simulation:
             state_dict['U'] = self.subspace_block.oja.U
 
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
-                         'signal_domain', 'tx_wave', 'adc'}
+                         'signal_domain', 'signal_dimension', 'sensing_matrix',
+                         'aperture_shape', 'tx_wave', 'adc'}
 
         for downstream_block in self.downstream_blocks:
             _check_frame_contract(downstream_block, state_dict)
@@ -341,7 +367,8 @@ class Simulation:
             _advance_domain(stage, state_dict, before)
 
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
-                         'signal_domain', 'tx_wave', 'adc'}
+                         'signal_domain', 'signal_dimension', 'sensing_matrix',
+                         'aperture_shape', 'tx_wave', 'adc'}
         for downstream_block in self.downstream_blocks:
             _check_frame_contract(downstream_block, state_dict)
             outputs = downstream_block.apply(state_dict)

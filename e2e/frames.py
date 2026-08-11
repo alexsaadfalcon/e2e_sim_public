@@ -138,6 +138,32 @@ _DOMAIN_BRIDGE = {
 }
 
 
+# ------------------------------------------------------------------ signal dimension
+# ORTHOGONAL to the signal domain, and for the same reason: a stage can be in the right
+# domain and still be handed a tensor it cannot interpret. Digitization happens either
+# on the full aperture or on a COMPRESSED measurement of it (the AFE's analog combining
+# reduces how many converters are needed), and everything downstream then runs either in
+# full dimension or in the reduced measurement space.
+#
+# This matters because the two are not interchangeable: a beamformer or an angle FFT
+# needs one sample per physical element and is meaningless applied to random projections
+# of them, whereas a subspace tracker is perfectly happy in the measurement space and
+# gains nothing from being handed a reconstruction. Making it a declared contract means
+# the pipeline says so instead of silently producing a plausible wrong answer.
+DIMENSION_FULL = "full"        # one sample per physical aperture element
+DIMENSION_REDUCED = "reduced"  # M < N linear measurements of the aperture (post-AFE)
+
+_DIMENSIONS = (DIMENSION_FULL, DIMENSION_REDUCED)
+
+#: Declared by blocks indifferent to dimension -- they neither index elements nor assume
+#: a measurement basis (the transmit tributary, pure bookkeeping stages). Exempt from
+#: the dimension check, exactly as DOMAIN_ANY is exempt from the domain check.
+DIMENSION_ANY = "any"
+
+#: The block that carries the chain back from reduced to full dimension, named in errors.
+_DIMENSION_BRIDGE = {DIMENSION_FULL: "DecompressBlock"}
+
+
 @dataclass(frozen=True)
 class FrameCapabilities:
     """What frame shapes a pipeline block/stage declares it can consume.
@@ -162,6 +188,8 @@ class FrameCapabilities:
     chirps: str = CHIRP_SINGLE
     domain: str = DOMAIN_CFR
     emits_domain: str = None
+    dimension: str = DIMENSION_FULL
+    emits_dimension: str = None
 
     def __post_init__(self):
         if self.chirps not in _CHIRP_MODES:
@@ -178,6 +206,16 @@ class FrameCapabilities:
                 f"unknown emitted signal domain {self.emits_domain!r}; expected one of "
                 f"{_DOMAINS} or None"
             )
+        if self.dimension not in _DIMENSIONS + (DIMENSION_ANY,):
+            raise ValueError(
+                f"unknown signal dimension {self.dimension!r}; expected one of "
+                f"{_DIMENSIONS + (DIMENSION_ANY,)}"
+            )
+        if self.emits_dimension is not None and self.emits_dimension not in _DIMENSIONS:
+            raise ValueError(
+                f"unknown emitted signal dimension {self.emits_dimension!r}; expected one "
+                f"of {_DIMENSIONS} or None"
+            )
 
     @property
     def accepts_multichirp(self):
@@ -187,6 +225,12 @@ class FrameCapabilities:
     def is_bridge(self):
         """True for the blocks that carry the chain from one domain into another."""
         return self.emits_domain is not None and self.emits_domain != self.domain
+
+    @property
+    def is_dimension_bridge(self):
+        """True for the blocks that carry the chain between full and reduced dimension
+        (the compress and decompress steps)."""
+        return self.emits_dimension is not None and self.emits_dimension != self.dimension
 
 
 #: Conservative fallback for components that declare nothing (legacy custom stages,
@@ -227,20 +271,46 @@ def require_domain(current_domain, component, who=None):
         )
 
 
+def require_dimension(current_dimension, component, who=None):
+    """Raise FrameContractError unless `component` accepts `current_dimension`.
+
+    The mirror of `require_domain` for the full/reduced axis. It catches the mistake
+    that motivates the whole contract: an angle FFT or beamformer handed compressed
+    measurements would run without complaining and return an image of nothing, because
+    random projections of an aperture have the right rank and the wrong meaning.
+    """
+    caps = capabilities_of(component)
+    who = who or component_name(component)
+    if caps.dimension == DIMENSION_ANY:
+        return
+    if caps.dimension != current_dimension:
+        bridge = _DIMENSION_BRIDGE.get(caps.dimension)
+        remedy = (f"insert a {bridge} before it" if bridge
+                  else "it must run before the chain is compressed")
+        raise FrameContractError(
+            f"{who} expects {caps.dimension}-dimension data, but the chain is in "
+            f"{current_dimension} dimension -- {remedy}."
+        )
+
+
 def check_capabilities(s_pars, component, layout=LAYOUT_RAW, who=None,
-                       domain=DOMAIN_CFR):
+                       domain=DOMAIN_CFR, dimension=DIMENSION_FULL):
     """Validate `s_pars` against `component`'s declared `FrameCapabilities`.
 
-    Raises FrameContractError naming the component and the offending axis or domain.
-    The domain is checked first: it is the coarser error and produces the more
-    actionable message. The MIMO (dim 1) check is skipped for non-raw layouts, where
-    dim 1 is not a TX axis; both axis checks apply only in DOMAIN_CFR, since they
-    describe the 4-D S-parameter frame specifically.
+    Raises FrameContractError naming the component and the offending axis, domain or
+    dimension. Domain is checked first (coarsest, most actionable message), then
+    dimension, then the frame axes. The MIMO (dim 1) check is skipped for non-raw
+    layouts, where dim 1 is not a TX axis; both axis checks apply only in DOMAIN_CFR,
+    since they describe the 4-D S-parameter frame specifically -- and are skipped in
+    reduced dimension, where dim 0 counts MEASUREMENTS, not antennas.
     """
     caps = capabilities_of(component)
     who = who or component_name(component)
     require_domain(domain, component, who)
+    require_dimension(dimension, component, who)
     if domain != DOMAIN_CFR or caps.domain == DOMAIN_ANY:
+        return
+    if dimension != DIMENSION_FULL:
         return
     if layout == LAYOUT_RAW and not caps.accepts_mimo:
         require_no_mimo(s_pars, who, hint="this block declares accepts_mimo=False")
