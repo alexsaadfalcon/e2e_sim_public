@@ -292,10 +292,30 @@ def test_local_asset_specs_are_recorded_with_unknown_license():
 
 
 def test_downloaded_asset_licenses_recorded_as_unverified():
+    """The five original freestl.com meshes have unchecked provenance -- generic
+    UNKNOWN/INTERNAL-ONLY text. The Kenney fleet (spec.license set) is the deliberate
+    exception, checked separately below."""
     for name, spec in DOWNLOADED_ASSET_SPECS.items():
+        if spec.license is not None:
+            continue
         assert name in ASSET_LICENSES
         lic = ASSET_LICENSES[name]["license"]
         assert "UNKNOWN" in lic and "INTERNAL-ONLY" in lic
+        assert ASSET_LICENSES[name]["category"] == spec.vehicle_class
+
+
+def test_kenney_fleet_licenses_recorded_as_verified_cc0():
+    """The Kenney fleet's `spec.license` must flow through into ASSET_LICENSES verbatim
+    (not the generic UNKNOWN text every other downloaded asset gets)."""
+    kenney_names = [n for n, s in DOWNLOADED_ASSET_SPECS.items() if s.license is not None]
+    # 15 vehicles only -- bus/trolley box-body stand-ins were drafted then deferred by
+    # the project owner (a parallel search for real freely-licensed bus/trolley meshes
+    # is in progress).
+    assert len(kenney_names) == 15
+    for name in kenney_names:
+        spec = DOWNLOADED_ASSET_SPECS[name]
+        assert ASSET_LICENSES[name]["license"] == spec.license
+        assert "CC0" in ASSET_LICENSES[name]["license"]
         assert ASSET_LICENSES[name]["category"] == spec.vehicle_class
 
 
@@ -648,6 +668,31 @@ def test_vehicle_class_mix_matches_its_weights():
     for cls, want in VEHICLE_CLASS_WEIGHTS.items():
         got = counts[cls] / total
         assert abs(got - want) < 0.03, f"{cls}: drew {got:.1%}, weights say {want:.0%}"
+
+
+def test_kenney_fleet_is_registered_in_the_default_pool():
+    """The Kenney fleet must be reachable through the normal (use_local_assets=False)
+    draw path -- it's registered via DOWNLOADED_ASSET_SPECS, same as every other
+    downloaded mesh, not through the separate (workstation-only) LOCAL_ASSET_SPECS."""
+    from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
+
+    kenney_names = {n for n, s in DOWNLOADED_ASSET_SPECS.items() if n.startswith("kn_")}
+    assert len(kenney_names) == 15
+    assert kenney_names <= _DEFAULT_VEHICLE_POOL
+
+    car_pool = set(VEHICLE_CLASS_POOLS["car"])
+    truck_pool = set(VEHICLE_CLASS_POOLS["truck"])
+    assert "kn_sedan" in car_pool
+    assert "kn_delivery" in truck_pool
+
+
+def test_bus_and_trolley_pools_are_unchanged_by_the_kenney_fleet():
+    """The Kenney fleet is car/truck only -- bus/trolley box-body stand-ins were
+    drafted then explicitly DEFERRED by the project owner (a parallel search for real
+    freely-licensed bus/trolley meshes is in progress). Both pools must still rest on
+    exactly the original single (UNKNOWN-license) mesh, same as before this campaign."""
+    assert tuple(VEHICLE_CLASS_POOLS["bus"]) == ("dl_school_bus",)
+    assert tuple(VEHICLE_CLASS_POOLS["trolley"]) == ("dl_trolley",)
 
 
 def test_draw_vehicle_asset_survives_an_empty_class_pool():

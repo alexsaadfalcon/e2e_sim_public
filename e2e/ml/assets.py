@@ -13,8 +13,20 @@ consume the result; neither owns any of this module's logic.
 Nothing here ever touches Sionna -- pure numpy/stdlib, so it runs (and degrades
 gracefully) with no ray tracer installed.
 
+Follow-up (the "Kenney fleet"): 15 CC0-licensed vehicle meshes (car/truck) from Kenney's
+Car Kit (kenney.nl/assets/car-kit, APPROVED, license verified from the kit's own
+License.txt), registered the same way as the five original freestl.com meshes but with a
+VERIFIED `license` string (see `DownloadedAssetSpec.license`) instead of the generic
+UNKNOWN one, and PER-AXIS scaling (`DownloadedAssetSpec.axis_scale_m`) since Kenney's
+stylized proportions make uniform scaling produce badly wrong bounding boxes (see that
+field's docstring). Kenney ships no bus/trolley mesh; box-body stand-ins for those two
+classes were drafted but DEFERRED by the project owner (a parallel search for real
+freely-licensed bus/trolley meshes is in progress) -- bus/trolley coverage is unchanged
+(still just dl_school_bus / dl_trolley, both UNKNOWN-license).
+
 Cache layout (NEVER inside the repo -- no mesh binary is ever committed):
     <cache_dir()>/raw/<asset>/...        -- extracted archive contents (verbatim)
+    <cache_dir()>/cc0/car-kit/...        -- the Kenney kit, hand-extracted once (CC0)
     <cache_dir()>/processed/<asset>.ply  -- decimated, metre-scaled, ground-aligned PLY
 
 `cache_dir()` defaults to `%LOCALAPPDATA%/e2e_ml_assets` (or `<tempdir>/e2e_ml_assets` if
@@ -117,8 +129,14 @@ DECIMATE_MAX_TRIS = 20_000
 # --------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ArchiveSpec:
-    archive_filename: str   # inside downloads_dir()
-    extract_subdir: str     # inside raw_dir(); 7z extracts the archive's own tree here
+    archive_filename: str = ""   # inside downloads_dir(); unused when source_subdir is set
+    extract_subdir: str = ""     # inside raw_dir(); 7z extracts the archive's own tree here
+    # An already-extracted directory, given RELATIVE to cache_dir() (not raw_dir()) so it
+    # still respects E2E_ML_ASSET_CACHE_DIR overrides (e.g. tests forcing a nonexistent
+    # cache dir to exercise graceful degradation). When set, this bypasses
+    # archive_filename/downloads_dir()/7z entirely -- for a kit that ships unzipped
+    # already (e.g. the Kenney car-kit, hand-extracted once under cache_dir()/cc0/...).
+    source_subdir: Optional[str] = None
 
 
 # The Mercedes O403 bus (m6f72urgb6yo-o403Onurym.rar, a .max/3ds-Max file) is
@@ -137,6 +155,12 @@ ARCHIVE_SPECS: Dict[str, ArchiveSpec] = {
         "Type_B_North_American_School_Bus_v2_L1.184d3df52-7cb6-41ad-9ad2-245a2e472149.zip",
         "bus_schoolbus",
     ),
+    # Kenney's "Car Kit" (CC0, kenney.nl/assets/car-kit) ships as a zip whose *contents*
+    # (not a further archive) were extracted once, by hand, under cache_dir() -- see
+    # the module docstring's cache layout and DOWNLOADED_ASSET_SPECS' Kenney entries.
+    "kenney_car_kit": ArchiveSpec(
+        source_subdir=os.path.join("cc0", "car-kit", "Models", "OBJ format")
+    ),
 }
 
 
@@ -144,8 +168,14 @@ def ensure_extracted(key: str) -> bool:
     """Extract `ARCHIVE_SPECS[key]` into `raw_dir()` via the `7z` CLI if not already
     present. Returns whether the extracted tree now exists (True even if it was already
     there); False if the source archive isn't in `downloads_dir()` or `7z` isn't
-    available -- callers degrade gracefully (see `process_asset`)."""
+    available -- callers degrade gracefully (see `process_asset`).
+
+    If `source_subdir` is set, the archive is already extracted (e.g. a hand-unzipped
+    kit) -- just check it's there, no 7z/downloads_dir() involved."""
     spec = ARCHIVE_SPECS[key]
+    if spec.source_subdir is not None:
+        dest = os.path.join(cache_dir(), spec.source_subdir)
+        return os.path.isdir(dest) and os.listdir(dest) != []
     dest = os.path.join(raw_dir(), spec.extract_subdir)
     if os.path.isdir(dest) and os.listdir(dest):
         return True
@@ -188,11 +218,24 @@ class DownloadedAssetSpec:
     # Permutation of raw axes (0=x,1=y,2=z) placing (length, width, height) at
     # (new x, new y, new z): `new_verts = raw_verts[:, axis_permutation]`.
     axis_permutation: Tuple[int, int, int]
-    scale_m: float                          # raw (permuted) units -> metres
+    scale_m: float                          # raw (permuted) units -> metres (isotropic case)
     real_length_range_m: Tuple[float, float]
     exclude_name_substrings: Tuple[str, ...] = ()  # OBJ object-group names to drop
     source: str = ""
     derivation: str = ""                    # how scale_m/axes were determined -- audit trail
+    # Per-(length, width, height)-axis scale, overriding `scale_m` when set. UNIFORM
+    # scaling is unusable for assets whose raw proportions don't already match the real
+    # vehicle's aspect ratio (e.g. Kenney's stylized "chunky" fleet: uniformly scaling a
+    # sedan to a real 4.70 m length also makes it 2.76 m wide / 2.40 m tall against a
+    # real 1.82/1.45) -- each axis is instead scaled independently onto the real class
+    # bounding box. `None` (the default, and every pre-Kenney asset) keeps the original
+    # isotropic `scale_m` behaviour.
+    axis_scale_m: Optional[Tuple[float, float, float]] = None
+    # Overrides the generic "UNKNOWN, terms not verified" text `e2e.ml.rt_gen.
+    # ASSET_LICENSES` otherwise applies uniformly to every DOWNLOADED_ASSET_SPECS entry.
+    # `None` (default) keeps that generic text -- set only for assets with an actually
+    # verified license (e.g. the Kenney fleet's CC0).
+    license: Optional[str] = None
 
 
 DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
@@ -260,6 +303,203 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "permutation. Scale so length = 8.0 m (mid-range of a 7-9 m "
                    "Type B school bus).",
     ),
+
+    # ----------------------------------------------------------------------------
+    # The "Kenney fleet" (campaign R3 follow-up): 15 CC0 vehicle meshes from Kenney's
+    # "Car Kit" (kenney.nl/assets/car-kit) -- APPROVED by the project owner, license
+    # verified from the License.txt shipped INSIDE the kit (CC0 1.0 Universal). Unlike
+    # the five freestl.com meshes above (UNKNOWN/unverified provenance), these carry an
+    # explicit `license` string (see DownloadedAssetSpec.license) that
+    # `e2e.ml.rt_gen.ASSET_LICENSES` picks up in place of the generic UNKNOWN text.
+    #
+    # Kenney's meshes are Y-up with wheels baked in (no separate assembly needed):
+    # raw axis convention length=z, width=x, height=y -> axis_permutation=(2, 0, 1),
+    # same permutation family as delorean/audi_r8/truck_daf above but re-derived from
+    # Kenney's own axis convention, not inferred per-mesh.
+    #
+    # UNIFORM scaling is unusable here (see `axis_scale_m`'s docstring): each mesh is
+    # scaled independently per axis onto a real vehicle class's (L, W, H), so the
+    # resulting bounding box -- what sets the radar's angular/range footprint -- is
+    # correct even though Kenney's stylized proportions stay "chunky". Every
+    # `axis_scale_m` triple below is `real_dims_m / raw_permuted_extent_m`, with
+    # `raw_permuted_extent_m` measured directly from each kit .obj via this module's own
+    # `_read_obj_np` (not asserted/guessed -- see the campaign report for the full
+    # measured-extent table). `scale_m` is kept equal to the length-axis scale for any
+    # caller still reading it in isotropic terms (e.g. the CLI inventory table).
+    "kn_sedan": DownloadedAssetSpec(
+        name="kn_sedan", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="sedan.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.843137,
+        axis_scale_m=(1.843137, 1.213333, 1.115385),
+        real_length_range_m=(4.40, 5.00),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.55 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "midsize sedan (Camry-class) 4.70 x 1.82 x 1.45 m.",
+    ),
+    "kn_sedan_sports": DownloadedAssetSpec(
+        name="kn_sedan_sports", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="sedan-sports.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.764706,
+        axis_scale_m=(1.764706, 1.423077, 1.181818),
+        real_length_range_m=(4.20, 4.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.55 x 1.30 x 1.10 m -> per-axis scale to a "
+                   "sports coupe 4.50 x 1.85 x 1.30 m.",
+    ),
+    "kn_hatchback_sports": DownloadedAssetSpec(
+        name="kn_hatchback_sports", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="hatchback-sports.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.473684,
+        axis_scale_m=(1.473684, 1.369231, 1.290909),
+        real_length_range_m=(4.00, 4.50),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.85 x 1.30 x 1.10 m -> per-axis scale to a "
+                   "hot hatch (Golf-class) 4.20 x 1.78 x 1.42 m.",
+    ),
+    "kn_suv": DownloadedAssetSpec(
+        name="kn_suv", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="suv.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.777778,
+        axis_scale_m=(1.777778, 1.280000, 1.346154),
+        real_length_range_m=(4.50, 5.10),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.70 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "midsize SUV (RAV4-class) 4.80 x 1.92 x 1.75 m.",
+    ),
+    "kn_suv_luxury": DownloadedAssetSpec(
+        name="kn_suv_luxury", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="suv-luxury.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.754386,
+        axis_scale_m=(1.754386, 1.333333, 1.369231),
+        real_length_range_m=(4.70, 5.30),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.85 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "full-size luxury SUV 5.00 x 2.00 x 1.78 m.",
+    ),
+    "kn_taxi": DownloadedAssetSpec(
+        name="kn_taxi", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="taxi.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.709091,
+        axis_scale_m=(1.709091, 1.213333, 0.986667),
+        real_length_range_m=(4.40, 5.00),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.75 x 1.50 x 1.50 m -> per-axis scale to a "
+                   "sedan taxi 4.70 x 1.82 x 1.48 m.",
+    ),
+    "kn_police": DownloadedAssetSpec(
+        name="kn_police", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="police.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.580645,
+        axis_scale_m=(1.580645, 1.266667, 1.153846),
+        real_length_range_m=(4.60, 5.20),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.10 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "police interceptor sedan 4.90 x 1.90 x 1.50 m.",
+    ),
+    "kn_van": DownloadedAssetSpec(
+        name="kn_van", vehicle_class="car",
+        archive_key="kenney_car_kit", filename="van.obj",
+        axis_permutation=(2, 0, 1), scale_m=1.963636,
+        axis_scale_m=(1.963636, 1.333333, 1.777778),
+        real_length_range_m=(5.10, 5.50),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.75 x 1.50 x 1.35 m -> per-axis scale to a "
+                   "panel van (Transit-class) 5.40 x 2.00 x 2.40 m; kept vehicle_class="
+                   "'car' per the approved fleet classification even though it is the "
+                   "longest member of that class.",
+    ),
+    "kn_delivery": DownloadedAssetSpec(
+        name="kn_delivery", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="delivery.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.000000,
+        axis_scale_m=(2.000000, 1.566667, 1.757576),
+        real_length_range_m=(6.20, 6.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.25 x 1.50 x 1.65 m -> per-axis scale to a "
+                   "box delivery truck 6.50 x 2.35 x 2.90 m.",
+    ),
+    "kn_delivery_flat": DownloadedAssetSpec(
+        name="kn_delivery_flat", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="delivery-flat.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.000000,
+        axis_scale_m=(2.000000, 1.566667, 1.925926),
+        real_length_range_m=(6.20, 6.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.25 x 1.50 x 1.35 m -> per-axis scale to a "
+                   "flatbed delivery truck 6.50 x 2.35 x 2.60 m.",
+    ),
+    "kn_truck": DownloadedAssetSpec(
+        name="kn_truck", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="truck.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.881356,
+        axis_scale_m=(2.881356, 1.666667, 2.615385),
+        real_length_range_m=(8.20, 8.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.95 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "rigid truck / small tractor 8.50 x 2.50 x 3.40 m.",
+    ),
+    "kn_truck_flat": DownloadedAssetSpec(
+        name="kn_truck_flat", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="truck-flat.obj",
+        axis_permutation=(2, 0, 1), scale_m=3.096411,
+        axis_scale_m=(3.096411, 1.666667, 2.153846),
+        real_length_range_m=(8.20, 8.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 2.745 x 1.50 x 1.30 m -> per-axis scale to a "
+                   "flatbed rigid truck 8.50 x 2.50 x 2.80 m.",
+    ),
+    "kn_garbage_truck": DownloadedAssetSpec(
+        name="kn_garbage_truck", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="garbage-truck.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.753623,
+        axis_scale_m=(2.753623, 1.593750, 2.250000),
+        real_length_range_m=(9.20, 9.80),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.45 x 1.60 x 1.60 m -> per-axis scale to a "
+                   "refuse collection truck 9.50 x 2.55 x 3.60 m.",
+    ),
+    "kn_firetruck": DownloadedAssetSpec(
+        name="kn_firetruck", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="firetruck.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.941176,
+        axis_scale_m=(2.941176, 1.700000, 2.235294),
+        real_length_range_m=(9.70, 10.30),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.40 x 1.50 x 1.70 m -> per-axis scale to a "
+                   "pumper fire engine 10.00 x 2.55 x 3.80 m.",
+    ),
+    "kn_ambulance": DownloadedAssetSpec(
+        name="kn_ambulance", vehicle_class="truck",
+        archive_key="kenney_car_kit", filename="ambulance.obj",
+        axis_permutation=(2, 0, 1), scale_m=2.092308,
+        axis_scale_m=(2.092308, 1.566667, 1.611111),
+        real_length_range_m=(6.50, 7.10),
+        source="Kenney Car Kit (kenney.nl/assets/car-kit)",
+        license="CC0 (kenney.nl/assets/car-kit, License.txt in archive)",
+        derivation="raw (permuted) bbox 3.25 x 1.50 x 1.80 m -> per-axis scale to a "
+                   "type-III box ambulance 6.80 x 2.35 x 2.90 m.",
+    ),
+
+    # Kenney ships no bus or trolley mesh at all. Box-body stand-ins for those two
+    # classes were drafted (a Kenney box-truck donor stretched to real bus/streetcar
+    # extents) but the project owner deferred that decision -- a parallel search is
+    # finding real freely-licensed bus/trolley meshes, so the fallback choice is made
+    # later. bus/trolley coverage stays exactly as it was (dl_school_bus / dl_trolley,
+    # both UNKNOWN/INTERNAL-ONLY) -- see e2e.ml.rt_scenes' VEHICLE_CLASS_POOLS.
 }
 
 DOWNLOADED_CAR_ASSET_NAMES = tuple(
@@ -371,7 +611,10 @@ def load_raw_mesh(spec: DownloadedAssetSpec) -> Optional[Tuple[np.ndarray, np.nd
     degrade, matching `rt_gen._load_local_asset`'s contract."""
     if not ensure_extracted(spec.archive_key):
         return None
-    root = os.path.join(raw_dir(), ARCHIVE_SPECS[spec.archive_key].extract_subdir)
+    archive_spec = ARCHIVE_SPECS[spec.archive_key]
+    root = (os.path.join(cache_dir(), archive_spec.source_subdir)
+            if archive_spec.source_subdir is not None
+            else os.path.join(raw_dir(), archive_spec.extract_subdir))
     path = _find_one(root, spec.filename)
     if path is None:
         return None
@@ -395,7 +638,9 @@ def normalize_mesh(verts: np.ndarray, spec: DownloadedAssetSpec
     with `stats = {"length_m", "width_m", "height_m"}` (post-normalization bbox, which
     -- thanks to the permutation -- are exactly the x/y/z extents)."""
     perm = list(spec.axis_permutation)
-    out = verts[:, perm] * float(spec.scale_m)
+    scale = (np.asarray(spec.axis_scale_m, dtype=np.float64) if spec.axis_scale_m is not None
+             else float(spec.scale_m))
+    out = verts[:, perm] * scale
     out = out.copy()
     out[:, 2] -= out[:, 2].min()
     extent = out.max(axis=0) - out.min(axis=0)
