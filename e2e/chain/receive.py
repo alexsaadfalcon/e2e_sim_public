@@ -250,7 +250,7 @@ class RadarCubeBlock:
             # De-interleaving consumes the transmit multiplexing: the cube now has one
             # virtual array and cfg.n_chirps_per_tx slow-time samples. Handing the
             # ORIGINAL cfg to adc_to_rd then fails its own shape check, which blocked
-            # the ti_iwr1443 preset -- the flagship configuration -- outright. Describe
+            # the ti_iwr1443 preset outright. Describe
             # the de-interleaved cube instead. Same pattern dataset.py already uses.
             cfg = dataclasses.replace(
                 cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx

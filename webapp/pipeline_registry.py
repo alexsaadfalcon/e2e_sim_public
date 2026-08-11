@@ -272,12 +272,15 @@ BLOCKS: List[BlockSpec] = [
         enabled_default=False,
         category="stage",
         params=[
-            ParamSpec("preset", "Radar preset", "choice", "ti_iwr1443",
+            ParamSpec("preset", "Radar preset", "choice", "radial_like",
                       choices=["ti_iwr1443", "radial_like"],
                       help="Chirp/frame timing preset shared by this whole ADC-cube "
                            "chain (RT Environment's ray-traced dimensions, this "
-                           "block, Impairments, and Radar Cube below)."),
-            ParamSpec("mimo", "MIMO scheme", "choice", "tdm",
+                           "block, Impairments, and Radar Cube below). radial_like "
+                           "(12 TX x 16 RX = 192 virtual elements) is the default: the "
+                           "detection label grid's 192 azimuth bins only carry "
+                           "information at that array size."),
+            ParamSpec("mimo", "MIMO scheme", "choice", "ddma",
                       choices=["tdm", "ddma", "single"],
                       help="How multiple transmit antennas share the array; "
                            "overrides the preset's own default."),

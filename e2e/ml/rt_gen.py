@@ -1517,7 +1517,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="python -m e2e.ml.rt_gen",
         description="Ray-traced FMCW ADC generation: native Doppler vs per-chirp re-trace.",
     )
-    p.add_argument("--config", default="ti_iwr1443", help="radar preset (e2e.ml.radar_config.PRESETS)")
+    p.add_argument("--config", default="radial_like",
+                   help="radar preset (e2e.ml.radar_config.PRESETS). Defaults to "
+                        "radial_like (12 TX x 16 RX = 192 virtual elements): the label "
+                        "grid's 192 azimuth bins and the metric's match tolerance are only "
+                        "physically answerable at that array size -- see "
+                        "e2e.ml.baseline.resolution_report")
     p.add_argument("--frames", type=int, default=2, help="frames to compare")
     p.add_argument("--chirps", type=int, default=16, help="chirps per frame (CPI truncation)")
     p.add_argument("--samples", type=int, default=128, help="ADC samples per chirp")

@@ -83,8 +83,23 @@ a dense, fast, tightly-packed multi-target scene.
 | `ti_iwr1443` | TDM | 3×4 (12) | 0.0749 m | 38.37 m | 0.4004 m/s | 12.81 m/s |
 | `radial_like` | DDMA | 12×16 (192) | 0.2000 m | 102.40 m | 0.1012 m/s | 1.06 m/s |
 
-`ti_iwr1443` is a TI IWR1443BOOST-like mid-range profile (76–81 GHz band) chosen to be
-within the device's real operating envelope. `radial_like` reproduces the RADIal paper's
+**`radial_like` is the default preset for detection work**, and the choice is forced by
+geometry rather than taste. The detection label grid
+(`LabelGrid.for_config`) has 192 azimuth bins and `metrics.MatchCriterion` matches a
+detection to a target within 0.06 in sin(azimuth). An array of `n_virtual` elements
+resolves no finer than ~`2 / n_virtual`: that is 0.0104 for `radial_like`'s 192 virtual
+elements (one grid cell each, tolerance ≈ 6 resolution cells — the configuration the
+upstream RADIal harness was built around), but 0.1667 for `ti_iwr1443`'s 12, where the
+tolerance is **2.8× tighter than the array can resolve** and both AP and AR are capped by
+geometry no matter which model or corpus is used. `e2e.ml.baseline.resolution_report`
+prints this comparison; run it before trusting any AP on a new config. Measured
+2026-08-10: on a `ti_iwr1443` corpus the classical CFAR baseline scored AP 0.0241 while a
+trained FFTRadNet reached 0.0084 — the harness, not the data, set the ceiling.
+
+`ti_iwr1443` remains available as a TI IWR1443BOOST-like mid-range profile (76–81 GHz
+band) within the device's real operating envelope, and is the right choice for
+signal-chain and ADC work where the detection grid is not involved.
+`radial_like` reproduces the RADIal paper's
 (Rebut et al., CVPR 2022) published resolution/FOV numbers (Table 5) — the paper never
 states its RF chirp parameters, so `radar_config.py` solves for `f0_hz`/`fs_hz`/
 `chirp_period_s` that reproduce the stated numbers; see the inline derivation comments in

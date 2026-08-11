@@ -343,7 +343,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     cheap. Purely for human-eyes review of the object meshes/environment, not part of
     any training-data pipeline.
 
-    `cfg` (a `RadarConfig`, default `e2e.ml.radar_config.PRESETS["ti_iwr1443"]`) only
+    `cfg` (a `RadarConfig`, default `e2e.ml.radar_config.PRESETS["radial_like"]`) only
     sets the radar's array/frequency for scene construction (`rt_gen.build_rt_scene`);
     it plays no role in the image itself. The camera auto-frames the radar node, the
     radar's own amber marker/boresight-rod (see below) AND every object: `_fit_camera_
@@ -379,7 +379,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     from e2e.ml.rt_scenes import build_rt_tier_scenario, tier_summary
 
     if cfg is None:
-        cfg = PRESETS["ti_iwr1443"]
+        cfg = PRESETS["radial_like"]
 
     scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1,
                                       use_local_assets=use_local_assets)
