@@ -6,6 +6,56 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **The detection path now defaults to the `radial_like` preset (12 TX x 16 RX, 192
+  virtual elements).** The 192-bin azimuth label grid and the 0.06 sin(az) match
+  tolerance were inherited from RADIal, where 192 *is* the virtual-element count.
+  Pointing that harness at `ti_iwr1443` (12 virtual elements, Rayleigh 0.167) demanded
+  azimuth accuracy 2.8x finer than the array can resolve, capping AP and AR by geometry
+  rather than by model or corpus quality. `ti_iwr1443` remains available and remains
+  right for signal-chain/ADC work. Measured cost of the switch, one D1 frame: solve
+  0.27 s -> 2.47 s, ADC cube 3.1 MB -> 16.5 MB.
+- **TX PA output mismatch is now modelled physically** (`ripple_model="mismatch"`, the
+  multiple-reflection response parameterized by reflection coefficients and a physical
+  length) instead of an ad hoc sinusoid whose default period implied a 50-150 cm
+  electrical length at 77 GHz. The physical form also carries the group-delay ripple
+  causality requires -- a range bias the magnitude-only model set to exactly zero. The
+  old model is retained as `ripple_model="sinusoid"` since it is its small-mismatch
+  linearization.
+- Mixed precision in `train.py` (`amp`, default on for CUDA). This is a memory decision:
+  SSMRadNet does not fit in 8 GiB without it.
+
+### Added
+- **`e2e/ml/baseline.py` -- a classical (no-learning) CFAR detector**, scored through
+  the identical metric as the networks, because a detection AP means nothing on its own.
+  On the pre-switch corpus it scored AP 0.0241 where a trained FFTRadNet reached 0.0084:
+  the learned detectors were losing to an FFT, which had been invisible for the whole
+  campaign. `resolution_report()` states whether a config's evaluation harness is
+  physically answerable at all and warns when it is not.
+- **Full-vs-reduced dimension contract** (`frames.DIMENSION_*`, `require_dimension`)
+  plus standalone `CompressBlock`/`DecompressBlock` (`e2e/chain/compress.py`).
+  Quantization and compression were entangled in one stage that reconstructed
+  immediately, so reduced-dimension processing was inexpressible and the reconstruction
+  cost was unconditional. Compression is modelled as analog (pre-digitization, reducing
+  ADC count); decompression is explicit because it is lossy for M < N.
+- **`doppler_validity()` / `warn_if_doppler_invalid()`** -- the one-solve Doppler model
+  omits intra-frame range migration, giving an error linear in chirp index at rate
+  `2*pi*B*v/(sqrt(3)*c)` and usable chirps `N = eps*sqrt(3)*c/(2*pi*B*v*T_c)`. Measured
+  on a stable-path-set scene (fitted exponent 0.93, R^2 0.998, matching the formula to
+  2.3%). Note the consequence, pinned by a test: `radial_like`'s 252-chirp frame is
+  outside a 5% bound even at 1 m/s.
+- `cfr_sum_over_paths()` -- the closed-form per-path CFR (convention verified against
+  Sionna's own `cfr()` at 2.3e-4) with an optional, not-yet-default range-migration
+  correction.
+- `detection_loss(cls_normalize=...)`, normalizing the focal term by positive-cell count
+  so `reg_weight` is meaningful. Explicitly NOT a fix for low detection AP -- measurement
+  refuted that, and the docstring records why.
+
+### Licensing
+- **RADIal: reuse and redistribution approved in writing by the publishing author and
+  repository publisher (2026-08-10)**; the missing `LICENSE` file was an oversight. The
+  previous "attribution, remove on request" posture and its scrub contingency are retired.
+
 ### Fixed
 - **Adversarial-review fixes to `e2e/ml/` (pre-merge audit, 6 confirmed findings)**:
   - Clutter is no longer detection ground truth: label encoding/target listing take a
