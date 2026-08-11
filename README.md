@@ -43,6 +43,7 @@ python -m e2e.main.main_comms_link            # OFDM link, BER vs SNR + constell
 python -m e2e.main.main_channel_estimation    # pilot-based estimation, MSE vs SNR
 python -m e2e.main.main_isac                  # joint radar+comm in one multi-node scene
 python -m e2e.main.main_comms_head            # SAME pipeline, swappable radar/comms heads
+python -m e2e.main.main_tx_nonideality        # ideal vs non-ideal TX: EVM, ACPR, sensing cost
 ```
 
 **3. Launch the web UI** (block diagram + scenario editor) — see
@@ -239,6 +240,7 @@ python -m e2e.main.main_comms_link            # OFDM link, BER vs SNR + constell
 python -m e2e.main.main_channel_estimation    # pilot-based estimation, MSE vs SNR
 python -m e2e.main.main_isac                  # joint radar+comm in one multi-node scene
 python -m e2e.main.main_isac_multilink        # consume a multi-link .pkl: radar + comm legs per link
+python -m e2e.main.main_tx_nonideality        # ideal vs non-ideal TX: EVM, ACPR, sensing cost
 ```
 
 `main_isac_multilink` is the end-to-end demo of the **multi-link export**: it generates
@@ -292,6 +294,15 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
 
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
 format, smoke-test results, and model attribution/licensing notes.
+
+`python -m e2e.ml.render_scene` renders a sampled scene (bird's-eye view + the radar's
+own range-azimuth power map) to an animated GIF, e.g. a busy D2 scene with several
+moving vehicles/pedestrians crossing the field of view:
+
+![D2 scene: bird's-eye view and radar range-azimuth map](docs/media/scene_D2.gif)
+
+See also [a quiet single-target D0 scene](docs/media/scene_D0.gif) and a
+[dense multi-target D3 scene](docs/media/scene_D3.gif).
 
 ## Cookbook
 

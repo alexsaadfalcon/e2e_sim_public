@@ -965,3 +965,164 @@ def test_figures_from_outputs_ber_without_array_gain_omits_it_from_title():
     outputs = {"ber": [0.3], "_comms_meta": {"combining": "element0"}}
     figs = figures_from_outputs(outputs)
     assert figs["ber"].layout.title.text == "Comms head BER (element0)"
+
+
+# =============================================================================
+# ADC-cube chain blocks (e2e/chain/*, e2e/environment/blocks.py, e2e/ml/blocks.py)
+# registered in webapp/pipeline_registry.py: rt_environment / waveform / tx_pa /
+# modulate / dechirp / impairment / quantizer / radar_cube / detector / sink.
+# =============================================================================
+
+_ADC_CHAIN_BLOCK_IDS = {
+    "rt_environment", "waveform", "tx_pa", "modulate", "dechirp",
+    "impairment", "quantizer", "radar_cube", "detector", "sink",
+}
+
+
+def test_registry_adc_chain_blocks_all_present_and_unique():
+    from webapp.pipeline_registry import BLOCKS, BLOCKS_BY_ID
+
+    ids = [b.id for b in BLOCKS]
+    assert len(ids) == len(set(ids)), f"duplicate block ids: {ids}"
+    missing = _ADC_CHAIN_BLOCK_IDS - set(BLOCKS_BY_ID)
+    assert not missing, f"new blocks missing from BLOCKS: {missing}"
+
+
+def test_registry_adc_chain_blocks_default_off_and_categorized():
+    """Every new block is opt-in (enabled_default False), so the existing
+    radar/subspace/comms pipeline is unaffected until a user turns one on."""
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+
+    expected_category = {
+        "rt_environment": "source", "waveform": "source",
+        "tx_pa": "stage", "modulate": "stage", "dechirp": "stage",
+        "impairment": "stage", "quantizer": "stage",
+        "radar_cube": "product", "detector": "product", "sink": "product",
+    }
+    for block_id, category in expected_category.items():
+        spec = BLOCKS_BY_ID[block_id]
+        assert spec.enabled_default is False, f"{block_id} should default off"
+        assert spec.toggleable is True, f"{block_id} should be toggleable"
+        assert spec.category == category, f"{block_id} category {spec.category!r}"
+
+
+def test_registry_dechirp_preset_and_mimo_params():
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+
+    params = {p.key: p for p in BLOCKS_BY_ID["dechirp"].params}
+    assert params["preset"].choices == ["ti_iwr1443", "radial_like"]
+    # radial_like (12 TX x 16 RX = 192 virtual) is the default: the detection label grid's
+    # 192 azimuth bins are only physically answerable at that array size (2026-08-10).
+    assert params["preset"].default == "radial_like"
+    assert params["mimo"].choices == ["tdm", "ddma", "single"]
+    assert params["mimo"].default == "ddma"      # matches the radial_like preset
+
+
+def test_registry_imports_without_torch_after_adc_chain_additions():
+    """Re-assert the no-heavy-import invariant now that BLOCKS/EDGES are bigger."""
+    proc = _import_without_torch("webapp.pipeline_registry")
+    assert proc.returncode == 0, (
+        f"webapp.pipeline_registry must still import without torch; stderr:\n{proc.stderr}"
+    )
+
+
+def test_build_elements_includes_adc_chain_nodes():
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    elements = block_diagram.build_elements(default_block_state())
+    node_ids = {e["data"]["id"] for e in elements if "source" not in e["data"]}
+    assert _ADC_CHAIN_BLOCK_IDS <= node_ids
+
+    edges = {(e["data"]["source"], e["data"]["target"])
+             for e in elements if "source" in e["data"]}
+    # spot-check the two new domain bridges are wired into the diagram
+    assert ("tx_pa", "modulate") in edges
+    assert ("interconnect", "dechirp") in edges
+    assert ("dechirp", "impairment") in edges
+
+
+def test_param_editor_runs_for_adc_chain_blocks():
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    for block_id in _ADC_CHAIN_BLOCK_IDS:
+        children = block_diagram.param_editor(block_id, state)
+        assert isinstance(children, list) and children
+
+
+def test_pipeline_runner_lazy_imports_adc_chain_backend():
+    """dechirp/rt_environment must be imported lazily inside run_pipeline, not at
+    module top -- same torch-free-shell requirement as the rest of the runner."""
+    from webapp import pipeline_runner
+
+    run_src = inspect.getsource(pipeline_runner.run_pipeline)
+    assert "from e2e.chain.dechirp import DechirpBlock" in run_src
+    assert "from e2e.environment.blocks import RTEnvironmentBlock" in run_src
+
+
+def test_run_pipeline_dechirp_and_comms_mutually_exclusive(monkeypatch, make_env_block):
+    """dechirp (RX-time ADC chain) and comms (frequency-domain OFDM head) consume
+    different signal domains; enabling both must raise a clear, named PipelineError
+    rather than a confusing FrameContractError deep inside the run."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["dechirp"]["enabled"] = True
+    state["comms"]["enabled"] = True
+    with pytest.raises(pipeline_runner.PipelineError, match="cannot run together"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+
+def test_run_pipeline_detector_enabled_raises_clear_checkpoint_error(
+        monkeypatch, make_env_block):
+    """NeuralDetectorBlock needs a trained checkpoint the UI cannot yet supply (no
+    text/path ParamSpec kind); enabling it must fail with a clear, actionable
+    message instead of a raw ValueError from deep inside the block."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["dechirp"]["enabled"] = True
+    state["detector"]["enabled"] = True
+    with pytest.raises(pipeline_runner.PipelineError, match="checkpoint"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+
+@pytest.mark.gui
+@pytest.mark.slow
+def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
+        monkeypatch, make_env_block):
+    """A real run with only 'dechirp' (+impairment+quantizer) enabled must succeed
+    (no radar_cube/detector/sink so no cfg-dimension mismatch against the synthetic
+    frame) and must NOT produce the frequency-domain products (fft/range_az/...),
+    since the chain crossed into RX time."""
+    pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=2, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["dechirp"]["enabled"] = True
+    state["impairment"]["enabled"] = True
+    state["quantizer"]["enabled"] = True
+    outputs = pipeline_runner.run_pipeline(state, n_steps=2)
+
+    assert isinstance(outputs, dict)
+    for stale_key in ("fft", "range_az", "range_el", "subspace_err"):
+        assert stale_key not in outputs, f"{stale_key} should not appear once dechirp is on"

@@ -211,3 +211,64 @@ def test_detection_loss_with_encoded_labels_target(torch_device):
     total.backward()
     assert pred.grad is not None
     assert torch.all(torch.isfinite(pred.grad))
+
+
+# --------------------------------------------------------------------------------
+# cls_normalize -- the all-background-collapse guard (regression, 2026-08-10)
+# --------------------------------------------------------------------------------
+def test_detection_loss_cls_normalize_divides_by_positive_cells(torch_device):
+    """"positives" is exactly the "none" sum divided by the positive-cell count."""
+    target = torch.zeros((2, 3, 16, 16), device=torch_device)
+    target[0, 0, 3, 4] = 1.0
+    target[1, 0, 9, 2] = 1.0
+    target[1, 0, 9, 3] = 1.0                      # 3 positive cells across the batch
+    pred = torch.full((2, 3, 16, 16), 0.4, device=torch_device)
+
+    _, raw = detection_loss(pred, target, cls_normalize="none")
+    _, norm = detection_loss(pred, target, cls_normalize="positives")
+    assert norm["cls"] == pytest.approx(raw["cls"] / 3.0, rel=1e-5)
+
+
+def test_detection_loss_cls_normalize_shrinks_cls_dominance(torch_device):
+    """On a realistic 128x192 grid the un-normalized focal sum dwarfs the regression term
+    (cls was 99.8% of the total, 33105 of 33181, on the real corpus). Normalizing by the
+    positive count shrinks that dominance by exactly the positive-cell count.
+
+    Note what this test deliberately does NOT claim: normalization does not make the two
+    terms commensurate (cls/reg is still in the thousands here), and it cannot fix a
+    positive/negative imbalance -- it scales positives and negatives by the same factor.
+    It only restores `reg_weight` as a meaningful knob. See `detection_loss`'s docstring.
+    """
+    n_range, n_az = 128, 192
+    target = torch.zeros((1, 3, n_range, n_az), device=torch_device)
+    for r, a in ((40, 60), (41, 60), (40, 61)):    # a 3-cell footprint, as labels.py emits
+        target[0, 0, r, a] = 1.0
+        target[0, 1, r, a] = 0.25
+        target[0, 2, r, a] = -0.15
+    pred = torch.full((1, 3, n_range, n_az), 0.5, device=torch_device)
+
+    _, raw = detection_loss(pred, target, cls_normalize="none")
+    _, norm = detection_loss(pred, target, cls_normalize="positives")
+
+    assert raw["cls"] / raw["reg"] > 1000.0
+    assert norm["cls"] == pytest.approx(raw["cls"] / 3.0, rel=1e-5)
+    assert norm["reg"] == pytest.approx(raw["reg"], rel=1e-9)   # reg term untouched
+
+
+def test_detection_loss_cls_normalize_all_negative_batch_is_finite(torch_device):
+    """Zero positives must not divide by zero -- the denominator is clamped to 1."""
+    target = torch.zeros((1, 3, 8, 8), device=torch_device)
+    pred = torch.full((1, 3, 8, 8), 0.3, device=torch_device, requires_grad=True)
+
+    total, info = detection_loss(pred, target, cls_normalize="positives")
+    total.backward()
+    assert math.isfinite(total.item())
+    assert info["reg"] == pytest.approx(0.0, abs=1e-9)
+    assert torch.any(pred.grad[0, 0] != 0.0)      # classifier still learns from negatives
+
+
+def test_detection_loss_cls_normalize_rejects_unknown_mode(torch_device):
+    target = torch.zeros((1, 3, 4, 4), device=torch_device)
+    pred = torch.full((1, 3, 4, 4), 0.2, device=torch_device)
+    with pytest.raises(ValueError, match="cls_normalize"):
+        detection_loss(pred, target, cls_normalize="bogus")

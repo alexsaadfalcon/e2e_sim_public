@@ -9,9 +9,20 @@ from e2e.subspace.subspace_utils import subspace_dist_frob
 from e2e.afe.afe_utils import quantizer_fp
 from e2e.circuit.rffe_model import get_RX_config, circuit_model_batch
 from e2e import frames
+from e2e.frames import FrameCapabilities
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Frame-contract shorthands used by the per-block `frame_capabilities` declarations
+# below. Every block/stage that consumes 's_pars' declares one; Simulation validates the
+# incoming frame against it before calling the component (see e2e/frames.py).
+# ELEMENTWISE: acts per element/frequency, so extra TX/chirp axes just ride along.
+_ELEMENTWISE = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
+# PER_CHIRP: single-chirp core, mapped over the chirp axis (results stacked, leading axis).
+_PER_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_BROADCAST)
+# SINGLE_CHIRP: the historical contract -- no MIMO, one chirp.
+_SINGLE_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_SINGLE)
 
 
 class SionnaEnvironmentBlock:
@@ -62,6 +73,11 @@ class SionnaEnvironmentBlock:
 
 # RF Frontend Block
 class RFFEBlock:
+    # The circuit model is element-wise in (rx, tx, chirp) -- circuit_model_batch
+    # flattens those three axes into its batch dim -- so MIMO and multi-chirp frames
+    # pass through natively, one independent noise realization per trace.
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
                  physical_scale=False, chirp_dur=None):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
@@ -82,7 +98,10 @@ class RFFEBlock:
         # Chirp/pol dim size is inferred (-1) rather than hardcoded to 2: this makes
         # the reshape a no-op for whatever n_chirp the caller actually passes (1, the
         # single-chirp frames Simulation feeds via CircuitStage; or 2, as some direct
-        # callers/tests still exercise) instead of assuming a pol pair.
+        # callers/tests still exercise) instead of assuming a pol pair. A MIMO frame's
+        # TX axis folds into the same batch dim (element (r, t, c) -> [r, 0, t*n_chirp+c])
+        # -- correct because the circuit acts independently per trace -- and the final
+        # view restores the caller's shape.
         s_pars_shape = s_pars.shape
         s_pars = s_pars.view(self.n, 1, -1, s_pars.shape[-1])
         frame = torch.fft.ifft(s_pars, dim=-1)
@@ -154,7 +173,12 @@ class InterconnectBlock:
       (band-agnostic). Grid points outside the CSV's frequency range clamp to its endpoints.
 
     `case='case3'` is an identity pass-through in either mode.
+
+    The filter multiplies along the frequency axis and broadcasts over every leading
+    axis, so MIMO and multi-chirp frames pass through natively (declared below).
     """
+
+    frame_capabilities = _ELEMENTWISE
 
     def __init__(self, case=None, transfer_csv=None, band_hz=None):
         self.case = case
@@ -197,19 +221,50 @@ class InterconnectBlock:
 
 # Adaptive Feature Extraction Block
 class AFEBlock:
+    """Analog feature extraction: the ADAPTIVE variant of `e2e.chain.compress`.
+
+    Same physical idea as `CompressBlock` -- a large analog receive aperture (this
+    package's array is 32x32 = 1024 elements) is combined down to a far smaller number
+    of digitized channels, so the converter count and every downstream data rate fall by
+    N/M. The two differ in exactly two respects, and share everything else:
+
+    * **How the matrix is chosen.** `CompressBlock` draws one static matrix and keeps it,
+      modelling a fixed combining network. The AFE redraws `A` each frame from the
+      subspace tracker's current estimate (`MeasurementStage` -> `gen_A_ada`), so the
+      measurements steer onto the signal subspace -- the "adaptive" in the name.
+    * **How the weights are quantized.** The AFE uses the low-precision FLOATING-POINT
+      model (constant relative error, a compute-datapath format), which is why `exp`
+      and `mantissa` rather than a bit count. `CompressBlock` uses the uniform model
+      (constant absolute step) appropriate to analog control settings. See
+      `e2e.chain.compress.quantize_weights` -- both live there now, named and
+      contrasted, so the choice is visible instead of implied by which class you picked.
+
+    The combining and reconstruction MATH is shared (`compress.combine` /
+    `compress.reconstruct_aperture`); this class contributes the adaptive draw and the
+    float weight model, not a second implementation of compression.
+    """
+
+    # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
+    # compressed measurement is defined for a single chirp of a single-TX frame.
+    frame_capabilities = _SINGLE_CHIRP
+
     def __init__(self, exp=5, mantissa=6):
         self.exp = exp
         self.mantissa = mantissa
 
     def apply_mat_mul(self, A, V):
-        Aq_real = quantizer_fp(A.real, self.exp, self.mantissa)
-        Aq_imag = quantizer_fp(A.imag, self.exp, self.mantissa)
-        Aq = Aq_real + 1j * Aq_imag
-        X = Aq @ V
-        return Aq, X
+        """Quantize `A` (float model) and combine: returns `(Aq, Aq @ V)`."""
+        from e2e.chain.compress import WEIGHT_FLOAT, combine, quantize_weights
+
+        Aq = quantize_weights(A, model=WEIGHT_FLOAT, exp=self.exp, mantissa=self.mantissa)
+        return Aq, combine(Aq, V)
 
     def reconstruct(self, Aq, X):
-        return torch.linalg.pinv(Aq) @ X
+        """Least-squares aperture from the compressed measurements. LOSSY for M < N --
+        see `compress.reconstruct_aperture`."""
+        from e2e.chain.compress import reconstruct_aperture
+
+        return reconstruct_aperture(Aq, X)
 
 
 # Adaptive subspace-tracking block feeding the AFE.
@@ -234,7 +289,13 @@ class AdaOjaBlock:
     It normalizes the gradient to unit norm and takes a fixed-size step carrying NO
     information about the drift magnitude, so it barely rotates the subspace and does
     not track fast drift. See ROADMAP.md.
+
+    The tracker's state is a d-dimensional basis for ONE aperture snapshot, so it
+    declares the single-chirp/no-MIMO contract: a multi-chirp or MIMO frame would
+    silently change what `d` indexes.
     """
+
+    frame_capabilities = _SINGLE_CHIRP
 
     def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1):
         self.oja = Oja(d, k, eta=eta, fixed_step=True)
@@ -276,6 +337,10 @@ class AdaOjaBlock:
 # dict of updates`), but they run in the FIRST loop of Simulation.feed_forward, in
 # series, each one able to (and expected to) update 's_pars' -- they ARE the pipeline,
 # not products of it. See e2e/simulation.py.
+#
+# Each stage mirrors the `frame_capabilities` of the block it wraps (and names that
+# block via `frame_contract_name`) so Simulation's per-component frame validation
+# reports the block the user actually configured, not the wrapper.
 
 class CircuitStage:
     """RF front-end circuit distortion, applied directly to the single-chirp frame.
@@ -288,8 +353,12 @@ class CircuitStage:
     noise realization per element, no wasted compute.
     """
 
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, rffe_block):
         self.rffe_block = rffe_block
+        self.frame_capabilities = frames.capabilities_of(rffe_block)
+        self.frame_contract_name = f"CircuitStage[{type(rffe_block).__name__}]"
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
@@ -297,25 +366,37 @@ class CircuitStage:
 
 
 class GridStage:
-    """Validates the frame (no MIMO, single chirp) and reshapes it onto the physical
-    receive-array grid."""
+    """Reshapes the frame onto the physical receive-array grid.
+
+    The aperture view is receive-only, so this stage cannot express a TX axis (no
+    MIMO); the chirp axis rides along untouched ([rx_x, rx_y, n_chirp, n_freqs]), and
+    from here on dim 1 is ELEVATION, not TX -- which is why it also flips the state's
+    frame layout to LAYOUT_APERTURE for the validation downstream of it.
+    """
+
+    frame_capabilities = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_NATIVE)
 
     def __init__(self, array_shape):
         self.array_shape = array_shape
 
     def apply(self, state):
         s_pars = state["s_pars"]
-        frames.require_no_mimo(s_pars, "Simulation.feed_forward")
-        frames.require_single_chirp(s_pars, "Simulation.feed_forward")
+        # Redundant with Simulation's pre-call validation, but kept so direct callers
+        # get the named contract error instead of a raw view() size mismatch.
+        frames.require_no_mimo(s_pars, "GridStage")
         s_pars = frames.to_aperture_grid(s_pars, self.array_shape)
-        return {"s_pars": s_pars}
+        return {"s_pars": s_pars, "frame_layout": frames.LAYOUT_APERTURE}
 
 
 class InterconnectStage:
     """Interconnect filtering on the aperture grid."""
 
+    frame_capabilities = _ELEMENTWISE
+
     def __init__(self, interconnect_block):
         self.interconnect_block = interconnect_block
+        self.frame_capabilities = frames.capabilities_of(interconnect_block)
+        self.frame_contract_name = f"InterconnectStage[{type(interconnect_block).__name__}]"
 
     def apply(self, state):
         s_pars = self.interconnect_block.apply_interconnect(state["s_pars"])
@@ -326,15 +407,57 @@ class MeasurementStage:
     """Adaptive compression (optional AFE) + online subspace tracking.
 
     With an AFE block: quantized measurement matrix, quantized matmul, subspace
-    update, then reconstruction -- the reconstructed grid replaces 's_pars'.
+    update, then -- if `reconstruct=True` -- reconstruction, with the reconstructed grid
+    replacing 's_pars'.
     Without an AFE block: the subspace tracker is fed the full-precision compressed
     measurements directly (same A-generation, no quantization); 's_pars' is left
     unchanged.
+
+    `reconstruct` (default True, the historical behaviour) decides whether the chain
+    continues in FULL or REDUCED dimension, which is the architectural choice this
+    stage exists to express. Digitizing a 1024-element aperture needs 1024 converters;
+    combining it down to 16-64 measurements first means that many, and everything
+    downstream then works in the measurement space. Reconstructing immediately -- which
+    this stage used to do unconditionally -- throws that away, pays a lossy pseudo-inverse
+    for M < N, and hides the choice. Set `reconstruct=False` to keep the measurements:
+    's_pars' stays `[M, 1, n_chirp, n_freqs]`, `state['signal_dimension']` becomes
+    `DIMENSION_REDUCED`, and blocks that index physical antennas will be stopped by the
+    frame contract rather than quietly imaging random projections. The subspace tracker
+    itself is content either way -- estimating a subspace from projections is the entire
+    premise of the AFE.
     """
 
-    def __init__(self, afe_block, subspace_block):
+    frame_capabilities = _SINGLE_CHIRP
+
+    def __init__(self, afe_block, subspace_block, reconstruct: bool = True):
         self.afe_block = afe_block
         self.subspace_block = subspace_block
+        self.reconstruct = bool(reconstruct)
+        if afe_block is None and not self.reconstruct:
+            # Without an AFE there is no compression to keep, so the flag would silently
+            # do nothing. Refuse rather than accept a request we cannot honour.
+            raise ValueError(
+                "reconstruct=False requires an afe_block: without one, MeasurementStage "
+                "feeds the tracker directly and never compresses `s_pars`, so there is "
+                "no reduced dimension to stay in."
+            )
+        if afe_block is not None and not self.reconstruct:
+            # Declared per-instance: the same class either preserves the dimension or
+            # crosses it, depending on configuration, so the capability cannot be a
+            # class attribute the way a fixed-behaviour block's can.
+            self.frame_capabilities = frames.FrameCapabilities(
+                accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
+                chirps=_SINGLE_CHIRP.chirps,
+                domain=_SINGLE_CHIRP.domain,
+                emits_dimension=frames.DIMENSION_REDUCED,
+            )
+        # The stage's own math (one A per frame, flatten the aperture to [d, n_freqs])
+        # is single-chirp/no-MIMO regardless of what the blocks declare; name the
+        # blocks it drives so the contract error points at what the user configured.
+        wrapped = [b for b in (subspace_block, afe_block) if b is not None]
+        if wrapped:
+            names = "/".join(type(b).__name__ for b in wrapped)
+            self.frame_contract_name = f"MeasurementStage[{names}]"
 
     def apply(self, state):
         s_pars = state["s_pars"]
@@ -349,9 +472,20 @@ class MeasurementStage:
                 A = self.subspace_block.gen_A_ada()
                 Aq, X = self.afe_block.apply_mat_mul(A, V)
                 self.subspace_block.update(X, Aq)
-            # Final measurement + reconstruction with the converged basis.
+            # Final measurement with the converged basis.
             A = self.subspace_block.gen_A_ada()
             Aq, X = self.afe_block.apply_mat_mul(A, V)
+            if not self.reconstruct:
+                # Stay in the measurement space: dim 0 now counts MEASUREMENTS, not
+                # antennas, and the contract says so for everything downstream.
+                n_chirp, n_freqs = s_pars.shape[2], s_pars.shape[3]
+                return {
+                    "s_pars": X.view(X.shape[0], 1, n_chirp, n_freqs),
+                    "U": self.subspace_block.oja.U,
+                    "sensing_matrix": Aq,
+                    "aperture_shape": (s_pars.shape[0], s_pars.shape[1]),
+                    "signal_dimension": frames.DIMENSION_REDUCED,
+                }
             Xt = self.afe_block.reconstruct(Aq, X)
             s_pars = Xt.view(s_pars.shape)
             return {"s_pars": s_pars, "U": self.subspace_block.oja.U}
@@ -428,15 +562,23 @@ class FFTBlock:
     ``window`` optionally tapers the aperture (angle) axes for sidelobe control
     (None / 'hann' / 'hamming'); it never touches the range axis. The default None
     is the untapered map (numbers unchanged from the uniform-aperture case).
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'fft' is
+    ``[bins, bins]`` for the single-chirp frames the pipeline has always produced, and
+    ``[n_chirp, bins, bins]`` ONLY when n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "FFTBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'fft': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         # Full-band range compression (freq -> range); NOT truncated to `bins`.
         range_full = torch.fft.fft(data, dim=2)     # [az, el, n_freqs]
@@ -455,7 +597,7 @@ class FFTBlock:
             ap = torch.fft.fft(torch.fft.fft(blk, self.bins, 0), self.bins, 1)
             ap = torch.fft.fftshift(torch.fft.fftshift(ap, 0), 1)
             acc = acc + torch.sum(torch.abs(ap) ** 2, dim=2)
-        return {'fft': acc}
+        return acc
 
 
 class RangeAzBlock:
@@ -472,15 +614,23 @@ class RangeAzBlock:
     by a COHERENT sum (an implicit broadside beam) that nulled off-broadside targets.
 
     ``window`` optionally tapers the azimuth aperture (None / 'hann' / 'hamming').
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_az' is
+    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
+    n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "RangeAzBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'range_az': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         w_az = _aperture_window(self.window, n_az, data.device)
         # Accumulate power over the collapsed (elevation) axis one element at a
@@ -494,8 +644,7 @@ class RangeAzBlock:
             a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
             r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
             power = power + torch.abs(r) ** 2
-        range_az = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
-        return {'range_az': range_az}
+        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
 
 
 class RangeElBlock:
@@ -506,15 +655,23 @@ class RangeElBlock:
     compression uses the full band and is power-binned to ``bins`` gates.
 
     ``window`` optionally tapers the elevation aperture (None / 'hann' / 'hamming').
+
+    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_el' is
+    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
+    n_chirp > 1.
     """
+
+    frame_capabilities = _PER_CHIRP
 
     def __init__(self, bins=256, window=None):
         self.bins = bins
         self.window = window
 
     def apply(self, state_dict):
-        frames.require_single_chirp(state_dict['s_pars'], "RangeElBlock")
-        data = frames.chirp0(state_dict['s_pars'])  # [az, el, n_freqs]
+        return {'range_el': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+
+    def _map(self, data):
+        # data: one chirp's aperture slab [az, el, n_freqs]
         n_az, n_el, n_freqs = data.shape
         w_el = _aperture_window(self.window, n_el, data.device)
         # Accumulate power over the collapsed (azimuth) axis one element at a time.
@@ -526,11 +683,27 @@ class RangeElBlock:
             a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
             r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
             power = power + torch.abs(r) ** 2
-        range_el = _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
-        return {'range_el': range_el}
+        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
 
 
 class SubspaceErrorBlock:
+    # Reads the tracker's basis (state['U'] / state['U_true']), not the frame, but it is
+    # only meaningful alongside the single-chirp/no-MIMO subspace path, so it declares
+    # that contract for the frame AXES.
+    #
+    # DIMENSION_ANY, though, and deliberately: this block never touches `s_pars`, so
+    # whether the aperture has been compressed is none of its business. Declaring
+    # full-dimension (the default) made it reject the very configuration
+    # `MeasurementStage(reconstruct=False)` exists to enable -- tracking a subspace from
+    # compressed measurements and then measuring the error -- which would have forced a
+    # pointless, lossy DecompressBlock in front of a block that reads no frame at all.
+    frame_capabilities = frames.FrameCapabilities(
+        accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
+        chirps=_SINGLE_CHIRP.chirps,
+        domain=_SINGLE_CHIRP.domain,
+        dimension=frames.DIMENSION_ANY,
+    )
+
     def __init__(self):
         self.metric = subspace_dist_frob
 

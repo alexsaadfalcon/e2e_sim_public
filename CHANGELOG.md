@@ -6,6 +6,71 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **The detection path now defaults to the `radial_like` preset (12 TX x 16 RX, 192
+  virtual elements).** The 192-bin azimuth label grid is inherited from RADIal, where
+  192 *is* the virtual-element count; the 0.06 sin(az) match tolerance is this project's
+  own choice for a polar criterion (RADIal itself matches on cartesian box IoU >= 0.5).
+  Pointing that harness at `ti_iwr1443` (12 virtual elements, Rayleigh 0.167) demanded
+  azimuth accuracy 2.8x finer than the array can resolve, capping AP and AR by geometry
+  rather than by model or corpus quality. `ti_iwr1443` remains available and remains
+  right for signal-chain/ADC work. Measured cost of the switch, one D1 frame: solve
+  0.27 s -> 2.47 s, ADC cube 3.1 MB -> 16.5 MB.
+- **TX PA output mismatch is now modelled physically** (`ripple_model="mismatch"`, the
+  multiple-reflection response parameterized by reflection coefficients and a physical
+  length) instead of an ad hoc sinusoid whose default period implied a 50-150 cm
+  electrical length at 77 GHz. The physical form also carries the group-delay ripple
+  causality requires -- a range bias the magnitude-only model set to exactly zero. The
+  old model is retained as `ripple_model="sinusoid"` since it is its small-mismatch
+  linearization.
+- Mixed precision in `train.py` (`amp`, default on for CUDA). Measured saving on
+  SSMRadNet is ~5% of peak memory (6.02 -> 5.74 GiB on an 8 GiB card), not the halving
+  an activation-memory argument predicts, and it does not buy a larger batch. Batch size
+  is what decides whether that model fits.
+
+### Added
+- **`e2e/main/main_tx_nonideality.py` -- ideal vs non-ideal transmitter, side by side.**
+  The TX PA was wired into the radar corpus generator and the webapp but into none of the
+  comms/ISAC examples, so the domain where a high-PAPR waveform stresses a PA hardest
+  never exercised it. Runs one OFDM frame through two otherwise-identical transmit paths:
+  EVM 3.56% (ideal) vs 22.02% (non-ideal) at 0 dB backoff, converging to 3.71% at 12 dB;
+  ACPR -20.4 dB non-ideal, vs an ideal path at the numerical floor (<= -140 dB; the exact floor varies a few dB with device/BLAS, so no precise figure is quoted); sensing PSL 19.1 -> 18.3 dB; measured PAPR 9.27 dB. The
+  printed summary and the PSD figure both state that the ~0 ACPR asymmetry is structural,
+  because the PA model is memoryless, so the plot is not mistaken for a hardware
+  prediction.
+- **`e2e/ml/baseline.py` -- a classical (no-learning) CFAR detector**, scored through
+  the identical metric as the networks, because a detection AP means nothing on its own.
+  On the pre-switch `ti_iwr1443` corpus it scored AP 0.0241 where a trained FFTRadNet
+  reached 0.0084: the learned detector was losing to an FFT, which had been invisible for
+  the whole campaign. On a `radial_like` pilot corpus -- where the harness is physically
+  answerable -- the ordering FLIPS: baseline AP 0.0044 against the model's 0.0168, a ~3.9x
+  win for the model. That is the result that justifies the preset switch. (400 frames,
+  12 epochs; an early number, not a headline.) `resolution_report()` states whether a config's evaluation harness is
+  physically answerable at all and warns when it is not.
+- **Full-vs-reduced dimension contract** (`frames.DIMENSION_*`, `require_dimension`)
+  plus standalone `CompressBlock`/`DecompressBlock` (`e2e/chain/compress.py`).
+  Quantization and compression were entangled in one stage that reconstructed
+  immediately, so reduced-dimension processing was inexpressible and the reconstruction
+  cost was unconditional. Compression is modelled as analog (pre-digitization, reducing
+  ADC count); decompression is explicit because it is lossy for M < N.
+- **`doppler_validity()` / `warn_if_doppler_invalid()`** -- the one-solve Doppler model
+  omits intra-frame range migration, giving an error linear in chirp index at rate
+  `2*pi*B*v/(sqrt(3)*c)` and usable chirps `N = eps*sqrt(3)*c/(2*pi*B*v*T_c)`. Measured
+  on a stable-path-set scene (fitted exponent 0.93, R^2 0.998, matching the formula to
+  2.3%). Note the consequence, pinned by a test: `radial_like`'s 252-chirp frame is
+  outside a 5% bound even at 1 m/s.
+- `cfr_sum_over_paths()` -- the closed-form per-path CFR (convention verified against
+  Sionna's own `cfr()` at 2.3e-4) with an optional, not-yet-default range-migration
+  correction.
+- `detection_loss(cls_normalize=...)`, normalizing the focal term by positive-cell count
+  so `reg_weight` is meaningful. Explicitly NOT a fix for low detection AP -- measurement
+  refuted that, and the docstring records why.
+
+### Licensing
+- **RADIal: reuse and redistribution approved in writing by the publishing author and
+  repository publisher (2026-08-10)**; the missing `LICENSE` file was an oversight. The
+  previous "attribution, remove on request" posture and its scrub contingency are retired.
+
 ### Fixed
 - **Adversarial-review fixes to `e2e/ml/` (pre-merge audit, 6 confirmed findings)**:
   - Clutter is no longer detection ground truth: label encoding/target listing take a
@@ -58,6 +123,37 @@ semantic versioning.
   - Neither upstream repo ships a `LICENSE` file; both ports carry attribution headers
     and are pending explicit license confirmation before public redistribution (see
     `e2e/ml/README.md`).
+- **Corpus v1 + tuning infrastructure for `e2e/ml`**: `corpus_v1`, a fixed, regeneratable
+  four-tier `ti_iwr1443` dataset (D0 400 / D1 1000 / D2 1500 / D3 2000 frames, ~14 GB;
+  see `e2e/ml/README.md` for the exact regen commands per tier) plus the tooling built to
+  generate, tune against, and validate it:
+  - **v2 manifest format**: `dataset.py` now stores raw ADC (not a precomputed
+    range-Doppler "input") plus scene-grouped `sequences` alongside the flat per-split
+    file lists, so a future sequence-aware loader has frame-order/scene grouping for
+    free; `manifest_version=1` corpora still load unchanged.
+  - `sweep.py`: a `reg_weight`/`lr`/`gamma` hyperparameter sweep driver with a
+    trailing-window objective and an AR-decline guard, plus `pick_best()` selection
+    logic — used to derive the recipe below.
+  - `stats_report.py`: a corpus-composition/statistical-validation reporter (targets-
+    and clutter-per-frame, veh:ped ratio, footprint-overlap and radial-velocity
+    clamp-saturation checks). Reports are generated locally (the `report/` directory is
+    not tracked): `python -m e2e.ml.stats_report --manifest <manifest.json>`.
+  - `render_scene.py`: bird's-eye + radar-view animated GIFs of `e2e.ml.scenes` scenes;
+    three showcase GIFs are committed under `docs/media/` and embedded in the README.
+  - **Tuned recipe + confirmed baseline numbers**: a 10-trial sweep on a smaller pilot
+    D1 set picked `lr=3e-4`, `gamma=2`, `reg_weight=100` (kept); `gamma=0` was rejected
+    after its validation-AP spikes (0.55-0.67) were traced to a near-zero-recall
+    checkpoint whose AP the metric's zero-detection-threshold exclusion inflates — the
+    same mirage reproduces independently in the confirmed `corpus_v1` baseline. FFTRadNet
+    gamma=2 (40 epochs) reaches test AP 0.030-0.177 / AR 0.095-0.183 across the D0-D3
+    tiers (not a difficulty ranking — see `e2e/ml/README.md`); SSMRadNet (12 epochs, same
+    recipe, unswept for that architecture) reaches D1 test AP 0.196 / AR 0.304 / range
+    RMSE 0.070 m on a step-comparable budget, with the appropriate single-seed/
+    single-tier/hyperparameters-not-tuned-for-it caveats.
+  - `metrics.evaluate_dataset` now also returns `n_defined_precision_thresholds`, the
+    count of confidence thresholds with defined (non-NaN) precision backing the AP mean
+    — the diagnostic that surfaced the gamma=0 mirage above (an AP resting on 1-2
+    thresholds is a small-sample artifact, not a quality signal).
 - **Comms head with spatial combining**: `ModemBlock` gains a `combining` mode
   (`"element0"` the historical single-tap SISO shortcut / `"mrc"` full-aperture
   maximum-ratio combining / `"subspace"` broadband combining using the AdaOja

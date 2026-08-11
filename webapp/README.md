@@ -36,6 +36,8 @@ dataflow edges are **derived from a single registry** (`pipeline_registry.py`,
 the `BLOCKS`/`EDGES` definitions), mirroring `e2e/blocks.py` and the feed-forward
 order in `e2e/simulation.py`:
 
+The default (frequency-domain) chain:
+
 ```
 Sionna Environment -> RFFE -> Interconnect -> AFE -> AdaOja Subspace
                                                          |-> FFT
@@ -43,6 +45,29 @@ Sionna Environment -> RFFE -> Interconnect -> AFE -> AdaOja Subspace
                                                          |-> Range-Elevation
                                                          `-> Subspace Error
 ```
+
+An opt-in **ADC-cube chain** is also available, selectable block by block. It swaps the
+precomputed-frame source for live ray tracing and carries the signal all the way into the
+receiver's digitized time domain, where the frequency-domain products above no longer
+apply and are replaced by the radar cube:
+
+```
+RT Environment ->  (Waveform -> TX PA) -.
+                                        `-> Modulate -> Dechirp -> Impairments
+                                                                       |
+                                            Quantizer (ADC) -> Radar Cube -> Detector
+                                                                       `-> Frame Sink
+```
+
+* **RT Environment** ray-traces a scenario live (needs Sionna) instead of replaying `.pkl`
+  frames, and is what supplies the multi-chirp frame the Radar Cube needs.
+* **Waveform / TX PA / Modulate** are the transmit tributary: a generated waveform, the
+  power amplifier's AM/AM + AM/PM distortion and mismatch ripple, then modulation onto the
+  channel. Leave them off for an ideal transmitter.
+* **Dechirp** crosses into receive time; its `preset` sets the chirp/frame timing for this
+  whole chain. **Impairments** adds leakage, clutter and phase noise; **Quantizer** is the
+  ADC; **Radar Cube** forms range-Doppler; **Detector** runs a trained model; **Frame Sink**
+  writes frames to disk for reuse.
 
 Click a block to toggle it on/off and edit its key params
 (RFFE `signal_scaling`/`chirp_dur`, AFE `exp`/`mantissa`, FFT `bins`,
@@ -85,13 +110,15 @@ Plotly figures from the most recent run: FFT, Range-Azimuth, Range-Elevation
   frames via `e2e.environment.sionna_iterator`. Missing frames (e.g. selecting
   `etoile` with no `etoile.pkl`) surface a clear "generate frames first" message
   instead of crashing. Generate frames first via the Scenario tab.
-* **Backend block-combination constraint.** The current, unmodified
-  `e2e/simulation.feed_forward()` (a) reads `PRX` unconditionally — only assigned
-  when the RFFE block is present — and (b) takes an as-yet-unwired subspace-update
-  path when AFE is off. So a clean run currently requires **RFFE + AFE + Subspace
-  enabled** (the defaults). `pipeline_runner.py` detects the incompatible combos
-  up front and explains, rather than letting the run crash. These constraints live
-  in `e2e/` and are out of scope for this UI to change.
+* **Block-combination constraints (updated).** The old requirement that a clean run
+  needed **RFFE + AFE + Subspace** all enabled no longer holds: `e2e/simulation.py`
+  now handles RFFE-off, AFE-off and subspace-off cleanly, and each combination has
+  been run end to end. What `pipeline_runner.py` still rejects up front — with a
+  specific `PipelineError` naming the cause and the fix, rather than a crash — are
+  the genuinely incompatible pairings: **Radar Cube** without the **RT Environment**
+  source (precomputed `.pkl` frames are single-chirp, so there is no chirp axis to
+  fold), the **Detector** without a checkpoint, and the **Comms head** alongside the
+  ADC-cube chain (both consume the frequency-domain frame).
 * The 2D editor edits positions/roles/arrays/motion through the JSON box (the
   source of truth) rather than drag-on-canvas, keeping the `e2e.scenario` schema
   authoritative and round-trippable.

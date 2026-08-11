@@ -9,6 +9,8 @@ This class provides a clean interface for:
 - Computing and extracting channel responses
 """
 
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 import sionna.rt as rt
@@ -92,48 +94,89 @@ class SionnaEnvironment:
         print(f"Scene loaded with frequency: {float(self.scene.frequency.numpy())/1e9:.1f} GHz")
         print(f"Number of objects in scene: {len(self.scene.objects)}")
         
-    def add_cars(self, 
+    # Sionna's 17 bundled car meshes (Apache-2.0, same license as the sionna-rt
+    # package they ship in): the standalone `low_poly_car.ply` plus the
+    # `simple_street_canyon_with_cars` demo's 16 duplicate-geometry, differently
+    # positioned/named copies (`car-0..7.ply` / `car_1..8.ply`). Duplicated here
+    # (rather than imported) to keep this module independent of the `e2e.ml`
+    # package -- see `e2e.ml.rt_gen.CAR_ASSET_NAMES` for the canonical list.
+    _CAR_ASSET_NAMES = (
+        ("low_poly_car",)
+        + tuple(f"car-{i}" for i in range(8))
+        + tuple(f"car_{i}" for i in range(1, 9))
+    )
+
+    @classmethod
+    def _car_mesh_path(cls, name: str) -> str:
+        scenes_dir = os.path.dirname(rt.scene.sphere)
+        if name == "low_poly_car":
+            return os.path.join(scenes_dir, "low_poly_car.ply")
+        return os.path.join(scenes_dir, "simple_street_canyon_with_cars", "meshes", f"{name}.ply")
+
+    def add_cars(self,
                  car_material: Optional[rt.ITURadioMaterial] = None,
-                 car_height_offset: float = 3.0):
+                 car_height_offset: float = 3.0,
+                 shape: str = "car",
+                 car_scaling: Optional[float] = None):
         """
         Add cars to the scene in a circular pattern.
-        
+
         Args:
             car_material: Material for the cars (default: red metal)
             car_height_offset: Height offset for receivers above cars
+            shape: "car" (default) places one of Sionna's 17 bundled Apache-2.0 car
+                meshes (cycled by index, see `_CAR_ASSET_NAMES`) at real automotive
+                scale (no extra scaling needed). "sphere" is an explicit opt-out that
+                keeps the previous sphere-primitive placeholder behaviour (e.g. for
+                tests/scenes that only need a simple, cheap-to-trace scatterer and
+                don't care that it doesn't look like a car).
+            car_scaling: Overrides the shape's default scaling (1.0 for "car" meshes,
+                which already model a real ~4.4 m car; 5.0 for "sphere", matching the
+                original placeholder's size).
         """
         print(f"Adding {self.num_cars} cars to the scene...")
-        
+
         # Create car material if not provided
         if car_material is None:
             car_material = rt.ITURadioMaterial("car-material",
                                              "metal",
                                              thickness=0.01,
                                              color=(0.8, 0.1, 0.1))
-        
+
+        if shape == "sphere":
+            fnames = [rt.scene.sphere] * self.num_cars
+            default_scaling = 5.0
+        elif shape == "car":
+            fnames = [self._car_mesh_path(self._CAR_ASSET_NAMES[i % len(self._CAR_ASSET_NAMES)])
+                     for i in range(self.num_cars)]
+            default_scaling = 1.0
+        else:
+            raise ValueError(f"unknown shape {shape!r}; expected 'car' or 'sphere'")
+        scaling = car_scaling if car_scaling is not None else default_scaling
+
         # Create cars
-        self.cars = [rt.SceneObject(fname=rt.scene.sphere,
+        self.cars = [rt.SceneObject(fname=fnames[i],
                                   name=f"car-{i}",
                                   radio_material=car_material)
                     for i in range(self.num_cars)]
-        
+
         # Add cars to scene
         self.scene.edit(add=self.cars)
-        
+
         # Position cars in a circle
         self._position_cars()
 
         for i in range(self.num_cars):
-            self.cars[i].scaling = 5.0
-        
+            self.cars[i].scaling = scaling
+
         # Store car top positions for easy access
         self.car_tops = []
         for i in range(self.num_cars):
-            car_top = [self.cars_positions.x[i], 
-                      self.cars_positions.y[i], 
+            car_top = [self.cars_positions.x[i],
+                      self.cars_positions.y[i],
                       self.cars_positions.z[i] + car_height_offset]
             self.car_tops.append(car_top)
-        
+
         print(f"Added {self.num_cars} cars to the scene")
         
     def _position_cars(self):

@@ -212,6 +212,135 @@ def test_ssmradnet_overfits_a_fixed_batch(torch_device):
     assert all(b < a for a, b in zip(losses, losses[1:])), losses
 
 
+# --------------------------------------------------------------------------------
+# SSMRadNet, input_mode="adc" (raw-ADC stem)
+# --------------------------------------------------------------------------------
+def _small_adc_net(device, **kwargs):
+    """A tiny `input_mode="adc"` net: [B, 8, n_samples=32, n_chirps=6] -> detection."""
+    kwargs.setdefault("d_model", 16)
+    kwargs.setdefault("d_state", 8)
+    kwargs.setdefault("n_layers_fast", 1)
+    kwargs.setdefault("n_layers_slow", 1)
+    kwargs.setdefault("head_channels", 8)
+    return SSMRadNet(8, 32, 6, 8, 12, backend="torch", input_mode="adc", **kwargs).to(device)
+
+
+def test_adcstem_forward_shape_and_detection_contract(torch_device):
+    torch.manual_seed(10)
+    net = _small_adc_net(torch_device)
+    x = torch.randn(2, 8, 32, 6, device=torch_device)
+
+    out = net(x)
+    assert set(out) == {"detection"}
+    det = out["detection"]
+    assert det.shape == (2, 3, 8, 12)
+    assert det.device.type == torch.device(torch_device).type
+    assert det[:, 0].min() >= 0.0 and det[:, 0].max() <= 1.0
+    assert torch.isfinite(det).all()
+
+
+def test_adcstem_disables_pre_scan_chirp_pooling(torch_device):
+    """`input_mode="adc"` must not pool the chirp axis before any SSM sees it."""
+    net = _small_adc_net(torch_device)
+    assert isinstance(net.doppler_pool, torch.nn.Identity)
+    assert net.n_doppler_tokens == net.n_doppler_in == 6
+    assert isinstance(net.stem, type(net.stem))  # sanity: constructed without error
+    from e2e.ml.models.ssmradnet import _ADCStem
+    assert isinstance(net.stem, _ADCStem)
+
+
+def test_adcstem_grads_finite(torch_device):
+    torch.manual_seed(11)
+    net = _small_adc_net(torch_device).train()
+    x = torch.randn(2, 8, 32, 6, device=torch_device)
+
+    det = net(x)["detection"]
+    det.sum().backward()
+    grads = [p.grad for p in net.parameters()]
+    assert all(g is not None for g in grads)
+    assert all(torch.isfinite(g).all() for g in grads)
+    assert max(g.abs().max().item() for g in grads) > 0.0
+
+
+def test_adcstem_overfits_a_fixed_batch(torch_device):
+    """3 optimizer steps on one fixed batch must strictly reduce the loss (adc mode)."""
+    torch.manual_seed(12)
+    net = _small_adc_net(torch_device).train()
+    x = torch.randn(4, 8, 32, 6, device=torch_device)
+    target = torch.rand(4, 3, 8, 12, device=torch_device)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+
+    losses = []
+    for _ in range(3):
+        opt.zero_grad()
+        loss = F.mse_loss(net(x)["detection"], target)
+        loss.backward()
+        opt.step()
+        losses.append(loss.item())
+    with torch.no_grad():
+        losses.append(F.mse_loss(net(x)["detection"], target).item())
+
+    assert all(b < a for a, b in zip(losses, losses[1:])), losses
+
+
+def test_adcstem_fast_axis_scan_is_causal(torch_device):
+    """The sample-axis (fast) scan must stay causal through the pointwise ADC stem.
+
+    Perturbing raw sample index `t` (across all channels/chirps) must leave every
+    fast-axis-scan output at position < t untouched -- checked directly on
+    `net.stem` + `net.fast_ssm` (before `range_pool`/the conv decoder mix positions
+    together spatially, which would otherwise mask a causality break in the scan
+    itself).
+    """
+    torch.manual_seed(13)
+    net = _small_adc_net(torch_device).eval()
+    x = torch.randn(2, 8, 32, 6, device=torch_device)
+    t = 20
+    x_perturbed = x.clone()
+    x_perturbed[:, :, t, :] += 5.0
+
+    def _fast_axis_seq(inp):
+        z = net.doppler_pool(net.stem(inp))                       # identity pool for adc
+        b, d_model, r, n_dop = z.shape
+        seq = z.permute(0, 3, 2, 1).reshape(b * n_dop, r, d_model)
+        return net.fast_ssm(seq)
+
+    with torch.no_grad():
+        y = _fast_axis_seq(x)
+        y_perturbed = _fast_axis_seq(x_perturbed)
+
+    torch.testing.assert_close(y[:, :t], y_perturbed[:, :t], rtol=0, atol=1e-5)
+    assert (y[:, t:] - y_perturbed[:, t:]).abs().max() > 1e-3
+
+
+def test_input_mode_rd_default_unchanged(torch_device):
+    """`input_mode="rd"` (implicit default) matches an explicit `input_mode="rd"` build.
+
+    Regression guard: adding the `input_mode`/adc path must not perturb the existing
+    RD default in any way (same stem type, same pooling, identical output given the
+    same seed/weights).
+    """
+    torch.manual_seed(14)
+    net_default = _small_net(torch_device)
+    torch.manual_seed(14)
+    net_explicit = _small_net(torch_device, input_mode="rd")
+
+    assert net_default.input_mode == "rd"
+    assert type(net_default.stem) is type(net_explicit.stem)
+    assert isinstance(net_default.doppler_pool, torch.nn.AdaptiveAvgPool2d)
+
+    x = torch.randn(2, 24, 128, 32, device=torch_device)
+    with torch.no_grad():
+        out_default = net_default(x)["detection"]
+        out_explicit = net_explicit(x)["detection"]
+    torch.testing.assert_close(out_default, out_explicit)
+
+
+def test_ssmradnet_rejects_unknown_input_mode(torch_device):
+    with pytest.raises(ValueError, match="input_mode"):
+        SSMRadNet(8, 32, 6, 8, 12, backend="torch", input_mode="raw")
+
+
 def test_ssmradnet_forward_wall_clock(torch_device):
     """A python for-loop over L=512 would blow this budget by orders of magnitude.
 

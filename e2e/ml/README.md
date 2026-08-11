@@ -83,8 +83,23 @@ a dense, fast, tightly-packed multi-target scene.
 | `ti_iwr1443` | TDM | 3×4 (12) | 0.0749 m | 38.37 m | 0.4004 m/s | 12.81 m/s |
 | `radial_like` | DDMA | 12×16 (192) | 0.2000 m | 102.40 m | 0.1012 m/s | 1.06 m/s |
 
-`ti_iwr1443` is a TI IWR1443BOOST-like mid-range profile (76–81 GHz band) chosen to be
-within the device's real operating envelope. `radial_like` reproduces the RADIal paper's
+**`radial_like` is the default preset for detection work**, and the choice is forced by
+geometry rather than taste. The detection label grid
+(`LabelGrid.for_config`) has 192 azimuth bins and `metrics.MatchCriterion` matches a
+detection to a target within 0.06 in sin(azimuth). An array of `n_virtual` elements
+resolves no finer than ~`2 / n_virtual`: that is 0.0104 for `radial_like`'s 192 virtual
+elements (one grid cell each, tolerance ≈ 6 resolution cells — the configuration the
+upstream RADIal harness was built around), but 0.1667 for `ti_iwr1443`'s 12, where the
+tolerance is **2.8× tighter than the array can resolve** and both AP and AR are capped by
+geometry no matter which model or corpus is used. `e2e.ml.baseline.resolution_report`
+prints this comparison; run it before trusting any AP on a new config. Measured
+2026-08-10: on a `ti_iwr1443` corpus the classical CFAR baseline scored AP 0.0241 while a
+trained FFTRadNet reached 0.0084 — the harness, not the data, set the ceiling.
+
+`ti_iwr1443` remains available as a TI IWR1443BOOST-like mid-range profile (76–81 GHz
+band) within the device's real operating envelope, and is the right choice for
+signal-chain and ADC work where the detection grid is not involved.
+`radial_like` reproduces the RADIal paper's
 (Rebut et al., CVPR 2022) published resolution/FOV numbers (Table 5) — the paper never
 states its RF chirp parameters, so `radar_config.py` solves for `f0_hz`/`fs_hz`/
 `chirp_period_s` that reproduce the stated numbers; see the inline derivation comments in
@@ -138,26 +153,88 @@ a `meta` 0-d unicode array (JSON: per-frame provenance + `targets` + `scene` sum
 train/val/test split (default 80/10/10) is a deterministic, unshuffled slice over frame
 index — reproducible for a given `(seed, n_frames)`, not random per run.
 
-## Smoke-train results
+## Corpus v1 + baseline results
 
-CUDA smoke test on `ti_iwr1443` / tier D0 (160 frames, 128 train). These are
-**plumbing-verification numbers, not benchmarks** — no hyperparameter search, small
-batches (memory-bound for SSMRadNet, see below), and AP is measured with the honest
-metric (vacuous thresholds excluded — see "AP semantics" below; an earlier draft
-reported AP 0.78 for the same weights purely through that inflation, see CHANGELOG):
+`corpus_v1` is a fixed, regeneratable four-tier `ti_iwr1443` corpus used for all the
+numbers below (manifest_version 2, raw-ADC storage, scene-grouped `sequences` — see
+"Data format"). ~14 GB on disk; regenerate any tier with:
 
-| Model | Epochs / batch | Loss (start → end) | Held-out test AP | Test AR | Range RMSE (matched) |
-| --- | --- | --- | --- | --- | --- |
-| FFTRadNet | 120 / 8 | 36.7k → 61 | 0.31 | 0.19 | 0.000 m |
-| SSMRadNet | 40 / 2 | 5.3k → 53 | ~0.00 | 0.10 | 0.000 m |
+| Tier | Frames | Seed | Regenerate |
+| --- | --- | --- | --- |
+| D0 | 400 | 1000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D0 --n 400 --seed 1000 --out e2e/ml/datasets/corpus_v1` |
+| D1 | 1000 | 2000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D1 --n 1000 --seed 2000 --out e2e/ml/datasets/corpus_v1` |
+| D2 | 1500 | 3000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D2 --n 1500 --seed 3000 --out e2e/ml/datasets/corpus_v1` |
+| D3 | 2000 | 4000 | `python -m e2e.ml.dataset --config ti_iwr1443 --tier D3 --n 2000 --seed 4000 --out e2e/ml/datasets/corpus_v1` |
 
-What this smoke does and does not establish: losses fall by ~3 orders of magnitude,
-recall is real, and matched detections localize to **exactly the right bin** (0.000 m
-RMSE — the label/decode chain is exact); but absolute AP at this scale is weak, and the
-loss balance inherited from upstream (`reg_weight=100`, tuned for RADIal's real data)
-visibly starves the objectness term on these synthetic scenes. Proper training runs and
-loss/hyperparameter tuning are deliberately downstream users' work (tracked as a
-ROADMAP follow-up).
+`e2e.ml.stats_report` (run it on your regenerated corpus: `python -m e2e.ml.stats_report
+--manifest <manifest.json>`; reports are local, not tracked) confirms the ladder is structurally
+monotone as designed — targets/frame 1 → 7.9 and clutter/frame 0 → 29.6 from D0 to D3,
+zero label-footprint overlaps at every tier — and surfaces the one caveat worth knowing
+before training on D2/D3: 24.7%/22.5% of targets sit at the radial-velocity clamp cap
+(`scenes.py`'s 80%-of-max-velocity anti-alias clamp), so the sampled speed range does
+not translate into a proportionally wider realized Doppler distribution at those tiers.
+
+### Recipe
+
+A 10-trial sweep (see `e2e.ml.sweep`; run on a smaller pilot D1 — seed 500, 300 frames,
+not `corpus_v1`'s D1) picked **`lr=3e-4`, `gamma=2` (focal loss), `reg_weight=100`
+(upstream default, kept)** — `lr=3e-4` dominated `1e-4` at every `reg_weight` tried, and
+`reg_weight` itself had little effect at that learning rate. More epochs beat more
+tuning at this scale.
+
+The sweep's `gamma=0` (plain BCE) trials looked *better* on validation — AP spikes up to
+0.55–0.67 mid-training — but that is a mirage, not a signal: those gamma=0 checkpoints'
+best-by-val-AP epoch has collapsed to near-zero recall (about one correct detection
+across the whole split), and our AP metric excludes zero-detection confidence
+thresholds from its mean instead of scoring them as zero, so a single lucky hit prints
+as AP≈0.5–0.7. This reproduces on two independent datasets/sweeps, not just one run, and
+the confirmed gamma=0 baseline below (trained on the full `corpus_v1`) shows the same
+pattern on test. `gamma=2` was kept.
+
+Note the sweep dataset is smaller than the confirm/baseline dataset below (pilot D1:
+seed 500/300 frames vs. `corpus_v1` D1: seed 2000/1000 frames) — the recipe was picked
+on the pilot set, then confirmed on the full corpus, not re-tuned on it.
+
+### Baseline results (`corpus_v1`, confirmed)
+
+FFTRadNet, `gamma=2`, 40 epochs / batch 8, one run per tier; SSMRadNet, same recipe
+(unswept for this architecture), 12 epochs / batch 2, D1 only — a step-comparable
+budget (FFTRadNet: ~4000 steps; SSMRadNet: ~4800 steps):
+
+| Model | Tier | Test AP | Test AR | Range RMSE (matched) |
+| --- | --- | --- | --- | --- |
+| FFTRadNet (g2) | D0 | 0.177 | 0.183 | — |
+| FFTRadNet (g2) | D1 | 0.030 | 0.127 | — |
+| FFTRadNet (g2) | D2 | 0.079 | 0.103 | — |
+| FFTRadNet (g2) | D3 | 0.093 | 0.095 | — |
+| SSMRadNet | D1 | 0.196 | 0.304 | 0.070 m |
+
+Matched detections still localize to the exact ground-truth range/azimuth bin at every
+tier (the label/decode chain is exact); absolute AP/AR are the weak part.
+
+Two caveats, stated exactly because it would be easy to over-read this table:
+
+- **The D0–D3 AP ordering above is not a difficulty ranking.** Recall collapses to
+  under 2% above confidence threshold 0.3 on every tier, so AP here is dominated by
+  whether a handful of very-high-confidence detections per tier happen to be correct —
+  it should not be read as "D1 is the hardest tier" or any other density-vs-accuracy
+  claim.
+- **SSMRadNet's D1 numbers are encouraging, not conclusive.** This is a single seed,
+  single tier, with hyperparameters tuned for FFTRadNet (via the sweep above), not for
+  SSMRadNet — an SSMRadNet-tuned recipe could move its number either direction. Its
+  training curve is steady and mostly monotonic, versus FFTRadNet gamma=2's more
+  volatile 40-epoch run on the same tier and a comparable step budget.
+- **These are reference/pipeline-validation numbers, not a production-capable
+  detector.** The best observed test AP across everything tried here is 0.196, AR at
+  most ~0.37 — enough to demonstrate the dataset-generation → training → evaluation
+  plumbing works end to end, not a tuned detector.
+
+Reproduce with `e2e.ml.train`, e.g.:
+
+```bash
+python -m e2e.ml.train --manifest e2e/ml/datasets/corpus_v1/ti_iwr1443_D1/manifest.json \
+    --model fftradnet --epochs 40 --batch-size 8 --lr 3e-4 --gamma 2
+```
 
 ## Practical notes
 
@@ -169,12 +246,19 @@ ROADMAP follow-up).
 * **AP semantics.** `metrics.evaluate_dataset` excludes thresholds where the model made
   no detections against existing ground truth from the AP mean (undefined precision,
   reported per-threshold as NaN) — an under-confident model does not harvest vacuous
-  `precision=1.0` above its confidence ceiling. Compare AP together with AR.
+  `precision=1.0` above its confidence ceiling. Compare AP together with AR. This
+  exclusion has a sharp edge, though: when a model makes almost no detections, only 1-2
+  thresholds have *any* defined precision, and AP becomes the mean of that razor-thin
+  sample — a single lucky confident detection can print AP 0.5-1.0 while recall is
+  near zero (this is exactly how an earlier gamma=0 checkpoint's validation AP spiked to
+  0.667, see the recipe section above). `evaluate_dataset`'s result dict now carries
+  `n_defined_precision_thresholds`, the count backing the AP mean — treat an AP resting
+  on a small count as unstable, not as model quality.
 * **SSMRadNet memory.** The pure-torch parallel selective scan (`e2e.ml.models.ssm`)
   materializes `[batch, L, d_inner, d_state]` state at every Hillis-Steele step (unlike a
   fused CUDA kernel, which never does), so it is memory-hungry: `batch_size=8` OOMs on an
-  8 GB card. Use a small batch (the smoke test above used 2) or reduce `d_state`/sequence
-  length.
+  8 GB card. Use a small batch (the baseline run above used 2) or reduce `d_state`/
+  sequence length.
 * **`mamba_ssm` fast path is optional and off by default.** `MambaBlock(backend="auto")`
   prefers the real `mamba_ssm` fused-CUDA-kernel package when it is importable and CUDA is
   available, falling back to the pure-torch scan otherwise. `mamba_ssm` ships hand-written
@@ -205,8 +289,6 @@ inline, and are used under research-community attribution norms. Status:
 
 * **SSMRadNet — approved.** The authors gave written approval for this adaptation's
   redistribution (2026-08-07), on top of having requested the integration.
-* **RADIal — inquiry sent (2026-08-07), proceeding with attribution.** The upstream
-  project's code and paper evidence open-research intent; this non-commercial,
-  attributed adaptation proceeds on that basis and **will be removed or relicensed
-  promptly if the authors object**. (If you fork this repo for commercial use, obtain
-  your own clarity from the RADIal authors first.)
+* **RADIal — approved.** The publishing author and repository publisher confirmed in
+  writing (2026-08-10) that the missing `LICENSE` was an oversight, and granted
+  permission to reuse and share the code. Used with attribution on that basis.

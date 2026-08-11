@@ -10,10 +10,18 @@ on a machine without torch installed. The functions here are the only place the
 Failure modes are surfaced as :class:`PipelineError` with a friendly message:
   * torch / e2e not importable          -> "torch not installed ..."
   * the scenario .pkl frames are missing -> "generate frames first ..."
+
+The TX-time trio ("waveform" / "tx_pa" / "modulate", from e2e.chain.waveform) IS wired,
+as a tributary of the chain rather than a segment of it: the waveform and amplifier
+blocks declare `frames.DOMAIN_ANY` because they produce and modify `tx_wave` without
+consuming the chain's payload at all, and "modulate" is the merge point where the
+transmitted spectrum multiplies the channel response. They therefore run BEFORE the
+receive-side stages, whatever domain the chain itself happens to be in.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -144,6 +152,8 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             RangeAzBlock,
             RangeElBlock,
             SubspaceErrorBlock,
+            CircuitStage,
+            InterconnectStage,
         )
     except ImportError as e:  # torch / sionna deps not present
         raise PipelineError(
@@ -163,16 +173,53 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # includes SubspaceErrorBlock, which consumes the tracker's 'U'.
 
     # --- environment block (loads the .pkl frames; can raise FileNotFoundError) -
-    try:
-        environment_block = SionnaEnvironmentBlock(scenario_name)
-    except FileNotFoundError as e:
-        raise PipelineError(
-            f"No precomputed frames found for scenario '{scenario_name}'. "
-            "Generate frames first (Scenario tab -> Generate frames), or pick a "
-            f"scenario whose .pkl exists. Missing file: {e}"
-        )
-    except ValueError as e:
-        raise PipelineError(str(e))
+    # "RT Environment" (rt_environment) is an opt-in ALTERNATIVE source: instead of
+    # reading precomputed .pkl frames it ray-traces a declarative Scenario live, via
+    # e2e.environment.blocks.RTEnvironmentBlock (needs Sionna/DrJit -- guarded behind
+    # its own lazy import, same per-feature pattern as the comms head below, so a
+    # machine without Sionna can still run every pipeline that leaves this off).
+    if _enabled(state, "rt_environment"):
+        try:
+            from e2e.environment.blocks import RTEnvironmentBlock
+            from e2e.ml.radar_config import PRESETS
+            from e2e.scenario import REFERENCE_SCENARIOS
+        except ImportError as e:
+            raise PipelineError(
+                "Could not import the live ray-tracing backend (e2e.environment / "
+                "e2e.ml / e2e.scenario -- needs Sionna+DrJit installed). "
+                "Underlying error: " + str(e)
+            )
+        rt_scenario_name = _p(state, "rt_environment", "scenario_name")
+        if rt_scenario_name not in REFERENCE_SCENARIOS:
+            raise PipelineError(f"Unknown RT scenario '{rt_scenario_name}'")
+        # The radar chirp/frame-timing preset is owned by the "dechirp" block's
+        # param (see webapp/pipeline_registry.py) because it is shared by the whole
+        # ADC-cube chain, not just this source; read regardless of whether "dechirp"
+        # itself is enabled.
+        rt_preset_name = _p(state, "dechirp", "preset")
+        if rt_preset_name not in PRESETS:
+            raise PipelineError(f"Unknown radar preset '{rt_preset_name}'")
+        try:
+            environment_block = RTEnvironmentBlock(
+                REFERENCE_SCENARIOS[rt_scenario_name](),
+                PRESETS[rt_preset_name],
+                base_scene=_p(state, "rt_environment", "base_scene"),
+                max_depth=int(_p(state, "rt_environment", "max_depth")),
+                include_leakage=bool(_p(state, "rt_environment", "include_leakage")),
+            )
+        except Exception as e:
+            raise PipelineError(f"Could not build the RT environment: {e}")
+    else:
+        try:
+            environment_block = SionnaEnvironmentBlock(scenario_name)
+        except FileNotFoundError as e:
+            raise PipelineError(
+                f"No precomputed frames found for scenario '{scenario_name}'. "
+                "Generate frames first (Scenario tab -> Generate frames), or pick a "
+                f"scenario whose .pkl exists. Missing file: {e}"
+            )
+        except ValueError as e:
+            raise PipelineError(str(e))
 
     # Derive the receive-array size from the environment block's array_shape so the
     # Oja tracker dimension and Simulation's view() agree with the actual frames.
@@ -215,7 +262,8 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # 'U'; keep a subspace block even when the user toggles the stage off.
         subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
 
-    # --- downstream product blocks (always present) -----------------------------
+    # --- downstream product blocks (always present unless the ADC-cube chain is --
+    # active -- see below) --------------------------------------------------------
     fft_bins = int(_p_positive(state, "fft", "bins"))
     range_az_bins = int(_p_positive(state, "range_az", "bins"))
     range_el_bins = int(_p_positive(state, "range_el", "bins"))
@@ -226,11 +274,163 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         SubspaceErrorBlock(),
     ]
 
+    # --- optional ADC-cube chain (e2e/chain/dechirp.py, e2e/chain/receive.py) ----
+    # "dechirp" is this chain's activation toggle: it BRIDGES the frequency-domain
+    # frame into a dechirped ADC cube (state['signal_domain'] flips from DOMAIN_CFR
+    # to DOMAIN_RX_TIME -- see e2e/frames.py), which is a different domain than the
+    # radar/subspace/comms products built above consume. So enabling it REPLACES
+    # Simulation's default serial-stage build (the composability hook Simulation
+    # itself documents -- see its `serial_stages=` kwarg) and the downstream product
+    # list, rather than being appended alongside them; the two chains are mutually
+    # exclusive within one run. (The TX-time trio -- waveform/tx_pa/modulate -- is
+    # NOT wired in here: see this module's docstring.)
+    serial_stages_override = None
+    if _enabled(state, "dechirp"):
+        try:
+            from e2e.chain.dechirp import DechirpBlock
+            from e2e.ml.radar_config import PRESETS
+        except ImportError as e:
+            raise PipelineError(
+                "Could not import the ADC-cube chain backend (e2e.chain.dechirp / "
+                "e2e.ml.radar_config). Underlying error: " + str(e)
+            )
+        preset_name = _p(state, "dechirp", "preset")
+        if preset_name not in PRESETS:
+            raise PipelineError(f"Unknown radar preset '{preset_name}'")
+        import dataclasses as _dc
+        adc_cfg = _dc.replace(PRESETS[preset_name], mimo=_p(state, "dechirp", "mimo"))
+
+        # CircuitStage/InterconnectStage mirror the existing radar path's stages,
+        # but run on the RAW [n_rx, n_tx, n_chirp, n_freqs] layout (no GridStage):
+        # DechirpBlock's antenna-axis handling needs the raw RX/TX axes, not the
+        # aperture-grid reshape GridStage would produce (see e2e/chain/dechirp.py).
+        serial_stages_override = []
+
+        # The transmit tributary, if the user enabled it: generate the waveform, distort
+        # it in the amplifier, then merge its spectrum into the channel response. These
+        # run first because everything after them is the receive side.
+        if _enabled(state, "waveform"):
+            try:
+                from e2e.chain.waveform import ModulateBlock, TxPABlock, WaveformBlock
+                from e2e.circuit.tx_pa import TxPA, TxPAConfig
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the transmit chain (e2e.chain.waveform / "
+                    "e2e.circuit.tx_pa). Underlying error: " + str(e)
+                )
+            serial_stages_override.append(WaveformBlock(
+                kind=_p(state, "waveform", "kind"),
+                bw=float(_p(state, "waveform", "bw")),
+                sample_rate=float(_p(state, "waveform", "sample_rate")),
+                chirp_duration=float(_p(state, "waveform", "chirp_duration")),
+            ))
+            tx_pa = None
+            if _enabled(state, "tx_pa"):
+                tx_pa = TxPA(TxPAConfig(
+                    small_signal_gain_db=float(_p(state, "tx_pa", "gain_db")),
+                    a_sat=float(_p(state, "tx_pa", "a_sat")),
+                ))
+                serial_stages_override.append(TxPABlock(tx_pa))
+            if _enabled(state, "modulate"):
+                serial_stages_override.append(ModulateBlock(
+                    tx_pa=tx_pa,
+                    bandwidth_hz=float(_p(state, "modulate", "bandwidth_hz")),
+                ))
+
+        if circuit_block is not None:
+            serial_stages_override.append(CircuitStage(circuit_block))
+        if interconnect_block is not None:
+            serial_stages_override.append(InterconnectStage(interconnect_block))
+        serial_stages_override.append(DechirpBlock(adc_cfg))
+
+        if _enabled(state, "impairment"):
+            try:
+                from e2e.chain.receive import ImpairmentBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the ADC impairments stage (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            serial_stages_override.append(
+                ImpairmentBlock(adc_cfg, seed=int(_p(state, "impairment", "seed")))
+            )
+
+        if _enabled(state, "quantizer"):
+            try:
+                from e2e.chain.receive import QuantizerBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the ADC quantizer stage (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            serial_stages_override.append(QuantizerBlock(
+                bits=int(_p(state, "quantizer", "bits")),
+                full_scale=float(_p(state, "quantizer", "full_scale")),
+            ))
+
+        # None of the frequency-domain products above apply once the chain has
+        # crossed into RX time; replace them with the RX-time products instead.
+        downstream_blocks = []
+        if _enabled(state, "radar_cube"):
+            # The radar cube folds the chirp axis, so it needs a frame carrying the
+            # preset's full chirp count. Precomputed .pkl frames are always SINGLE-chirp,
+            # so this pairing fails deep inside adc_to_rd with a bare shape mismatch
+            # ("adc has 1 chirps but cfg.n_chirps=252"), which reads as a bug rather than
+            # a configuration error. Say what is actually wrong, as the comms-head guard
+            # below does. Not caused by the preset default -- it failed identically at
+            # the old preset's 192 chirps.
+            if not _enabled(state, "rt_environment"):
+                raise PipelineError(
+                    "The Radar Cube product needs a multi-chirp frame, but the "
+                    "Environment source replays precomputed .pkl frames, which are "
+                    "single-chirp. Enable the RT Environment source (it ray-traces "
+                    f"{adc_cfg.n_chirps} chirps to match the '{_p(state, 'dechirp', 'preset')}' "
+                    "preset), or turn off Radar Cube and use the frequency-domain "
+                    "products instead."
+                )
+            try:
+                from e2e.chain.receive import RadarCubeBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the radar-cube product (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            downstream_blocks.append(RadarCubeBlock(adc_cfg))
+        if _enabled(state, "detector"):
+            # NeuralDetectorBlock needs a trained model checkpoint (a file path);
+            # the registry's ParamSpec model has no text/path parameter kind yet
+            # (see webapp/pipeline_registry.py / webapp/block_diagram.py), so there
+            # is no way for this screen to collect one. Fail clearly rather than
+            # silently skip the block the user asked for.
+            raise PipelineError(
+                "The Neural Detector block needs a trained model checkpoint, which "
+                "this screen does not yet let you choose -- disable it to run the "
+                "rest of the ADC-cube chain."
+            )
+        if _enabled(state, "sink"):
+            try:
+                from e2e.ml.blocks import SinkBlock
+                from e2e.frames import DOMAIN_RX_TIME
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the frame-sink product (e2e.ml.blocks). "
+                    "Underlying error: " + str(e)
+                )
+            sink_dir = Path(__file__).resolve().parent / "_sink_output"
+            downstream_blocks.append(SinkBlock(sink_dir, tag="webapp", domain=DOMAIN_RX_TIME))
+
     # --- optional comms head (swappable "product": OFDM demod instead of / -------
     # alongside the radar products above). Appended AFTER the radar products so it
-    # composes without disturbing their output ordering.
+    # composes without disturbing their output ordering. Incompatible with the
+    # ADC-cube chain above (also a frequency-domain consumer).
     comms_combining = None
     if _enabled(state, "comms"):
+        if serial_stages_override is not None:
+            raise PipelineError(
+                "The Comms Head and the ADC-cube chain (Dechirp/Impairments/"
+                "Quantizer/...) consume different signal domains and cannot run "
+                "together -- disable one of them."
+            )
         try:
             from e2e.comms.blocks import ModemBlock, BERBlock
         except ImportError as e:
@@ -261,6 +461,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         afe_block,
         subspace_block,
         array_shape=array_shape,
+        serial_stages=serial_stages_override,
     )
 
     try:

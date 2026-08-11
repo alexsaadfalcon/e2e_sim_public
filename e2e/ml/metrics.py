@@ -242,9 +242,16 @@ def evaluate_dataset(
     ap = sum(defined) / len(defined) if defined else 0.0
     ar = sum(recall_per_threshold.values()) / len(thresholds)
 
+    # SMALL-SAMPLE CAVEAT (results-review finding): when a model makes almost no
+    # detections, only 1-2 thresholds have defined precision and AP becomes the mean
+    # of that razor-thin sample -- a single lucky confident detection can print
+    # AP ~0.5-1.0 while recall is ~0. n_defined_precision_thresholds exposes exactly
+    # how many sweep points the AP mean rests on; treat AP with a small count (and
+    # always AP alongside AR) as unstable, not as model quality.
     return {
         "AP": ap,
         "AR": ar,
+        "n_defined_precision_thresholds": len(defined),
         "precision_per_threshold": precision_per_threshold,
         "recall_per_threshold": recall_per_threshold,
         "range_rmse_m": _rmse(range_errs_mid),

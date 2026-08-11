@@ -1,0 +1,360 @@
+"""Tests for `e2e.ml.impairments` (FMCW ADC-domain radar impairments)."""
+
+import math
+
+import os
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from e2e.ml.impairments import (  # noqa: E402
+    ClutterParams,
+    LeakageParams,
+    PhaseNoiseParams,
+    _k_distributed_gain,
+    _range_to_bin,
+    apply_all,
+    apply_clutter,
+    apply_leakage,
+    apply_phase_noise,
+)
+from e2e.ml.radar_config import RadarConfig  # noqa: E402
+
+
+@pytest.fixture
+def cfg():
+    # Small (fast) but self-consistent radar config: sweep_time = 128/10e6 = 12.8us
+    # fits inside chirp_period_s=20e-6.
+    c = RadarConfig(
+        name="test_small",
+        f0_hz=77e9,
+        bandwidth_hz=500e6,
+        n_tx=1,
+        n_rx=8,
+        n_chirps=64,
+        n_samples=128,
+        fs_hz=10e6,
+        chirp_period_s=20e-6,
+        mimo="single",
+    )
+    assert not c.validate()
+    return c
+
+
+def _rand_cube(n_rx, n_chirps, n_samples, device, seed=0):
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    real = torch.randn((n_rx, n_chirps, n_samples), generator=gen, device=device, dtype=torch.float32)
+    imag = torch.randn((n_rx, n_chirps, n_samples), generator=gen, device=device, dtype=torch.float32)
+    return torch.view_as_complex(torch.stack([real, imag], dim=-1).contiguous())
+
+
+def _tone_cube(n_rx, n_chirps, n_samples, k0, amplitude, device):
+    """A pure tone at fast-time DFT bin k0, identical on every rx/chirp."""
+    n = torch.arange(n_samples, device=device, dtype=torch.float32)
+    tone = amplitude * torch.exp(1j * (2.0 * math.pi * k0 * n / n_samples)).to(torch.complex64)
+    return tone.view(1, 1, n_samples).expand(n_rx, n_chirps, n_samples).clone()
+
+
+def _skirt_power(adc, k0, window=3, exclude=1):
+    """Mean range-FFT power in bins `exclude < |k - k0| <= window` (wrapped) -- the
+    "shoulders" just outside a target's own peak bin, where FMCW phase-noise skirts
+    show up."""
+    n_samples = adc.shape[-1]
+    x = torch.fft.fft(adc, dim=-1)
+    p = torch.abs(x) ** 2
+    idx = torch.arange(n_samples, device=adc.device)
+    dist = torch.minimum((idx - k0) % n_samples, (k0 - idx) % n_samples)
+    mask = (dist > exclude) & (dist <= window)
+    return p[:, :, mask].mean().item()
+
+
+# --------------------------------------------------------------------------- phase noise
+
+def test_phase_noise_doppler_axis_range_correlation(cfg, torch_device):
+    """Doppler-axis (chirp-to-chirp, STEP B) skirts: far range sees more phase drift
+    than near range. Uses single-tone probes rather than a random cube -- now that
+    STEP A also perturbs the range axis, a random cube's dense occupancy makes the
+    per-bin phase-ratio metric noisy (measured: it flips the old assertion). A tone
+    isolates the bin under test so this measures STEP B alone, as intended."""
+    n_rx = 4
+    a0 = 5.0
+    k_near = int(round(_range_to_bin(2.0, cfg))) % cfg.n_samples
+    k_far = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    assert k_near != k_far
+
+    def _chirp_phase_rms(k0):
+        adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+        out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=123)
+        assert out.shape == adc.shape
+        assert out.dtype == adc.dtype
+        assert out.device.type == torch_device.type
+        x_in = torch.fft.fft(adc, dim=-1)[:, :, k0]
+        x_out = torch.fft.fft(out, dim=-1)[:, :, k0]
+        delta = torch.angle(x_out / x_in)
+        return delta.pow(2).mean().sqrt().item()
+
+    near_rms = _chirp_phase_rms(k_near)
+    far_rms = _chirp_phase_rms(k_far)
+    # Measured (seed=123, defaults): near_rms ~= 1.0e-3 rad, far_rms ~= 1.4e-2 rad.
+    assert far_rms > 1.5 * near_rms
+
+
+def test_phase_noise_range_axis_skirts_appear(cfg, torch_device):
+    """The honesty-debt fix: a strong point target must now show RANGE-axis skirts
+    (power leaking into neighboring range-FFT bins), not just Doppler-axis ones.
+    Measured (n_rx=4, a0=5.0, far target at 30 m, seed=321, defaults): skirt power
+    (mean |X|^2 over bins 2-3 away from the peak) goes from ~3.2e-7 (float noise floor
+    of a pure tone) to ~168 -- a ~58 dB increase -- while the peak bin itself is
+    ~4.1e5, i.e. skirts sit ~34 dB below the peak, a physically sane FMCW phase-noise
+    skirt level."""
+    n_rx = 4
+    a0 = 5.0
+    k0 = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+    out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+
+    skirt_in = _skirt_power(adc, k0)
+    skirt_out = _skirt_power(out, k0)
+    peak_out = torch.abs(torch.fft.fft(out, dim=-1))[:, :, k0].pow(2).mean().item()
+
+    assert skirt_out > 1e4 * max(skirt_in, 1e-30)  # orders of magnitude above the noise-free floor
+    assert skirt_out < 0.1 * peak_out  # skirts stay well below the peak (sane relative level)
+
+
+def test_phase_noise_range_axis_skirts_shrink_with_better_psd(cfg, torch_device):
+    """Skirt power must fall as the oscillator improves (lower PSD). Measured (same
+    setup as the skirts-appear test): -85 dBc/Hz -> skirt ~168; -110 dBc/Hz (25 dB
+    better) -> skirt ~0.54, a ~25 dB drop, tracking the 25 dB PSD improvement."""
+    n_rx = 4
+    a0 = 5.0
+    k0 = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+
+    out_default = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+    out_better = apply_phase_noise(adc, cfg, PhaseNoiseParams(psd_dbc_hz_at_ref=-110.0), seed=321)
+
+    assert _skirt_power(out_better, k0) < 0.1 * _skirt_power(out_default, k0)
+
+
+def test_phase_noise_range_axis_correlation(cfg, torch_device):
+    """Range correlation must survive on the (newly added) range axis too: a far
+    target's skirts exceed a near target's. Measured (n_rx=4, a0=5.0, seed=321,
+    defaults): near (2 m) skirt ~0.91, far (30 m) skirt ~168 -- about 180x larger."""
+    n_rx = 4
+    a0 = 5.0
+    k_near = int(round(_range_to_bin(2.0, cfg))) % cfg.n_samples
+    k_far = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    assert k_near != k_far
+
+    def _skirt(k0):
+        adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+        out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=321)
+        return _skirt_power(out, k0)
+
+    assert _skirt(k_far) > 10.0 * _skirt(k_near)
+
+
+def test_phase_noise_energy_conserved(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=2)
+    out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=5)
+    e_in = torch.sum(torch.abs(adc) ** 2).item()
+    e_out = torch.sum(torch.abs(out) ** 2).item()
+    db = 10.0 * math.log10(e_out / e_in)
+    assert abs(db) < 0.5
+
+
+def test_phase_noise_deterministic(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=3)
+    out1 = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=42)
+    out2 = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=42)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- leakage
+
+def test_leakage_bins_and_power(cfg, torch_device):
+    n_rx = 6
+    a0 = 2.0
+    k0 = int(round(_range_to_bin(10.0, cfg))) % cfg.n_samples  # a target far from leak/bumper bins
+    params = LeakageParams()  # leakage -5 dB, bumper at 0.2 m, -15 dB
+    k_leak = 0
+    k_bump = int(round(_range_to_bin(params.bumper_range_m, cfg))) % cfg.n_samples
+    assert len({k0, k_leak, k_bump}) == 3  # distinct bins, otherwise the test is ambiguous
+
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+    out = apply_leakage(adc, cfg, params, seed=7)
+
+    assert out.shape == adc.shape
+    assert out.dtype == adc.dtype
+
+    p_ref = (a0 * cfg.n_samples) ** 2
+    diff = out - adc
+    x_diff = torch.fft.fft(diff, dim=-1)  # [n_rx, n_chirps, n_samples]
+
+    for k, rel_db in ((k_leak, params.leakage_relative_db), (k_bump, params.bumper_relative_db)):
+        power = torch.abs(x_diff[:, :, k]) ** 2
+        observed_db = 10.0 * torch.log10(power / p_ref)
+        assert torch.allclose(observed_db, torch.full_like(observed_db, rel_db), atol=1.0)
+        # constant across chirps (all energy in Doppler bin 0)
+        assert power.std(dim=1).max().item() / power.mean().item() < 1e-5
+
+    # target bin itself is untouched
+    assert torch.abs(x_diff[:, :, k0]).max().item() < 1e-3 * (a0 * cfg.n_samples)
+
+
+def test_leakage_deterministic(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=9)
+    out1 = apply_leakage(adc, cfg, LeakageParams(), seed=11)
+    out2 = apply_leakage(adc, cfg, LeakageParams(), seed=11)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- clutter
+
+def test_clutter_kurtosis_decreases_with_nu(torch_device):
+    gen = torch.Generator(device=torch_device)
+    gen.manual_seed(0)
+    n = 20000
+
+    def _excess_kurtosis(nu):
+        gen.manual_seed(1234)
+        gain = _k_distributed_gain(n, 1, nu, generator=gen, device=torch_device)
+        amp = torch.abs(gain).flatten().to(torch.float64)
+        mu = amp.mean()
+        m2 = ((amp - mu) ** 2).mean()
+        m4 = ((amp - mu) ** 4).mean()
+        return (m4 / m2 ** 2 - 3.0).item()
+
+    k_heavy = _excess_kurtosis(0.1)
+    k_mid = _excess_kurtosis(1.0)
+    k_light = _excess_kurtosis(50.0)
+
+    assert k_heavy > k_mid > k_light
+    assert k_heavy > k_light + 2.0
+    # nu=50 texture barely fluctuates -> amplitude close to Rayleigh (excess kurtosis ~0.1)
+    assert k_light < 1.0
+
+
+def test_clutter_doppler_near_zero_and_shape(cfg, torch_device):
+    n_rx = 4
+    a0 = 3.0
+    k0 = int(round(_range_to_bin(10.0, cfg))) % cfg.n_samples
+    adc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k0, a0, torch_device)
+
+    params = ClutterParams(density=2.0, nu=1.0, doppler_std_mps=0.05, total_relative_db=-10.0)
+    out = apply_clutter(adc, cfg, params, seed=17)
+
+    assert out.shape == adc.shape
+    assert out.dtype == adc.dtype
+    diff = out - adc
+    assert torch.abs(diff).max().item() > 0.0
+
+    # Doppler concentration: power (summed over rx, range) should be concentrated
+    # within a small window around Doppler bin 0.
+    y = torch.fft.fft(diff, dim=1)  # chirp axis -> Doppler
+    power_per_bin = torch.sum(torch.abs(y) ** 2, dim=(0, 2))  # [n_chirps]
+
+    sigma_dop_hz = 2.0 * params.doppler_std_mps / cfg.wavelength_m
+    df = 1.0 / (cfg.n_chirps * cfg.chirp_period_s)
+    sigma_bins = sigma_dop_hz / df
+    half_window = max(2, int(math.ceil(6.0 * sigma_bins)) + 2)
+
+    idx = torch.arange(cfg.n_chirps, device=torch_device)
+    centered = torch.minimum(idx, cfg.n_chirps - idx)  # distance from bin 0, wrapped
+    in_window = centered <= half_window
+
+    frac = (power_per_bin[in_window].sum() / power_per_bin.sum()).item()
+    assert frac > 0.7
+
+
+def test_clutter_deterministic(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=21)
+    params = ClutterParams()
+    out1 = apply_clutter(adc, cfg, params, seed=23)
+    out2 = apply_clutter(adc, cfg, params, seed=23)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+# --------------------------------------------------------------------------- chain
+
+def test_apply_all_defaults_and_skip(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=31)
+
+    out_all = apply_all(adc, cfg, seed=1)
+    assert out_all.shape == adc.shape
+    assert out_all.dtype == adc.dtype
+    assert not torch.allclose(out_all, adc)
+
+    from e2e.ml.impairments import stage_seed
+    out_skip = apply_all(adc, cfg, {"leakage": None, "clutter": None}, seed=1)
+    out_phase_only = apply_phase_noise(adc, cfg, PhaseNoiseParams(),
+                                       seed=stage_seed(1, "phase_noise"))
+    assert torch.allclose(out_skip, out_phase_only, atol=1e-6)
+
+
+def test_apply_all_deterministic(cfg, torch_device):
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=33)
+    out1 = apply_all(adc, cfg, seed=99)
+    out2 = apply_all(adc, cfg, seed=99)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
+def test_clutter_passes_through_the_oscillator_phase_noise(cfg, torch_device):
+    """Leakage and clutter are RETURNS: they reach the mixer with the echoes and must be
+    subject to the same phase noise. With phase noise applied first they escaped it
+    entirely. Test: inject clutter alone into a silent cube, then check the composite is
+    modified by the phase-noise stage rather than passing through untouched."""
+    import torch
+    from e2e.ml.impairments import (ClutterParams, PhaseNoiseParams, apply_all,
+                                    apply_clutter, apply_phase_noise)
+
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples,
+                         dtype=torch.complex64, device=torch_device)
+    # Give the cube one strong return so clutter power has something to scale against.
+    silent[:, :, 0] = 1.0
+
+    cluttered = apply_clutter(silent, cfg, ClutterParams(), seed=1)
+    both = apply_phase_noise(cluttered, cfg, PhaseNoiseParams(), seed=3)
+    assert not torch.equal(both, cluttered), "phase noise must act on the clutter too"
+
+    # And the chained order must reach the same arrangement: the last stage applied is
+    # phase noise, so the chain output differs from the un-phase-noised composite.
+    chained = apply_all(silent, cfg, {"leakage": None}, seed=1)
+    assert not torch.equal(chained, apply_clutter(silent, cfg, ClutterParams(), seed=2))
+
+
+def test_stage_seeds_never_collide_across_frames_or_stages():
+    """The corpus advances the frame seed by one per frame. With small per-stage
+    offsets that made frame i's leakage seed identical to frame i+1's phase-noise
+    seed -- the same noise realization filed under two different labels, which
+    quietly correlates a corpus. Sweep frames and stages and assert every sub-seed
+    is distinct."""
+    from e2e.ml.impairments import stage_seed
+
+    stages = ("phase_noise", "leakage", "clutter")
+    seeds = {}
+    for frame in range(200):
+        for stage in stages:
+            s = stage_seed(1000 + frame, stage)
+            assert s not in seeds, (
+                f"collision: (frame {frame}, {stage}) reuses the seed of {seeds[s]}"
+            )
+            seeds[s] = (frame, stage)
+
+
+def test_stage_seed_is_stable_across_processes():
+    """Reproducibility of a corpus depends on this being independent of PYTHONHASHSEED
+    -- Python's built-in hash() is salted per process and would break it."""
+    import subprocess
+    import sys
+
+    code = ("from e2e.ml.impairments import stage_seed;"
+            "print(stage_seed(7, 'clutter'))")
+    runs = {
+        subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env={**os.environ, "PYTHONHASHSEED": seed}).stdout.strip()
+        for seed in ("0", "1", "12345")
+    }
+    assert len(runs) == 1, f"stage_seed varies with PYTHONHASHSEED: {runs}"

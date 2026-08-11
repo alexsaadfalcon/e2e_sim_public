@@ -158,3 +158,149 @@ def test_device_follows_input(torch_device):
     s_pars = _frame(n_rx=1024, n_tx=1, n_chirp=1, n_freqs=16, device=torch_device)
     assert chirp0(s_pars).device.type == torch.device(torch_device).type
     assert to_aperture_grid(s_pars, (32, 32)).device.type == torch.device(torch_device).type
+
+
+# ------------------------------------------------------- per-block capability contract
+
+from e2e import frames  # noqa: E402
+from e2e.frames import (  # noqa: E402
+    CHIRP_BROADCAST,
+    CHIRP_NATIVE,
+    CHIRP_SINGLE,
+    FrameCapabilities,
+    broadcast_over_chirps,
+    capabilities_of,
+    check_capabilities,
+    component_name,
+)
+
+
+class _Declared:
+    frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=CHIRP_NATIVE)
+
+
+class _Undeclared:
+    pass
+
+
+def test_default_capabilities_are_the_historical_contract():
+    """A component that declares nothing keeps the pre-capability behavior."""
+    caps = capabilities_of(_Undeclared())
+    assert caps.accepts_mimo is False
+    assert caps.chirps == CHIRP_SINGLE
+    assert caps.accepts_multichirp is False
+
+
+def test_unknown_chirp_mode_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="unknown chirp capability"):
+        FrameCapabilities(chirps="sometimes")
+
+
+def test_check_capabilities_passes_multichirp_mimo_to_an_elementwise_component():
+    check_capabilities(_frame(n_tx=2, n_chirp=4), _Declared())
+
+
+def test_check_capabilities_names_the_component_and_the_offending_axis():
+    with pytest.raises(FrameContractError, match=r"_Undeclared: multiple chirps"):
+        check_capabilities(_frame(n_chirp=2), _Undeclared())
+    with pytest.raises(FrameContractError, match=r"_Undeclared: MIMO not supported"):
+        check_capabilities(_frame(n_tx=2), _Undeclared())
+
+
+def test_mimo_check_is_skipped_on_the_aperture_layout():
+    """After to_aperture_grid, dim 1 is elevation -- not TX -- so it must not trip the
+    no-MIMO guard even for a component that declares accepts_mimo=False."""
+    grid = torch.zeros(32, 32, 1, 8, dtype=torch.complex64)
+    check_capabilities(grid, _Undeclared(), layout=frames.LAYOUT_APERTURE)
+
+
+def test_component_name_prefers_the_declared_contract_name():
+    obj = _Undeclared()
+    assert component_name(obj) == "_Undeclared"
+    obj.frame_contract_name = "MeasurementStage[AdaOjaBlock]"
+    assert component_name(obj) == "MeasurementStage[AdaOjaBlock]"
+
+
+def test_broadcast_over_chirps_is_the_identity_path_for_one_chirp():
+    """Single-chirp frames must keep the historical output shape exactly -- no new axis."""
+    s_pars = _frame(n_rx=4, n_chirp=1, n_freqs=8)
+    out = broadcast_over_chirps(s_pars, lambda slab: slab.abs().sum(dim=-1))
+    assert out.shape == (4, 1)
+
+
+def test_broadcast_over_chirps_stacks_only_when_multichirp():
+    s_pars = _frame(n_rx=4, n_chirp=3, n_freqs=8)
+    for c in range(3):
+        s_pars[:, :, c, :] = c + 1
+    out = broadcast_over_chirps(s_pars, lambda slab: slab.abs().sum(dim=-1))
+    assert out.shape == (3, 4, 1)
+    # Chirp c carries value c+1 across 8 frequency bins.
+    for c in range(3):
+        assert torch.allclose(out[c], torch.full((4, 1), 8.0 * (c + 1)))
+
+
+# ------------------------------------------------------------------- signal domains
+
+from e2e.frames import (  # noqa: E402
+    DOMAIN_CFR,
+    DOMAIN_PAYLOAD_KEY,
+    DOMAIN_RX_TIME,
+    DOMAIN_TX_TIME,
+    require_domain,
+)
+
+
+class _RxTimeBlock:
+    frame_capabilities = FrameCapabilities(domain=DOMAIN_RX_TIME, chirps=CHIRP_NATIVE)
+
+
+class _Bridge:
+    frame_capabilities = FrameCapabilities(
+        domain=DOMAIN_CFR, emits_domain=DOMAIN_RX_TIME,
+        accepts_mimo=True, chirps=CHIRP_NATIVE,
+    )
+
+
+def test_default_domain_is_the_frequency_domain():
+    """Every block that predates the domain field must keep working untouched."""
+    assert capabilities_of(_Undeclared()).domain == DOMAIN_CFR
+    assert capabilities_of(_Undeclared()).emits_domain is None
+    assert capabilities_of(_Undeclared()).is_bridge is False
+
+
+def test_unknown_domain_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="unknown signal domain"):
+        FrameCapabilities(domain="sideways")
+    with pytest.raises(ValueError, match="unknown emitted signal domain"):
+        FrameCapabilities(emits_domain="sideways")
+
+
+def test_bridge_blocks_identify_themselves():
+    assert _Bridge.frame_capabilities.is_bridge is True
+    # Declaring the same domain in and out is not a crossing.
+    assert FrameCapabilities(domain=DOMAIN_CFR, emits_domain=DOMAIN_CFR).is_bridge is False
+
+
+def test_misordered_chain_names_the_bridge_that_would_fix_it():
+    """The whole point of the domain field: an impairment placed before the dechirp
+    must say so, not fail later inside a transform."""
+    with pytest.raises(FrameContractError, match=r"expects the rx_time domain.*insert a DechirpBlock"):
+        require_domain(DOMAIN_CFR, _RxTimeBlock())
+
+
+def test_domain_check_passes_when_the_chain_is_in_the_right_domain():
+    require_domain(DOMAIN_RX_TIME, _RxTimeBlock())
+    require_domain(DOMAIN_CFR, _Undeclared())
+
+
+def test_axis_checks_do_not_apply_outside_the_frequency_domain():
+    """MIMO/chirp checks describe the 4-D S-parameter frame; a time-domain payload has
+    its own shape and must not be judged against them."""
+    cube = torch.zeros(4, 8, 16, dtype=torch.complex64)  # [n_rx, n_chirp, n_sample]
+    check_capabilities(cube, _RxTimeBlock(), domain=DOMAIN_RX_TIME)
+
+
+def test_every_domain_names_its_payload_key():
+    for d in (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME):
+        assert DOMAIN_PAYLOAD_KEY[d]
+    assert DOMAIN_PAYLOAD_KEY[DOMAIN_CFR] == "s_pars"

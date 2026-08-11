@@ -274,6 +274,9 @@ def test_underconfident_model_does_not_collect_vacuous_precision(torch_device):
     assert all(math.isnan(p[t]) for t in (0.6, 0.7, 0.8, 0.9))   # undefined, not 1.0
     assert result["AP"] == pytest.approx(1.0)   # mean over DEFINED thresholds only
     assert result["AR"] == pytest.approx(5 / 9) # recall honestly collapses above 0.55
+    # The defined-threshold count exposes how thin the AP sample is (5 of 9 here):
+    # a near-silent model's AP can rest on 1-2 points and spike misleadingly.
+    assert result["n_defined_precision_thresholds"] == 5
     # And a model that never detects anything at all scores AP = 0, not 1.
     silent = torch.zeros_like(pred_map)
     silent_result = evaluate_dataset([silent], [targets], grid)
