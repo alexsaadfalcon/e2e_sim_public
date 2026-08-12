@@ -297,7 +297,10 @@ class AdaOjaBlock:
 
     frame_capabilities = _SINGLE_CHIRP
 
-    def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1):
+    _GAP_RESPONSES = ("none", "refine", "coast")
+
+    def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1,
+                 gap_response="none", gap_threshold=1.15, n_refine_hi=60):
         self.oja = Oja(d, k, eta=eta, fixed_step=True)
         self.method = method
         # Measurement count for the adaptive sensing matrix (rows of A). Defaults to the
@@ -310,6 +313,56 @@ class AdaOjaBlock:
         # error ~10x above the SVD floor, and each refinement re-aims the anchor at the
         # current subspace. n_refine≈5 reaches the floor; 1 = single-shot (legacy).
         self.n_refine = n_refine
+        # Opt-in reaction to a near-degenerate singular-value cluster sitting right at
+        # the k cutoff (see `effective_n_refine`). Off by default ("none"): every
+        # existing caller keeps getting exactly `n_refine` every frame, unconditionally.
+        if gap_response not in self._GAP_RESPONSES:
+            raise ValueError(
+                f"gap_response must be one of {self._GAP_RESPONSES}, got {gap_response!r}"
+            )
+        self.gap_response = gap_response
+        # sv_gap_at_k = S[k-1]/S[k] (see e2e.simulation.rank_diagnostic); below this the
+        # k-cutoff is judged to fall inside a near-degenerate SV cluster (S[k-1]~=S[k]).
+        # 1.15 was the value measured to isolate the munich-scene spike (TODO.md
+        # "TRACKER DIVERGENCE ROOT-CAUSED") without triggering on the normal frame-to-
+        # frame ratio, which sits well above it.
+        self.gap_threshold = gap_threshold
+        # Refinement count used for gap_response="refine" while the gap is collapsed.
+        self.n_refine_hi = n_refine_hi
+
+    def effective_n_refine(self, sv_gap_at_k=None):
+        """The refinement count MeasurementStage should run THIS frame.
+
+        `sv_gap_at_k` is a SPECTRUM-only diagnostic -- the ratio S[k-1]/S[k] of two
+        singular values, computed upstream in `Simulation.feed_forward` from the
+        frame's singular-value spectrum alone (see `rank_diagnostic`). It never touches
+        the ground-truth basis U_true, so reacting to it is not a peek at ground truth
+        -- the same guarantee the tracker's own online update already has to hold.
+
+        gap_response="none" (default): always `n_refine`, ignoring the signal entirely
+        (bit-identical to every AdaOjaBlock built before this option existed).
+        gap_response="refine": bump to `n_refine_hi` refinement passes while the gap is
+        collapsed (sv_gap_at_k < gap_threshold) -- spend more compute chasing the
+        ambiguous cutoff. Productionized from the investigation's "reactive n_refine"
+        finding (TODO.md "TRACKER DIVERGENCE ROOT-CAUSED"): peak -46%/post -94% on the
+        30-frame munich protocol.
+        gap_response="coast": drop to 0 refinement passes (freeze U, skip the update)
+        while the gap is collapsed, resuming once it reopens -- "detect-and-coast": stop
+        chasing a target whose own frame-to-frame identity is numerically arbitrary
+        (ground truth's drift itself jumps 0.24 -> ~1.0 in the same window) rather than
+        spend compute re-estimating in a direction likely to be reverted next frame.
+
+        A missing or NaN sv_gap_at_k (no diagnostic available -- e.g. the replay path,
+        which never computes one) falls back to `n_refine`, matching the "off" behavior.
+        """
+        if self.gap_response == "none" or sv_gap_at_k is None:
+            return self.n_refine
+        if sv_gap_at_k != sv_gap_at_k:  # NaN (k >= len(S)); no gap to react to
+            return self.n_refine
+        collapsed = sv_gap_at_k < self.gap_threshold
+        if not collapsed:
+            return self.n_refine
+        return self.n_refine_hi if self.gap_response == "refine" else 0
 
     def gen_A_ada(self, m=None):
         return gen_A_ada(self.oja.U, m if m is not None else self.m)
@@ -465,7 +518,16 @@ class MeasurementStage:
         # matrix from the CURRENT estimate and re-estimates, so A's anchor rows converge
         # onto this frame's subspace (a stale anchor from the previous frame otherwise
         # caps accuracy ~10x above the SVD floor). n_refine=1 is the single-shot legacy path.
-        n_refine = getattr(self.subspace_block, "n_refine", 1)
+        # A subspace_block that declares `effective_n_refine` (AdaOjaBlock's opt-in
+        # gap_response) gets to adjust the count from `state['sv_gap_at_k']` -- a
+        # spectrum-only diagnostic Simulation threads through, never the ground-truth
+        # basis (see AdaOjaBlock.effective_n_refine). Anything else keeps the plain
+        # `n_refine` attribute, unconditionally, as before.
+        get_n_refine = getattr(self.subspace_block, "effective_n_refine", None)
+        if callable(get_n_refine):
+            n_refine = get_n_refine(state.get("sv_gap_at_k"))
+        else:
+            n_refine = getattr(self.subspace_block, "n_refine", 1)
         if self.afe_block:
             V = s_pars.view(-1, s_pars.shape[-1])
             for _ in range(n_refine):
@@ -485,10 +547,12 @@ class MeasurementStage:
                     "sensing_matrix": Aq,
                     "aperture_shape": (s_pars.shape[0], s_pars.shape[1]),
                     "signal_dimension": frames.DIMENSION_REDUCED,
+                    "n_refine_used": n_refine,
                 }
             Xt = self.afe_block.reconstruct(Aq, X)
             s_pars = Xt.view(s_pars.shape)
-            return {"s_pars": s_pars, "U": self.subspace_block.oja.U}
+            return {"s_pars": s_pars, "U": self.subspace_block.oja.U,
+                    "n_refine_used": n_refine}
         else:
             # No AFE: feed the subspace tracker the full-precision compressed
             # measurements directly (same A-generation as the AFE branch, but
@@ -498,7 +562,7 @@ class MeasurementStage:
                 A = self.subspace_block.gen_A_ada()
                 X = A @ V
                 self.subspace_block.update(X, A)
-            return {"U": self.subspace_block.oja.U}
+            return {"U": self.subspace_block.oja.U, "n_refine_used": n_refine}
 
 
 def _aperture_window(kind, length, device):
