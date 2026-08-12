@@ -211,16 +211,20 @@ ASSET_LICENSES = {
 }
 
 # Downloaded vehicle meshes (campaign R3, see `e2e.ml.assets`): real car/truck/bus/
-# trolley geometry, decimated + normalized by that module. Every one of these is a
-# user-supplied file whose redistribution terms have NOT been checked -- see the
-# "license" text below, applied uniformly. No mesh binary is committed to this
-# repository (see `e2e.ml.assets`' cache-directory docstring); every consumer degrades
-# gracefully to `SIONNA_CAR_REPRESENTATIVE` when the cache/source archive is absent.
+# trolley geometry, decimated + normalized by that module. Most of these are
+# user-supplied files whose redistribution terms have NOT been checked -- the generic
+# "license" text below applies to those. The Kenney fleet (campaign R3 follow-up) is the
+# exception: it carries a VERIFIED `DownloadedAssetSpec.license` (CC0, checked against
+# the kit's own License.txt), which takes precedence over the generic text. No mesh
+# binary is committed to this repository (see `e2e.ml.assets`' cache-directory
+# docstring); every consumer degrades gracefully to `SIONNA_CAR_REPRESENTATIVE` when the
+# cache/source archive is absent.
 for _name, _spec in DOWNLOADED_ASSET_SPECS.items():
     ASSET_LICENSES[_name] = {
         "source": _spec.source,
-        "license": "UNKNOWN -- user-supplied; terms not verified; corpus using these is "
-                  "INTERNAL-ONLY until cleared",
+        "license": _spec.license if _spec.license is not None else (
+            "UNKNOWN -- user-supplied; terms not verified; corpus using these is "
+            "INTERNAL-ONLY until cleared"),
         "category": _spec.vehicle_class,
         "derivation": _spec.derivation,
     }

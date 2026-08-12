@@ -69,15 +69,23 @@ def test_school_bus_replaces_the_max_bus_which_is_not_registered():
 
 
 def test_real_length_ranges_match_the_class_brief():
+    # Bounds widened for the Kenney fleet (kept loose enough that the original 5
+    # freestl.com entries still pass unchanged): car hi 5.2->5.5 (kn_van, a Transit-class
+    # panel van kept in the "car" class per the approved fleet, is 5.40 m long); truck lo
+    # 7.0->6.0 (kn_delivery/kn_delivery_flat/kn_ambulance are smaller box trucks, ~6.5-6.8
+    # m). bus hi widened again, 10.0->13.0, for the OWNER-APPROVED dl_bus_ajanhallinta (a
+    # full-size 12.00 m transit bus, longer than dl_school_bus's 7-9 m Type B range).
+    # trolley bound is unchanged -- dl_tram_google's 11.90 m target already fits inside
+    # dl_trolley's existing 9-15 m streetcar range.
     for name, spec in DOWNLOADED_ASSET_SPECS.items():
         lo, hi = spec.real_length_range_m
         assert lo < hi
         if spec.vehicle_class == "car":
-            assert 4.0 <= lo and hi <= 5.2
+            assert 4.0 <= lo and hi <= 5.5
         elif spec.vehicle_class == "truck":
-            assert 7.0 <= lo and hi <= 17.0
+            assert 6.0 <= lo and hi <= 17.0
         elif spec.vehicle_class == "bus":
-            assert 6.0 <= lo and hi <= 10.0
+            assert 6.0 <= lo and hi <= 13.0
         elif spec.vehicle_class == "trolley":
             assert 9.0 <= lo and hi <= 15.0
 
@@ -85,6 +93,140 @@ def test_real_length_ranges_match_the_class_brief():
 def test_axis_permutation_is_a_valid_permutation():
     for name, spec in DOWNLOADED_ASSET_SPECS.items():
         assert sorted(spec.axis_permutation) == [0, 1, 2], name
+
+
+# --------------------------------------------------------------------------------
+# The Kenney fleet (approved 15-vehicle CC0 pool; bus/trolley coverage deferred by the
+# project owner -- see the module docstring's "Follow-up" note -- NOT registered here).
+# --------------------------------------------------------------------------------
+KENNEY_NAMES = tuple(n for n in DOWNLOADED_ASSET_SPECS if n.startswith("kn_"))
+
+
+def test_kenney_fleet_is_exactly_fifteen_vehicles():
+    assert len(KENNEY_NAMES) == 15
+    for name in KENNEY_NAMES:
+        assert DOWNLOADED_ASSET_SPECS[name].vehicle_class in ("car", "truck")
+
+
+def test_kenney_fleet_has_no_bus_or_trolley_standin():
+    """The bus/trolley box-body stand-ins were drafted then explicitly DEFERRED by the
+    project owner (a parallel search for real freely-licensed bus/trolley meshes is in
+    progress) -- must not be registered."""
+    assert "kn_bus_standin" not in DOWNLOADED_ASSET_SPECS
+    assert "kn_trolley_standin" not in DOWNLOADED_ASSET_SPECS
+    assert not any(s.vehicle_class in ("bus", "trolley")
+                   for n, s in DOWNLOADED_ASSET_SPECS.items() if n.startswith("kn_"))
+
+
+def test_kenney_license_is_cc0_not_the_generic_unknown_text():
+    for name in KENNEY_NAMES:
+        spec = DOWNLOADED_ASSET_SPECS[name]
+        assert spec.license is not None
+        assert "CC0" in spec.license
+        assert "kenney.nl/assets/car-kit" in spec.license
+        assert "UNKNOWN" not in spec.license
+
+
+def test_pre_kenney_assets_keep_the_default_unverified_license():
+    """Extending the spec with `license`/`axis_scale_m` must not change behaviour for
+    the five original freestl.com entries -- both fields default to None."""
+    for name in ("dl_delorean", "dl_audi_r8", "dl_truck_daf", "dl_trolley", "dl_school_bus"):
+        spec = DOWNLOADED_ASSET_SPECS[name]
+        assert spec.license is None
+        assert spec.axis_scale_m is None
+
+
+def test_kenney_archive_uses_an_already_extracted_directory_source():
+    """`ensure_extracted`/`load_raw_mesh` must accept a pre-extracted directory (the
+    Kenney kit, unzipped once by hand) rather than requiring 7z + downloads_dir()."""
+    from e2e.ml.assets import ARCHIVE_SPECS
+
+    spec = ARCHIVE_SPECS["kenney_car_kit"]
+    assert spec.source_subdir is not None
+    assert spec.archive_filename == ""  # no archive to extract
+
+
+# name -> real (length, width, height) target the per-axis scale was solved for (see
+# each spec's `derivation`) -- used to check the processed bbox lands on the EXACT
+# target, not just "somewhere plausible", which a squashed/uniformly-scaled mesh
+# would also pass. One car, one truck.
+_KENNEY_REAL_DIMS_M = {
+    "kn_sedan": (4.70, 1.82, 1.45),
+    "kn_firetruck": (10.00, 2.55, 3.80),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_KENNEY_REAL_DIMS_M))
+def test_kenney_per_axis_scaling_matches_real_class_dims(name):
+    """The load-bearing geometry fix: per-axis scaling must land the processed bbox on
+    the real (length, width, height) target -- uniform scaling would get length right
+    while badly overshooting width/height (see the module docstring). Runs against the
+    REAL kit files on this workstation; skips gracefully (no Sionna needed either way)
+    if the kit isn't present, so CI (which has neither) stays green."""
+    import e2e.ml.assets as assets_mod
+    assets_mod._process_cache.pop(name, None)
+
+    result = process_asset(name, force=True)
+    if result is None:
+        pytest.skip(f"{name}: Kenney kit not found on this machine (graceful degrade)")
+
+    want_l, want_w, want_h = _KENNEY_REAL_DIMS_M[name]
+    assert result.length_m == pytest.approx(want_l, abs=0.02)
+    assert result.width_m == pytest.approx(want_w, abs=0.02)
+    assert result.height_m == pytest.approx(want_h, abs=0.02)
+
+
+# --------------------------------------------------------------------------------
+# OWNER-APPROVED bus + tram (resolves the Kenney follow-up's deferred bus/trolley
+# search): one CC0 bus (ajanhallinta, OpenGameArt) and one CC-BY 3.0 tram (Poly by
+# Google) -- see e2e.ml.assets.DOWNLOADED_ASSET_SPECS' "Follow-up 2" docstring note.
+# --------------------------------------------------------------------------------
+def test_bus_and_tram_are_registered_with_the_right_class_and_license():
+    bus = DOWNLOADED_ASSET_SPECS["dl_bus_ajanhallinta"]
+    assert bus.vehicle_class == "bus"
+    assert bus.license == "CC0 (opengameart.org/content/3d-bus)"
+
+    tram = DOWNLOADED_ASSET_SPECS["dl_tram_google"]
+    assert tram.vehicle_class == "trolley"
+    assert "CC-BY 3.0" in tram.license
+    assert "poly.pizza/m/e9pQgEqPGir" in tram.license
+    assert "attribution required" in tram.license  # the one non-CC0 asset in this module
+
+
+def test_bus_and_tram_archives_use_an_already_extracted_directory_source():
+    """Same `source_subdir` mechanism as the Kenney kit (see
+    `test_kenney_archive_uses_an_already_extracted_directory_source`) -- both were
+    copied/converted once into cache_dir()/cc0/..., no 7z/downloads_dir() involved."""
+    for key in ("bus_ajanhallinta", "tram_google"):
+        spec = ARCHIVE_SPECS[key]
+        assert spec.source_subdir is not None
+        assert spec.archive_filename == ""
+
+
+# name -> real (length, width, height) target the per-axis scale was solved for -- see
+# each spec's `derivation`.
+_OWNER_APPROVED_REAL_DIMS_M = {
+    "dl_bus_ajanhallinta": (12.00, 2.55, 3.20),
+    "dl_tram_google": (11.90, 2.50, 3.50),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OWNER_APPROVED_REAL_DIMS_M))
+def test_bus_and_tram_per_axis_scaling_matches_real_class_dims(name):
+    """Same load-bearing check as `test_kenney_per_axis_scaling_matches_real_class_dims`,
+    against the REAL files on this workstation; skips gracefully if absent so CI (which
+    has neither) stays green."""
+    import e2e.ml.assets as assets_mod
+    assets_mod._process_cache.pop(name, None)
+
+    result = process_asset(name, force=True)
+    if result is None:
+        pytest.skip(f"{name}: source file not found on this machine (graceful degrade)")
+
+    want_l, want_w, want_h = _OWNER_APPROVED_REAL_DIMS_M[name]
+    assert result.length_m == pytest.approx(want_l, abs=0.02)
+    assert result.width_m == pytest.approx(want_w, abs=0.02)
+    assert result.height_m == pytest.approx(want_h, abs=0.02)
 
 
 # --------------------------------------------------------------------------------
