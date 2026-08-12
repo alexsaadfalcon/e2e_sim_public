@@ -162,14 +162,14 @@ contract **self-describing and general** so blocks compose freely and the geomet
 
 ## Suggested 1.1 milestone
 
-**"Frames that describe themselves."** A tight, shippable scope:
+**"Frames that describe themselves."** A tight, shippable scope. (Items 1-3 of the
+original list are DONE — A1 self-describing frames, the subspace-tracking review
+(reactive `gap_response`), and the CFR-loader unification — see their entries above;
+what remains:)
 
-1. **A1 — self-describing frames** (the keystone; everything compounds off it).
-2. **Subspace-tracking mode** + **RFFE operating-point** review (low effort, high
-   credibility payoff).
-3. **Unify the CFR loaders** (folds into A1).
-4. **A3 — widen the shape contract** (A1 makes it nearly free; sets up Doppler/MIMO).
-5. Polish: cookbook, base-scene options.
+1. **RFFE operating-point** review (low effort, high credibility payoff).
+2. **A3 — widen the shape contract** (A1 made it nearly free; sets up Doppler/MIMO).
+3. Polish: cookbook, base-scene options.
 
 A2 (block-protocol unification) and A4 (multi-link ISAC consumer) are deferred to
 1.2 to keep 1.1 focused.

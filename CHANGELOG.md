@@ -334,5 +334,7 @@ semantic versioning.
 
 ### Known limitations
 See `ROADMAP.md`. In brief: the runtime pipeline currently assumes a single chirp and no
-MIMO; frames are not yet self-describing (the planned A1 keystone); and the online
-subspace-tracking and RF-front-end default operating points are slated for review in 1.1.
+MIMO, and the RF-front-end default operating points are slated for review in 1.1.
+(Earlier editions of this note also listed self-describing frames and the
+subspace-tracking review as pending; both have since shipped — see the A1 entry above
+and the reactive `gap_response` tracker work.)
