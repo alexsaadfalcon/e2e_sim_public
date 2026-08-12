@@ -170,25 +170,29 @@ class _DegradedRadarFrameDataset(RadarFrameDataset):
 
     def _load_raw(self, idx: int):
         array, is_adc, labels, meta = super()._load_raw(idx)
-        if is_adc:
-            adc = torch.from_numpy(array).to(torch.complex64)
-            adc = degrade_adc_cube(adc, self._afe_m, seed=self._afe_seed,
-                                   weight_bits=self._afe_weight_bits,
-                                   quantize=self._afe_quantize)
-            array = adc.numpy()
-        return array, is_adc, labels, meta
+        if not is_adc:
+            # FAIL FAST, here at the load seam -- not only in raw_adc(). Silently
+            # passing a non-ADC frame through would let evaluate_at_m() run the whole
+            # (expensive) model-eval pass on UNDEGRADED inputs before the classical
+            # stage finally noticed (pre-merge review finding): a caller recording
+            # model metrics progressively would log an undegraded AP as if it were
+            # the M-degraded number.
+            raise ValueError(
+                f"{self.files[idx]!r} has no raw ADC on disk (manifest_version 1?) -- "
+                "the AFE sweep degrades raw ADC cubes and needs a raw-ADC-native corpus"
+            )
+        adc = torch.from_numpy(array).to(torch.complex64)
+        adc = degrade_adc_cube(adc, self._afe_m, seed=self._afe_seed,
+                               weight_bits=self._afe_weight_bits,
+                               quantize=self._afe_quantize)
+        return adc.numpy(), is_adc, labels, meta
 
     def raw_adc(self, idx: int) -> torch.Tensor:
         """The degraded raw ADC cube for frame `idx`, `[n_rx, n_chirps, n_samples]`
         complex64 -- undecorated by any `input_format` derivation. What the classical
         baseline (`e2e.ml.baseline.classical_detection_map`) needs, and exactly what
         `__getitem__` derived its model input from for the same frame."""
-        array, is_adc, _labels, _meta = self._load_raw(idx)
-        if not is_adc:
-            raise ValueError(
-                f"{self.files[idx]!r} has no raw ADC on disk (manifest_version 1?) -- "
-                "the AFE sweep needs a raw-ADC-native corpus"
-            )
+        array, _is_adc, _labels, _meta = self._load_raw(idx)  # raises on non-ADC
         return torch.from_numpy(array).to(torch.complex64)
 
 

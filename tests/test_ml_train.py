@@ -207,6 +207,26 @@ def test_train_accum_steps_step_count_matches_effective_batch(tiny_manifest_path
         assert moved, f"{tag} run: parameters identical to initialization"
 
 
+def test_accum_group_len_partial_tail_scaling():
+    """Regression for the pre-merge review finding: the epoch's final accumulation
+    group can be PARTIAL, and each micro-batch loss must be divided by ITS group's
+    actual length, not the full accum_steps -- otherwise the tail examples are
+    systematically under-weighted every epoch. Pin the pure function exhaustively for
+    the reviewer's repro shape (5 batches, accum 3 -> groups [3,3,3] + [2,2]) and the
+    clean-division / accum=1 / single-batch edges."""
+    from e2e.ml.train import _accum_group_len
+
+    assert [_accum_group_len(i, 5, 3) for i in range(5)] == [3, 3, 3, 2, 2]
+    assert [_accum_group_len(i, 6, 3) for i in range(6)] == [3] * 6   # divides evenly
+    assert [_accum_group_len(i, 4, 1) for i in range(4)] == [1] * 4   # accum off
+    assert _accum_group_len(0, 1, 8) == 1                             # single batch
+    # Every group's members agree on their group length, and group sums equal the
+    # batch count (nothing dropped or double-counted).
+    for n, accum in [(5, 3), (7, 2), (9, 4), (8, 8), (3, 5)]:
+        lens = [_accum_group_len(i, n, accum) for i in range(n)]
+        assert sum(1 / g for g in lens) == pytest.approx(-(-n // accum))  # = n_groups
+
+
 def test_train_accum_steps_rejects_non_positive(tiny_manifest_path):
     with pytest.raises(ValueError, match="accum_steps"):
         train_mod.train(tiny_manifest_path, "fftradnet", epochs=1, batch_size=2,

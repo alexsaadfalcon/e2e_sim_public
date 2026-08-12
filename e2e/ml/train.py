@@ -244,6 +244,18 @@ def release_gpu_memory() -> None:
         torch.cuda.ipc_collect()
 
 
+def _accum_group_len(i: int, n_batches: int, accum: int) -> int:
+    """Micro-batch count of the accumulation group containing batch index `i`.
+
+    Groups are consecutive runs of `accum` batches; the epoch's final group is
+    whatever remains (`n_batches % accum`, when nonzero). The train loop divides each
+    micro-batch loss by ITS group's length -- dividing the partial tail group by the
+    full `accum` would systematically under-weight the epoch's last examples. Pure
+    function so that scaling is unit-testable (see test_ml_train.py)."""
+    group_start = (i // accum) * accum
+    return min(accum, n_batches - group_start)
+
+
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
@@ -340,9 +352,13 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
                 pred = model(x)["detection"]
                 loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
                                              cls_normalize=cls_normalize)
-            # Scale by 1/accum_steps so accumulated grads match one step over
-            # batch_size * accum_steps samples (accum_steps=1: no-op, loss unchanged).
-            scaled_loss = loss / accum_steps
+            # Scale by 1/(this group's ACTUAL micro-batch count) so accumulated grads
+            # average the group's members (accum_steps=1: no-op, loss unchanged).
+            # The epoch's last group can be PARTIAL (n_train_batches % accum_steps
+            # micro-batches); dividing those by the full accum_steps would
+            # systematically under-weight the tail examples every epoch (caught in
+            # pre-merge review with an empirical repro).
+            scaled_loss = loss / _accum_group_len(i, n_train_batches, accum_steps)
             if scaler is not None:
                 # Half-precision gradients underflow to zero without loss scaling; the
                 # scaler also skips the step on any inf/NaN it detects.

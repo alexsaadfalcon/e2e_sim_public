@@ -46,9 +46,10 @@ Please keep the suite green and add tests for new behavior. A few conventions:
   shared by the UI, the generator, and the examples.
 
 See `ROADMAP.md` for where the project is headed if you're looking for high-leverage
-places to contribute — currently: compressed-domain (reduced-dimension) processing
-blocks, the MIMO/multi-chirp shape-contract widening (A3), and sequence-aware dataset
-loading for the ML models.
+places to contribute — currently: further compressed-domain (reduced-dimension)
+processing blocks (a first one, `RangeProfileBlock`, shows the pattern), the
+MIMO/multi-chirp shape-contract widening (A3), and sequence-aware dataset loading for
+the ML models.
 
 ## Submitting changes
 

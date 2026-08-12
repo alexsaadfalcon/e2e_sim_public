@@ -43,6 +43,7 @@ Sionna Environment -> RFFE -> Interconnect -> AFE -> AdaOja Subspace
                                                          |-> FFT
                                                          |-> Range-Azimuth
                                                          |-> Range-Elevation
+                                                         |-> Range Profile
                                                          `-> Subspace Error
 ```
 
@@ -92,7 +93,9 @@ role-colored markers). Editing is done through the **Scenario JSON** text box
 
 ### Results
 Plotly figures from the most recent run: FFT, Range-Azimuth, Range-Elevation
-(dB heatmaps) and the per-frame Subspace Error line plot.
+(dB heatmaps), the Range Profile line plot (non-coherent over channels — the one
+product that also works on compressed, reduced-dimension frames), and the per-frame
+Subspace Error line plot.
 
 ## Module map
 
