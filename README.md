@@ -94,14 +94,14 @@ $env:DRJIT_LIBLLVM_PATH = (Get-ChildItem "$env:CONDA_PREFIX\Library\bin" -Filter
 
 Verify with `python -c "import drjit; print('DrJit loaded successfully!')"`.
 
-**NVIDIA driver / CUDA (GPU OptiX backend).** DrJit 1.2 / Mitsuba 3.7 OptiX ray
-tracing requires a **CUDA-12.x** NVIDIA driver. Keep the driver in the range
-**`>= 570` and `< 580`**:
+**NVIDIA driver / CUDA (GPU OptiX backend).** The pinned stack (Sionna 1.2.2 /
+DrJit 1.3.1 / Mitsuba 3.8.0) works on both current driver families:
 
-* **Validated:** driver `576.80` / CUDA `12.9`.
-* **Known broken:** driver `610` / CUDA `13.3` fails with a `ptx2llvm` error —
-  `Failed to translate PTX input to LLVM`. CUDA 13.x is not supported by this
-  DrJit/Mitsuba combination; pin the driver below 580.
+* **Validated:** driver `576.80` / CUDA `12.9`, and driver `610` / CUDA `13.3`.
+* **History, so you don't rediscover it:** the previously pinned DrJit `1.2` /
+  Mitsuba `3.7` stack fails on driver `610` / CUDA `13.3` with a `ptx2llvm` error
+  (`Failed to translate PTX input to LLVM`). The fix is **upgrading the Python
+  packages** (to the pins in `requirements.txt`), not downgrading the driver.
 
 CPU-only generation (`--dry-run`, or the synthetic-channel example fallbacks) does not
 need any NVIDIA driver.
