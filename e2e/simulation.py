@@ -128,20 +128,45 @@ def rank_diagnostic(S, k, rtol=_RANK_RTOL):
     - `sv_gap_at_k`: ratio S[k-1] / S[k], the singular-value gap right at the requested
       cutoff (large gap = a clean signal/noise boundary at k; near 1 = no real
       boundary there). NaN if k >= len(S) (no S[k] to compare against).
+    - `sv_gap_norm`: (S[k-1] - S[k]) / S[0], the absolute gap at the cutoff normalized
+      by the dominant singular value. This is the quantity that actually conditions the
+      top-k subspace's identity (Davis-Kahan: a perturbation E rotates the subspace by
+      ~||E|| / (S[k-1] - S[k])), made scale-free by S[0]. Small under BOTH failure
+      modes: a near-degenerate cluster straddling the cutoff (S[k-1] ~= S[k], the
+      ratio's territory) AND a tail that has sunk into insignificance (S[k-1], S[k]
+      both << S[0] -- where the ratio of two noise-floor values can still look
+      "healthy"). NaN if k >= len(S).
     - `rank_ok`: True iff `k <= effective_rank`, i.e. the requested subspace rank is
       supported by the frame's actual signal content.
+
+    Honesty note: this diagnostic reads the FULL spectrum of the frame -- available
+    here only because Simulation computes a full SVD anyway to construct the scoring
+    ground truth. A deployed receiver stores a rank-k basis and never holds the full
+    aperture frame, so it cannot know S[k] this way. The boundary singular values ARE
+    estimable from what a receiver genuinely has -- the m >> k measurements X = A V,
+    whose sensing matrix already contains rows orthogonal to the tracked subspace
+    (gen_A_ada), so an eigendecomposition of the m x m covariance X X^H (or k+p guard
+    directions with Rayleigh quotients) recovers sigma_k, sigma_{k+1} estimates in the
+    measurement domain -- but that estimator is NOT implemented; anything gating on
+    these values (AdaOjaBlock.gap_response) is consuming simulator-side
+    instrumentation, spectrum-only but oracle-sourced.
     """
     threshold = rtol * S[0]
     effective_rank = int((S > threshold).sum().item())
     if k < len(S):
         denom = S[k]
         sv_gap_at_k = float((S[k - 1] / denom).item()) if denom > 0 else float('inf')
+        sv_gap_norm = (
+            float(((S[k - 1] - S[k]) / S[0]).item()) if S[0] > 0 else float('nan')
+        )
     else:
         sv_gap_at_k = float('nan')
+        sv_gap_norm = float('nan')
     rank_ok = k <= effective_rank
     return {
         'effective_rank': effective_rank,
         'sv_gap_at_k': sv_gap_at_k,
+        'sv_gap_norm': sv_gap_norm,
         'rank_ok': rank_ok,
     }
 
@@ -262,6 +287,7 @@ class Simulation:
         rank_diag = rank_diagnostic(S, self.k)
         self.outputs['effective_rank'].append(rank_diag['effective_rank'])
         self.outputs['sv_gap_at_k'].append(rank_diag['sv_gap_at_k'])
+        self.outputs['sv_gap_norm'].append(rank_diag['sv_gap_norm'])
         self.outputs['rank_ok'].append(rank_diag['rank_ok'])
         if not rank_diag['rank_ok'] and not self._rank_warned:
             warnings.warn(
@@ -295,12 +321,13 @@ class Simulation:
             'PRX': None,
             'signal_domain': frames.DOMAIN_CFR,
             'signal_dimension': frames.DIMENSION_FULL,
-            # Spectrum-only diagnostic (S[k-1]/S[k], from rank_diagnostic above) -- NOT
-            # derived from U_true. Threaded through so a stage/block downstream (e.g.
-            # MeasurementStage/AdaOjaBlock's opt-in gap_response) can react to a
-            # near-degenerate singular-value cluster at the k cutoff without peeking at
+            # Spectrum-only diagnostic ((S[k-1]-S[k])/S[0], from rank_diagnostic
+            # above) -- NOT derived from U_true. Threaded through so a stage/block
+            # downstream (e.g. MeasurementStage/AdaOjaBlock's opt-in gap_response) can
+            # react to an ill-conditioned subspace identity at the k cutoff -- a
+            # degenerate cluster there OR an insignificant tail -- without peeking at
             # the ground-truth basis itself.
-            'sv_gap_at_k': rank_diag['sv_gap_at_k'],
+            'sv_gap_norm': rank_diag['sv_gap_norm'],
         }
         state_dict.update(self._environment_state_updates())
         for stage in self.serial_stages:

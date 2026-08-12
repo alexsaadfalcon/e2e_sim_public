@@ -124,9 +124,16 @@ def test_rank_diagnostic_values():
     assert diag["effective_rank"] == 3
     assert diag["rank_ok"] is True
     assert diag["sv_gap_at_k"] == pytest.approx(8.0 / 0.001, rel=1e-3)
+    assert diag["sv_gap_norm"] == pytest.approx((8.0 - 0.001) / 10.0, rel=1e-3)
 
     diag_over = rank_diagnostic(S, k=4)
     assert diag_over["rank_ok"] is False
+    # THE case the ratio is blind to (and sv_gap_norm exists for): S[3] and S[4] are
+    # both at the noise floor, so their ratio looks like a huge healthy gap while the
+    # normalized absolute gap correctly reads ~0 -- the 4th kept direction is
+    # insignificant and its identity ill-conditioned.
+    assert diag_over["sv_gap_at_k"] == pytest.approx(2.0, rel=1e-3)
+    assert diag_over["sv_gap_norm"] == pytest.approx(0.0005 / 10.0, rel=1e-3)
 
 
 def test_low_rank_frame_triggers_rank_warning_and_outputs(make_env_block, torch_device):
@@ -168,7 +175,7 @@ def test_full_rank_frame_no_rank_warning(make_env_block):
         out = sim.run(n_steps=2)
     assert not any("exceeds frame effective rank" in str(w.message) for w in caught)
     assert out["rank_ok"][0] is True
-    assert "effective_rank" in out and "sv_gap_at_k" in out
+    assert "effective_rank" in out and "sv_gap_at_k" in out and "sv_gap_norm" in out
 
 
 def test_pipeline_subspace_only_regression(make_env_block):
@@ -562,16 +569,18 @@ def test_reset_rewinds_serial_stages_not_only_downstream_blocks():
 
 # ------------------------------------------ reactive n_refine / gap_response wiring
 # See AdaOjaBlock.effective_n_refine (e2e/blocks.py) and the "TRACKER DIVERGENCE
-# ROOT-CAUSED" investigation in notes/TODO.md: a near-degenerate SV cluster at the k
-# cutoff makes the top-k subspace identity numerically arbitrary and spikes tracking
-# error. These pin that Simulation threads the (ground-truth-free) sv_gap_at_k
-# diagnostic to MeasurementStage, and that it actually changes tracker behavior.
+# ROOT-CAUSED" investigation in notes/TODO.md: an ill-conditioned top-k subspace
+# identity at the cutoff (degenerate cluster there, or an insignificant tail) makes
+# tracking error spike. These pin that Simulation threads the (ground-truth-free)
+# sv_gap_norm diagnostic to MeasurementStage, and that it actually changes tracker
+# behavior.
 
 def _controlled_gap_env(make_env_block, d, n_freqs, k, s_tail, array_shape, seed=0):
     """An env block that hands back ONE fixed frame whose true singular values are
-    EXACTLY `s_tail` from index k-1 onward (descending, so `s_tail[0]/s_tail[1]` is
-    the frame's real sv_gap_at_k) -- deterministic control of the spectrum diagnostic
-    for testing the sv_gap_at_k -> effective_n_refine wiring end to end."""
+    EXACTLY `s_tail` from index k-1 onward (descending, with S[0] pinned at 20.0, so
+    the frame's real sv_gap_norm is (s_tail[0]-s_tail[1])/20) -- deterministic control
+    of the spectrum diagnostic for testing the sv_gap_norm -> effective_n_refine
+    wiring end to end."""
     env = make_env_block(n_frames=1, n_freqs=n_freqs, seed=seed, n_rx=d, array_shape=array_shape)
     S = torch.linspace(20.0, s_tail[0] * 1.5, k - 1, device=torch_device_of(env))
     S = torch.cat([S, torch.tensor(s_tail, device=S.device)])
@@ -608,8 +617,8 @@ def test_gap_response_none_matches_baseline_n_refine_call_count(make_env_block, 
 
 
 def test_gap_response_refine_boosts_n_refine_on_collapsed_gap_end_to_end(make_env_block, torch_device):
-    """A frame whose true spectrum has a near-degenerate cluster at k (sv_gap_at_k
-    ~1.05) makes gap_response='refine' run n_refine_hi passes instead of the base
+    """A frame whose true spectrum has a near-degenerate cluster at k (sv_gap_norm
+    ~0.012) makes gap_response='refine' run n_refine_hi passes instead of the base
     n_refine -- driven purely by Simulation's own spectrum diagnostic, with no U_true
     in sight for the tracker."""
     from e2e.blocks import MeasurementStage
@@ -622,23 +631,46 @@ def test_gap_response_refine_boosts_n_refine_on_collapsed_gap_end_to_end(make_en
 
     def n_refine_calls(env):
         subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="refine",
-                                gap_threshold=1.15, n_refine_hi=9)
+                                gap_threshold=0.02, n_refine_hi=9)
         calls = {"n": 0}
         real_update = subspace.update
         subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
         sim = Simulation(env, [], k, subspace_block=subspace)
         sim.reset()
         sim.feed_forward()
-        assert sim.outputs["sv_gap_at_k"][0] == pytest.approx(5.0 / s_tail_gap, rel=1e-2)
+        assert sim.outputs["sv_gap_norm"][0] == pytest.approx((5.0 - s_tail_1) / 20.0, rel=1e-2)
         # The per-frame cost log records what actually ran, next to the diagnostic
         # that triggered it.
         assert sim.outputs["n_refine_used"] == [calls["n"]]
         return calls["n"]
 
-    s_tail_gap = 4.762
-    assert n_refine_calls(collapsed_env) == 9   # sv_gap_at_k ~1.05 < gap_threshold -> hi
-    s_tail_gap = 1.0
-    assert n_refine_calls(healthy_env) == 3     # sv_gap_at_k ~5.0 >= gap_threshold -> base
+    s_tail_1 = 4.762
+    assert n_refine_calls(collapsed_env) == 9   # sv_gap_norm ~0.012 < 0.02 -> hi
+    s_tail_1 = 1.0
+    assert n_refine_calls(healthy_env) == 3     # sv_gap_norm 0.2 >= 0.02 -> base
+
+
+def test_gap_response_refine_triggers_on_insignificant_tail_despite_healthy_ratio(
+        make_env_block, torch_device):
+    """The failure mode the raw ratio S[k-1]/S[k] is blind to: both singular values at
+    the cutoff are far below S[0] (the k-th kept direction is insignificant, its
+    identity ill-conditioned), yet their RATIO is a comfortable 2.0 that the old gate
+    would have called healthy. The normalized absolute gap reads ~0.0075 and the
+    DEFAULT gap_threshold (0.01) must trigger the boost."""
+    d, n_freqs, k = 32, 9, 6
+    env = _controlled_gap_env(
+        make_env_block, d, n_freqs, k, s_tail=[0.30, 0.15, 0.10, 0.05], array_shape=(4, 8))
+    subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="refine", n_refine_hi=9)
+    calls = {"n": 0}
+    real_update = subspace.update
+    subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
+    sim = Simulation(env, [], k, subspace_block=subspace)
+    sim.reset()
+    sim.feed_forward()
+    assert sim.outputs["sv_gap_at_k"][0] == pytest.approx(2.0, rel=1e-2)   # "healthy" ratio
+    assert sim.outputs["sv_gap_norm"][0] == pytest.approx(0.0075, rel=1e-2)
+    assert calls["n"] == 9
+    assert sim.outputs["n_refine_used"] == [9]
 
 
 def test_gap_response_coast_freezes_basis_on_collapsed_gap_end_to_end(make_env_block, torch_device):
@@ -646,7 +678,7 @@ def test_gap_response_coast_freezes_basis_on_collapsed_gap_end_to_end(make_env_b
     while the gap is collapsed."""
     d, n_freqs, k = 32, 9, 6
     env = _controlled_gap_env(make_env_block, d, n_freqs, k, s_tail=[5.0, 4.762, 3.0, 2.0], array_shape=(4, 8))
-    subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="coast", gap_threshold=1.15)
+    subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="coast", gap_threshold=0.02)
     calls = {"n": 0}
     real_update = subspace.update
     subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
@@ -667,14 +699,14 @@ def test_gap_response_reacts_only_to_spectrum_never_to_ground_truth(make_env_blo
 
     d, k, m = 32, 4, 16
     subspace = AdaOjaBlock(d, k, m=m, n_refine=2, gap_response="refine",
-                            gap_threshold=1.15, n_refine_hi=6)
+                            gap_threshold=0.01, n_refine_hi=6)
     stage = MeasurementStage(None, subspace)
     calls = {"n": 0}
     real_update = subspace.update
     subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
 
     s_pars = torch.randn(d, 1, 1, 8, dtype=torch.cfloat, device=torch_device)
-    state = {"s_pars": s_pars, "sv_gap_at_k": 1.0}  # collapsed; no 'U_true' key present
+    state = {"s_pars": s_pars, "sv_gap_norm": 0.001}  # collapsed; no 'U_true' key present
     assert "U_true" not in state
     stage.apply(state)
     assert calls["n"] == 6
