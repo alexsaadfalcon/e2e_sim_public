@@ -9,8 +9,21 @@ LR schedule, no checkpoint resumption, no distributed support -- read it top to 
 Mixed precision is supported (`amp`, default "auto" = on for CUDA). MEASURED, because
 the first version of this note overstated it: on an 8 GiB card SSMRadNet peaks at
 6.02 GiB with AMP off and 5.74 GiB with it on -- a 4.6% saving, NOT a halving, and not
-enough to buy a larger batch (batch 4 still OOMs either way). What actually makes
-SSMRadNet fit is the BATCH SIZE (2, not 8). Treat AMP as a modest speed/memory bonus.
+enough to buy a larger batch. What actually makes SSMRadNet fit is the BATCH SIZE
+(2, not 8): batch 4 does not always raise `OutOfMemoryError` on Windows (the driver's
+"system memory fallback" silently spills the excess into host RAM instead), but MEASURED
+on this box it turns 1 epoch from 187s/6.0 GiB (batch 2) into 1399s/12.0 GiB-worth of
+allocations (batch 4) for the *same* 320-frame split -- a 7.5x slowdown from PCIe-speed
+paging, not a clean 2x, and effectively as unusable as an outright OOM. Treat AMP as a
+modest speed/memory bonus, and treat "did not raise OutOfMemoryError" as insufficient
+evidence a batch size is usable on this hardware.
+
+To reach a larger *effective* batch without more memory, use `accum_steps` (default 1 =
+current behavior exactly unchanged): the optimizer step only fires every `accum_steps`
+micro-batches of size `batch_size`, with the loss scaled by `1/accum_steps` first so the
+accumulated gradient matches a single step over `batch_size * accum_steps` samples. E.g.
+`batch_size=2, accum_steps=4` reaches the same effective batch of 8 that OOMs outright at
+`batch_size=8`, at roughly `batch_size=2`'s memory footprint.
 
 Artifact layout
 ----------------
@@ -31,8 +44,8 @@ CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]
         [--batch-size 8] [--lr 1e-4] [--seed 0] [--reg-weight 100.0] [--gamma 2.0]
-        [--input-format rd|adc] [--amp auto|on|off] [--out DIR] [--eval-only CKPT]
-        [--split test]
+        [--input-format rd|adc] [--amp auto|on|off] [--accum-steps 1] [--out DIR]
+        [--eval-only CKPT] [--split test]
 """
 
 from __future__ import annotations
@@ -234,7 +247,7 @@ def release_gpu_memory() -> None:
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
-          cls_normalize: str = "positives", amp="auto",
+          cls_normalize: str = "positives", amp="auto", accum_steps: int = 1,
           num_workers: Optional[int] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
 
@@ -249,10 +262,20 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     `cls_normalize="none"` reproduces pre-2026-08-10 runs, which collapsed to an
     all-background predictor -- see `detection_loss`'s "WHY THE DEFAULT CHANGED".
 
+    `accum_steps` (default 1, i.e. exactly today's behavior) groups `accum_steps`
+    consecutive `batch_size` micro-batches into one optimizer step, loss-scaled by
+    `1/accum_steps` so the accumulated gradient matches training at the effective batch
+    `batch_size * accum_steps` -- see the module docstring's memory note for why this,
+    not a bigger `batch_size`, is the lever for models (SSMRadNet) whose activation
+    memory scales with batch size steeply enough that "bigger batch" means "silent
+    system-memory-fallback thrashing" on an 8 GiB card, not a clean OOM.
+
     Returns the `history` dict (also written to `history.json`); see the module
     docstring for the artifact layout. `drop_last=False` throughout, so this still
     runs (last batch just smaller) on a split with as few as 1 sample.
     """
+    if accum_steps < 1:
+        raise ValueError(f"accum_steps must be >= 1, got {accum_steps}")
     release_gpu_memory()
     manifest_path = Path(manifest_path)
     device = device if device is not None else _default_device()
@@ -292,8 +315,9 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     # Mixed precision. "auto" enables it on CUDA only. Measured on this box's 8 GiB
     # cards: SSMRadNet peaks at 6.02 GiB with AMP off, 5.74 GiB with it on -- 4.6%, not
     # the halving the activation-memory argument would predict (its footprint is not
-    # activation-dominated), and batch 4 OOMs with or without it. Batch size is the
-    # lever that decides whether it fits; this is a bonus on top.
+    # activation-dominated), and batch 4 thrashes into Windows' system-memory fallback
+    # with or without it (see module docstring). Batch size (with accum_steps to reach a
+    # larger effective batch) is the lever that decides whether it fits; AMP is a bonus.
     use_amp = (device.type == "cuda") if amp == "auto" else bool(amp)
     if use_amp and device.type != "cuda":
         raise ValueError("amp=True requires a CUDA device; got " + str(device))
@@ -305,25 +329,37 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     best_ap = -1.0
     best_state = None
 
+    n_train_batches = len(train_loader)
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss, total_cls, total_reg, n_batches = 0.0, 0.0, 0.0, 0
-        for x, y in train_loader:
+        optimizer.zero_grad()
+        for i, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
             with _autocast(use_amp):
                 pred = model(x)["detection"]
                 loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
                                              cls_normalize=cls_normalize)
+            # Scale by 1/accum_steps so accumulated grads match one step over
+            # batch_size * accum_steps samples (accum_steps=1: no-op, loss unchanged).
+            scaled_loss = loss / accum_steps
             if scaler is not None:
                 # Half-precision gradients underflow to zero without loss scaling; the
                 # scaler also skips the step on any inf/NaN it detects.
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                scaler.scale(scaled_loss).backward()
             else:
-                loss.backward()
-                optimizer.step()
+                scaled_loss.backward()
+
+            # Step every accum_steps micro-batches, and on the last (possibly partial)
+            # group of an epoch so no accumulated gradient is ever silently dropped.
+            is_accum_boundary = (i + 1) % accum_steps == 0 or (i + 1) == n_train_batches
+            if is_accum_boundary:
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
 
             total_loss += float(loss.detach().item())
             total_cls += parts["cls"]
@@ -434,6 +470,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="mixed precision: 'auto' (default) enables it on CUDA. Measured "
                         "saving on SSMRadNet is ~5%% of peak memory (6.02 -> 5.74 GiB), "
                         "not a halving; batch size is what decides whether it fits")
+    p.add_argument("--accum-steps", type=int, default=1,
+                   help="gradient accumulation: group this many batch_size micro-batches "
+                        "into one optimizer step (default 1 = unchanged behavior), reaching "
+                        "effective batch batch_size*accum_steps without more peak memory "
+                        "(see module docstring; the lever for models like SSMRadNet where "
+                        "a bigger batch_size alone risks Windows system-memory-fallback "
+                        "thrashing on an 8 GiB card)")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -455,7 +498,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
           seed=args.seed, out_dir=args.out, input_format=args.input_format,
           reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize,
-          amp={"auto": "auto", "on": True, "off": False}[args.amp])
+          amp={"auto": "auto", "on": True, "off": False}[args.amp], accum_steps=args.accum_steps)
     return 0
 
 

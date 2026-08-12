@@ -139,6 +139,97 @@ def test_train_default_out_dir(tiny_manifest_path):
 
 
 # --------------------------------------------------------------------------------
+# accum_steps (gradient accumulation): see train.py's module docstring for why this,
+# not a bigger batch_size, is the memory lever for SSMRadNet on an 8 GiB card.
+# --------------------------------------------------------------------------------
+def test_train_accum_steps_default_matches_unset_step_count(tiny_manifest_path, tmp_path,
+                                                             monkeypatch):
+    """`accum_steps` unset (default 1) is bit-for-bit the same optimizer-step schedule
+    as passing `accum_steps=1` explicitly -- guards against the new arg silently
+    changing default behavior. Forced onto CPU: on CUDA, `amp="auto"` routes `step()`
+    through `GradScaler.step()`, whose internal found-inf skip logic (needed for AMP,
+    irrelevant to accum_steps) makes a naive `Adam.step` call-count an unreliable probe."""
+    real_step = torch.optim.Adam.step
+    counts = {"n": 0}
+
+    def counting_step(self, *args, **kwargs):
+        counts["n"] += 1
+        return real_step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.Adam, "step", counting_step)
+    train_mod.train(tiny_manifest_path, "fftradnet", epochs=2, batch_size=2,
+                     out_dir=tmp_path / "default", seed=0, device=torch.device("cpu"))
+    # train split has 4 frames -> 2 micro-batches/epoch, accum_steps=1 -> 1 step/micro-batch.
+    assert counts["n"] == 2 * 2
+
+
+def test_train_accum_steps_step_count_matches_effective_batch(tiny_manifest_path, manifest_dict,
+                                                               tmp_path, monkeypatch):
+    """`batch_size=2, accum_steps=2` (4 train frames -> 2 micro-batches/epoch, grouped
+    into 1 step) must take exactly as many optimizer steps per epoch as the
+    unaccumulated equivalent `batch_size=4, accum_steps=1` (1 micro-batch/epoch, 1
+    step) -- both are effective-batch-4. Loss trajectories are not expected to match
+    (different micro-batch schedules -> different BatchNorm running stats), so this
+    checks step COUNT and that parameters actually moved, not float equality. CPU-forced
+    for the same reason as the test above (AMP's GradScaler.step() skip logic)."""
+    real_step = torch.optim.Adam.step
+    cpu = torch.device("cpu")
+
+    def _run(batch_size, accum_steps, out_dir):
+        counts = {"n": 0}
+
+        def counting_step(self, *args, **kwargs):
+            counts["n"] += 1
+            return real_step(self, *args, **kwargs)
+
+        monkeypatch.setattr(torch.optim.Adam, "step", counting_step)
+        try:
+            train_mod.train(tiny_manifest_path, "fftradnet", epochs=3, batch_size=batch_size,
+                            accum_steps=accum_steps, out_dir=out_dir, seed=0, device=cpu)
+        finally:
+            monkeypatch.setattr(torch.optim.Adam, "step", real_step)
+        return counts["n"]
+
+    steps_unaccum = _run(4, 1, tmp_path / "unaccum")   # 1 micro-batch/epoch, no accumulation
+    steps_accum = _run(2, 2, tmp_path / "accum")       # 2 micro-batches/epoch, grouped by 2
+    assert steps_unaccum == steps_accum == 3            # 1 step/epoch x 3 epochs, either way
+
+    # Params actually moved from their (seed-reproducible) initial values in both runs.
+    torch.manual_seed(0)
+    initial = train_mod.build_model("fftradnet", manifest_dict, device=cpu)
+    initial_state = initial.state_dict()
+    for tag in ("unaccum", "accum"):
+        ckpt = torch.load(tmp_path / tag / "best.pt", map_location="cpu")
+        trained_state = ckpt["model_state"]
+        moved = any(
+            not torch.equal(trained_state[k], initial_state[k]) for k in initial_state
+        )
+        assert moved, f"{tag} run: parameters identical to initialization"
+
+
+def test_train_accum_steps_rejects_non_positive(tiny_manifest_path):
+    with pytest.raises(ValueError, match="accum_steps"):
+        train_mod.train(tiny_manifest_path, "fftradnet", epochs=1, batch_size=2,
+                        accum_steps=0, seed=0)
+
+
+def test_cli_accum_steps_default_and_wiring(monkeypatch):
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet"])
+    assert captured["accum_steps"] == 1
+
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet",
+                    "--accum-steps", "4"])
+    assert captured["accum_steps"] == 4
+
+
+# --------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------
 def test_cli_bad_model_exits_nonzero(tiny_manifest_path):
