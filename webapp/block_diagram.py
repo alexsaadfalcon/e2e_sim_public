@@ -53,7 +53,18 @@ _POSITIONS = {
     "sink": (1240, 400),
 }
 
-# Cytoscape stylesheet: color by category, dim disabled toggleable blocks.
+# Category colors, shared by the cytoscape stylesheet below AND the legend in
+# layout() -- keep these two in sync when changing either.
+CATEGORY_COLORS: Dict[str, str] = {
+    "source": "#0fb9b1",
+    "stage": "#4b6584",
+    "product": "#8854d0",
+    "disabled": "#a5b1c2",
+}
+
+# Cytoscape stylesheet: color by category, dim disabled toggleable blocks. Sized
+# and weighted to stay legible projected at demo scale (a shared screen, not a
+# close-up laptop), not just on a dev monitor.
 CYTO_STYLESHEET: List[Dict[str, Any]] = [
     {
         "selector": "node",
@@ -62,39 +73,44 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "text-valign": "center",
             "text-halign": "center",
             "color": "#fff",
-            "font-size": "11px",
+            "font-size": "12px",
+            "font-weight": 600,
             "text-wrap": "wrap",
-            "text-max-width": "120px",
-            "width": "150px",
-            "height": "56px",
+            "text-max-width": "130px",
+            "width": "160px",
+            "height": "60px",
             "shape": "round-rectangle",
-            "background-color": "#4b6584",
+            "background-color": CATEGORY_COLORS["stage"],
             "border-width": 2,
             "border-color": "#2d3a4a",
         },
     },
-    {"selector": "node.source", "style": {"background-color": "#0fb9b1"}},
-    {"selector": "node.product", "style": {"background-color": "#8854d0"}},
-    {"selector": "node.disabled", "style": {"background-color": "#a5b1c2",
+    {"selector": "node.source", "style": {"background-color": CATEGORY_COLORS["source"]}},
+    {"selector": "node.product", "style": {"background-color": CATEGORY_COLORS["product"]}},
+    {"selector": "node.disabled", "style": {"background-color": CATEGORY_COLORS["disabled"],
                                             "border-color": "#7f8c9b",
-                                            "color": "#3c4858"}},
+                                            "border-style": "dashed",
+                                            "color": "#3c4858",
+                                            "opacity": 0.7}},
     {
         "selector": "node:selected",
-        "style": {"border-color": "#f7b731", "border-width": 4},
+        "style": {"border-color": "#f7b731", "border-width": 4, "border-style": "solid"},
     },
     {
         "selector": "edge",
         "style": {
             "curve-style": "bezier",
             "target-arrow-shape": "triangle",
+            "arrow-scale": 1.3,
             "line-color": "#778ca3",
             "target-arrow-color": "#778ca3",
-            "width": 2,
+            "width": 2.5,
         },
     },
     {"selector": "edge.inactive", "style": {"line-color": "#d1d8e0",
                                             "target-arrow-color": "#d1d8e0",
-                                            "line-style": "dashed"}},
+                                            "line-style": "dashed",
+                                            "width": 2}},
 ]
 
 
@@ -175,14 +191,42 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
     return children
 
 
+def _legend_swatch(color: str, label: str) -> Any:
+    """One legend entry: a small filled square + label (readable at demo scale --
+    colored text alone is low-contrast for the lighter category colors)."""
+    return html.Span([
+        html.Span(style={
+            "display": "inline-block", "width": "12px", "height": "12px",
+            "backgroundColor": color, "border": "1px solid #2d3a4a",
+            "borderRadius": "3px", "marginRight": "5px", "verticalAlign": "middle",
+        }),
+        html.Span(label, style={"verticalAlign": "middle", "color": "#2d3a4a"}),
+    ], style={"marginRight": "16px", "whiteSpace": "nowrap"})
+
+
+def _legend_line(label: str, dashed: bool = False) -> Any:
+    """One legend entry for an edge style (solid = active, dashed = inactive)."""
+    return html.Span([
+        html.Span(style={
+            "display": "inline-block", "width": "22px", "height": "0px",
+            "borderTop": f"3px {'dashed' if dashed else 'solid'} #778ca3",
+            "marginRight": "5px", "verticalAlign": "middle",
+        }),
+        html.Span(label, style={"verticalAlign": "middle", "color": "#2d3a4a"}),
+    ], style={"marginRight": "16px", "whiteSpace": "nowrap"})
+
+
 def layout() -> Any:
     """The Block Diagram tab layout."""
     legend = html.Div([
-        html.Span("source ", style={"color": "#0fb9b1", "fontWeight": "bold"}),
-        html.Span("stage ", style={"color": "#4b6584", "fontWeight": "bold"}),
-        html.Span("product ", style={"color": "#8854d0", "fontWeight": "bold"}),
-        html.Span("disabled", style={"color": "#a5b1c2", "fontWeight": "bold"}),
-    ], style={"marginBottom": "6px", "fontSize": "12px"})
+        _legend_swatch(CATEGORY_COLORS["source"], "source"),
+        _legend_swatch(CATEGORY_COLORS["stage"], "stage"),
+        _legend_swatch(CATEGORY_COLORS["product"], "product"),
+        _legend_swatch(CATEGORY_COLORS["disabled"], "disabled"),
+        _legend_line("active edge"),
+        _legend_line("inactive edge", dashed=True),
+    ], style={"marginBottom": "8px", "fontSize": "12px", "display": "flex",
+              "flexWrap": "wrap", "alignItems": "center"})
 
     return html.Div([
         html.H3("Pipeline Block Diagram"),

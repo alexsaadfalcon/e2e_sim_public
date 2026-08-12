@@ -239,10 +239,12 @@ def _render_results(results_data, active_tab):
                    "tab and click Run pipeline.", style={"color": "#576574"}),
         ])
 
-    titles = {
-        "fft": "FFT", "range_az": "Range-Azimuth",
-        "range_el": "Range-Elevation", "subspace_err": "Subspace Error",
-    }
+    # Card order follows results_data's insertion order, which mirrors
+    # figures_from_outputs' build order (webapp/pipeline_runner.py): fft ->
+    # range_az -> range_el -> range_profile -> subspace_err -> comms products.
+    # That already keeps Range Profile grouped with its FFT/range siblings, so no
+    # re-sort is needed here; each figure carries its own title (set where it is
+    # built) rather than a second, easily-stale title map duplicated in this tab.
     cards = []
     for key, fig_dict in results_data.items():
         cards.append(html.Div(
