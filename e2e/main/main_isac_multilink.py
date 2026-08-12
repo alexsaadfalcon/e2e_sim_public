@@ -305,9 +305,23 @@ def main(cache_path=None, fig_dir=None, seed=SEED,
     os.makedirs(fig_dir, exist_ok=True)
 
     _ensure_cache(cache_path, num_frames, num_freqs, seed, verbose=verbose)
-    if verbose:
-        tag = "" if data_source.startswith("REAL") else "  [synthetic fallback]"
-        print(f"[isac_multilink] data source: {data_source} ({cache_path}){tag}")
+    if data_source.startswith("REAL"):
+        # ALWAYS printed (not verbose-gated): the real file is preferred by mere
+        # existence -- nothing validates it against the CURRENT munich_isac_scenario()
+        # definition (the synthetic path fingerprints the scenario content precisely
+        # so a spec change regenerates; a real dump has no such guard), and the
+        # num_frames/num_freqs arguments are ignored for it. If the scenario spec
+        # changed since this file was generated, the metrics below describe the OLD
+        # spec: regenerate via
+        #   python -m e2e.environment.scenario_runner --scenario munich_isac
+        import datetime
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(cache_path))
+        print(f"[isac_multilink] data source: {data_source} ({cache_path})\n"
+              f"[isac_multilink]   file dated {mtime:%Y-%m-%d %H:%M}; used AS-IS -- "
+              f"regenerate if munich_isac_scenario() changed since then")
+    elif verbose:
+        print(f"[isac_multilink] data source: {data_source} ({cache_path})"
+              "  [synthetic fallback]")
 
     links = SionnaIterator.available_links(cache_path)
     if verbose:

@@ -128,6 +128,11 @@ def test_rank_diagnostic_values():
 
     diag_over = rank_diagnostic(S, k=4)
     assert diag_over["rank_ok"] is False
+
+    # k=0 used to wrap S[k-1] to S[-1] via negative indexing and log nonsense;
+    # a rank request below 1 must fail loudly instead.
+    with pytest.raises(ValueError, match="k >= 1"):
+        rank_diagnostic(S, k=0)
     # THE case the ratio is blind to (and sv_gap_norm exists for): S[3] and S[4] are
     # both at the noise floor, so their ratio looks like a huge healthy gap while the
     # normalized absolute gap correctly reads ~0 -- the 4th kept direction is

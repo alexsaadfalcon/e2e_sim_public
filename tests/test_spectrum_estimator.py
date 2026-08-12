@@ -146,6 +146,43 @@ def test_gate_decision_robust_to_30db_noise(torch_device, name):
         )
 
 
+def test_low_snr_validity_bound_is_real(torch_device):
+    """The documented low-SNR validity bound (module docstring): below ~25 dB the gate
+    becomes unreliable. Pins the two defensible halves at 15 dB with fixed seeds:
+    (1) WELL-SEPARATED healthy spectra (oracle gap ~25x the threshold) never falsely
+    trigger; (2) at least one genuine collapse IS missed (the dominant, operationally
+    dangerous false-healthy direction is real, not hypothetical). Near-threshold
+    healthy spectra (healthy_moderate, gap ~3x threshold) are deliberately EXCLUDED
+    from (1): writing this test found they can false-trigger at 15 dB too -- see the
+    module docstring's bound, updated accordingly."""
+    d, n_freqs, k, m = _GATE_D, _GATE_NFREQS, _GATE_K, _GATE_M
+
+    def est_trigger(name, trial):
+        seed = _GATE_SEED_BASE[name] + 300 + trial
+        V, U_o, S = _make_frame(d, n_freqs, _GATE_CASES[name], torch_device, seed=seed)
+        A = gen_A_ada(U_o[:, :k], m)
+        X_noisy = _add_noise(A @ V, snr_db=15.0, seed=seed + 1)
+        return estimate_boundary_spectrum(X_noisy, A, k)["sv_gap_norm"] < _GATE_THRESHOLD
+
+    # (1) A deeply-healthy spectrum never falsely triggers, even at 15 dB.
+    for trial in range(6):
+        assert not est_trigger("healthy_separated", trial), (
+            f"false-collapse on healthy_separated trial {trial}: even the "
+            "well-separated regime now flips at 15 dB -- re-measure the validity "
+            "bound in the module docstring"
+        )
+
+    # (2) Some genuine collapses ARE missed at 15 dB (the bound is real).
+    missed = sum(not est_trigger(name, trial)
+                 for name in ("degenerate_cluster", "insignificant_tail")
+                 for trial in range(8))
+    assert missed >= 1, (
+        "no missed collapses at 15 dB with these seeds -- if the estimator gained "
+        "noise debiasing, update the module docstring's validity bound instead of "
+        "deleting this test"
+    )
+
+
 # ------------------------------------------------------------------ misc / edge behavior
 
 def test_requires_k_less_than_m():

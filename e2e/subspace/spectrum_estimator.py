@@ -48,6 +48,24 @@ in the test file and the task report for measured accuracy.)
 The estimator therefore assumes (matching `gen_A_ada`'s convention, and NOT re-derived
 generically from `A` alone): `A`'s first `k` rows are the anchor block `U^H` for some
 orthonormal `U`, and rows `k:` are the complement block.
+
+MEASUREMENT-NOISE VALIDITY BOUND (measured, adversarial review 2026-08-12): gate
+decisions thresholding the estimated `sv_gap_norm` match the oracle at >= 25-30 dB
+per-measurement SNR (0 mismatches / 120 trials at 30 dB at d=512/m=256/k=8, default
+0.01 threshold), and become unreliable below that. The DOMINANT failure is
+false-healthy -- noise inflates every estimated singular value, closing the estimated
+gap less than it lifts the tail, so at 20 dB ~10% and at 15 dB ~35-50% of genuine
+collapses are MISSED. Near-threshold healthy spectra are not safe either: an oracle
+gap within a few multiples of the threshold (e.g. 0.03 vs 0.01) can also
+FALSE-TRIGGER at 15 dB (found while pinning this bound in tests), though
+well-separated healthy spectra (gap >= ~10x threshold) stayed correct in every trial.
+If this estimator is ever wired into the live `gap_response` gate, a receiver below
+~25 dB measurement SNR gets an unreliable gate in both directions -- and the missed
+deep collapses are the operationally dangerous case, silently skipping the refinement
+boost exactly during the divergence events the gate exists to catch. Either budget
+SNR accordingly, raise the threshold, or debias the noise floor first (e.g. subtract
+the median tail eigenvalue). Not fixed here: this module is an unwired prototype and
+the bound is documented rather than compensated.
 """
 
 import torch
