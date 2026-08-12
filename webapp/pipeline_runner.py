@@ -151,6 +151,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             FFTBlock,
             RangeAzBlock,
             RangeElBlock,
+            RangeProfileBlock,
             SubspaceErrorBlock,
             CircuitStage,
             InterconnectStage,
@@ -267,10 +268,12 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     fft_bins = int(_p_positive(state, "fft", "bins"))
     range_az_bins = int(_p_positive(state, "range_az", "bins"))
     range_el_bins = int(_p_positive(state, "range_el", "bins"))
+    range_profile_bins = int(_p_positive(state, "range_profile", "bins"))
     downstream_blocks = [
         FFTBlock(bins=fft_bins),
         RangeAzBlock(bins=range_az_bins),
         RangeElBlock(bins=range_el_bins),
+        RangeProfileBlock(bins=range_profile_bins),
         SubspaceErrorBlock(),
     ]
 
@@ -503,6 +506,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         "fft_bins": fft_bins,
         "range_az_bins": range_az_bins,
         "range_el_bins": range_el_bins,
+        "range_profile_bins": range_profile_bins,
         "n_freqs": n_freqs,
         "freq_span_hz": freq_span_hz,
         # True when the values above came from the frames' own v2 metadata (env
@@ -647,6 +651,30 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 _to_numpy_abs_db(outputs[key][-1]), title,
                 x=x, y=y, xlabel=aperture_label, ylabel=ylabel,
             )
+
+    if outputs.get("range_profile_agg"):
+        prof = outputs["range_profile_agg"][-1]
+        if hasattr(prof, "detach"):
+            prof = prof.detach().cpu().numpy()
+        prof = np.asarray(prof, dtype=float)
+        bins_rp = meta.get("range_profile_bins") or prof.shape[0]
+        if n_freqs and freq_span_hz:
+            x = _range_axis(bins_rp, freq_span_hz, n_freqs)
+            xlabel = "range (m)"
+        else:
+            x = np.arange(bins_rp)
+            xlabel = "range (bins)"
+        peak = max(float(prof.max()), 1e-12)
+        prof_db = 10 * np.log10(prof / peak + 1e-12)
+        fig = go.Figure(data=go.Scatter(x=np.asarray(x), y=prof_db, mode="lines"))
+        fig.update_layout(
+            title="Range profile (non-coherent over channels)",
+            xaxis_title=xlabel,
+            yaxis_title="power (dB rel. peak)",
+            margin=dict(l=40, r=20, t=40, b=40),
+            height=360,
+        )
+        figs["range_profile"] = fig
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]

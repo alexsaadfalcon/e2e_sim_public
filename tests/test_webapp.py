@@ -383,6 +383,30 @@ def test_run_pipeline_maps_frame_contract_errors_to_constraint_message(
         pipeline_runner.run_pipeline(state, n_steps=1)
 
 
+def test_run_pipeline_wires_every_classic_product_block(monkeypatch, make_env_block):
+    """Regression for the range_profile gap: a block registered as a non-toggleable
+    'product' in pipeline_registry MUST actually execute in run_pipeline and MUST get
+    a figure from figures_from_outputs -- otherwise the UI presents a permanently-on
+    node that silently never runs. Guards the classic-chain products; the ADC-cube
+    chain trio (radar_cube/detector/sink) is registered-but-unwired by documented
+    design (see pipeline_runner's module docstring) and excluded here."""
+    pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=2, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    outputs = pipeline_runner.run_pipeline(default_block_state(), n_steps=1)
+    for key in ("fft", "range_az", "range_el", "range_profile_agg", "subspace_err"):
+        assert outputs.get(key), f"classic product output {key!r} missing from run_pipeline"
+
+    figs = pipeline_runner.figures_from_outputs(outputs)
+    for fig_key in ("fft", "range_az", "range_el", "range_profile", "subspace_err"):
+        assert fig_key in figs, f"figures_from_outputs has no figure for {fig_key!r}"
+
+
 def test_run_pipeline_no_longer_errors_when_rffe_disabled():
     """RFFE-off is now a valid config: the stale up-front RFFE guard must not fire.
 
