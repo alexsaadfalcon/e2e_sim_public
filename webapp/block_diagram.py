@@ -29,6 +29,7 @@ _POSITIONS = {
     "fft": (1020, 20),
     "range_az": (1020, 120),
     "range_el": (1020, 220),
+    "range_profile": (1020, 270),
     "subspace_err": (1020, 320),
     "comms": (1020, 420),
 

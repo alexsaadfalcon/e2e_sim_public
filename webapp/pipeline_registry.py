@@ -151,6 +151,18 @@ BLOCKS: List[BlockSpec] = [
         blurb="Range-elevation power map (non-coherent over azimuth).",
     ),
     BlockSpec(
+        id="range_profile",
+        label="Range Profile",
+        toggleable=False,
+        category="product",
+        params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
+        blurb=("Per-channel range profile (FFT along frequency only, no aperture "
+               "transform). Compression mixes only the aperture axis, so range "
+               "survives compression even where angle does not -- this is the one "
+               "product that stays valid on compressed (reduced-dimension) "
+               "measurements without a DecompressBlock."),
+    ),
+    BlockSpec(
         id="subspace_err",
         label="Subspace Error",
         toggleable=False,
@@ -369,6 +381,7 @@ EDGES: List[tuple] = [
     ("subspace", "fft"),
     ("subspace", "range_az"),
     ("subspace", "range_el"),
+    ("subspace", "range_profile"),
     ("subspace", "subspace_err"),
     ("subspace", "comms"),
 
