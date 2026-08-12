@@ -98,31 +98,35 @@ def test_more_measurements_lower_the_floor(torch_device):
 # See "TRACKER DIVERGENCE ROOT-CAUSED" in notes/TODO.md: on munich frames 22+ a
 # near-degenerate SV cluster sits right at the k cutoff and the tracker's error spikes.
 # `effective_n_refine` is the pure function these opt-in reactions are built from --
-# it takes the SPECTRUM-only sv_gap_at_k diagnostic (S[k-1]/S[k]) and nothing else, so
-# it cannot be peeking at ground truth by construction (see the signature test below).
+# it takes the SPECTRUM-only sv_gap_norm diagnostic ((S[k-1]-S[k])/S[0]) and nothing
+# else, so it cannot be peeking at ground truth by construction (see the signature test
+# below). The normalized ABSOLUTE gap (not the ratio S[k-1]/S[k]) is deliberate: the
+# ratio of two singular values already down at the noise floor can look "healthy" while
+# the k-th kept direction is insignificant -- the normalized gap collapses in both
+# failure modes.
 
 def test_gap_response_defaults_to_none_and_is_backward_compatible():
     block = AdaOjaBlock(16, 2, n_refine=10)
     assert block.gap_response == "none"
-    for gap in (0.5, 1.0, 1.15, 5.0, None, float("nan")):
+    for gap in (0.0, 0.005, 0.01, 0.5, None, float("nan")):
         assert block.effective_n_refine(gap) == 10
 
 
 def test_gap_response_refine_boosts_only_below_threshold():
     block = AdaOjaBlock(16, 2, n_refine=10, gap_response="refine",
-                         gap_threshold=1.15, n_refine_hi=60)
-    assert block.effective_n_refine(1.0) == 60     # collapsed
-    assert block.effective_n_refine(1.149) == 60   # just under threshold
-    assert block.effective_n_refine(1.15) == 10    # not strictly less -> base
-    assert block.effective_n_refine(5.0) == 10     # healthy gap
+                         gap_threshold=0.01, n_refine_hi=60)
+    assert block.effective_n_refine(0.001) == 60   # collapsed
+    assert block.effective_n_refine(0.0099) == 60  # just under threshold
+    assert block.effective_n_refine(0.01) == 10    # not strictly less -> base
+    assert block.effective_n_refine(0.2) == 10     # healthy gap
     assert block.effective_n_refine(None) == 10    # no diagnostic -> base
     assert block.effective_n_refine(float("nan")) == 10
 
 
 def test_gap_response_coast_freezes_refinement_below_threshold():
-    block = AdaOjaBlock(16, 2, n_refine=10, gap_response="coast", gap_threshold=1.15)
-    assert block.effective_n_refine(1.0) == 0
-    assert block.effective_n_refine(5.0) == 10
+    block = AdaOjaBlock(16, 2, n_refine=10, gap_response="coast", gap_threshold=0.01)
+    assert block.effective_n_refine(0.001) == 0
+    assert block.effective_n_refine(0.2) == 10
     assert block.effective_n_refine(None) == 10
 
 
@@ -138,4 +142,4 @@ def test_effective_n_refine_signature_cannot_see_ground_truth():
     import inspect
 
     sig = inspect.signature(AdaOjaBlock.effective_n_refine)
-    assert list(sig.parameters) == ["self", "sv_gap_at_k"]
+    assert list(sig.parameters) == ["self", "sv_gap_norm"]

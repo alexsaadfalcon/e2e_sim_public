@@ -300,7 +300,7 @@ class AdaOjaBlock:
     _GAP_RESPONSES = ("none", "refine", "coast")
 
     def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1,
-                 gap_response="none", gap_threshold=1.15, n_refine_hi=60):
+                 gap_response="none", gap_threshold=0.01, n_refine_hi=60):
         self.oja = Oja(d, k, eta=eta, fixed_step=True)
         self.method = method
         # Measurement count for the adaptive sensing matrix (rows of A). Defaults to the
@@ -321,28 +321,35 @@ class AdaOjaBlock:
                 f"gap_response must be one of {self._GAP_RESPONSES}, got {gap_response!r}"
             )
         self.gap_response = gap_response
-        # sv_gap_at_k = S[k-1]/S[k] (see e2e.simulation.rank_diagnostic); below this the
-        # k-cutoff is judged to fall inside a near-degenerate SV cluster (S[k-1]~=S[k]).
-        # 1.15 was the value measured to isolate the munich-scene spike (TODO.md
-        # "TRACKER DIVERGENCE ROOT-CAUSED") without triggering on the normal frame-to-
-        # frame ratio, which sits well above it.
+        # sv_gap_norm = (S[k-1]-S[k])/S[0] (see e2e.simulation.rank_diagnostic); below
+        # this the top-k subspace identity is judged ill-conditioned at the cutoff.
+        # 0.01 was calibrated on the 30-frame munich protocol: collapse frames 22-29
+        # sit at <= 0.0022, every earlier frame at >= 0.013 -- the same trigger set as
+        # the ratio gate this replaces, but the normalized ABSOLUTE gap also collapses
+        # when the tail sinks into the noise floor (S[k-1], S[k] both << S[0]), where a
+        # ratio of two noise-floor values can read "healthy" (munich frame 18: ratio
+        # 2.34 while S[k-1]/S[0] had already fallen to 0.12).
         self.gap_threshold = gap_threshold
         # Refinement count used for gap_response="refine" while the gap is collapsed.
         self.n_refine_hi = n_refine_hi
 
-    def effective_n_refine(self, sv_gap_at_k=None):
+    def effective_n_refine(self, sv_gap_norm=None):
         """The refinement count MeasurementStage should run THIS frame.
 
-        `sv_gap_at_k` is a SPECTRUM-only diagnostic -- the ratio S[k-1]/S[k] of two
-        singular values, computed upstream in `Simulation.feed_forward` from the
+        `sv_gap_norm` is a SPECTRUM-only diagnostic -- the normalized absolute gap
+        (S[k-1] - S[k]) / S[0], computed upstream in `Simulation.feed_forward` from the
         frame's singular-value spectrum alone (see `rank_diagnostic`). It never touches
         the ground-truth basis U_true, so reacting to it is not a peek at ground truth
         -- the same guarantee the tracker's own online update already has to hold.
+        The ABSOLUTE gap is what conditions the top-k subspace's identity (Davis-Kahan),
+        so unlike the raw ratio S[k-1]/S[k] this signal also collapses when the tail is
+        merely insignificant (both singular values near the noise floor), not only when
+        the cutoff straddles a degenerate cluster.
 
         gap_response="none" (default): always `n_refine`, ignoring the signal entirely
         (bit-identical to every AdaOjaBlock built before this option existed).
         gap_response="refine": bump to `n_refine_hi` refinement passes while the gap is
-        collapsed (sv_gap_at_k < gap_threshold) -- spend more compute chasing the
+        collapsed (sv_gap_norm < gap_threshold) -- spend more compute chasing the
         ambiguous cutoff. Productionized from the investigation's "reactive n_refine"
         finding (TODO.md "TRACKER DIVERGENCE ROOT-CAUSED"): peak -46%/post -94% on the
         30-frame munich protocol.
@@ -351,15 +358,16 @@ class AdaOjaBlock:
         chasing a target whose own frame-to-frame identity is numerically arbitrary
         (ground truth's drift itself jumps 0.24 -> ~1.0 in the same window) rather than
         spend compute re-estimating in a direction likely to be reverted next frame.
+        (Benchmarked WORSE than baseline -- kept as a documented negative result.)
 
-        A missing or NaN sv_gap_at_k (no diagnostic available -- e.g. the replay path,
+        A missing or NaN sv_gap_norm (no diagnostic available -- e.g. the replay path,
         which never computes one) falls back to `n_refine`, matching the "off" behavior.
         """
-        if self.gap_response == "none" or sv_gap_at_k is None:
+        if self.gap_response == "none" or sv_gap_norm is None:
             return self.n_refine
-        if sv_gap_at_k != sv_gap_at_k:  # NaN (k >= len(S)); no gap to react to
+        if sv_gap_norm != sv_gap_norm:  # NaN (k >= len(S)); no gap to react to
             return self.n_refine
-        collapsed = sv_gap_at_k < self.gap_threshold
+        collapsed = sv_gap_norm < self.gap_threshold
         if not collapsed:
             return self.n_refine
         return self.n_refine_hi if self.gap_response == "refine" else 0
@@ -519,13 +527,13 @@ class MeasurementStage:
         # onto this frame's subspace (a stale anchor from the previous frame otherwise
         # caps accuracy ~10x above the SVD floor). n_refine=1 is the single-shot legacy path.
         # A subspace_block that declares `effective_n_refine` (AdaOjaBlock's opt-in
-        # gap_response) gets to adjust the count from `state['sv_gap_at_k']` -- a
+        # gap_response) gets to adjust the count from `state['sv_gap_norm']` -- a
         # spectrum-only diagnostic Simulation threads through, never the ground-truth
         # basis (see AdaOjaBlock.effective_n_refine). Anything else keeps the plain
         # `n_refine` attribute, unconditionally, as before.
         get_n_refine = getattr(self.subspace_block, "effective_n_refine", None)
         if callable(get_n_refine):
-            n_refine = get_n_refine(state.get("sv_gap_at_k"))
+            n_refine = get_n_refine(state.get("sv_gap_norm"))
         else:
             n_refine = getattr(self.subspace_block, "n_refine", 1)
         if self.afe_block:
