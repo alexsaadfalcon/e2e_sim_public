@@ -15,8 +15,12 @@ from dash import dcc, html
 
 from webapp.pipeline_registry import BLOCKS, BLOCKS_BY_ID, EDGES, PRODUCT_IDS
 
-# Manual positions so the graph reads left-to-right as a pipeline.
+# Manual positions so the graph reads left-to-right as a pipeline. Every id in
+# webapp.pipeline_registry.BLOCKS must appear here (see test_webapp.py), or it
+# falls back to the origin and overlaps other nodes.
 _POSITIONS = {
+    # Main radar/subspace chain: environment -> rffe -> interconnect -> afe ->
+    # subspace -> products (fanned out on the right).
     "environment": (0, 160),
     "rffe": (200, 160),
     "interconnect": (400, 160),
@@ -26,6 +30,26 @@ _POSITIONS = {
     "range_az": (1020, 120),
     "range_el": (1020, 220),
     "subspace_err": (1020, 320),
+    "comms": (1020, 420),
+
+    # TX-time tributary (above the main chain): waveform -> PA -> modulate,
+    # which bridges back into the main chain at rffe.
+    "waveform": (0, 40),
+    "tx_pa": (150, 40),
+    "modulate": (300, 40),
+
+    # Live-ray-tracing source, an alternative to "environment" (below the main
+    # chain); it also feeds modulate and rffe directly.
+    "rt_environment": (0, 280),
+
+    # RX-time ADC-cube tributary (below the main chain), branching off
+    # interconnect: dechirp -> impairment -> quantizer -> products.
+    "dechirp": (600, 280),
+    "impairment": (800, 280),
+    "quantizer": (1000, 280),
+    "radar_cube": (1240, 200),
+    "detector": (1240, 300),
+    "sink": (1240, 400),
 }
 
 # Cytoscape stylesheet: color by category, dim disabled toggleable blocks.

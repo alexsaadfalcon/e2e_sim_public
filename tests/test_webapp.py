@@ -245,6 +245,24 @@ def test_block_diagram_layout_builds():
     assert getattr(layout, "children", None) is not None
 
 
+def test_positions_cover_every_registered_block_without_collisions():
+    """Every block registered in pipeline_registry.BLOCKS must have an explicit,
+    unique (x, y) entry in block_diagram._POSITIONS -- otherwise it silently
+    falls back to (0, 0) and overlaps another node in the cytoscape diagram."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS
+
+    ids = [b.id for b in BLOCKS]
+    missing = [bid for bid in ids if bid not in block_diagram._POSITIONS]
+    assert not missing, f"blocks missing explicit positions: {missing}"
+
+    positions = [block_diagram._POSITIONS[bid] for bid in ids]
+    assert len(positions) == len(set(positions)), (
+        "two or more blocks share the same (x, y) position: "
+        f"{[bid for bid in ids if positions.count(block_diagram._POSITIONS[bid]) > 1]}"
+    )
+
+
 # =============================================================================
 # scenario_editor: JSON round-trip, map figure, validation
 # =============================================================================
