@@ -341,6 +341,11 @@ class AdaOjaBlock:
         frame's singular-value spectrum alone (see `rank_diagnostic`). It never touches
         the ground-truth basis U_true, so reacting to it is not a peek at ground truth
         -- the same guarantee the tracker's own online update already has to hold.
+        It IS, however, oracle-sourced: the simulator gets S[k] from the full-frame
+        SVD it performs anyway for scoring, which a deployed receiver storing only a
+        rank-k basis would not have. The equivalent signal is estimable from the
+        m >> k measurement covariance (see the honesty note on `rank_diagnostic`),
+        but that estimator is not implemented.
         The ABSOLUTE gap is what conditions the top-k subspace's identity (Davis-Kahan),
         so unlike the raw ratio S[k-1]/S[k] this signal also collapses when the tail is
         merely insignificant (both singular values near the noise floor), not only when

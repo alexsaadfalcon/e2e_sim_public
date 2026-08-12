@@ -138,6 +138,18 @@ def rank_diagnostic(S, k, rtol=_RANK_RTOL):
       "healthy"). NaN if k >= len(S).
     - `rank_ok`: True iff `k <= effective_rank`, i.e. the requested subspace rank is
       supported by the frame's actual signal content.
+
+    Honesty note: this diagnostic reads the FULL spectrum of the frame -- available
+    here only because Simulation computes a full SVD anyway to construct the scoring
+    ground truth. A deployed receiver stores a rank-k basis and never holds the full
+    aperture frame, so it cannot know S[k] this way. The boundary singular values ARE
+    estimable from what a receiver genuinely has -- the m >> k measurements X = A V,
+    whose sensing matrix already contains rows orthogonal to the tracked subspace
+    (gen_A_ada), so an eigendecomposition of the m x m covariance X X^H (or k+p guard
+    directions with Rayleigh quotients) recovers sigma_k, sigma_{k+1} estimates in the
+    measurement domain -- but that estimator is NOT implemented; anything gating on
+    these values (AdaOjaBlock.gap_response) is consuming simulator-side
+    instrumentation, spectrum-only but oracle-sourced.
     """
     threshold = rtol * S[0]
     effective_rank = int((S > threshold).sum().item())
