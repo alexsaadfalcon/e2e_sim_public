@@ -70,10 +70,12 @@ def test_registry_block_ids_unique():
 
 
 def test_registry_edges_reference_existing_nodes():
-    from webapp.pipeline_registry import BLOCKS_BY_ID, EDGES
-    for src, dst in EDGES:
+    from webapp.pipeline_registry import BLOCKS_BY_ID, EDGES, normalize_edge
+    for edge in EDGES:
+        src, dst, kind = normalize_edge(edge)
         assert src in BLOCKS_BY_ID, f"edge source {src!r} not a known block"
         assert dst in BLOCKS_BY_ID, f"edge target {dst!r} not a known block"
+        assert kind in {"toggle", "alt"}, f"edge {src}->{dst} has unknown kind {kind!r}"
 
 
 def test_registry_categories_are_known():
@@ -184,7 +186,10 @@ def test_build_elements_matches_registry():
     from webapp.pipeline_registry import BLOCKS, EDGES, default_block_state
 
     elements = block_diagram.build_elements(default_block_state())
-    nodes = [e for e in elements if "source" not in e["data"]]
+    # Exclude the compound-group container nodes (see block_diagram._GROUPS):
+    # they are not registry blocks and carry no "position".
+    nodes = [e for e in elements
+             if "source" not in e["data"] and "position" in e]
     edges = [e for e in elements if "source" in e["data"]]
 
     assert len(nodes) == len(BLOCKS)
@@ -246,9 +251,12 @@ def test_block_diagram_layout_builds():
 
 
 def test_positions_cover_every_registered_block_without_collisions():
-    """Every block registered in pipeline_registry.BLOCKS must have an explicit,
-    unique (x, y) entry in block_diagram._POSITIONS -- otherwise it silently
-    falls back to (0, 0) and overlaps another node in the cytoscape diagram."""
+    """Every block registered in pipeline_registry.BLOCKS must have an explicit
+    position in block_diagram._POSITIONS -- otherwise it silently falls back to
+    (0, 0) and overlaps another node in the cytoscape diagram -- AND no two
+    nodes' actual rendered boxes may geometrically overlap. Tuple-equality alone
+    is not enough: this is the regression that let range_profile (1020, 270)
+    sit on top of quantizer (1000, 280) -- different tuples, overlapping boxes."""
     from webapp import block_diagram
     from webapp.pipeline_registry import BLOCKS
 
@@ -256,11 +264,46 @@ def test_positions_cover_every_registered_block_without_collisions():
     missing = [bid for bid in ids if bid not in block_diagram._POSITIONS]
     assert not missing, f"blocks missing explicit positions: {missing}"
 
-    positions = [block_diagram._POSITIONS[bid] for bid in ids]
-    assert len(positions) == len(set(positions)), (
-        "two or more blocks share the same (x, y) position: "
-        f"{[bid for bid in ids if positions.count(block_diagram._POSITIONS[bid]) > 1]}"
-    )
+    # Node box size from CYTO_STYLESHEET's base "node" selector (width/height).
+    node_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
+                       if s["selector"] == "node")
+    w = float(node_style["width"].rstrip("px"))
+    h = float(node_style["height"].rstrip("px"))
+
+    def _box(bid):
+        x, y = block_diagram._POSITIONS[bid]
+        return (x - w / 2, x + w / 2, y - h / 2, y + h / 2)
+
+    def _overlaps(a, b):
+        ax0, ax1, ay0, ay1 = a
+        bx0, bx1, by0, by1 = b
+        return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+
+    boxes = {bid: _box(bid) for bid in ids}
+    colliding = []
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if _overlaps(boxes[a], boxes[b]):
+                colliding.append((a, b))
+    assert not colliding, f"node boxes ({w}x{h}) geometrically overlap: {colliding}"
+
+
+def test_every_block_belongs_to_exactly_one_diagram_group():
+    """Every registered block must appear in exactly one of block_diagram._GROUPS
+    (the compound region containers from the redesign) -- not zero, not two."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS
+
+    membership_count = {b.id: 0 for b in BLOCKS}
+    for spec in block_diagram._GROUPS.values():
+        for bid in spec["members"]:
+            assert bid in membership_count, f"group member {bid!r} is not a registered block"
+            membership_count[bid] += 1
+
+    not_grouped = [bid for bid, n in membership_count.items() if n == 0]
+    multi_grouped = [bid for bid, n in membership_count.items() if n > 1]
+    assert not not_grouped, f"blocks not in any diagram group: {not_grouped}"
+    assert not multi_grouped, f"blocks in more than one diagram group: {multi_grouped}"
 
 
 # =============================================================================

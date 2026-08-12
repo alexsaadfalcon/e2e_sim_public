@@ -398,16 +398,30 @@ EDGES: List[tuple] = [
     ("waveform", "tx_pa"),
     ("tx_pa", "modulate"),
     ("environment", "modulate"),
-    ("rt_environment", "modulate"),
-    ("rt_environment", "rffe"),
+    ("rt_environment", "modulate", "alt"),
+    ("rt_environment", "rffe", "alt"),
     ("modulate", "rffe"),
-    ("interconnect", "dechirp"),
+    ("interconnect", "dechirp", "alt"),
     ("dechirp", "impairment"),
     ("impairment", "quantizer"),
     ("quantizer", "radar_cube"),
     ("quantizer", "detector"),
     ("quantizer", "sink"),
 ]
+
+
+def normalize_edge(edge: tuple) -> tuple:
+    """Normalize an EDGES entry to (src, dst, kind).
+
+    Most entries are plain (src, dst) 2-tuples, which default to kind="toggle"
+    (the original active/inactive-on-disable styling). A few entries are
+    3-tuples (src, dst, "alt") marking one of two mutually-exclusive source
+    paths into the same downstream block (e.g. precomputed 'environment' vs.
+    live 'rt_environment' both feeding 'modulate'/'rffe')."""
+    if len(edge) == 3:
+        return edge
+    src, dst = edge
+    return (src, dst, "toggle")
 
 
 # Quick lookups -------------------------------------------------------------------

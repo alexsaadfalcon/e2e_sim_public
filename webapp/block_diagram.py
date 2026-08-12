@@ -13,11 +13,16 @@ from typing import Any, Dict, List
 import dash_cytoscape as cyto
 from dash import dcc, html
 
-from webapp.pipeline_registry import BLOCKS, BLOCKS_BY_ID, EDGES, PRODUCT_IDS
+from webapp.pipeline_registry import (
+    BLOCKS, BLOCKS_BY_ID, EDGES, PRODUCT_IDS, normalize_edge,
+)
 
 # Manual positions so the graph reads left-to-right as a pipeline. Every id in
 # webapp.pipeline_registry.BLOCKS must appear here (see test_webapp.py), or it
-# falls back to the origin and overlaps other nodes.
+# falls back to the origin and overlaps other nodes. Product column keeps a
+# consistent 100px pitch; the ADC-cube tributary gets its own band (y=580-740)
+# well clear of the main chain and product column (node boxes are 160x60, see
+# CYTO_STYLESHEET, so anything closer than 100px on a shared axis can touch).
 _POSITIONS = {
     # Main radar/subspace chain: environment -> rffe -> interconnect -> afe ->
     # subspace -> products (fanned out on the right).
@@ -29,28 +34,72 @@ _POSITIONS = {
     "fft": (1020, 20),
     "range_az": (1020, 120),
     "range_el": (1020, 220),
-    "range_profile": (1020, 270),
-    "subspace_err": (1020, 320),
-    "comms": (1020, 420),
+    "range_profile": (1020, 320),
+    "subspace_err": (1020, 420),
+    "comms": (1020, 520),
 
     # TX-time tributary (above the main chain): waveform -> PA -> modulate,
-    # which bridges back into the main chain at rffe.
+    # which bridges back into the main chain at rffe. Pitch bumped 150 -> 170
+    # (deviation from the original untouched values): at 150 the 160px-wide
+    # boxes actually overlapped by 10px -- caught by the new geometric-overlap
+    # test in (E), not the original tuple-equality one.
     "waveform": (0, 40),
-    "tx_pa": (150, 40),
-    "modulate": (300, 40),
+    "tx_pa": (170, 40),
+    "modulate": (340, 40),
 
     # Live-ray-tracing source, an alternative to "environment" (below the main
     # chain); it also feeds modulate and rffe directly.
     "rt_environment": (0, 280),
 
-    # RX-time ADC-cube tributary (below the main chain), branching off
-    # interconnect: dechirp -> impairment -> quantizer -> products.
-    "dechirp": (600, 280),
-    "impairment": (800, 280),
-    "quantizer": (1000, 280),
-    "radar_cube": (1240, 200),
-    "detector": (1240, 300),
-    "sink": (1240, 400),
+    # RX-time ADC-cube tributary, on its own band well below everything else,
+    # branching off interconnect: dechirp -> impairment -> quantizer -> products.
+    "dechirp": (600, 620),
+    "impairment": (800, 620),
+    "quantizer": (1000, 620),
+    "radar_cube": (1240, 580),
+    "detector": (1240, 660),
+    "sink": (1240, 740),
+}
+
+# Compound region groups (Cytoscape native `data.parent`; see build_elements).
+# Parent/container nodes get no explicit position -- Cytoscape auto-computes
+# the compound box from the children's preset positions above.
+_GROUPS: Dict[str, Dict[str, Any]] = {
+    "grp_txtime": {
+        "members": ["waveform", "tx_pa", "modulate"],
+        "label": "TX-time waveform tributary (opt-in)",
+    },
+    "grp_main": {
+        "members": ["environment", "rt_environment", "rffe", "interconnect",
+                    "afe", "subspace"],
+        "label": "Main radar/subspace chain",
+    },
+    "grp_products": {
+        "members": ["fft", "range_az", "range_el", "range_profile",
+                    "subspace_err", "comms"],
+        "label": "Frequency-domain products",
+    },
+    "grp_adc": {
+        "members": ["dechirp", "impairment", "quantizer", "radar_cube",
+                    "detector", "sink"],
+        "label": "ADC-cube chain - mutually exclusive with the products above",
+    },
+}
+
+_BLOCK_TO_GROUP: Dict[str, str] = {
+    bid: gid for gid, spec in _GROUPS.items() for bid in spec["members"]
+}
+
+# Entry points into the diagram: a "start here" affordance for the two source
+# blocks that begin the two mutually-exclusive main-chain paths.
+_ENTRY_IDS = {"environment", "rt_environment"}
+
+# Diagram-only label overrides for clean line breaks. Deliberately local to
+# this module -- webapp.pipeline_registry.BlockSpec.label is also used by the
+# param editor, which should keep the single-line label.
+_DIAGRAM_LABEL_OVERRIDES: Dict[str, str] = {
+    "rt_environment": "RT Environment\n(live ray tracing)",
+    "modulate": "Modulate\n(TX -> channel)",
 }
 
 # Category colors, shared by the cytoscape stylesheet below AND the legend in
@@ -96,6 +145,25 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
         "selector": "node:selected",
         "style": {"border-color": "#f7b731", "border-width": 4, "border-style": "solid"},
     },
+    {"selector": "node.entry", "style": {"border-color": "#20bf6b", "border-width": 5,
+                                         "border-style": "solid"}},
+    # Compound group containers (see _GROUPS / build_elements): a faint labeled
+    # box behind their children, drawn from Cytoscape's native :parent pseudo-class.
+    {
+        "selector": "node:parent",
+        "style": {
+            "background-opacity": 0.06,
+            "border-style": "dashed",
+            "border-width": 1,
+            "border-color": "#576574",
+            "text-valign": "top",
+            "text-halign": "left",
+            "font-size": "11px",
+            "font-weight": "bold",
+            "color": "#576574",
+            "padding": "18px",
+        },
+    },
     {
         "selector": "edge",
         "style": {
@@ -111,31 +179,49 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
                                             "target-arrow-color": "#d1d8e0",
                                             "line-style": "dashed",
                                             "width": 2}},
+    {"selector": "edge.alt-path", "style": {"line-color": "#e17055",
+                                            "target-arrow-color": "#e17055",
+                                            "line-style": "dotted",
+                                            "width": 2.5}},
 ]
 
 
 def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build cytoscape elements (nodes + edges) reflecting enabled/disabled state."""
     elements: List[Dict[str, Any]] = []
+
+    # Compound region containers first (see _GROUPS). No "position" -- Cytoscape
+    # auto-computes the compound box from the children's preset positions.
+    for gid, spec in _GROUPS.items():
+        elements.append({"data": {"id": gid, "label": spec["label"]}, "classes": "group"})
+
     for b in BLOCKS:
         enabled = block_state.get(b.id, {}).get("enabled", b.enabled_default)
         classes = [b.category]
         if b.toggleable and not enabled:
             classes.append("disabled")
+        if b.id in _ENTRY_IDS:
+            classes.append("entry")
         x, y = _POSITIONS.get(b.id, (0, 0))
+        data = {"id": b.id, "label": _DIAGRAM_LABEL_OVERRIDES.get(b.id, b.label)}
+        if b.id in _BLOCK_TO_GROUP:
+            data["parent"] = _BLOCK_TO_GROUP[b.id]
         elements.append({
-            "data": {"id": b.id, "label": b.label},
+            "data": data,
             "position": {"x": x, "y": y},
             "classes": " ".join(classes),
         })
 
-    for src, dst in EDGES:
+    for edge in EDGES:
+        src, dst, kind = normalize_edge(edge)
         src_on = block_state.get(src, {}).get("enabled", True)
         dst_on = block_state.get(dst, {}).get("enabled", True)
-        cls = "" if (src_on and dst_on) else "inactive"
+        classes = [] if (src_on and dst_on) else ["inactive"]
+        if kind == "alt":
+            classes.append("alt-path")
         elements.append({
             "data": {"source": src, "target": dst, "id": f"{src}->{dst}"},
-            "classes": cls,
+            "classes": " ".join(classes),
         })
     return elements
 
@@ -204,12 +290,15 @@ def _legend_swatch(color: str, label: str) -> Any:
     ], style={"marginRight": "16px", "whiteSpace": "nowrap"})
 
 
-def _legend_line(label: str, dashed: bool = False) -> Any:
-    """One legend entry for an edge style (solid = active, dashed = inactive)."""
+def _legend_line(label: str, dashed: bool = False, style: str = None,
+                  color: str = "#778ca3") -> Any:
+    """One legend entry for an edge style: solid = active, dashed = inactive,
+    dotted (with `style`/`color` overrides) = the alt-path edges from (C)."""
+    line_style = style or ("dashed" if dashed else "solid")
     return html.Span([
         html.Span(style={
             "display": "inline-block", "width": "22px", "height": "0px",
-            "borderTop": f"3px {'dashed' if dashed else 'solid'} #778ca3",
+            "borderTop": f"3px {line_style} {color}",
             "marginRight": "5px", "verticalAlign": "middle",
         }),
         html.Span(label, style={"verticalAlign": "middle", "color": "#2d3a4a"}),
@@ -225,6 +314,8 @@ def layout() -> Any:
         _legend_swatch(CATEGORY_COLORS["disabled"], "disabled"),
         _legend_line("active edge"),
         _legend_line("inactive edge", dashed=True),
+        _legend_line("alternative source path - only one used per run",
+                     style="dotted", color="#e17055"),
     ], style={"marginBottom": "8px", "fontSize": "12px", "display": "flex",
               "flexWrap": "wrap", "alignItems": "center"})
 
@@ -240,8 +331,11 @@ def layout() -> Any:
                     id="block-cytoscape",
                     elements=[],            # populated by callback from store
                     stylesheet=CYTO_STYLESHEET,
-                    layout={"name": "preset"},
-                    style={"width": "100%", "height": "440px"},
+                    # fit=True re-frames the viewport to the current extent on
+                    # every (re)render -- belt-and-suspenders with the taller
+                    # container below now that the ADC-cube band pushes y to ~770.
+                    layout={"name": "preset", "fit": True, "padding": 20},
+                    style={"width": "100%", "height": "820px"},
                     userZoomingEnabled=True,
                     userPanningEnabled=True,
                 ),
@@ -254,7 +348,7 @@ def layout() -> Any:
                 style={"flex": "1", "marginLeft": "12px", "padding": "10px",
                        "border": "1px solid #dfe4ea", "borderRadius": "6px",
                        "minWidth": "240px", "maxWidth": "320px",
-                       "overflowY": "auto", "maxHeight": "440px"},
+                       "overflowY": "auto", "maxHeight": "820px"},
             ),
         ], style={"display": "flex"}),
         html.Div([
