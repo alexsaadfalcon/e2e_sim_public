@@ -307,16 +307,29 @@ def test_downloaded_asset_licenses_recorded_as_unverified():
 def test_kenney_fleet_licenses_recorded_as_verified_cc0():
     """The Kenney fleet's `spec.license` must flow through into ASSET_LICENSES verbatim
     (not the generic UNKNOWN text every other downloaded asset gets)."""
-    kenney_names = [n for n, s in DOWNLOADED_ASSET_SPECS.items() if s.license is not None]
+    kenney_names = [n for n in DOWNLOADED_ASSET_SPECS if n.startswith("kn_")]
     # 15 vehicles only -- bus/trolley box-body stand-ins were drafted then deferred by
-    # the project owner (a parallel search for real freely-licensed bus/trolley meshes
-    # is in progress).
+    # the project owner (that search concluded separately -- see
+    # test_owner_approved_bus_and_tram_licenses_recorded_verbatim below).
     assert len(kenney_names) == 15
     for name in kenney_names:
         spec = DOWNLOADED_ASSET_SPECS[name]
+        assert spec.license is not None
         assert ASSET_LICENSES[name]["license"] == spec.license
         assert "CC0" in ASSET_LICENSES[name]["license"]
         assert ASSET_LICENSES[name]["category"] == spec.vehicle_class
+
+
+def test_owner_approved_bus_and_tram_licenses_recorded_verbatim():
+    """The OWNER-APPROVED bus (CC0) and tram (CC-BY 3.0, attribution required) also
+    carry a verified `spec.license` -- must flow through into ASSET_LICENSES verbatim,
+    same as the Kenney fleet, even though the tram's is not CC0."""
+    for name in ("dl_bus_ajanhallinta", "dl_tram_google"):
+        spec = DOWNLOADED_ASSET_SPECS[name]
+        assert spec.license is not None
+        assert ASSET_LICENSES[name]["license"] == spec.license
+        assert ASSET_LICENSES[name]["category"] == spec.vehicle_class
+    assert "CC-BY 3.0" in ASSET_LICENSES["dl_tram_google"]["license"]
 
 
 def test_use_local_assets_false_stays_within_the_default_pool():
@@ -686,13 +699,15 @@ def test_kenney_fleet_is_registered_in_the_default_pool():
     assert "kn_delivery" in truck_pool
 
 
-def test_bus_and_trolley_pools_are_unchanged_by_the_kenney_fleet():
-    """The Kenney fleet is car/truck only -- bus/trolley box-body stand-ins were
-    drafted then explicitly DEFERRED by the project owner (a parallel search for real
-    freely-licensed bus/trolley meshes is in progress). Both pools must still rest on
-    exactly the original single (UNKNOWN-license) mesh, same as before this campaign."""
-    assert tuple(VEHICLE_CLASS_POOLS["bus"]) == ("dl_school_bus",)
-    assert tuple(VEHICLE_CLASS_POOLS["trolley"]) == ("dl_trolley",)
+def test_bus_and_trolley_pools_gain_the_owner_approved_assets():
+    """The Kenney fleet itself is car/truck only -- bus/trolley box-body stand-ins were
+    drafted then explicitly DEFERRED by the project owner, pending a parallel search
+    for real freely-licensed bus/trolley meshes. That search has SINCE concluded (this
+    replaces the older pin of "unchanged" -- i.e. still just dl_school_bus/dl_trolley
+    -- which was only ever true for the pre-approval state): each pool now holds its
+    original (UNKNOWN-license) mesh PLUS one new OWNER-APPROVED asset."""
+    assert set(VEHICLE_CLASS_POOLS["bus"]) == {"dl_school_bus", "dl_bus_ajanhallinta"}
+    assert set(VEHICLE_CLASS_POOLS["trolley"]) == {"dl_trolley", "dl_tram_google"}
 
 
 def test_draw_vehicle_asset_survives_an_empty_class_pool():

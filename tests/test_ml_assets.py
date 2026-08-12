@@ -73,10 +73,10 @@ def test_real_length_ranges_match_the_class_brief():
     # freestl.com entries still pass unchanged): car hi 5.2->5.5 (kn_van, a Transit-class
     # panel van kept in the "car" class per the approved fleet, is 5.40 m long); truck lo
     # 7.0->6.0 (kn_delivery/kn_delivery_flat/kn_ambulance are smaller box trucks, ~6.5-6.8
-    # m). bus/trolley bounds are UNCHANGED -- the Kenney bus/trolley box-body stand-ins
-    # were deferred by the project owner (a parallel search for real freely-licensed
-    # bus/trolley meshes is in progress), so bus/trolley coverage is still just
-    # dl_school_bus / dl_trolley.
+    # m). bus hi widened again, 10.0->13.0, for the OWNER-APPROVED dl_bus_ajanhallinta (a
+    # full-size 12.00 m transit bus, longer than dl_school_bus's 7-9 m Type B range).
+    # trolley bound is unchanged -- dl_tram_google's 11.90 m target already fits inside
+    # dl_trolley's existing 9-15 m streetcar range.
     for name, spec in DOWNLOADED_ASSET_SPECS.items():
         lo, hi = spec.real_length_range_m
         assert lo < hi
@@ -85,7 +85,7 @@ def test_real_length_ranges_match_the_class_brief():
         elif spec.vehicle_class == "truck":
             assert 6.0 <= lo and hi <= 17.0
         elif spec.vehicle_class == "bus":
-            assert 6.0 <= lo and hi <= 10.0
+            assert 6.0 <= lo and hi <= 13.0
         elif spec.vehicle_class == "trolley":
             assert 9.0 <= lo and hi <= 15.0
 
@@ -171,6 +171,59 @@ def test_kenney_per_axis_scaling_matches_real_class_dims(name):
         pytest.skip(f"{name}: Kenney kit not found on this machine (graceful degrade)")
 
     want_l, want_w, want_h = _KENNEY_REAL_DIMS_M[name]
+    assert result.length_m == pytest.approx(want_l, abs=0.02)
+    assert result.width_m == pytest.approx(want_w, abs=0.02)
+    assert result.height_m == pytest.approx(want_h, abs=0.02)
+
+
+# --------------------------------------------------------------------------------
+# OWNER-APPROVED bus + tram (resolves the Kenney follow-up's deferred bus/trolley
+# search): one CC0 bus (ajanhallinta, OpenGameArt) and one CC-BY 3.0 tram (Poly by
+# Google) -- see e2e.ml.assets.DOWNLOADED_ASSET_SPECS' "Follow-up 2" docstring note.
+# --------------------------------------------------------------------------------
+def test_bus_and_tram_are_registered_with_the_right_class_and_license():
+    bus = DOWNLOADED_ASSET_SPECS["dl_bus_ajanhallinta"]
+    assert bus.vehicle_class == "bus"
+    assert bus.license == "CC0 (opengameart.org/content/3d-bus)"
+
+    tram = DOWNLOADED_ASSET_SPECS["dl_tram_google"]
+    assert tram.vehicle_class == "trolley"
+    assert "CC-BY 3.0" in tram.license
+    assert "poly.pizza/m/e9pQgEqPGir" in tram.license
+    assert "attribution required" in tram.license  # the one non-CC0 asset in this module
+
+
+def test_bus_and_tram_archives_use_an_already_extracted_directory_source():
+    """Same `source_subdir` mechanism as the Kenney kit (see
+    `test_kenney_archive_uses_an_already_extracted_directory_source`) -- both were
+    copied/converted once into cache_dir()/cc0/..., no 7z/downloads_dir() involved."""
+    for key in ("bus_ajanhallinta", "tram_google"):
+        spec = ARCHIVE_SPECS[key]
+        assert spec.source_subdir is not None
+        assert spec.archive_filename == ""
+
+
+# name -> real (length, width, height) target the per-axis scale was solved for -- see
+# each spec's `derivation`.
+_OWNER_APPROVED_REAL_DIMS_M = {
+    "dl_bus_ajanhallinta": (12.00, 2.55, 3.20),
+    "dl_tram_google": (11.90, 2.50, 3.50),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OWNER_APPROVED_REAL_DIMS_M))
+def test_bus_and_tram_per_axis_scaling_matches_real_class_dims(name):
+    """Same load-bearing check as `test_kenney_per_axis_scaling_matches_real_class_dims`,
+    against the REAL files on this workstation; skips gracefully if absent so CI (which
+    has neither) stays green."""
+    import e2e.ml.assets as assets_mod
+    assets_mod._process_cache.pop(name, None)
+
+    result = process_asset(name, force=True)
+    if result is None:
+        pytest.skip(f"{name}: source file not found on this machine (graceful degrade)")
+
+    want_l, want_w, want_h = _OWNER_APPROVED_REAL_DIMS_M[name]
     assert result.length_m == pytest.approx(want_l, abs=0.02)
     assert result.width_m == pytest.approx(want_w, abs=0.02)
     assert result.height_m == pytest.approx(want_h, abs=0.02)

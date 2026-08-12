@@ -21,13 +21,25 @@ UNKNOWN one, and PER-AXIS scaling (`DownloadedAssetSpec.axis_scale_m`) since Ken
 stylized proportions make uniform scaling produce badly wrong bounding boxes (see that
 field's docstring). Kenney ships no bus/trolley mesh; box-body stand-ins for those two
 classes were drafted but DEFERRED by the project owner (a parallel search for real
-freely-licensed bus/trolley meshes is in progress) -- bus/trolley coverage is unchanged
-(still just dl_school_bus / dl_trolley, both UNKNOWN-license).
+freely-licensed bus/trolley meshes was launched instead).
+
+Follow-up 2 (OWNER-APPROVED bus + tram): that search concluded with two more assets,
+registered the same way as the Kenney fleet (verified `license` + per-axis
+`axis_scale_m`) -- "dl_bus_ajanhallinta" (CC0, OpenGameArt) and "dl_tram_google" (CC-BY
+3.0, Poly by Google -- the one non-CC0 asset in this module; its `license` string carries
+the required attribution). The tram ships as a .glb; since this module only reads
+OBJ/STL, `cc0/tram-google/tram.obj` is a one-time trimesh format conversion of the source
+GLB (no geometry change -- see that directory's PROVENANCE.txt) rather than adding a
+glTF reader for one asset. bus/trolley coverage is now dl_school_bus + dl_bus_ajanhallinta
+(bus) and dl_trolley + dl_tram_google (trolley).
 
 Cache layout (NEVER inside the repo -- no mesh binary is ever committed):
-    <cache_dir()>/raw/<asset>/...        -- extracted archive contents (verbatim)
-    <cache_dir()>/cc0/car-kit/...        -- the Kenney kit, hand-extracted once (CC0)
-    <cache_dir()>/processed/<asset>.ply  -- decimated, metre-scaled, ground-aligned PLY
+    <cache_dir()>/raw/<asset>/...           -- extracted archive contents (verbatim)
+    <cache_dir()>/cc0/car-kit/...           -- the Kenney kit, hand-extracted once (CC0)
+    <cache_dir()>/cc0/bus-ajanhallinta/...  -- the OWNER-APPROVED bus, copied once (CC0)
+    <cache_dir()>/cc0/tram-google/...       -- the OWNER-APPROVED tram, converted once
+                                                from .glb (CC-BY 3.0, attribution required)
+    <cache_dir()>/processed/<asset>.ply     -- decimated, metre-scaled, ground-aligned PLY
 
 `cache_dir()` defaults to `%LOCALAPPDATA%/e2e_ml_assets` (or `<tempdir>/e2e_ml_assets` if
 `LOCALAPPDATA` isn't set), overridable via the `E2E_ML_ASSET_CACHE_DIR` env var. Source
@@ -161,6 +173,17 @@ ARCHIVE_SPECS: Dict[str, ArchiveSpec] = {
     "kenney_car_kit": ArchiveSpec(
         source_subdir=os.path.join("cc0", "car-kit", "Models", "OBJ format")
     ),
+    # OWNER-APPROVED bus + tram (same source_subdir mechanism as the Kenney kit above):
+    # both were copied/converted once into cache_dir()/cc0/... from the search agent's
+    # staging area (cc0/candidates/), so processing needs no downloads_dir()/7z. See
+    # DOWNLOADED_ASSET_SPECS' "dl_bus_ajanhallinta"/"dl_tram_google" entries below.
+    "bus_ajanhallinta": ArchiveSpec(source_subdir=os.path.join("cc0", "bus-ajanhallinta")),
+    # tram.obj is a ONE-TIME trimesh conversion of the source GLB (glTF has no group-
+    # aware reader here, and this module intentionally adds no new mesh-format support
+    # for one asset -- see DOWNLOADED_ASSET_SPECS' entry and cc0/tram-google/
+    # PROVENANCE.txt for the exact conversion command; geometry/bounds are unchanged by
+    # the format conversion, verified empirically).
+    "tram_google": ArchiveSpec(source_subdir=os.path.join("cc0", "tram-google")),
 }
 
 
@@ -498,8 +521,56 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
     # classes were drafted (a Kenney box-truck donor stretched to real bus/streetcar
     # extents) but the project owner deferred that decision -- a parallel search is
     # finding real freely-licensed bus/trolley meshes, so the fallback choice is made
-    # later. bus/trolley coverage stays exactly as it was (dl_school_bus / dl_trolley,
-    # both UNKNOWN/INTERNAL-ONLY) -- see e2e.ml.rt_scenes' VEHICLE_CLASS_POOLS.
+    # later. That search concluded with the two OWNER-APPROVED assets below.
+
+    # ----------------------------------------------------------------------------
+    # OWNER-APPROVED bus + tram (resolves the "bus/trolley coverage deferred" note
+    # above). Registered the same way as the Kenney fleet -- `axis_scale_m` (per-axis
+    # scale) + a verified `license` string -- but each is its own single-mesh
+    # `ArchiveSpec` (like dl_trolley/dl_school_bus), not a shared kit.
+    # ----------------------------------------------------------------------------
+    "dl_bus_ajanhallinta": DownloadedAssetSpec(
+        name="dl_bus_ajanhallinta", vehicle_class="bus",
+        archive_key="bus_ajanhallinta", filename="BUS.obj",
+        # Raw OBJ is already length=x/width=y/height=z (Blender Z-up export, same
+        # convention as dl_school_bus/dl_trolley) -- confirmed by inspection (side-view
+        # silhouette is long along x; z is floor-resting, min z=0.18 vs. max 2.30) not
+        # assumed. Identity permutation.
+        axis_permutation=(0, 1, 2), scale_m=1.256426,
+        axis_scale_m=(1.256426, 1.084656, 1.510007),
+        real_length_range_m=(11.50, 12.50),
+        source="ajanhallinta \"3D Bus\" (opengameart.org/content/3d-bus)",
+        license="CC0 (opengameart.org/content/3d-bus)",
+        derivation="raw bbox (x=9.5509, y=2.350975, z=2.119196) already length=x/"
+                   "width=y/height=z (Blender Z-up convention, matching dl_school_bus/"
+                   "dl_trolley) -- identity permutation. Per-axis scale to a full-size "
+                   "transit bus 12.00 x 2.55 x 3.20 m (uniform scaling would badly "
+                   "overshoot height relative to width, same issue as the Kenney fleet).",
+    ),
+    "dl_tram_google": DownloadedAssetSpec(
+        name="dl_tram_google", vehicle_class="trolley",
+        archive_key="tram_google", filename="tram.obj",
+        # Source GLB is glTF (Y-up, -Z forward): raw y is floor-resting (min=1.55,
+        # confirming "up") and raw z is front/back-symmetric (+-111.9, confirming
+        # "forward/length"); raw x is left/right-symmetric (+-19.26, confirming
+        # "width") -- confirmed from the raw vertex bounds, not assumed from the glTF
+        # spec alone. length=z, width=x, height=y -> axis_permutation=(2, 0, 1).
+        axis_permutation=(2, 0, 1), scale_m=0.053171,
+        axis_scale_m=(0.053171, 0.064894, 0.054729),
+        real_length_range_m=(11.40, 12.40),
+        source="\"Tram\" by Poly by Google (poly.pizza/m/e9pQgEqPGir)",
+        license="CC-BY 3.0 — 'Tram' by Poly by Google "
+                "(poly.pizza/m/e9pQgEqPGir); attribution required",
+        derivation="raw (permuted) bbox 223.806 x 38.524 x 63.951 (arbitrary glTF "
+                   "export units, not metres) -> per-axis scale to a modern low-floor "
+                   "streetcar 11.90 x 2.50 x 3.50 m. Source is a .glb; this package's "
+                   "OBJ/STL-only readers can't load it directly, so tram.obj is a "
+                   "ONE-TIME trimesh format conversion (no geometry change, verified: "
+                   "identical vertex bounds before/after) done once into cc0/"
+                   "tram-google/ -- see that directory's PROVENANCE.txt.",
+    ),
+    # bus/trolley coverage is now dl_school_bus + dl_bus_ajanhallinta (bus) and
+    # dl_trolley + dl_tram_google (trolley) -- see e2e.ml.rt_scenes' VEHICLE_CLASS_POOLS.
 }
 
 DOWNLOADED_CAR_ASSET_NAMES = tuple(
