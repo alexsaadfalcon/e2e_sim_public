@@ -26,8 +26,9 @@ def test_main_returns_finite_metrics_for_all_modes():
         assert np.all(np.isfinite(r["ber"]))
         assert np.all(np.isfinite(r["evm"]))
         assert np.all((r["ber"] >= 0.0) & (r["ber"] <= 1.0))
-    # element0 never reports an array gain (no spatial combining); mrc/subspace do.
+    # element0 never reports an array gain (no spatial combining); egc/mrc/subspace do.
     assert results["element0"]["gain_db"] is None
+    assert results["egc"]["gain_db"] is not None
     assert results["mrc"]["gain_db"] is not None
     assert results["subspace"]["gain_db"] is not None
 
@@ -39,6 +40,14 @@ def test_mrc_ber_not_worse_than_element0():
     results = main(n_frames=2, show=False, force_synthetic=True, n_freqs=64,
                    n_symbols=4, seed=0)
     assert results["mrc"]["ber"].mean() <= results["element0"]["ber"].mean()
+
+
+def test_egc_ber_not_worse_than_element0():
+    """EGC (naive phase-only combining, the honest baseline) should never do
+    worse than the no-combining element0 tap."""
+    results = main(n_frames=2, show=False, force_synthetic=True, n_freqs=64,
+                   n_symbols=4, seed=0)
+    assert results["egc"]["ber"].mean() <= results["element0"]["ber"].mean()
 
 
 def test_main_does_not_touch_disk_when_show_is_false(tmp_path, monkeypatch):

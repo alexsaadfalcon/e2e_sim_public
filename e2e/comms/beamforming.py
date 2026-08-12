@@ -3,9 +3,9 @@
 `ModemBlock` (see `blocks.py`) previously tapped a single spatial channel (element
 (0, 0)) -- a SISO link that ignored the other 1023 elements of the array. This
 module turns the full aperture into a receive beamformer: build a per-element
-channel-frequency-response matrix, form combining weights (MRC or a subspace-
-tracker-derived broadband direction), and coherently combine per-element signals
-into a single stream.
+channel-frequency-response matrix, form combining weights (EGC, MRC, or a
+subspace-tracker-derived broadband direction), and coherently combine
+per-element signals into a single stream.
 
 Everything here is a pure function (no state), torch, complex64, on the shared
 library `device`. Correctness/array-gain bookkeeping is spelled out in each
@@ -99,6 +99,34 @@ def mrc_weights(H):
     safe_norm = torch.clamp(norm, min=1e-12)
     w = H / safe_norm
     return torch.where(norm > 1e-12, w, torch.zeros_like(w))
+
+
+def egc_weights(H):
+    """Per-subcarrier equal-gain-combining weights: the naive phase-only
+    beamformer -- co-phase each element (unit-magnitude weight tracking only
+    the channel's phase, no amplitude/matched-filter weighting) and sum.
+
+    `H` : [N, n_sc] per-element channel (e.g. from `element_channels`). Returns
+    `w` : [N, n_sc], unit-norm columns (``||w[:, k]|| == 1``, matching
+    `mrc_weights`'s convention so `combine`'s noise bookkeeping applies
+    unchanged): for each element with a nonzero channel tap, `w`'s magnitude is
+    ``1 / sqrt(n_valid)`` where `n_valid` is the number of nonzero-channel
+    elements in that column (equal gain across all contributing elements,
+    unlike MRC's amplitude-proportional weighting), and its phase equals `H`'s
+    phase (`combine` conjugates at combine time, so `w` is stored un-conjugated
+    here, exactly as `mrc_weights` does). An element whose channel is
+    (numerically) zero on a subcarrier has no phase to track and gets a zero
+    weight there (same zero-guard behavior as `mrc_weights`); a subcarrier that
+    is all-zero across every element gets an all-zero weight column.
+    """
+    H = torch.as_tensor(H, dtype=torch.complex64, device=device)
+    mag = torch.abs(H)
+    valid = mag > 1e-12
+    phase = torch.where(valid, H / torch.clamp(mag, min=1e-12), torch.zeros_like(H))
+    n_valid = valid.sum(dim=0, keepdim=True).to(torch.float32)         # [1, n_sc]
+    safe_n = torch.clamp(n_valid, min=1.0)
+    w = phase / torch.sqrt(safe_n).to(torch.complex64)
+    return torch.where(n_valid > 0, w, torch.zeros_like(w))
 
 
 def subspace_weights(U):

@@ -166,10 +166,11 @@ BLOCKS: List[BlockSpec] = [
         category="product",
         params=[
             ParamSpec("combining", "Combining", "choice", "mrc",
-                      choices=["element0", "mrc", "subspace"],
+                      choices=["element0", "egc", "mrc", "subspace"],
                       help="How the array feeds the OFDM demod: 'element0' is the "
-                           "historical single-tap SISO shortcut; 'mrc'/'subspace' "
-                           "combine across the full aperture."),
+                           "historical single-tap SISO shortcut; 'egc' (naive "
+                           "phase-only beamforming) / 'mrc' / 'subspace' combine "
+                           "across the full aperture."),
             ParamSpec("snr_db", "SNR (dB)", "number", 10.0, step=1.0,
                       help="Per-element AWGN SNR (dB), injected before combining."),
             ParamSpec("fft_size", "FFT size", "int", 64, step=1,

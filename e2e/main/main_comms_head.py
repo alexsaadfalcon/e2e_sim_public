@@ -9,18 +9,22 @@ replaces ``s_pars``). Everything downstream of that point is a swappable "head":
 radar product, while ``ModemBlock``/``BERBlock`` turn the SAME reconstruction
 into a communications link. ``ModemBlock``'s ``combining`` selects how the
 array feeds the comms head: ``'element0'`` taps a single spatial channel (the
-historical SISO shortcut); ``'mrc'`` coherently combines all 1024 elements
-(independent per-element noise injected before combining, so any measured
-array gain is real signal-addition gain, not noise averaging); ``'subspace'``
-instead reuses the AdaOja tracker's dominant tracked direction
-(``state['U'][:, 0]``) as a broadband beamformer weight, so the SAME online-
-tracked subspace serves both heads.
+historical SISO shortcut, and the "no combining" baseline); ``'egc'``
+coherently combines all 1024 elements with a naive phase-only beamformer
+(equal-gain combining -- co-phase each element, no amplitude weighting);
+``'mrc'`` coherently combines all 1024 elements with amplitude+phase
+(matched-filter, SNR-optimal) weights (independent per-element noise injected
+before combining in both ``'egc'`` and ``'mrc'``, so any measured array gain
+is real signal-addition gain, not noise averaging); ``'subspace'`` instead
+reuses the AdaOja tracker's dominant tracked direction (``state['U'][:, 0]``)
+as a broadband beamformer weight, so the SAME online-tracked subspace serves
+both heads.
 
 Run:
     python -m e2e.main.main_comms_head
 
 Outputs (e2e/main/figures/):
-    comms_head_ber.png         per-frame BER for element0/mrc/subspace (log-y)
+    comms_head_ber.png         per-frame BER for element0/egc/mrc/subspace (log-y)
     comms_head_evm_gain.png    mean EVM per mode, annotated with array gain (dB)
     comms_head_radar_map.png   range-azimuth map from the SAME pipeline run
 """
@@ -55,7 +59,7 @@ N_TX = 1
 START_HZ, STOP_HZ = 28.5e9, 31.5e9
 DEFAULT_SYNTH_FREQS = 256      # small but wide enough for a 64-tone OFDM slice
 
-MODES = ("element0", "mrc", "subspace")
+MODES = ("element0", "egc", "mrc", "subspace")
 
 
 class _SyntheticEnvBlock:

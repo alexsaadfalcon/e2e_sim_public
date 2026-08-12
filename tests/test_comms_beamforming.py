@@ -72,6 +72,28 @@ def test_mrc_weights_zero_channel_guard():
     assert torch.all(torch.isfinite(w.real)) and torch.all(torch.isfinite(w.imag))
 
 
+def test_egc_weights_unit_norm_columns():
+    rng = np.random.default_rng(1)
+    N, n_sc = 32, 16
+    H = torch.tensor(rng.standard_normal((N, n_sc)) + 1j * rng.standard_normal((N, n_sc)),
+                     dtype=torch.complex64, device=device)
+    w = bf.egc_weights(H)
+    norms = torch.linalg.norm(w, dim=0)
+    torch.testing.assert_close(norms, torch.ones_like(norms), atol=1e-5, rtol=1e-5)
+    # phase-only: every nonzero weight has magnitude 1/sqrt(N) (equal gain, unlike MRC)
+    expected_mag = 1.0 / np.sqrt(N)
+    mags = torch.abs(w)
+    torch.testing.assert_close(mags, torch.full_like(mags, expected_mag), atol=1e-5, rtol=1e-5)
+
+
+def test_egc_weights_zero_channel_guard():
+    N, n_sc = 8, 4
+    H = torch.zeros(N, n_sc, dtype=torch.complex64, device=device)
+    w = bf.egc_weights(H)
+    assert torch.all(w == 0)
+    assert torch.all(torch.isfinite(w.real)) and torch.all(torch.isfinite(w.imag))
+
+
 def test_subspace_weights_unit_norm():
     torch.manual_seed(0)
     U, _ = torch.linalg.qr(torch.randn(64, 4, dtype=torch.cfloat, device=device))
@@ -154,6 +176,74 @@ def test_mrc_array_gain_matches_10log10N_monte_carlo():
     assert gain_db == pytest.approx(expected_db, abs=0.5)
 
 
+def test_egc_array_gain_matches_10log10N_monte_carlo_equal_magnitude_channel():
+    """Same setup as the MRC Monte-Carlo gain test (unit-magnitude, random-phase
+    per-element channel): since every element has EQUAL magnitude, EGC's
+    equal-gain weighting coincides with MRC's amplitude-proportional weighting
+    (both reduce to phase-only unit weights here), so EGC should also recover
+    ~10*log10(N) dB -- the honest-noise bookkeeping (unit-norm w) applies
+    identically to EGC."""
+    rng = np.random.default_rng(0)
+    N, n_trials = 64, 400
+    phases = rng.uniform(0, 2 * np.pi, size=N)
+    H = torch.tensor(np.exp(1j * phases), dtype=torch.complex64, device=device)[:, None]  # [N, 1]
+    w = bf.egc_weights(H)   # [N, 1], unit norm
+
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(123)
+    sig_pow_sum = 0.0
+    noise_pow_sum = 0.0
+    for _ in range(n_trials):
+        noise = (torch.randn(N, 1, generator=gen) + 1j * torch.randn(N, 1, generator=gen)) / np.sqrt(2.0)
+        noise = noise.to(device).to(torch.complex64)   # unit variance per element
+        rx = H + noise
+        y_sig = bf.combine(H, w)
+        y_full = bf.combine(rx, w)
+        y_noise = y_full - y_sig
+        sig_pow_sum += torch.abs(y_sig).item() ** 2
+        noise_pow_sum += torch.abs(y_noise).item() ** 2
+
+    post_combining_snr = sig_pow_sum / noise_pow_sum
+    gain_db = 10.0 * np.log10(post_combining_snr)
+    expected_db = 10.0 * np.log10(N)
+    assert gain_db == pytest.approx(expected_db, abs=0.5)
+
+
+def test_egc_array_gain_less_than_or_equal_mrc_monte_carlo_rayleigh_magnitude():
+    """With RANDOM (Rayleigh-like) per-element magnitude, EGC's equal-gain
+    weighting is strictly suboptimal relative to MRC's amplitude-matched
+    weighting -- the classic naive-vs-optimal-combiner gap. MRC's array gain
+    should not be smaller than EGC's (both still beat a single element)."""
+    rng = np.random.default_rng(5)
+    N, n_trials = 64, 300
+    mags = rng.rayleigh(scale=1.0, size=N)
+    phases = rng.uniform(0, 2 * np.pi, size=N)
+    H = torch.tensor(mags * np.exp(1j * phases), dtype=torch.complex64, device=device)[:, None]
+
+    w_egc = bf.egc_weights(H)
+    w_mrc = bf.mrc_weights(H)
+
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(321)
+    pow_sums = {"egc": [0.0, 0.0], "mrc": [0.0, 0.0]}   # [sig_pow_sum, noise_pow_sum]
+    for _ in range(n_trials):
+        noise = (torch.randn(N, 1, generator=gen) + 1j * torch.randn(N, 1, generator=gen)) / np.sqrt(2.0)
+        noise = noise.to(device).to(torch.complex64)
+        rx = H + noise
+        for mode, w in (("egc", w_egc), ("mrc", w_mrc)):
+            y_sig = bf.combine(H, w)
+            y_noise = bf.combine(rx, w) - y_sig
+            pow_sums[mode][0] += torch.abs(y_sig).item() ** 2
+            pow_sums[mode][1] += torch.abs(y_noise).item() ** 2
+
+    snr_egc = pow_sums["egc"][0] / pow_sums["egc"][1]
+    snr_mrc = pow_sums["mrc"][0] / pow_sums["mrc"][1]
+    # MRC is SNR-optimal: it must not be beaten by the naive EGC baseline
+    assert snr_mrc >= snr_egc - 1e-6
+    # EGC still beats a single element (SNR=1 per element)
+    assert snr_egc > 1.0
+
+
 # --------------------------------------------------------------------------- ModemBlock combining
 
 def _state_dict(rx_x=8, rx_y=8, n_freqs=64, seed=0):
@@ -204,6 +294,47 @@ def test_mrc_beats_element0_ber_same_snr():
         bers[mode] = ber_out["ber"]
 
     assert bers["mrc"] <= bers["element0"] + 1e-9
+
+
+def test_egc_beats_element0_bounded_by_mrc_ber_same_snr():
+    """The naive EGC baseline should beat the no-combining element0 tap, and
+    should be beaten by (or equal to) the SNR-optimal MRC combiner, on the same
+    synthetic multipath-per-element frame / SNR as `test_mrc_beats_element0_ber_same_snr`."""
+    n_freqs = 64
+    freqs = _freqs(n_freqs)
+    rx_x, rx_y = 8, 8   # N = 64
+    snr_db = 5.0
+
+    bers = {}
+    for mode in ("element0", "egc", "mrc"):
+        state = _state_dict(rx_x, rx_y, n_freqs, seed=11)
+        modem = ModemBlock(freqs, n_symbols=16, fft_size=n_freqs, cp_len=16, n_active=52,
+                          pilot_spacing=8, bits_per_symbol=2, snr_db=snr_db,
+                          equalizer="mmse", estimator="ls", seed=5, combining=mode)
+        out = modem.apply(state)
+        ber_out = BERBlock().apply({**state, **out})
+        bers[mode] = ber_out["ber"]
+
+    assert bers["egc"] <= bers["element0"] + 1e-9
+    assert bers["mrc"] <= bers["egc"] + 1e-9
+
+
+def test_egc_reports_array_gain_db_and_H_eff():
+    n_freqs = 64
+    freqs = _freqs(n_freqs)
+    state = _state_dict(8, 8, n_freqs, seed=1)
+    modem = ModemBlock(freqs, n_symbols=4, fft_size=n_freqs, snr_db=10.0, combining="egc", seed=0)
+    out = modem.apply(state)
+    assert "comm_array_gain_db" in out
+    assert np.isfinite(out["comm_array_gain_db"])
+    # some coherent gain over a single element expected on average, but less
+    # than (or equal to) MRC's on the SAME channel realization
+    assert out["comm_array_gain_db"] > 0.0
+    assert out["comm_H_true"].shape == (modem.modem.fft_size,)
+
+    modem_mrc = ModemBlock(freqs, n_symbols=4, fft_size=n_freqs, snr_db=10.0, combining="mrc", seed=0)
+    out_mrc = modem_mrc.apply({"s_pars": state["s_pars"].clone()})
+    assert out["comm_array_gain_db"] <= out_mrc["comm_array_gain_db"] + 1e-6
 
 
 def test_mrc_reports_array_gain_db_and_H_eff():
