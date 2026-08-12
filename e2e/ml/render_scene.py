@@ -336,10 +336,39 @@ def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
     return cam_pos, centroid
 
 
+def _build_rt_scene_for_render(scenario, cfg, *, material_policy: str = "extrapolated",
+                               stand_in_material: str = "concrete"):
+    """`build_rt_scene(scenario, cfg, ...)`, repairing city-scene materials for `cfg`'s
+    centre frequency first if `scenario.base_scene` needs it (see
+    `render_rt_tier_png`'s "City-scene materials" docstring section for why). Split out
+    from `render_rt_tier_png` so the branch is unit-testable without Sionna -- see
+    `tests/test_ml_render.py::test_build_rt_scene_for_render_*`.
+    """
+    from e2e.ml.rt_gen import build_rt_scene
+
+    if scenario.base_scene in ("flat", "free"):
+        # Synthetic scenes only ever use in-band materials (see
+        # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, matching
+        # `RTEnvironmentBlock.get_S_pars`'s same no-op branch.
+        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+
+    # A Sionna built-in city scene (e.g. D4's "munich"): repair its materials for this
+    # radar's frequency one Python frame before `build_rt_scene` sets `scene.frequency`
+    # -- see `city_scenes.patched_builtin_loader`'s own docstring for why this is a
+    # monkeypatch rather than a direct call.
+    from e2e.environment.city_scenes import patched_builtin_loader
+
+    f_center_hz = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
+    with patched_builtin_loader(f_center_hz, policy=material_policy,
+                                stand_in_itu_type=stand_in_material):
+        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+
+
 def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: int = 0,
                        resolution=(1280, 720), camera_dir=(-1.0, -1.0, 1.15),
                        num_samples: int = 128, use_local_assets: bool = True,
-                       caption: bool = True):
+                       caption: bool = True, material_policy: str = "extrapolated",
+                       stand_in_material: str = "concrete"):
     """Ray-trace `e2e.ml.rt_scenes` tier `tier` and save a camera render (array +
     objects) as a PNG at `out_path`. Needs Sionna RT; this is a plain geometry render
     (no path solve -- `Scene.render_to_file` needs no `PathSolver` output unless a
@@ -372,6 +401,17 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     machine (see `e2e.ml.rt_gen`'s module docstring); it degrades gracefully to the
     Sionna-bundled meshes elsewhere. `caption` overlays a title bar (tier, object
     counts, radar position) via Pillow if installed; silently skipped otherwise.
+
+    City-scene materials: when the tier's `base_scene` is not `"flat"`/`"free"` (e.g.
+    the D4 "munich" tier), the base scene is loaded through
+    `e2e.environment.city_scenes.patched_builtin_loader` before `build_rt_scene` sets
+    `scene.frequency` -- otherwise an out-of-band ITU material (munich's `marble`/
+    `brick` above their tabulated range, e.g. at automotive/mmWave 77 GHz) hard-raises
+    inside Sionna and the render never happens. Mirrors
+    `e2e.environment.blocks.RTEnvironmentBlock.get_S_pars`'s same guard, so `"flat"`/
+    `"free"` tiers (which only ever use in-band materials, see
+    `e2e.ml.rt_gen._GROUND_MATERIAL`) are unaffected. `material_policy`/
+    `stand_in_material` are that module's substitution knobs.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +419,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     import sionna.rt as rt
 
     from e2e.ml.radar_config import PRESETS
-    from e2e.ml.rt_gen import _box_mesh_path, build_rt_scene
+    from e2e.ml.rt_gen import _box_mesh_path
     from e2e.ml.rt_scenes import build_rt_tier_scenario, tier_summary
 
     if cfg is None:
@@ -387,7 +427,8 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
 
     scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1,
                                       use_local_assets=use_local_assets)
-    rt_scene = build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+    rt_scene = _build_rt_scene_for_render(scenario, cfg, material_policy=material_policy,
+                                          stand_in_material=stand_in_material)
 
     rt_scene.tx.display_radius = 0.3
     rt_scene.rx.display_radius = 0.3
