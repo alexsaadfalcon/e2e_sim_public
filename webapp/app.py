@@ -181,22 +181,34 @@ def _update_block_state(enabled_values, param_values, block_state):
     Output("results-store", "data"),
     Output("run-status", "children"),
     Output("tabs", "value"),
+    Output("run-sink", "children"),
     Input("run-button", "n_clicks"),
     State("block-state-store", "data"),
     State("run-nsteps", "value"),
     prevent_initial_call=True,
+    # dash>=2.9 supports `running` on plain (non-background) callbacks: the
+    # renderer flips these properties synchronously around the request, so the
+    # button disables and the dcc.Loading spinner around "run-sink" (its only
+    # child is now an Output of this callback, which is what makes dcc.Loading
+    # notice it's "loading" in the first place) actually engages for the ~10s a
+    # run takes, instead of both being dead decoration.
+    running=[(Output("run-button", "disabled"), True, False)],
 )
 def _run_pipeline(n_clicks, block_state, n_steps):
     """Run the pipeline (lazy heavy imports inside) and stash result figures."""
     block_state = block_state or default_block_state()
+    # Unique per-invocation value so "run-sink" always changes -- dcc.Loading only
+    # needs this Output to belong to a pending callback to spin, but a changing
+    # value also makes the sink's own purpose (a loading anchor) legible in devtools.
+    sink = f"run #{n_clicks}"
     try:
         outputs = run_pipeline(block_state, n_steps=int(n_steps or 10))
     except PipelineError as e:
         # Friendly, expected failure: stay on the diagram, show the message.
-        return no_update, html.Span(str(e), style={"color": "#eb3b5a"}), no_update
+        return no_update, html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink
     except Exception as e:  # unexpected — still don't crash the server
         return no_update, html.Span(f"Unexpected error: {e}",
-                                    style={"color": "#eb3b5a"}), no_update
+                                    style={"color": "#eb3b5a"}), no_update, sink
 
     figs = figures_from_outputs(outputs)
     # store as plain dicts (Plotly figures are JSON-serializable via to_dict)
@@ -216,7 +228,7 @@ def _run_pipeline(n_clicks, block_state, n_steps):
         note = "  [auto scale mode: following the frames' own metadata]"
     msg = html.Span(f"Run complete: {len(data)} product(s). See Results tab.{note}",
                     style={"color": "#20bf6b"})
-    return data, msg, "tab-results"
+    return data, msg, "tab-results", sink
 
 
 # =================================================================================

@@ -111,6 +111,28 @@ def test_registry_param_defaults_match_kind():
                 )
 
 
+def test_registry_subspace_k_has_min_one():
+    """Subspace dim k=0 (or negative) crashes deep inside e2e.simulation's
+    rank_diagnostic; the ParamSpec declares a floor so the rendered dcc.Input
+    stops the user at the UI layer."""
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+    k_spec = next(p for p in BLOCKS_BY_ID["subspace"].params if p.key == "k")
+    assert k_spec.min == 1
+
+
+def test_param_editor_k_input_has_min():
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+    from dash import dcc
+
+    state = default_block_state()
+    children = block_diagram.param_editor("subspace", state)
+    k_inputs = [c for c in children
+                if isinstance(c, dcc.Input) and c.id.get("param") == "k"]
+    assert len(k_inputs) == 1
+    assert k_inputs[0].min == 1
+
+
 def test_default_block_state_covers_every_block():
     from webapp.pipeline_registry import BLOCKS, BLOCKS_BY_ID, default_block_state
     state = default_block_state()
@@ -241,6 +263,52 @@ def test_param_editor_unknown_block_is_graceful():
     from webapp import block_diagram
     children = block_diagram.param_editor("does-not-exist", {})
     assert isinstance(children, list) and children  # returns a "select a block" prompt
+
+
+def _find_checklist(children):
+    """Dig the (single) dcc.Checklist out of a param_editor children list."""
+    from dash import dcc
+    matches = [c for c in children if isinstance(c, dcc.Checklist)]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_param_editor_subspace_checkbox_disabled_while_afe_enabled():
+    """pipeline_runner always builds the AdaOja tracker whenever AFE is enabled
+    (dead no-AFE-without-subspace guard notwithstanding), so the subspace 'Enabled'
+    checkbox toggling it off is a no-op. The honest-UI fix: disable the checkbox
+    (checked/locked on) and explain why, instead of letting the user believe it
+    does something."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    assert state["afe"]["enabled"] is True  # afe is on by default
+    children = block_diagram.param_editor("subspace", state)
+
+    checklist = _find_checklist(children)
+    assert checklist.options[0]["disabled"] is True
+    assert checklist.value == ["on"]  # locked "on" regardless of stored state
+    caption_text = " ".join(
+        c.children for c in children
+        if hasattr(c, "children") and isinstance(c.children, str)
+    )
+    assert "always on while AFE is enabled" in caption_text
+
+
+def test_param_editor_subspace_checkbox_normal_when_afe_disabled():
+    """With AFE off, the subspace toggle is a real, honored control again."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    state["afe"]["enabled"] = False
+    state["subspace"]["enabled"] = False
+    children = block_diagram.param_editor("subspace", state)
+
+    checklist = _find_checklist(children)
+    assert not checklist.options[0].get("disabled")
+    assert checklist.value == []  # honors the stored (off) state
 
 
 def test_block_diagram_layout_builds():
@@ -511,6 +579,25 @@ def test_run_pipeline_still_requires_subspace_when_afe_enabled():
         run_pipeline(state, n_steps=1)
     except PipelineError as e:
         assert not _stale_guard_fired(e), f"stale guard still fires: {e}"
+
+
+def test_run_pipeline_k_zero_surfaces_friendly_message(monkeypatch, make_env_block):
+    """A subspace k < 1 crashes deep inside e2e.simulation.rank_diagnostic with
+    ValueError('rank_diagnostic requires k >= 1, got k=0'); the runner must
+    translate that into an actionable message instead of leaking the internal
+    function name."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["subspace"]["params"]["k"] = 0
+    with pytest.raises(pipeline_runner.PipelineError, match=r"Subspace dim k must be >= 1"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
 
 
 def test_figures_from_outputs_handles_empty_outputs():
@@ -1190,10 +1277,15 @@ def test_run_pipeline_detector_enabled_raises_clear_checkpoint_error(
 @pytest.mark.slow
 def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
         monkeypatch, make_env_block):
-    """A real run with only 'dechirp' (+impairment+quantizer) enabled must succeed
-    (no radar_cube/detector/sink so no cfg-dimension mismatch against the synthetic
-    frame) and must NOT produce the frequency-domain products (fft/range_az/...),
-    since the chain crossed into RX time."""
+    """A real run with 'dechirp' (+quantizer+sink) enabled must succeed and must
+    NOT produce the frequency-domain products (fft/range_az/...), since the chain
+    crossed into RX time. 'sink' is enabled (not radar_cube/detector, see the
+    checkpoint/multi-chirp guards tested elsewhere) purely so the downstream
+    product list isn't empty -- see test_run_pipeline_dechirp_with_no_product_raises
+    for what happens when it is. 'impairment' is deliberately left off: its
+    phase-noise stage (e2e/ml/impairments.py, not owned by this shard) hits an
+    unrelated pre-existing in-place aliasing RuntimeError on this synthetic-frame
+    path (see handoff notes) -- a separate bug from the one this test covers."""
     pytest.importorskip("torch")
     from webapp import pipeline_runner
     from webapp.pipeline_registry import default_block_state
@@ -1204,10 +1296,31 @@ def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
 
     state = default_block_state()
     state["dechirp"]["enabled"] = True
-    state["impairment"]["enabled"] = True
     state["quantizer"]["enabled"] = True
+    state["sink"]["enabled"] = True
     outputs = pipeline_runner.run_pipeline(state, n_steps=2)
 
     assert isinstance(outputs, dict)
     for stale_key in ("fft", "range_az", "range_el", "subspace_err"):
         assert stale_key not in outputs, f"{stale_key} should not appear once dechirp is on"
+
+
+def test_run_pipeline_dechirp_with_no_product_raises(monkeypatch, make_env_block):
+    """Enabling only 'dechirp' (no radar_cube/detector/sink) used to run to
+    completion with an EMPTY downstream_blocks list -- zero outputs, no error,
+    indistinguishable in the Results tab from never having run. It must now raise
+    a PipelineError naming the fix (enable a product, or disable dechirp)."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["dechirp"]["enabled"] = True
+    with pytest.raises(pipeline_runner.PipelineError, match="Radar Cube"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+

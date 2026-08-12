@@ -27,6 +27,10 @@ class ParamSpec:
     default: Any
     choices: Optional[List[Any]] = None
     step: Optional[float] = None
+    # dcc.Input's `min` -- only declared where a value below it is actually invalid
+    # downstream (e.g. subspace k=0 crashes e2e.simulation.rank_diagnostic); None
+    # means "no floor", the pre-existing behavior for every other param.
+    min: Optional[float] = None
     help: str = ""
 
 
@@ -120,7 +124,7 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,
         params=[
-            ParamSpec("k", "Subspace dim k", "int", 8, step=1,
+            ParamSpec("k", "Subspace dim k", "int", 8, step=1, min=1,
                       help="Tracked subspace rank k; also used for U_true."),
         ],
         blurb="Online subspace tracking via Oja's algorithm. Required by AFE.",

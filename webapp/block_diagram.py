@@ -164,6 +164,14 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "padding": "18px",
         },
     },
+    # grp_adc's label calls out a real constraint (mutually exclusive with the
+    # frequency-domain products), not just a region name like the other three
+    # group labels -- give it the same amber the app already uses for :selected
+    # emphasis, so it reads as a warning rather than blending in as grey chrome.
+    {
+        "selector": "#grp_adc",
+        "style": {"color": "#f7b731", "font-weight": "bold"},
+    },
     {
         "selector": "edge",
         "style": {
@@ -238,16 +246,31 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
         html.P(spec.blurb, style={"fontSize": "12px", "color": "#576574"}),
     ]
 
-    # Enable/disable toggle for toggleable blocks.
+    # Enable/disable toggle for toggleable blocks. The subspace block is a special
+    # case: pipeline_runner always builds an AdaOjaBlock whenever AFE is enabled
+    # (the AFE draws its combining weights from the tracker, and the results view
+    # always needs the tracker's 'U' for SubspaceErrorBlock), so the checkbox would
+    # otherwise be a no-op that lies about being toggleable. Render it disabled with
+    # an explanatory caption instead of letting the user "turn off" something that
+    # stays on.
+    afe_enabled = block_state.get("afe", {}).get("enabled", True)
+    subspace_locked_on = block_id == "subspace" and afe_enabled
     if spec.toggleable:
         children.append(
             dcc.Checklist(
                 id={"role": "block-enabled", "block": block_id},
-                options=[{"label": " Enabled", "value": "on"}],
-                value=["on"] if st.get("enabled", spec.enabled_default) else [],
+                options=[{"label": " Enabled", "value": "on",
+                          "disabled": subspace_locked_on}],
+                value=["on"] if (subspace_locked_on or st.get("enabled", spec.enabled_default)) else [],
                 style={"marginBottom": "8px"},
             )
         )
+        if subspace_locked_on:
+            children.append(html.P(
+                "(always on while AFE is enabled -- the AFE draws its combining "
+                "weights from the tracker)",
+                style={"fontSize": "11px", "color": "#8395a7"},
+            ))
     else:
         children.append(html.P("(structural block — always on)",
                                style={"fontSize": "11px", "color": "#8395a7"}))
@@ -270,9 +293,13 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
             ))
         else:
             step = ps.step if ps.step is not None else (1 if ps.kind == "int" else "any")
+            input_kwargs = {}
+            if ps.min is not None:
+                input_kwargs["min"] = ps.min
             children.append(dcc.Input(
                 id=cid, type="number", value=val, step=step,
                 debounce=True, style={"width": "100%", "marginBottom": "4px"},
+                **input_kwargs,
             ))
     return children
 
