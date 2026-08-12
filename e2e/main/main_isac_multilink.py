@@ -17,12 +17,17 @@ Flow
    defaults (100 frames x 5000 freq bins) are sized for real generation, not a quick
    plumbing demo. ``Scenario`` / ``FrequencyPlan`` are plain dataclasses, so this is a
    direct attribute mutation on the returned instance.
-2. If no cached multi-link ``.pkl`` exists yet at ``cache_path``, generate one via
-   ``ScenarioRunner(..., dry_run=True)`` (no Sionna/GPU needed). If a ``.pkl`` is
-   already present -- e.g. a REAL generation dropped at the same path by a machine
-   with Sionna RT -- it is used as-is and the demo processes real frames automatically
-   (the frequency grid is derived from the actual per-link array shape, not the
-   shrunk demo scenario, so this works regardless of which one produced the file).
+2. If ``cache_path`` is left at its default (``None``), first look for a REAL
+   multi-link dump at the CANONICAL path ``scenario_runner.default_out_path("munich_isac")``
+   -> ``e2e/environment/sionna_sims/munich_isac.pkl`` -- i.e. exactly what
+   ``python -m e2e.environment.scenario_runner --scenario munich_isac`` (needs Sionna
+   RT + GPU) writes. If present, it is used as-is (real frames, no code changes
+   needed). Otherwise falls back to a small in-process synthetic dry-run cache
+   (``ScenarioRunner(..., dry_run=True)``, no Sionna/GPU needed) at a scenario-content
+   -fingerprinted path, generating it once if missing and reusing it on later runs;
+   this path is clearly logged as ``[synthetic fallback]``. Either way the frequency
+   grid is derived from the actual per-link array shape / the pkl's own ``freq_plan``
+   meta, not hardcoded, so both branches share the same downstream code.
 3. Discover links with ``SionnaIterator.available_links()`` and print them. Links are
    selected by the v2 payload's ``meta["links"][name]["kind"]`` ("radar"/"comm") when
    present, falling back to a name-substring match ("radar"/"comm" in the link name)
@@ -67,7 +72,7 @@ matplotlib.use("Agg")            # headless: write figures to files, no display
 import matplotlib.pyplot as plt
 
 from e2e.scenario import munich_isac_scenario
-from e2e.environment.scenario_runner import ScenarioRunner, SIONNA_SIMS_DIR
+from e2e.environment.scenario_runner import ScenarioRunner, SIONNA_SIMS_DIR, default_out_path
 from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.comms.ofdm import OFDMModem, qam_demod, random_bits
 from e2e.comms import channel as ch
@@ -92,6 +97,10 @@ def _default_cache_path(scenario):
 # Demo-sized scenario knobs -- see module docstring step 1.
 DEMO_NUM_FRAMES = 10
 DEMO_NUM_FREQS = 512
+
+# Name munich_isac_scenario() reports -- the canonical real-generation output is
+# scenario_runner.default_out_path(REAL_SCENARIO_NAME), see module docstring step 2.
+REAL_SCENARIO_NAME = "munich_isac"
 
 SEED = 7
 SNR_LIST_DB = [5.0, 15.0, 25.0]
@@ -280,14 +289,25 @@ def main(cache_path=None, fig_dir=None, seed=SEED,
     Parameters (all optional, default to the repo's shared cache/figures locations)
     let tests redirect I/O into a tmp dir without touching the repo tree.
     """
+    data_source = "synthetic dry-run demo"
     if cache_path is None:
-        # Fingerprint the default cache by the DEMO scenario's content so a scenario
-        # change regenerates instead of silently reusing incompatible frames.
-        cache_path = _default_cache_path(_demo_scenario(num_frames, num_freqs))
+        # Prefer a REAL Sionna dump at the canonical scenario_runner output path
+        # (see module docstring step 2) over generating a synthetic one.
+        real_path = default_out_path(REAL_SCENARIO_NAME)
+        if os.path.isfile(real_path):
+            cache_path = real_path
+            data_source = "REAL Sionna-generated"
+        else:
+            # Fingerprint the default cache by the DEMO scenario's content so a scenario
+            # change regenerates instead of silently reusing incompatible frames.
+            cache_path = _default_cache_path(_demo_scenario(num_frames, num_freqs))
     fig_dir = fig_dir or FIG_DIR
     os.makedirs(fig_dir, exist_ok=True)
 
     _ensure_cache(cache_path, num_frames, num_freqs, seed, verbose=verbose)
+    if verbose:
+        tag = "" if data_source.startswith("REAL") else "  [synthetic fallback]"
+        print(f"[isac_multilink] data source: {data_source} ({cache_path}){tag}")
 
     links = SionnaIterator.available_links(cache_path)
     if verbose:
@@ -395,6 +415,7 @@ def main(cache_path=None, fig_dir=None, seed=SEED,
 
     return {
         "cache_path": cache_path,
+        "data_source": data_source,
         "links": links,
         "radar_link": radar_link,
         "comm_link": comm_link,
