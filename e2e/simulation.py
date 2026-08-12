@@ -317,6 +317,13 @@ class Simulation:
         if self.subspace_block is not None:
             state_dict['U'] = self.subspace_block.oja.U
 
+        # Per-frame refine-pass count MeasurementStage actually ran (constant unless a
+        # gap_response is enabled). Logged next to 'sv_gap_at_k' so the adaptive
+        # compute cost of a gap response is visible in the same outputs record that
+        # holds the diagnostic that triggered it.
+        if 'n_refine_used' in state_dict:
+            self.outputs['n_refine_used'].append(state_dict['n_refine_used'])
+
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
                          'signal_domain', 'signal_dimension', 'sensing_matrix',
                          'aperture_shape', 'tx_wave', 'adc'}
@@ -381,6 +388,11 @@ class Simulation:
             # declares emits_dimension gets its promise checked on one path and not the
             # other -- the asymmetry is the bug, not whether it is reachable today.
             _advance_dimension(stage, state_dict, before_dim)
+
+        # Same cost log as the main path -- the replay loop mirrors it so runs that
+        # start mid-chain record identical bookkeeping.
+        if 'n_refine_used' in state_dict:
+            self.outputs['n_refine_used'].append(state_dict['n_refine_used'])
 
         reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
                          'signal_domain', 'signal_dimension', 'sensing_matrix',

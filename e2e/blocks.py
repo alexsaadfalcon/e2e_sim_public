@@ -547,10 +547,12 @@ class MeasurementStage:
                     "sensing_matrix": Aq,
                     "aperture_shape": (s_pars.shape[0], s_pars.shape[1]),
                     "signal_dimension": frames.DIMENSION_REDUCED,
+                    "n_refine_used": n_refine,
                 }
             Xt = self.afe_block.reconstruct(Aq, X)
             s_pars = Xt.view(s_pars.shape)
-            return {"s_pars": s_pars, "U": self.subspace_block.oja.U}
+            return {"s_pars": s_pars, "U": self.subspace_block.oja.U,
+                    "n_refine_used": n_refine}
         else:
             # No AFE: feed the subspace tracker the full-precision compressed
             # measurements directly (same A-generation as the AFE branch, but
@@ -560,7 +562,7 @@ class MeasurementStage:
                 A = self.subspace_block.gen_A_ada()
                 X = A @ V
                 self.subspace_block.update(X, A)
-            return {"U": self.subspace_block.oja.U}
+            return {"U": self.subspace_block.oja.U, "n_refine_used": n_refine}
 
 
 def _aperture_window(kind, length, device):

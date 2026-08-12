@@ -604,6 +604,7 @@ def test_gap_response_none_matches_baseline_n_refine_call_count(make_env_block, 
     sim.reset()
     sim.feed_forward()
     assert calls["n"] == 3
+    assert sim.outputs["n_refine_used"] == [3]
 
 
 def test_gap_response_refine_boosts_n_refine_on_collapsed_gap_end_to_end(make_env_block, torch_device):
@@ -629,6 +630,9 @@ def test_gap_response_refine_boosts_n_refine_on_collapsed_gap_end_to_end(make_en
         sim.reset()
         sim.feed_forward()
         assert sim.outputs["sv_gap_at_k"][0] == pytest.approx(5.0 / s_tail_gap, rel=1e-2)
+        # The per-frame cost log records what actually ran, next to the diagnostic
+        # that triggered it.
+        assert sim.outputs["n_refine_used"] == [calls["n"]]
         return calls["n"]
 
     s_tail_gap = 4.762
@@ -652,6 +656,7 @@ def test_gap_response_coast_freezes_basis_on_collapsed_gap_end_to_end(make_env_b
     sim.feed_forward()
     assert calls["n"] == 0
     assert torch.allclose(subspace.oja.U, U_before)
+    assert sim.outputs["n_refine_used"] == [0]
 
 
 def test_gap_response_reacts_only_to_spectrum_never_to_ground_truth(make_env_block, torch_device):
