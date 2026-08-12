@@ -209,8 +209,12 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     n_range = ra_db.shape[1]
     range_axis = np.arange(n_range) * float(cfg.range_resolution_m)
 
+    # ra_db is [n_angle, n_range] (see range_azimuth_map's docstring), but imshow indexes
+    # its array as [row=y, col=x]; extent below puts azimuth on x and range on y, so the
+    # array must be transposed to [n_range, n_angle] or the image content is scrambled
+    # relative to its axes (markers below use `extent` directly and are unaffected).
     ax.imshow(
-        ra_db.numpy(),
+        ra_db.numpy().T,
         extent=[sin_az_axis[0], sin_az_axis[-1], range_axis[0], range_axis[-1]],
         origin="lower", aspect="auto", cmap="inferno", vmin=-40.0, vmax=0.0,
     )

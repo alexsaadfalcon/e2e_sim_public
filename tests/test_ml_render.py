@@ -110,6 +110,46 @@ def test_range_azimuth_map_peak_matches_known_target(tiny_cfg):
 
 
 # --------------------------------------------------------------------------------
+# _draw_radar_view orientation (regression: array/extent transpose mismatch)
+# --------------------------------------------------------------------------------
+def test_draw_radar_view_imshow_orientation_matches_extent(tiny_cfg):
+    """`ra_db` is `[n_angle, n_range]` (see `range_azimuth_map`'s docstring) but the
+    panel's `extent` puts azimuth on x and range on y -- imshow needs `[n_range,
+    n_angle]` to match. Regression for a transpose bug where the raw (untransposed)
+    array was passed to imshow: build a map with a single hot cell at a known
+    (angle_idx, range_idx) and assert the rendered AxesImage's array has that cell at
+    the position implied by the extent (row -> range, column -> azimuth), not the
+    other way around.
+    """
+    import matplotlib.pyplot as plt
+
+    from e2e.ml.labels import LabelGrid
+    from e2e.ml.scatterers import RadarPose
+
+    n_angle, n_range = 8, 5
+    angle_idx, range_idx = 2, 4  # deliberately distinct so a transpose is detectable
+    ra_db = torch.full((n_angle, n_range), -40.0)
+    ra_db[angle_idx, range_idx] = 0.0
+    sin_az_axis = np.linspace(-1.0, 1.0, n_angle)
+
+    grid = LabelGrid.for_config(tiny_cfg)
+    pose = RadarPose(position=(0.0, 0.0, 0.0), boresight=(1.0, 0.0, 0.0))
+
+    fig, ax = plt.subplots()
+    try:
+        render_scene._draw_radar_view(ax, tiny_cfg, grid, ra_db, sin_az_axis, [], pose)
+        images = ax.get_images()
+        assert len(images) == 1
+        arr = images[0].get_array()
+
+        assert arr.shape == (n_range, n_angle)  # [row=range, col=angle], not the raw ra_db shape
+        hot_row, hot_col = np.unravel_index(np.argmax(arr), arr.shape)
+        assert (hot_row, hot_col) == (range_idx, angle_idx)
+    finally:
+        plt.close(fig)
+
+
+# --------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------
 def test_cli_help_exits_zero():
