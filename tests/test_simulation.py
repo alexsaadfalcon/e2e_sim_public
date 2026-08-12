@@ -558,3 +558,118 @@ def test_reset_rewinds_serial_stages_not_only_downstream_blocks():
     assert stage.frames_seen == 1
     sim.reset()
     assert stage.frames_seen == 0
+
+
+# ------------------------------------------ reactive n_refine / gap_response wiring
+# See AdaOjaBlock.effective_n_refine (e2e/blocks.py) and the "TRACKER DIVERGENCE
+# ROOT-CAUSED" investigation in notes/TODO.md: a near-degenerate SV cluster at the k
+# cutoff makes the top-k subspace identity numerically arbitrary and spikes tracking
+# error. These pin that Simulation threads the (ground-truth-free) sv_gap_at_k
+# diagnostic to MeasurementStage, and that it actually changes tracker behavior.
+
+def _controlled_gap_env(make_env_block, d, n_freqs, k, s_tail, array_shape, seed=0):
+    """An env block that hands back ONE fixed frame whose true singular values are
+    EXACTLY `s_tail` from index k-1 onward (descending, so `s_tail[0]/s_tail[1]` is
+    the frame's real sv_gap_at_k) -- deterministic control of the spectrum diagnostic
+    for testing the sv_gap_at_k -> effective_n_refine wiring end to end."""
+    env = make_env_block(n_frames=1, n_freqs=n_freqs, seed=seed, n_rx=d, array_shape=array_shape)
+    S = torch.linspace(20.0, s_tail[0] * 1.5, k - 1, device=torch_device_of(env))
+    S = torch.cat([S, torch.tensor(s_tail, device=S.device)])
+    assert torch.all(S[:-1] >= S[1:]), "s_tail must keep S descending"
+    Uo = torch.linalg.qr((torch.randn(d, n_freqs, dtype=torch.cfloat, device=S.device)))[0]
+    Vo = torch.linalg.qr((torch.randn(n_freqs, n_freqs, dtype=torch.cfloat, device=S.device)))[0]
+    frame = (Uo * S.to(torch.cfloat).unsqueeze(0)) @ Vo.conj().T
+    frame = frame.view(d, 1, 1, n_freqs)
+    env.get_S_pars = lambda: frame
+    return env
+
+
+def torch_device_of(env):
+    return env.get_S_pars().device
+
+
+def test_gap_response_none_matches_baseline_n_refine_call_count(make_env_block, torch_device):
+    """gap_response='none' (the default) is bit-for-bit the old behavior: n_refine
+    calls to subspace_block.update() every frame, regardless of the spectrum."""
+    from e2e.blocks import MeasurementStage
+
+    d, n_freqs, k = 32, 9, 6
+    env = _controlled_gap_env(make_env_block, d, n_freqs, k, s_tail=[5.0, 4.762, 3.0, 2.0], array_shape=(4, 8))
+    subspace = AdaOjaBlock(d, k, m=16, n_refine=3)
+    assert subspace.gap_response == "none"
+    calls = {"n": 0}
+    real_update = subspace.update
+    subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
+    sim = Simulation(env, [], k, subspace_block=subspace)
+    sim.reset()
+    sim.feed_forward()
+    assert calls["n"] == 3
+
+
+def test_gap_response_refine_boosts_n_refine_on_collapsed_gap_end_to_end(make_env_block, torch_device):
+    """A frame whose true spectrum has a near-degenerate cluster at k (sv_gap_at_k
+    ~1.05) makes gap_response='refine' run n_refine_hi passes instead of the base
+    n_refine -- driven purely by Simulation's own spectrum diagnostic, with no U_true
+    in sight for the tracker."""
+    from e2e.blocks import MeasurementStage
+
+    d, n_freqs, k = 32, 9, 6
+    collapsed_env = _controlled_gap_env(
+        make_env_block, d, n_freqs, k, s_tail=[5.0, 4.762, 3.0, 2.0], array_shape=(4, 8))
+    healthy_env = _controlled_gap_env(
+        make_env_block, d, n_freqs, k, s_tail=[5.0, 1.0, 0.9, 0.8], array_shape=(4, 8))
+
+    def n_refine_calls(env):
+        subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="refine",
+                                gap_threshold=1.15, n_refine_hi=9)
+        calls = {"n": 0}
+        real_update = subspace.update
+        subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
+        sim = Simulation(env, [], k, subspace_block=subspace)
+        sim.reset()
+        sim.feed_forward()
+        assert sim.outputs["sv_gap_at_k"][0] == pytest.approx(5.0 / s_tail_gap, rel=1e-2)
+        return calls["n"]
+
+    s_tail_gap = 4.762
+    assert n_refine_calls(collapsed_env) == 9   # sv_gap_at_k ~1.05 < gap_threshold -> hi
+    s_tail_gap = 1.0
+    assert n_refine_calls(healthy_env) == 3     # sv_gap_at_k ~5.0 >= gap_threshold -> base
+
+
+def test_gap_response_coast_freezes_basis_on_collapsed_gap_end_to_end(make_env_block, torch_device):
+    """gap_response='coast': the tracker's basis is left untouched (0 update calls)
+    while the gap is collapsed."""
+    d, n_freqs, k = 32, 9, 6
+    env = _controlled_gap_env(make_env_block, d, n_freqs, k, s_tail=[5.0, 4.762, 3.0, 2.0], array_shape=(4, 8))
+    subspace = AdaOjaBlock(d, k, m=16, n_refine=3, gap_response="coast", gap_threshold=1.15)
+    calls = {"n": 0}
+    real_update = subspace.update
+    subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
+    U_before = subspace.oja.U.clone()
+    sim = Simulation(env, [], k, subspace_block=subspace, warm_start=False)
+    sim.reset()
+    sim.feed_forward()
+    assert calls["n"] == 0
+    assert torch.allclose(subspace.oja.U, U_before)
+
+
+def test_gap_response_reacts_only_to_spectrum_never_to_ground_truth(make_env_block, torch_device):
+    """MeasurementStage.apply must be able to compute the reactive n_refine from a
+    state dict that has NO 'U_true' key at all -- the mechanism cannot be peeking at
+    ground truth if it doesn't even receive it."""
+    from e2e.blocks import MeasurementStage
+
+    d, k, m = 32, 4, 16
+    subspace = AdaOjaBlock(d, k, m=m, n_refine=2, gap_response="refine",
+                            gap_threshold=1.15, n_refine_hi=6)
+    stage = MeasurementStage(None, subspace)
+    calls = {"n": 0}
+    real_update = subspace.update
+    subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
+
+    s_pars = torch.randn(d, 1, 1, 8, dtype=torch.cfloat, device=torch_device)
+    state = {"s_pars": s_pars, "sv_gap_at_k": 1.0}  # collapsed; no 'U_true' key present
+    assert "U_true" not in state
+    stage.apply(state)
+    assert calls["n"] == 6

@@ -295,6 +295,12 @@ class Simulation:
             'PRX': None,
             'signal_domain': frames.DOMAIN_CFR,
             'signal_dimension': frames.DIMENSION_FULL,
+            # Spectrum-only diagnostic (S[k-1]/S[k], from rank_diagnostic above) -- NOT
+            # derived from U_true. Threaded through so a stage/block downstream (e.g.
+            # MeasurementStage/AdaOjaBlock's opt-in gap_response) can react to a
+            # near-degenerate singular-value cluster at the k cutoff without peeking at
+            # the ground-truth basis itself.
+            'sv_gap_at_k': rank_diag['sv_gap_at_k'],
         }
         state_dict.update(self._environment_state_updates())
         for stage in self.serial_stages:
