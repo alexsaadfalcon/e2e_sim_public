@@ -89,6 +89,111 @@ def test_selective_scan_stable_over_long_sequences(torch_device):
     assert torch.isfinite(y).all()
 
 
+# --------------------------------------------------------------------------------
+# Chunked / checkpointed scan (memory-ceiling fix): `chunk_size` must not change the
+# scan's *result*, only how it is evaluated -- see ssm.py's "CHUNKED SCAN" docstring.
+# --------------------------------------------------------------------------------
+def _random_scan_inputs(device, b, seq_len, p, n, seed):
+    torch.manual_seed(seed)
+    u = torch.randn(b, seq_len, p, device=device, requires_grad=True)
+    dt = (torch.rand(b, seq_len, p, device=device) * 0.2 + 0.01).requires_grad_()
+    A = (-(torch.rand(p, n, device=device) * 3.0 + 0.1)).requires_grad_()
+    B = torch.randn(b, seq_len, n, device=device, requires_grad=True)
+    C = torch.randn(b, seq_len, n, device=device, requires_grad=True)
+    D = torch.randn(p, device=device, requires_grad=True)
+    return u, dt, A, B, C, D
+
+
+@pytest.mark.parametrize("seq_len,chunk_size", [
+    (24, 1),     # maximally fine-grained chunking
+    (24, 5),     # L not evenly divisible by chunk_size -> a short final chunk
+    (24, 8),     # evenly divisible
+    (24, 24),    # chunk_size == L (single chunk, still routes through the chunked path... )
+    (24, 100),   # ... this one does NOT (chunk_size >= L short-circuits to the unchunked path)
+    (37, 6),     # a second, differently-shaped L not evenly divisible by chunk_size
+])
+def test_selective_scan_chunked_matches_unchunked_forward_and_grad(torch_device, seq_len, chunk_size):
+    """Chunking is an evaluation-order change on an associative recurrence, not a
+    different computation: forward output AND every input's gradient must match the
+    unchunked (`chunk_size=None`) scan within float32 tolerance, for L both divisible
+    and not divisible by chunk_size."""
+    b, p, n = 2, 6, 5
+    inputs_ref = _random_scan_inputs(torch_device, b, seq_len, p, n, seed=0)
+    y_ref = selective_scan(*inputs_ref)
+    y_ref.sum().backward()
+    grads_ref = [t.grad.clone() for t in inputs_ref]
+
+    inputs = _random_scan_inputs(torch_device, b, seq_len, p, n, seed=0)   # same values, fresh graph
+    y = selective_scan(*inputs, chunk_size=chunk_size)
+    torch.testing.assert_close(y, y_ref, rtol=1e-4, atol=1e-5)
+
+    y.sum().backward()
+    for t, t_ref, name in zip(inputs, grads_ref, ("u", "dt", "A", "B", "C", "D")):
+        torch.testing.assert_close(t.grad, t_ref, rtol=1e-3, atol=1e-4,
+                                   msg=lambda m, name=name: f"grad mismatch for {name}: {m}")
+
+
+def test_selective_scan_chunk_size_none_is_bitwise_unchanged_regression(torch_device):
+    """Pin the unchunked (`chunk_size=None`, today's default) scan's output against a
+    hardcoded value, so a future edit to the default path (not just the new chunked
+    one) cannot silently drift without a test catching it."""
+    # Inputs are generated on CPU with a fixed seed (reproducible regardless of which
+    # device the suite runs on -- CPU/CUDA RNG streams differ for the same seed) and
+    # then moved to `torch_device`; the scan itself still runs on the library's device.
+    torch.manual_seed(42)
+    b, seq_len, p, n = 1, 6, 2, 2
+    u = torch.randn(b, seq_len, p).to(torch_device)
+    dt = (torch.rand(b, seq_len, p) * 0.2 + 0.01).to(torch_device)
+    A = (-(torch.rand(p, n) * 3.0 + 0.1)).to(torch_device)
+    B = torch.randn(b, seq_len, n).to(torch_device)
+    C = torch.randn(b, seq_len, n).to(torch_device)
+    D = torch.randn(p).to(torch_device)
+
+    y = selective_scan(u, dt, A, B, C, D)
+    expected = torch.tensor([[
+        [0.6545, -0.0227], [0.4255, -0.0713], [-2.1623, 0.0399],
+        [4.0586, 0.1623], [0.9564, -0.0689], [0.9418, -0.1328],
+    ]], device=torch_device)
+    torch.testing.assert_close(y, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_selective_scan_rejects_non_positive_chunk_size(torch_device):
+    u, dt, A, B, C, D = _random_scan_inputs(torch_device, 1, 4, 2, 2, seed=0)
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="chunk_size"):
+            selective_scan(u, dt, A, B, C, D, chunk_size=bad)
+
+
+def test_selective_ssm_chunk_size_matches_unchunked(torch_device):
+    """Same equivalence check at the `SelectiveSSM` layer level (shared weights)."""
+    torch.manual_seed(7)
+    layer = SelectiveSSM(d_model=8, d_state=6, d_conv=4).to(torch_device)
+    layer_chunked = SelectiveSSM(d_model=8, d_state=6, d_conv=4, chunk_size=5).to(torch_device)
+    layer_chunked.load_state_dict(layer.state_dict())
+
+    x = torch.randn(2, 22, 8, device=torch_device, requires_grad=True)
+    x_chunked = x.detach().clone().requires_grad_()
+
+    y = layer(x)
+    y.sum().backward()
+    y_chunked = layer_chunked(x_chunked)
+    y_chunked.sum().backward()
+
+    torch.testing.assert_close(y_chunked, y, rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(x_chunked.grad, x.grad, rtol=1e-3, atol=1e-4)
+
+
+def test_selective_ssm_rejects_non_positive_chunk_size():
+    with pytest.raises(ValueError, match="chunk_size"):
+        SelectiveSSM(d_model=8, chunk_size=0)
+
+
+def test_mamba_block_threads_chunk_size_to_selective_ssm(torch_device):
+    block = MambaBlock(8, backend="torch", chunk_size=3).to(torch_device)
+    assert block.ssm.chunk_size == 3
+    assert block(torch.randn(2, 10, 8, device=torch_device)).shape == (2, 10, 8)
+
+
 def test_selective_ssm_is_causal(torch_device):
     """Perturbing position t leaves every output at position < t untouched."""
     torch.manual_seed(3)

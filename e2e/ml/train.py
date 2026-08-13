@@ -25,6 +25,21 @@ accumulated gradient matches a single step over `batch_size * accum_steps` sampl
 `batch_size=2, accum_steps=4` reaches the same effective batch of 8 that OOMs outright at
 `batch_size=8`, at roughly `batch_size=2`'s memory footprint.
 
+To reach a larger *materialized* batch (real BatchNorm statistics over 8 samples, unlike
+`accum_steps`, which never forms one), use `--ssm-chunk` / `ssm_chunk` (default `None` =
+today's unchunked scan; `model="ssmradnet"` only, see
+`e2e.ml.models.ssm.selective_scan`'s "CHUNKED SCAN" docs). MEASURED on this same 8 GiB
+card / 320-frame split: `batch_size=8, ssm_chunk=None` raises `OutOfMemoryError` (peak
+allocation reaches 6.83 GiB before the allocator gives up trying to grow past it);
+`batch_size=8, ssm_chunk=128` completes 1 epoch at 5.48 GiB peak / 197s -- i.e. it fits
+with room to spare on the same card `batch_size=4` (no chunking) could not use at all.
+`ssm_chunk=64` also fits (5.61 GiB / 214s, slightly slower: more, smaller checkpointed
+chunks); `ssm_chunk=256` (2 chunks of L=512) does not (OOMs at 6.84 GiB, the same
+ballpark as no chunking at all) -- the chunk has to be small enough relative to `L` for
+the memory saving to bite. `accum_steps` and `ssm_chunk` are independent: use `ssm_chunk`
+first to make a `batch_size` fit outright, `accum_steps` on top of that for a still
+larger effective batch.
+
 Artifact layout
 ----------------
 `train(manifest_path, model_name, ..., out_dir=None)` writes, under `out_dir`
@@ -44,8 +59,8 @@ CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]
         [--batch-size 8] [--lr 1e-4] [--seed 0] [--reg-weight 100.0] [--gamma 2.0]
-        [--input-format rd|adc] [--amp auto|on|off] [--accum-steps 1] [--out DIR]
-        [--eval-only CKPT] [--split test]
+        [--input-format rd|adc] [--amp auto|on|off] [--accum-steps 1] [--ssm-chunk N]
+        [--out DIR] [--eval-only CKPT] [--split test]
 """
 
 from __future__ import annotations
@@ -115,7 +130,7 @@ def _input_dims(cfg: RadarConfig, input_format: str = "rd"):
 # --------------------------------------------------------------------------------
 # Model construction
 # --------------------------------------------------------------------------------
-def build_model(name: str, manifest: Dict, *, device=None) -> nn.Module:
+def build_model(name: str, manifest: Dict, *, device=None, ssm_chunk_size=None) -> nn.Module:
     """Construct an untrained model matching `manifest`'s input/output geometry.
 
     `manifest` is a parsed `generate_dataset` manifest dict (e.g.
@@ -134,6 +149,11 @@ def build_model(name: str, manifest: Dict, *, device=None) -> nn.Module:
     has no raw-ADC path (`e2e.ml.models.fftradnet` is RD-only); `input_format=="adc"`
     with `name=="fftradnet"` raises `ValueError` rather than silently building a model
     that will shape-mismatch on the first batch.
+
+    `ssm_chunk_size` (default `None`, i.e. today's unchunked scan) is forwarded to
+    `SSMRadNet(ssm_chunk_size=...)` when `name=="ssmradnet"` -- see
+    `e2e.ml.models.ssm.selective_scan`'s "CHUNKED SCAN" docs and `train()`'s
+    `ssm_chunk` argument. Ignored for `fftradnet` (no SSM in that architecture).
     """
     cfg = RadarConfig.from_dict(manifest["config"])
     input_format = manifest.get("input_format", "rd")
@@ -161,7 +181,7 @@ def build_model(name: str, manifest: Dict, *, device=None) -> nn.Module:
         from e2e.ml.models import SSMRadNet
 
         model = SSMRadNet(in_channels, n_range_in, n_doppler_in, n_range_out, n_azimuth_out,
-                          input_mode=input_format)
+                          input_mode=input_format, ssm_chunk_size=ssm_chunk_size)
     else:
         raise ValueError(f"unknown model {name!r}; choices: {_MODEL_NAMES}")
 
@@ -260,7 +280,7 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
           cls_normalize: str = "positives", amp="auto", accum_steps: int = 1,
-          num_workers: Optional[int] = None) -> Dict:
+          num_workers: Optional[int] = None, ssm_chunk: Optional[int] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
 
     `input_format` ("rd" default | "adc") selects the range-Doppler vs. raw-ADC input
@@ -281,6 +301,17 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     not a bigger `batch_size`, is the lever for models (SSMRadNet) whose activation
     memory scales with batch size steeply enough that "bigger batch" means "silent
     system-memory-fallback thrashing" on an 8 GiB card, not a clean OOM.
+
+    `ssm_chunk` (default `None`, `model_name=="ssmradnet"` only) is forwarded to
+    `build_model(..., ssm_chunk_size=ssm_chunk)` -- see
+    `e2e.ml.models.ssm.selective_scan`'s "CHUNKED SCAN" docs. It is an *additional*
+    lever alongside `accum_steps`/`batch_size`: `accum_steps` reaches a larger
+    *effective* batch at a small `batch_size`'s memory cost by never materializing a
+    large batch at all, whereas `ssm_chunk` lets a `batch_size` that would otherwise
+    OOM fit by trading the scan's own peak memory for recompute, so a genuinely larger
+    *materialized* batch (bigger BatchNorm statistics per step, unlike accumulation)
+    becomes affordable. Ignored (but harmless) for `model_name=="fftradnet"`, which has
+    no SSM.
 
     Returns the `history` dict (also written to `history.json`); see the module
     docstring for the artifact layout. `drop_last=False` throughout, so this still
@@ -318,7 +349,7 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
 
     manifest_for_model = dict(manifest)
     manifest_for_model["input_format"] = input_format
-    model = build_model(model_name, manifest_for_model, device=device)
+    model = build_model(model_name, manifest_for_model, device=device, ssm_chunk_size=ssm_chunk)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     out_dir = Path(out_dir) if out_dir is not None else manifest_path.parent / "runs" / model_name
@@ -493,6 +524,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(see module docstring; the lever for models like SSMRadNet where "
                         "a bigger batch_size alone risks Windows system-memory-fallback "
                         "thrashing on an 8 GiB card)")
+    p.add_argument("--ssm-chunk", type=int, default=None,
+                   help="model='ssmradnet' only: chunk size for the selective-scan's "
+                        "chunked+checkpointed evaluation order (default None = "
+                        "original unchunked scan). Trades scan compute (~2x) for peak "
+                        "activation memory (see e2e.ml.models.ssm's 'CHUNKED SCAN' "
+                        "docs); lets a larger --batch-size fit that would otherwise "
+                        "OOM. Ignored for model='fftradnet'.")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -514,7 +552,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
           seed=args.seed, out_dir=args.out, input_format=args.input_format,
           reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize,
-          amp={"auto": "auto", "on": True, "off": False}[args.amp], accum_steps=args.accum_steps)
+          amp={"auto": "auto", "on": True, "off": False}[args.amp], accum_steps=args.accum_steps,
+          ssm_chunk=args.ssm_chunk)
     return 0
 
 

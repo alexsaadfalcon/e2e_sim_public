@@ -101,11 +101,12 @@ __all__ = ["SSMRadNet"]
 class _SSMStage(nn.Module):
     """`n_layers` pre-LayerNorm residual `MambaBlock`s over a `[B, L, d_model]` sequence."""
 
-    def __init__(self, d_model, d_state, n_layers, backend, d_conv=4, expand=2):
+    def __init__(self, d_model, d_state, n_layers, backend, d_conv=4, expand=2, chunk_size=None):
         super().__init__()
         self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
         self.blocks = nn.ModuleList([
-            MambaBlock(d_model, d_state=d_state, d_conv=d_conv, expand=expand, backend=backend)
+            MambaBlock(d_model, d_state=d_state, d_conv=d_conv, expand=expand, backend=backend,
+                      chunk_size=chunk_size)
             for _ in range(n_layers)
         ])
 
@@ -180,6 +181,13 @@ class SSMRadNet(nn.Module):
         outright (see "Raw-ADC input mode").
     head_channels
         Width of the conv decoder that produces the detection map.
+    ssm_chunk_size
+        Forwarded to every `MambaBlock`/`SelectiveSSM` in `fast_ssm`/`slow_ssm` as
+        `chunk_size` (see `e2e.ml.models.ssm.selective_scan`'s "CHUNKED SCAN" docs, and
+        `e2e.ml.train`'s `--ssm-chunk`): `None` (default) is the original, unchunked
+        scan; a smaller positive int trades scan compute for peak activation memory,
+        with no change to the model's output (the chunked scan is numerically
+        equivalent, see `tests/test_ml_ssmradnet.py`).
     """
 
     def __init__(
@@ -198,6 +206,7 @@ class SSMRadNet(nn.Module):
         input_mode: str = "rd",
         n_doppler_tokens: int = 16,
         head_channels: int = 32,
+        ssm_chunk_size=None,
     ):
         super().__init__()
         for name, value in (
@@ -236,10 +245,12 @@ class SSMRadNet(nn.Module):
             self.doppler_pool = nn.Identity()
 
         # ---- two SSM scales + channel mixing -------------------------------------------
-        self.fast_ssm = _SSMStage(self.d_model, d_state, n_layers_fast, backend)   # scans range
+        self.fast_ssm = _SSMStage(self.d_model, d_state, n_layers_fast, backend,
+                                  chunk_size=ssm_chunk_size)                        # scans range
         self.chan_mix = _ChannelMix(self.d_model)
         self.range_pool = nn.AdaptiveAvgPool2d((self.n_range_out, self.n_doppler_tokens))
-        self.slow_ssm = _SSMStage(self.d_model, d_state, n_layers_slow, backend)   # scans Doppler
+        self.slow_ssm = _SSMStage(self.d_model, d_state, n_layers_slow, backend,
+                                  chunk_size=ssm_chunk_size)                        # scans Doppler
         self.post_norm = nn.LayerNorm(self.d_model)
 
         # ---- detection head -------------------------------------------------------------

@@ -86,6 +86,89 @@ def test_build_model_unknown_name_raises(manifest_dict):
 
 
 # --------------------------------------------------------------------------------
+# ssm_chunk_size / --ssm-chunk plumbing (cuts SSMRadNet's selective-scan memory
+# ceiling; see e2e.ml.models.ssm's "CHUNKED SCAN" docs). CPU-only, tiny shapes -- the
+# equivalence of the chunked scan itself is covered by tests/test_ml_ssmradnet.py.
+# --------------------------------------------------------------------------------
+def test_build_model_threads_ssm_chunk_size_into_ssmradnet(manifest_dict):
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("ssmradnet", manifest_dict, device=cpu, ssm_chunk_size=7)
+    # every SelectiveSSM in both scan stages must have received the knob
+    chunk_sizes = {m.chunk_size for m in model.modules()
+                   if type(m).__name__ == "SelectiveSSM"}
+    assert chunk_sizes == {7}
+
+
+def test_build_model_ssm_chunk_size_default_is_none(manifest_dict):
+    """Omitting `ssm_chunk_size` (default `None`) must build exactly the unchunked model."""
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("ssmradnet", manifest_dict, device=cpu)
+    chunk_sizes = {m.chunk_size for m in model.modules()
+                   if type(m).__name__ == "SelectiveSSM"}
+    assert chunk_sizes == {None}
+
+
+def test_build_model_ssm_chunk_size_ignored_for_fftradnet(manifest_dict):
+    """fftradnet has no SSM; passing ssm_chunk_size must not raise or change anything."""
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("fftradnet", manifest_dict, device=cpu, ssm_chunk_size=7)
+    assert isinstance(model, torch.nn.Module)
+
+
+def test_train_threads_ssm_chunk_into_build_model(tmp_path, monkeypatch):
+    """`train(..., ssm_chunk=...)` must reach `build_model`'s `ssm_chunk_size` kwarg."""
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="rd")
+
+    captured = {}
+    real_build_model = train_mod.build_model
+
+    def _spy(name, manifest, **kwargs):
+        captured.update(kwargs)
+        return real_build_model(name, manifest, **kwargs)
+
+    monkeypatch.setattr(train_mod, "build_model", _spy)
+    train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2, input_format="rd",
+                    ssm_chunk=6, device=torch.device("cpu"), seed=0)
+
+    assert captured["ssm_chunk_size"] == 6
+
+
+def test_train_ssm_chunk_default_is_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="rd")
+
+    captured = {}
+    real_build_model = train_mod.build_model
+
+    def _spy(name, manifest, **kwargs):
+        captured.update(kwargs)
+        return real_build_model(name, manifest, **kwargs)
+
+    monkeypatch.setattr(train_mod, "build_model", _spy)
+    train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2, input_format="rd",
+                    device=torch.device("cpu"), seed=0)
+
+    assert captured["ssm_chunk_size"] is None
+
+
+def test_cli_ssm_chunk_default_and_wiring(monkeypatch):
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "ssmradnet"])
+    assert captured["ssm_chunk"] is None
+
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "ssmradnet",
+                    "--ssm-chunk", "64"])
+    assert captured["ssm_chunk"] == 64
+
+
+# --------------------------------------------------------------------------------
 # train() / evaluate()
 # --------------------------------------------------------------------------------
 def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
