@@ -20,6 +20,7 @@ from e2e.blocks import \
     RangeAzBlock, \
     RangeElBlock, \
     SubspaceErrorBlock
+from e2e.viz import to_db
 
 
 
@@ -30,6 +31,9 @@ N_TX = 1
 N_FREQS = 5000
 freqs = np.linspace(28.5e9, 31.5e9, N_FREQS)
 
+# Hand-rolled rather than e2e.viz.fig_dir: main(show=False) must never touch disk
+# (pinned by tests/test_main_sionna_blocks.py), and fig_dir() creates the directory
+# eagerly. The makedirs happens inside the `if show:` branch instead.
 FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 
 
@@ -111,10 +115,12 @@ def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=Fa
         # non-coherent (power) integration over range -- a target at any range shows up,
         # not just one at range 0 (see e2e/blocks.py FFTBlock).
         for i, _fft in enumerate(outputs['fft']):
-            _fft = _fft / torch.max(torch.abs(_fft))
-            # Power quantity -> 10*log10 (matches the webapp's conversion). .cpu().numpy()
-            # so the frame's device (CPU or CUDA) doesn't matter for plotting.
-            fft_energy = (10 * torch.log10(torch.abs(_fft))).T.cpu().numpy()
+            # Power quantity -> peak-normalized dB via the shared helper (matches the
+            # webapp's conversion). This is an az/el (not az/range) map --
+            # e2e.viz.imshow_ra's transpose+extent helper is specific to az/range
+            # display conventions, so only the dB-normalize half is consolidated here.
+            # .cpu().numpy() so the frame's device doesn't matter for plotting.
+            fft_energy = to_db(_fft, floor_db=-40.0).T.cpu().numpy()
             plt.figure()
             plt.title('Azimuth-Elevation power (non-coherent over range)')
             plt.imshow(fft_energy)

@@ -28,6 +28,12 @@ from e2e.blocks import (
     device,
 )
 
+# NOT created here (unlike e2e.viz.fig_dir, which creates eagerly): this tutorial's
+# `main(show=False)` path must never touch the filesystem (see
+# tests/test_interconnect.py::test_tutorial_smoke_runs_without_disk), so the
+# directory is made lazily below, only when a figure is actually about to be
+# written -- kept as a module-level FIG_DIR (rather than e2e.viz.fig_dir(__file__))
+# so that contract holds and the constant stays monkeypatchable by that test.
 FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 
 BAND = (28.5e9, 31.5e9)   # the default pipeline FrequencyPlan band

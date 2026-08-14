@@ -48,10 +48,10 @@ from e2e.blocks import (
     device,
 )
 from e2e.comms.blocks import ModemBlock, BERBlock
+from e2e.viz import fig_dir, to_db, imshow_ra
 
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = fig_dir(__file__)
 
 N_RX_X = N_RX_Y = 32
 N_RX = N_RX_X * N_RX_Y
@@ -211,11 +211,12 @@ def _make_figures(results, range_az, source, snr_db):
     plt.close()
 
     # radar head, SAME pipeline run: range-azimuth map (RangeAzBlock -> [az, range]).
-    ra = range_az.cpu().numpy() if torch.is_tensor(range_az) else np.asarray(range_az)
-    ra_db = 10 * np.log10(ra / (ra.max() + 1e-30) + 1e-12)
+    # No physical az/range axes here (bin-indexed labels below), so imshow_ra gets no
+    # sin_az_axis/range_axis_m and falls back to imshow's own pixel-index extent.
+    ra_db = to_db(range_az, floor_db=-40.0)
     plt.figure()
-    plt.imshow(ra_db.T, aspect="auto", origin="lower", cmap="viridis", vmin=-40, vmax=0)
-    plt.colorbar(label="normalized power (dB)")
+    im = imshow_ra(plt.gca(), ra_db, cmap="viridis", vmin=-40, vmax=0)
+    plt.colorbar(im, label="normalized power (dB)")
     plt.xlabel("azimuth bin")
     plt.ylabel("range bin")
     plt.title("Radar head: range-azimuth map (same pipeline, last frame)")

@@ -34,10 +34,10 @@ from e2e.scenario import munich_isac_scenario
 from e2e.comms.ofdm import OFDMModem, qam_demod, random_bits
 from e2e.comms import channel as ch
 from e2e.comms import isac
+from e2e.viz import fig_dir, to_db, imshow_ra
 
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = fig_dir(__file__)
 
 N_RX_X = N_RX_Y = 32
 
@@ -162,11 +162,11 @@ def main():
     # angle bins -> normalized sine-angle u = sin(theta), centered (fftshift order)
     n_a = ra_map.shape[1]
     u = (np.arange(n_a) - n_a // 2) / (n_a // 2)
-    ra_db = 10 * np.log10(ra_z / (ra_z.max() + 1e-12) + 1e-12)
-    plt.imshow(ra_db, aspect="auto", origin="lower",
-               extent=[u[0], u[-1], ranges[0], ranges[kmax - 1]],
-               cmap="viridis", vmin=-30, vmax=0)
-    plt.colorbar(label="normalized power (dB)")
+    ra_db = to_db(ra_z, floor_db=-30.0)
+    # isac.range_angle_map returns [n_range, n_angle] (see its docstring); imshow_ra
+    # expects [n_angle, n_range] and owns the transpose itself, so pass ra_db.T.
+    im = imshow_ra(plt.gca(), ra_db.T, u, ranges[:kmax], cmap="viridis", vmin=-30, vmax=0)
+    plt.colorbar(im, label="normalized power (dB)")
     plt.xlabel("azimuth  sin(θ)")
     plt.ylabel("range (m)")
     plt.title(f"ISAC sensing range/azimuth map ({sense_src})")

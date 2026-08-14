@@ -94,10 +94,10 @@ from e2e.comms.ofdm import OFDMModem, random_bits
 from e2e.comms import channel as ch
 from e2e.comms import isac
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
+from e2e.viz import fig_dir, to_db
 
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = fig_dir(__file__)
 
 _C_LIGHT = 299_792_458.0
 
@@ -438,8 +438,13 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
     plt.figure()
     f_i = faxis_i.cpu().numpy() / 1e6
     f_n = faxis_n.cpu().numpy() / 1e6
-    p_i = 10 * np.log10(psd_i.cpu().numpy() / (psd_n.max().item() + 1e-30) + 1e-30)
-    p_n = 10 * np.log10(psd_n.cpu().numpy() / (psd_n.max().item() + 1e-30) + 1e-30)
+    # Cross-normalized (both arms relative to the SAME non-ideal-arm peak, not each
+    # their own) -- e2e.viz.to_db always normalizes to the input's OWN peak, so this
+    # deliberately different convention is kept inline; eps matches to_db's chosen
+    # 1e-12 (see its docstring) for consistency, not a re-derivation of that constant.
+    _eps = 1e-12
+    p_i = 10 * np.log10(psd_i.cpu().numpy() / (psd_n.max().item() + _eps) + _eps)
+    p_n = 10 * np.log10(psd_n.cpu().numpy() / (psd_n.max().item() + _eps) + _eps)
     plt.plot(f_i, p_i, label="ideal TX", alpha=0.8)
     plt.plot(f_n, p_n, label="non-ideal TX (PA)", alpha=0.8)
     half_mhz = occupied_bw_hz / 2e6
@@ -471,8 +476,8 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
 
     # (4) ISAC sensing-side cost
     plt.figure()
-    pi_db = 10 * np.log10(power_i / (power_i.max() + 1e-30) + 1e-12)
-    pn_db = 10 * np.log10(power_n / (power_n.max() + 1e-30) + 1e-12)
+    pi_db = to_db(power_i, floor_db=None)
+    pn_db = to_db(power_n, floor_db=None)
     plt.plot(ranges_i, pi_db, label=f"ideal TX (PSL={results['psl_ideal_db']:.1f} dB)")
     plt.plot(ranges_n, pn_db, label=f"non-ideal TX (PSL={results['psl_nonideal_db']:.1f} dB)")
     plt.axvline(target_range_m, color="k", linestyle="--", alpha=0.5, label="true target range")
