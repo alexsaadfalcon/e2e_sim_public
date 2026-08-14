@@ -67,6 +67,7 @@ from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
 from e2e.ml.rd_synth import synthesize_adc  # noqa: E402
 from e2e.ml.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml.transforms import adc_to_rd, tdm_deinterleave  # noqa: E402
+from e2e.viz import imshow_ra  # noqa: E402
 
 # Marker/color convention: loosely matches `webapp/scenario_editor.py`'s ROLE_COLORS /
 # OBJECT_COLOR (radar red, generic object amber) without importing Dash/Plotly here.
@@ -209,15 +210,10 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     n_range = ra_db.shape[1]
     range_axis = np.arange(n_range) * float(cfg.range_resolution_m)
 
-    # ra_db is [n_angle, n_range] (see range_azimuth_map's docstring), but imshow indexes
-    # its array as [row=y, col=x]; extent below puts azimuth on x and range on y, so the
-    # array must be transposed to [n_range, n_angle] or the image content is scrambled
-    # relative to its axes (markers below use `extent` directly and are unaffected).
-    ax.imshow(
-        ra_db.numpy().T,
-        extent=[sin_az_axis[0], sin_az_axis[-1], range_axis[0], range_axis[-1]],
-        origin="lower", aspect="auto", cmap="inferno", vmin=-40.0, vmax=0.0,
-    )
+    # Orientation (transpose + azimuth-on-x/range-on-y) is owned by e2e.viz.imshow_ra
+    # -- see its docstring for why the transpose is needed (markers below use `extent`
+    # directly and are unaffected either way).
+    imshow_ra(ax, ra_db, sin_az_axis, range_axis, cmap="inferno", vmin=-40.0, vmax=0.0)
 
     seen_labels = set()
     for r, sin_az, cls in targets_in_grid(grid, scatterers, pose, classes=("vehicle", "pedestrian")):
