@@ -110,6 +110,49 @@ def test_degrade_adc_cube_rejects_bad_shape():
 
 
 # --------------------------------------------------------------------------------
+# no_reconstruct mode -- degrade_adc_cube
+# --------------------------------------------------------------------------------
+def test_degrade_adc_cube_no_reconstruct_shape():
+    torch.manual_seed(10)
+    adc = torch.randn(8, 3, 5, dtype=torch.complex64)
+    for m in (8, 5, 1):
+        out = afe_sweep.degrade_adc_cube(adc, m, seed=0, no_reconstruct=True)
+        assert out.shape == (m, 3, 5)
+        assert out.dtype == adc.dtype
+
+
+def test_degrade_adc_cube_no_reconstruct_deterministic_per_seed():
+    torch.manual_seed(11)
+    adc = torch.randn(8, 3, 5, dtype=torch.complex64)
+    a = afe_sweep.degrade_adc_cube(adc, 4, seed=7, no_reconstruct=True)
+    b = afe_sweep.degrade_adc_cube(adc, 4, seed=7, no_reconstruct=True)
+    c = afe_sweep.degrade_adc_cube(adc, 4, seed=8, no_reconstruct=True)
+    assert torch.equal(a, b)
+    assert not torch.equal(a, c)
+
+
+def test_degrade_adc_cube_no_reconstruct_identity_control_matches_reconstructed():
+    """At M == n_rx, `A` is the identity (no RNG draw): `y = I @ x == x`, so the
+    no-reconstruct cube and the reconstructed cube must be bit-identical."""
+    torch.manual_seed(12)
+    n_rx = 6
+    adc = torch.randn(n_rx, 4, 7, dtype=torch.complex64)
+    reconstructed = afe_sweep.degrade_adc_cube(adc, n_rx, seed=0)
+    no_recon = afe_sweep.degrade_adc_cube(adc, n_rx, seed=0, no_reconstruct=True)
+    assert torch.equal(reconstructed, no_recon)
+    assert torch.equal(no_recon, adc)
+
+
+def test_degrade_adc_cube_no_reconstruct_differs_from_reconstructed_when_m_below_n():
+    torch.manual_seed(13)
+    adc = torch.randn(8, 3, 5, dtype=torch.complex64)
+    reconstructed = afe_sweep.degrade_adc_cube(adc, 4, seed=0)
+    no_recon = afe_sweep.degrade_adc_cube(adc, 4, seed=0, no_reconstruct=True)
+    assert reconstructed.shape == (8, 3, 5)
+    assert no_recon.shape == (4, 3, 5)
+
+
+# --------------------------------------------------------------------------------
 # End-to-end fixture: tiny CPU corpus + one trained fftradnet checkpoint
 # --------------------------------------------------------------------------------
 @pytest.fixture(scope="module")
@@ -162,6 +205,156 @@ def test_degraded_dataset_targets_are_not_degraded(tiny_afe_fixture):
     degraded = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc",
                                                      m=max(n_rx // 2, 1), seed=0)
     assert degraded.targets(0) == plain.targets(0)
+
+
+# --------------------------------------------------------------------------------
+# no_reconstruct mode -- the compressed-domain-v1 harness extension
+# --------------------------------------------------------------------------------
+def test_degraded_dataset_no_reconstruct_raw_adc_shape(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+
+    degraded = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc", m=m, seed=0,
+                                                     no_reconstruct=True)
+    adc = degraded.raw_adc(0)
+    assert adc.shape[0] == m
+    assert adc.shape[0] != n_rx
+
+
+def test_degraded_dataset_effective_n_rx():
+    """`effective_n_rx` reports M in no_reconstruct mode, else the corpus's native n_rx --
+    what a caller must size a model's stem to (see `_manifest_at_m`)."""
+    cfg = TI_IWR1443
+    m = max(cfg.n_rx // 2, 1)
+
+    class _StubManifestDataset(afe_sweep._DegradedRadarFrameDataset):
+        # avoid touching disk: only effective_n_rx (and the cfg it reads) is exercised.
+        def __init__(self, *, no_reconstruct):
+            self._afe_m = m
+            self._afe_no_reconstruct = no_reconstruct
+            self._cfg = cfg
+
+    assert _StubManifestDataset(no_reconstruct=True).effective_n_rx == m
+    assert _StubManifestDataset(no_reconstruct=False).effective_n_rx == cfg.n_rx
+
+
+def test_degraded_dataset_no_reconstruct_matches_direct_degrade_adc_cube(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+
+    plain = ml_dataset.RadarFrameDataset(manifest_path, split="val", input_format="adc")
+    array0, is_adc0, _labels, _meta = plain._load_raw(0)
+    assert is_adc0
+    expected = afe_sweep.degrade_adc_cube(torch.from_numpy(array0).to(torch.complex64), m,
+                                          seed=0, no_reconstruct=True)
+
+    degraded = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc", m=m, seed=0,
+                                                     no_reconstruct=True)
+    assert torch.equal(degraded.raw_adc(0), expected)
+
+
+def test_degraded_dataset_no_reconstruct_deterministic_across_instances(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+
+    a = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc", m=m, seed=3,
+                                             no_reconstruct=True)
+    b = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc", m=m, seed=3,
+                                             no_reconstruct=True)
+    assert torch.equal(a.raw_adc(0), b.raw_adc(0))
+
+
+def test_degraded_dataset_no_reconstruct_targets_are_not_degraded(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    plain = ml_dataset.RadarFrameDataset(manifest_path, split="val", input_format="adc")
+    degraded = afe_sweep._DegradedRadarFrameDataset(manifest_path, "val", "adc",
+                                                     m=max(n_rx // 2, 1), seed=0,
+                                                     no_reconstruct=True)
+    assert degraded.targets(0) == plain.targets(0)
+
+
+def test_manifest_at_m_overrides_n_rx_only(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+
+    out = afe_sweep._manifest_at_m(manifest, m, "adc")
+    assert out["config"]["n_rx"] == m
+    assert out["input_format"] == "adc"
+    # original untouched
+    assert manifest["config"]["n_rx"] == n_rx
+    assert "input_format" not in manifest or manifest.get("input_format") != "adc"
+
+
+def test_build_model_sized_to_m(tiny_afe_fixture):
+    """The M-sized model build: `build_model` on a `_manifest_at_m`-overridden manifest
+    produces a stem sized to the M-derived input geometry, not the corpus's own.
+
+    Uses `train_mod._input_dims` (not a hardcoded `2*M`) to derive the expected input
+    shape, since a TDM config's "rd" channel count is `2*n_tx*n_rx` (virtual array),
+    not `2*n_rx` -- `_manifest_at_m`'s `n_rx` override must still shape-agree with the
+    runtime `tdm_deinterleave` call, which reads `n_rx` off the ACTUAL degraded array
+    (see `e2e.ml.transforms.tdm_deinterleave`), not off `cfg.n_rx`.
+    """
+    from e2e.ml.radar_config import RadarConfig
+
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+    assert m != n_rx
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    manifest_for_m = afe_sweep._manifest_at_m(manifest, m, "rd")
+    model = train_mod.build_model("fftradnet", manifest_for_m, device=CPU)
+
+    cfg_m = RadarConfig.from_dict(manifest_for_m["config"])
+    in_channels, n_range_in, n_doppler_in = train_mod._input_dims(cfg_m, "rd")
+    x = torch.randn(1, in_channels, n_range_in, n_doppler_in, dtype=torch.float32)
+    out = model(x)
+    assert out["detection"].shape[0] == 1
+
+    # the FULL-aperture stem would reject an M-shaped input outright (shape mismatch) --
+    # the whole reason build_model must be given the M-overridden manifest, not the corpus's own.
+    manifest_full = afe_sweep._manifest_at_m(manifest, n_rx, "rd")
+    full_model = train_mod.build_model("fftradnet", manifest_full, device=CPU)
+    with pytest.raises(RuntimeError):
+        full_model(x)
+
+
+# --------------------------------------------------------------------------------
+# classical_at_m -- checkpoint-free classical baseline on reconstructed frames
+# --------------------------------------------------------------------------------
+def test_classical_at_m_returns_finite_metrics(tiny_afe_fixture):
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+    m = max(n_rx // 2, 1)
+
+    r = afe_sweep.classical_at_m(manifest_path, "val", m, seed=0, device=CPU)
+    assert r["m"] == m
+    for key in ("AP", "AR", "range_rmse_m"):
+        assert math.isfinite(r[key])
+
+
+def test_classical_at_m_control_row_matches_evaluate_at_m_classical_branch(tiny_afe_fixture):
+    """`classical_at_m` at M == n_rx must agree with `evaluate_at_m`'s own (inline,
+    reused-dataset) classical computation -- same degrade seed/m, so bit-identical
+    degraded frames feed the same classical detector."""
+    manifest_path = tiny_afe_fixture["manifest_path"]
+    ckpt_path = tiny_afe_fixture["ckpt_path"]
+    n_rx = tiny_afe_fixture["cfg"].n_rx
+
+    standalone = afe_sweep.classical_at_m(manifest_path, "val", n_rx, seed=0, device=CPU)
+    via_evaluate = afe_sweep.evaluate_at_m(manifest_path, ckpt_path, "val", n_rx, seed=0,
+                                           device=CPU, batch_size=2)
+    assert standalone["AP"] == pytest.approx(via_evaluate["classical"]["AP"], abs=1e-6)
+    assert standalone["AR"] == pytest.approx(via_evaluate["classical"]["AR"], abs=1e-6)
 
 
 # --------------------------------------------------------------------------------

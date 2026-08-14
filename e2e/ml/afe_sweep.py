@@ -45,6 +45,17 @@ RECONSTRUCTION IS LOSSY for `M < n_rx` (minimum-norm least squares, not an inver
 see `e2e.chain.compress`'s module docstring) -- that lossiness is the entire point: it
 is what a real AFE-then-decompress consumer actually sees.
 
+NO-RECONSTRUCT MODE (`no_reconstruct=True`, compressed-domain-v1 campaign): skips
+`reconstruct_aperture` entirely and returns the `[M, n_chirps, n_samples]` measurement
+cube `y = A x` itself -- dim 0 now counts MEASUREMENTS, not antennas. This is the
+"detect without ever reconstructing" arm: `e2e.blocks.RangeProfileBlock`'s docstring
+makes the physics case that a range/Doppler FFT commutes straight through `A` (it mixes
+only the aperture axis, never frequency/slow-time), so a range-Doppler-input model has
+nothing to lose by skipping reconstruction -- ONLY IF its own stem is sized to `M`, not
+`n_rx` (a full-aperture checkpoint cannot consume an `M < n_rx` input at all -- see
+`_DegradedRadarFrameDataset.effective_n_rx` / `_manifest_at_m`, and
+`e2e.ml.compressed_domain.train_native_m`, which trains exactly such a stem).
+
 EVAL PLUMBING
 -------------
 `_DegradedRadarFrameDataset` subclasses `e2e.ml.dataset.RadarFrameDataset` and overrides
@@ -119,8 +130,9 @@ def sensing_matrix(n_elements: int, m: int, *, seed: int = 0) -> torch.Tensor:
 
 
 def degrade_adc_cube(adc: torch.Tensor, m: int, *, seed: int = 0,
-                     weight_bits: Optional[int] = 8, quantize: bool = True) -> torch.Tensor:
-    """One ADC cube `[n_rx, n_chirps, n_samples]` -> the AFE-degraded cube, same shape.
+                     weight_bits: Optional[int] = 8, quantize: bool = True,
+                     no_reconstruct: bool = False) -> torch.Tensor:
+    """One ADC cube `[n_rx, n_chirps, n_samples]` -> the AFE-degraded cube.
 
     `m` is the number of compressed measurements (`M <= n_rx`). See the module
     docstring for the full pipeline (`sensing_matrix` -> optional `quantize_weights`
@@ -129,8 +141,13 @@ def degrade_adc_cube(adc: torch.Tensor, m: int, *, seed: int = 0,
     `m == n_rx` (the identity control) is never quantized regardless of these flags,
     since a wire has no attenuator setting to quantize.
 
-    Deterministic per `(seed, m)`. Output dtype matches the input's (normally
-    complex64); shape is unchanged.
+    `no_reconstruct=False` (default) reconstructs and returns `[n_rx, n_chirps,
+    n_samples]`, same shape as the input. `no_reconstruct=True` skips
+    `reconstruct_aperture` and returns the raw `[M, n_chirps, n_samples]` measurement
+    cube `y` instead -- dim 0 shrinks to `M` (see the module docstring's "NO-RECONSTRUCT
+    MODE"); at `m == n_rx` the two modes agree exactly (`A` is the identity).
+
+    Deterministic per `(seed, m)`. Output dtype matches the input's (normally complex64).
     """
     if adc.dim() != 3:
         raise ValueError(f"adc must be [n_rx, n_chirps, n_samples], got shape {tuple(adc.shape)}")
@@ -142,6 +159,8 @@ def degrade_adc_cube(adc: torch.Tensor, m: int, *, seed: int = 0,
 
     x = adc.reshape(n_rx, n_chirps * n_samples).to(torch.complex64)
     y = combine(a, x)
+    if no_reconstruct:
+        return y.reshape(m, n_chirps, n_samples).to(adc.dtype)
     x_hat = reconstruct_aperture(a, y)
     return x_hat.reshape(n_rx, n_chirps, n_samples).to(adc.dtype)
 
@@ -161,12 +180,14 @@ class _DegradedRadarFrameDataset(RadarFrameDataset):
     """
 
     def __init__(self, manifest_path, split: str, input_format: str, *, m: int,
-                seed: int = 0, weight_bits: Optional[int] = 8, quantize: bool = True):
+                seed: int = 0, weight_bits: Optional[int] = 8, quantize: bool = True,
+                no_reconstruct: bool = False):
         super().__init__(manifest_path, split=split, input_format=input_format)
         self._afe_m = m
         self._afe_seed = seed
         self._afe_weight_bits = weight_bits
         self._afe_quantize = quantize
+        self._afe_no_reconstruct = no_reconstruct
 
     def _load_raw(self, idx: int):
         array, is_adc, labels, meta = super()._load_raw(idx)
@@ -184,16 +205,81 @@ class _DegradedRadarFrameDataset(RadarFrameDataset):
         adc = torch.from_numpy(array).to(torch.complex64)
         adc = degrade_adc_cube(adc, self._afe_m, seed=self._afe_seed,
                                weight_bits=self._afe_weight_bits,
-                               quantize=self._afe_quantize)
+                               quantize=self._afe_quantize,
+                               no_reconstruct=self._afe_no_reconstruct)
         return adc.numpy(), is_adc, labels, meta
 
+    @property
+    def effective_n_rx(self) -> int:
+        """Physical-channel count of dim 0 of every array this dataset hands out: `M`
+        (compressed measurements) in `no_reconstruct` mode, else the corpus's native
+        `cfg.n_rx` (reconstruction restores the full aperture). What a caller must size
+        a model's input stem to -- see `_manifest_at_m` / `build_model`'s
+        manifest-driven `_input_dims` (`e2e.ml.train`)."""
+        return self._afe_m if self._afe_no_reconstruct else self._radar_config().n_rx
+
     def raw_adc(self, idx: int) -> torch.Tensor:
-        """The degraded raw ADC cube for frame `idx`, `[n_rx, n_chirps, n_samples]`
-        complex64 -- undecorated by any `input_format` derivation. What the classical
-        baseline (`e2e.ml.baseline.classical_detection_map`) needs, and exactly what
-        `__getitem__` derived its model input from for the same frame."""
+        """The degraded raw ADC cube for frame `idx`, complex64 -- undecorated by any
+        `input_format` derivation. Shape is `[n_rx, n_chirps, n_samples]` normally,
+        or `[M, n_chirps, n_samples]` in `no_reconstruct` mode (see `effective_n_rx`) --
+        in the latter case this is NOT a physical aperture and is not a meaningful input
+        to `e2e.ml.baseline.classical_detection_map` (which needs one to beamform; use
+        `classical_at_m`, scored on RECONSTRUCTED frames, as the honest comparator
+        instead). What `__getitem__` derived its model input from for the same frame."""
         array, _is_adc, _labels, _meta = self._load_raw(idx)  # raises on non-ADC
         return torch.from_numpy(array).to(torch.complex64)
+
+
+def _manifest_at_m(manifest: Dict, m: int, input_format: str) -> Dict:
+    """Shallow-copied `manifest` with `config.n_rx` overridden to `m` and `input_format`
+    set to `input_format`. What `build_model` needs to size a stem to `M` compressed
+    measurements instead of the corpus's native aperture -- see `_DegradedRadarFrameDataset`'s
+    `no_reconstruct` mode and `e2e.ml.compressed_domain.train_native_m`. Does not mutate
+    the caller's `manifest`; only `"config"` is deep-copied (a plain dict), everything
+    else (e.g. `"grid"`, `"files"`) is shared by reference since it is read-only here.
+    """
+    out = dict(manifest)
+    out["config"] = dict(manifest["config"], n_rx=int(m))
+    out["input_format"] = input_format
+    return out
+
+
+# --------------------------------------------------------------------------------
+# Classical baseline at M, reconstructed -- no checkpoint needed
+# --------------------------------------------------------------------------------
+def classical_at_m(manifest_path, split: str, m: int, *, seed: int = 0,
+                   weight_bits: Optional[int] = 8, quantize: bool = True, device=None,
+                   limit: Optional[int] = None) -> Dict:
+    """Classical CFAR baseline on frames RECONSTRUCTED from `M` compressed measurements.
+
+    `e2e.ml.baseline.classical_detection_map` needs a physical aperture to beamform
+    (an angle FFT indexes antennas), so this always reconstructs -- unlike a native-M
+    model, which may skip reconstruction entirely (see `_DegradedRadarFrameDataset`'s
+    `no_reconstruct` mode). This is the "reconstruct-then-detect" arm of `evaluate_at_m`
+    factored out so a native-M comparison can call it without a checkpoint/model at all.
+
+    Returns `{"m": M, "AP", "AR", "range_rmse_m"}`.
+    """
+    manifest_path = Path(manifest_path)
+    device = device if device is not None else train_mod._default_device()
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    grid = train_mod._load_grid(manifest)
+    cfg = RadarConfig.from_dict(manifest["config"])
+
+    ds = _DegradedRadarFrameDataset(manifest_path, split, "adc", m=m, seed=seed,
+                                    weight_bits=weight_bits, quantize=quantize)
+    if limit is not None:
+        ds.files = ds.files[:limit]
+
+    pred_maps, target_lists = [], []
+    for i in range(len(ds)):
+        adc = ds.raw_adc(i).to(device)
+        pred_maps.append(baseline.classical_detection_map(cfg, adc, grid).cpu())
+        target_lists.append(ds.targets(i))
+    metrics = evaluate_dataset(pred_maps, target_lists, grid)
+    return {"m": int(m), "AP": metrics["AP"], "AR": metrics["AR"],
+            "range_rmse_m": metrics["range_rmse_m"]}
 
 
 # --------------------------------------------------------------------------------
@@ -201,8 +287,21 @@ class _DegradedRadarFrameDataset(RadarFrameDataset):
 # --------------------------------------------------------------------------------
 def evaluate_at_m(manifest_path, ckpt_path, split: str, m: int, *, seed: int = 0,
                   weight_bits: Optional[int] = 8, quantize: bool = True, device=None,
-                  batch_size: int = 8, limit: Optional[int] = None) -> Dict:
+                  batch_size: int = 8, limit: Optional[int] = None,
+                  no_reconstruct: bool = False) -> Dict:
     """Score both the checkpoint and the classical baseline at compression level `M`.
+
+    `no_reconstruct` (default `False`, unchanged behavior): when `True`, the MODEL's
+    dataset yields the raw `[M, n_chirps, n_samples]` measurement cube instead of the
+    reconstructed `[n_rx, ...]` aperture (see `_DegradedRadarFrameDataset`) -- only
+    sensible for a checkpoint whose stem was itself sized to `M` (native-M training, see
+    `e2e.ml.compressed_domain.train_native_m`), so the model here is built from a
+    manifest copy with `config.n_rx` overridden to `m` (`_manifest_at_m`), not the
+    corpus's own `n_rx`. The CLASSICAL baseline is always scored via `classical_at_m` on
+    the RECONSTRUCTED cube at the same `M`, regardless of this flag: reconstruction is
+    what an aperture-indexing consumer like an angle FFT needs (see
+    `e2e.chain.compress`'s module docstring), so it stays the honest comparator whether
+    or not the model under test skips reconstruction.
 
     Returns `{"m": M, "model": {"AP", "AR", "range_rmse_m"}, "classical": {...}}`.
     `limit`, if given, scores only the split's first `limit` frames (fast smoke runs).
@@ -216,25 +315,34 @@ def evaluate_at_m(manifest_path, ckpt_path, split: str, m: int, *, seed: int = 0
 
     checkpoint = torch.load(ckpt_path, map_location=device)
     input_format = checkpoint.get("input_format", manifest.get("input_format", "rd"))
-    manifest_for_model = dict(manifest)
-    manifest_for_model["input_format"] = input_format
+    if no_reconstruct:
+        manifest_for_model = _manifest_at_m(manifest, m, input_format)
+    else:
+        manifest_for_model = dict(manifest)
+        manifest_for_model["input_format"] = input_format
     model = train_mod.build_model(checkpoint["model_name"], manifest_for_model, device=device)
     model.load_state_dict(checkpoint["model_state"])
 
     ds = _DegradedRadarFrameDataset(manifest_path, split, input_format, m=m, seed=seed,
-                                    weight_bits=weight_bits, quantize=quantize)
+                                    weight_bits=weight_bits, quantize=quantize,
+                                    no_reconstruct=no_reconstruct)
     if limit is not None:
         ds.files = ds.files[:limit]  # plain list slice; no disk touched
 
     model_metrics = train_mod._evaluate_split(model, ds, grid, device=device,
                                               batch_size=batch_size)
 
-    pred_maps, target_lists = [], []
-    for i in range(len(ds)):
-        adc = ds.raw_adc(i).to(device)
-        pred_maps.append(baseline.classical_detection_map(cfg, adc, grid).cpu())
-        target_lists.append(ds.targets(i))
-    classical_metrics = evaluate_dataset(pred_maps, target_lists, grid)
+    if no_reconstruct:
+        classical_metrics = classical_at_m(manifest_path, split, m, seed=seed,
+                                           weight_bits=weight_bits, quantize=quantize,
+                                           device=device, limit=limit)
+    else:
+        pred_maps, target_lists = [], []
+        for i in range(len(ds)):
+            adc = ds.raw_adc(i).to(device)
+            pred_maps.append(baseline.classical_detection_map(cfg, adc, grid).cpu())
+            target_lists.append(ds.targets(i))
+        classical_metrics = evaluate_dataset(pred_maps, target_lists, grid)
 
     return {
         "m": int(m),
