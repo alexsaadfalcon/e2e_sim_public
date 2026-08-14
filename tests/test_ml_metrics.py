@@ -16,7 +16,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
-from e2e.ml.metrics import MatchCriterion, evaluate_dataset, evaluate_frame, match_detections
+from e2e.ml.metrics import (
+    DEFAULT_CLASSES,
+    MatchCriterion,
+    evaluate_dataset,
+    evaluate_frame,
+    match_detections,
+)
 from e2e.ml.scatterers import RadarPose, Scatterer
 
 
@@ -282,3 +288,88 @@ def test_underconfident_model_does_not_collect_vacuous_precision(torch_device):
     silent_result = evaluate_dataset([silent], [targets], grid)
     assert silent_result["AP"] == 0.0
     assert silent_result["AR"] == 0.0
+
+
+# --------------------------------------------------------------------------------
+# Per-class AP/AR
+# --------------------------------------------------------------------------------
+def test_default_classes_is_vehicle_pedestrian():
+    assert DEFAULT_CLASSES == ("vehicle", "pedestrian")
+
+
+def test_all_vehicle_frame_gives_nan_pedestrian_metrics():
+    """A frame with only vehicle targets: AP_vehicle/AR_vehicle mirror the pooled
+    numbers exactly (filtering to "vehicle" changes nothing when everything already IS
+    vehicle), while AP_pedestrian/AR_pedestrian are NaN (nothing of that class exists to
+    score), not the vacuous 0/0 -> 1.0 pooled convention."""
+    grid = LabelGrid(n_range=40, n_azimuth=40, max_range_m=40.0)
+    pose = RadarPose()
+    cells = [(5, 5), (30, 30)]
+    vehicles = [_target((ri + 0.5) * grid.range_bin_m, -1.0 + (ai + 0.5) * grid.az_bin, "vehicle")
+                for (ri, ai) in cells]
+
+    pred_map = encode_detection_labels(grid, vehicles, pose)
+    targets = targets_in_grid(grid, vehicles, pose)
+
+    result = evaluate_dataset([pred_map], [targets], grid)
+    assert result["AP"] == pytest.approx(1.0)
+    assert result["AR"] == pytest.approx(1.0)
+    assert result["AP_vehicle"] == pytest.approx(result["AP"])
+    assert result["AR_vehicle"] == pytest.approx(result["AR"])
+    assert result["n_targets_vehicle"] == 2
+    assert result["n_targets_pedestrian"] == 0
+    assert math.isnan(result["AP_pedestrian"])
+    assert math.isnan(result["AR_pedestrian"])
+
+
+def test_mixed_frame_per_class_hand_computable():
+    """2 vehicle + 2 pedestrian targets, all perfectly detected, plus one spurious
+    (unmatched-by-anything) detection far from every real target.
+
+    Pooled: TP=4, FP=1 (the phantom), FN=0 -> AP=4/5=0.8, AR=1.0.
+    Per-class (target list filtered to just that class, but ALL 5 detections still
+    compete for it -- see metrics.py's "Per-class AP/AR" docstring): each class's own
+    2 targets get matched (TP=2), and the OTHER class's 2 correct detections plus the
+    phantom (3 detections) all become false positives against that class's restricted
+    target list -> AP_vehicle = AP_pedestrian = 2/5 = 0.4, AR_vehicle = AR_pedestrian = 1.0.
+    """
+    grid = LabelGrid(n_range=40, n_azimuth=40, max_range_m=40.0)
+    pose = RadarPose()
+
+    def _at(ri, ai, object_class):
+        return _target((ri + 0.5) * grid.range_bin_m, -1.0 + (ai + 0.5) * grid.az_bin,
+                        object_class)
+
+    vehicles = [_at(5, 5, "vehicle"), _at(5, 30, "vehicle")]
+    pedestrians = [_at(30, 5, "pedestrian"), _at(30, 30, "pedestrian")]
+    phantom = _at(18, 18, "vehicle")   # far from all real cells; excluded from targets below
+
+    pred_map = encode_detection_labels(grid, vehicles + pedestrians + [phantom], pose)
+    targets = targets_in_grid(grid, vehicles + pedestrians, pose)   # phantom is not real
+
+    result = evaluate_dataset([pred_map], [targets], grid)
+    assert result["AP"] == pytest.approx(0.8)
+    assert result["AR"] == pytest.approx(1.0)
+
+    assert result["n_targets_vehicle"] == 2
+    assert result["n_targets_pedestrian"] == 2
+    # Sanity: every real target is accounted for exactly once across the per-class splits.
+    assert result["n_targets_vehicle"] + result["n_targets_pedestrian"] == len(targets)
+
+    assert result["AP_vehicle"] == pytest.approx(0.4)
+    assert result["AR_vehicle"] == pytest.approx(1.0)
+    assert result["AP_pedestrian"] == pytest.approx(0.4)
+    assert result["AR_pedestrian"] == pytest.approx(1.0)
+
+
+def test_classes_empty_tuple_omits_per_class_keys():
+    grid = LabelGrid(n_range=10, n_azimuth=10, max_range_m=10.0)
+    pose = RadarPose()
+    scatterers = [_target((5 + 0.5) * grid.range_bin_m, -1.0 + (5 + 0.5) * grid.az_bin)]
+    pred_map = encode_detection_labels(grid, scatterers, pose)
+    targets = targets_in_grid(grid, scatterers, pose)
+
+    result = evaluate_dataset([pred_map], [targets], grid, classes=())
+    assert "AP_vehicle" not in result
+    assert "AR_vehicle" not in result
+    assert result["AP"] == pytest.approx(1.0)
