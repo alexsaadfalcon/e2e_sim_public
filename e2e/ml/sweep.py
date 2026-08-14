@@ -217,7 +217,7 @@ def _summarize_trial(params: Dict, history: Dict, *, stage: str, out_dir: Path,
 
 
 def _run_trial(manifest_path, model_name: str, params: Dict, *, epochs: int, batch_size: int,
-                seed: int, sweep_out_dir: Path, device, stage: str) -> Dict:
+                seed: int, sweep_out_dir: Path, device, stage: str, accum_steps: int = 1) -> Dict:
     trial_out = sweep_out_dir / trial_slug(params)
     history_path = trial_out / "history.json"
 
@@ -231,7 +231,7 @@ def _run_trial(manifest_path, model_name: str, params: Dict, *, epochs: int, bat
     t0 = time.perf_counter()
     history = train(manifest_path, model_name, epochs=epochs, batch_size=batch_size, seed=seed,
                      out_dir=trial_out, device=device, reg_weight=params["reg_weight"],
-                     lr=params["lr"], gamma=params["gamma"])
+                     lr=params["lr"], gamma=params["gamma"], accum_steps=accum_steps)
     wall_s = time.perf_counter() - t0
 
     # Belt-and-suspenders: the real train() already writes this, but re-writing our
@@ -266,12 +266,16 @@ def pick_best(sweep_results: Union[Dict, Sequence[Dict]]) -> Dict:
 # Sweep driver
 # --------------------------------------------------------------------------------
 def run_sweep(manifest_path, model_name: str, grid: Optional[Dict] = None, *, epochs: int = 25,
-              batch_size: int = 8, seed: int = 0, out_dir=None, device=None) -> Path:
+              batch_size: int = 8, seed: int = 0, out_dir=None, device=None,
+              accum_steps: int = 1) -> Path:
     """Run the design doc's staged sweep sequentially; write/return `sweep_results.json`.
 
     `grid` defaults to `DEFAULT_GRID`. `out_dir` defaults to
     `<manifest's directory>/runs/sweep_<model_name>/`, mirroring `train.py`'s own
-    default `out_dir` convention.
+    default `out_dir` convention. `accum_steps` (default 1, unchanged behavior) is
+    forwarded verbatim to every trial's `train()` call -- see `train.py`'s docstring for
+    what it does; this module doesn't sweep it, it's a fixed-per-run memory lever, same
+    as `batch_size`.
     """
     if model_name not in _MODEL_NAMES:
         raise ValueError(f"unknown model {model_name!r}; choices: {_MODEL_NAMES}")
@@ -284,13 +288,13 @@ def run_sweep(manifest_path, model_name: str, grid: Optional[Dict] = None, *, ep
     for params in _stage1_trials(grid):
         results.append(_run_trial(manifest_path, model_name, params, epochs=epochs,
                                    batch_size=batch_size, seed=seed, sweep_out_dir=out_dir,
-                                   device=device, stage="stage1"))
+                                   device=device, stage="stage1", accum_steps=accum_steps))
 
     winner = pick_best(results)
     for params in _stage2_trials(grid, winner["params"]):
         results.append(_run_trial(manifest_path, model_name, params, epochs=epochs,
                                    batch_size=batch_size, seed=seed, sweep_out_dir=out_dir,
-                                   device=device, stage="stage2"))
+                                   device=device, stage="stage2", accum_steps=accum_steps))
 
     results.sort(key=lambda r: r["objective_mean_ap_last5"], reverse=True)
 
@@ -300,6 +304,7 @@ def run_sweep(manifest_path, model_name: str, grid: Optional[Dict] = None, *, ep
         "epochs": epochs,
         "batch_size": batch_size,
         "seed": seed,
+        "accum_steps": accum_steps,
         "grid": grid,
         "trials": results,
     }
@@ -357,6 +362,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=int, default=25, help="epochs/trial (design doc default: 25)")
     p.add_argument("--batch-size", type=int, default=8,
                    help="fixed across every trial (see module docstring)")
+    p.add_argument("--accum-steps", type=int, default=1,
+                   help="gradient-accumulation steps, forwarded to train() for every trial "
+                        "(default 1 = unchanged behavior; see train.py's docstring)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default=None,
                    help="sweep output dir (default: <manifest dir>/runs/sweep_<model>)")
@@ -379,7 +387,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     run_sweep(args.manifest, args.model, grid, epochs=args.epochs, batch_size=args.batch_size,
-              seed=args.seed, out_dir=args.out)
+              seed=args.seed, out_dir=args.out, accum_steps=args.accum_steps)
     return 0
 
 
