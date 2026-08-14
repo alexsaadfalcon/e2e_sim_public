@@ -164,6 +164,26 @@ def test_range_migration_changes_a_moving_target_and_grows_with_chirp():
     assert per_chirp[-1] > per_chirp[1] > 0.0
 
 
+def test_cfr_from_paths_defaults_range_migration_on():
+    """PINS THE FLIP (2026-08-14): `cfr_from_paths` -- the corpus-generation call site
+    -- now defaults to the range-migration-corrected closed form, on the strength of the
+    37x whole-cube rel-RMSE reduction measured 2026-08-11 (see `cfr_sum_over_paths`'s
+    docstring and CHANGELOG.md). Corpora generated before this date used
+    `range_migration=False`. Sionna-free (signature inspection only), so this guards the
+    default even though `cfr_from_paths` itself cannot run without Sionna/GPU here."""
+    import inspect
+
+    from e2e.ml.rt_gen import cfr_from_paths, cfr_sum_over_paths, rt_cfr_frame, rt_synthesize_adc
+
+    for fn in (cfr_from_paths, rt_cfr_frame, rt_synthesize_adc):
+        default = inspect.signature(fn).parameters["range_migration"].default
+        assert default is True, f"{fn.__name__}'s range_migration default is {default!r}"
+
+    # The general-purpose closed-form utility keeps its own default False deliberately
+    # (see its docstring) -- cfr_from_paths always passes the flag explicitly.
+    assert inspect.signature(cfr_sum_over_paths).parameters["range_migration"].default is False
+
+
 def test_range_migration_leaves_the_carrier_phase_alone():
     """At f_baseband = 0 the baseband term is exp(0) = 1 regardless of delay, so the
     correction cannot change the DC bin. If it does, the drift leaked into the carrier
