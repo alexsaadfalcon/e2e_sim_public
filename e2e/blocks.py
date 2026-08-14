@@ -763,6 +763,65 @@ class RangeElBlock:
         return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
 
 
+class RangeProfileBlock:
+    """Per-measurement-channel range profile: a windowless FFT along the FREQUENCY
+    axis only -- no aperture transform. The first COMPRESSED-DOMAIN downstream product.
+
+    THE ASYMMETRY THIS BLOCK EXISTS TO SHOW. Compression measures ``y = A x``, and
+    `A` mixes only the APERTURE axis -- each measurement is a linear combination of
+    physical elements -- while leaving the FREQUENCY axis completely untouched
+    (`e2e.chain.compress.combine` / `AFEBlock.apply_mat_mul` never index dim -1). So
+    for measurement channel `m`, ``y[m, f] = sum_n A[m, n] x[n, f]``, and an FFT over
+    `f` commutes straight through that sum: ``range(y[m, :]) = sum_n A[m, n] *
+    range(x[n, :])`` -- a valid (if basis-mixed) full-resolution range profile per
+    channel, with no reconstruction needed. An ANGLE FFT has no such luck: it needs
+    one sample per physical element to steer a beam, and a random linear combination
+    of elements is not a beam-steerable aperture at all -- which is why
+    RangeAzBlock/RangeElBlock/FFTBlock consume the full aperture grid while THIS block,
+    like `SubspaceErrorBlock`, declares `DIMENSION_ANY` (via `frame_capabilities`,
+    exactly as `SubspaceErrorBlock` does): it runs unmodified whether `s_pars` is the
+    full aperture or `MeasurementStage(reconstruct=False)`'s `M` measurements, because
+    whether dim 0 counts elements or measurements is irrelevant to a per-channel range
+    transform.
+
+    Range compression matches RangeAzBlock/RangeElBlock's convention exactly: the
+    full frequency band is FFT'd (never truncated to `bins`), fftshifted, and turned
+    into power (`|.|**2`, non-coherent) -- no window on the range axis
+    (`_aperture_window` tapers only aperture/angle axes and is never applied here),
+    and no dB conversion (that is a display-layer choice made downstream, e.g.
+    `webapp/pipeline_runner.py`'s dB helper). `bins` sizes only the DISPLAY range
+    axis, via the same energy-preserving `_power_bin` RangeAzBlock/RangeElBlock use.
+
+    Outputs `'range_profile'` -- per-channel power, `[n_channels, bins]` -- and
+    `'range_profile_agg'` -- the non-coherent (power) MEAN over channels, `[bins]` --
+    matching the repo's non-coherent combining convention for display products (see
+    RangeAzBlock's elevation integration).
+    """
+
+    # Single-chirp/no-MIMO like the other range products, but DIMENSION_ANY: this
+    # block only ever indexes the frequency axis, so whether the aperture has been
+    # compressed is none of its business (see SubspaceErrorBlock for the same pattern).
+    frame_capabilities = frames.FrameCapabilities(
+        accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
+        chirps=_SINGLE_CHIRP.chirps,
+        domain=_SINGLE_CHIRP.domain,
+        dimension=frames.DIMENSION_ANY,
+    )
+
+    def __init__(self, bins=256):
+        self.bins = bins
+
+    def apply(self, state_dict):
+        data = frames.chirp0(state_dict['s_pars'])    # [dim0, dim1, n_freqs]
+        n_freqs = data.shape[-1]
+        channels = data.reshape(-1, n_freqs)           # [n_channels, n_freqs]
+        r = torch.fft.fftshift(torch.fft.fft(channels, dim=1), 1)   # full-band range
+        power = torch.abs(r) ** 2
+        power = _power_bin(power, self.bins, dim=1)    # n_freqs range bins -> bins gates
+        agg = torch.mean(power, dim=0)                  # non-coherent combine over channels
+        return {'range_profile': power, 'range_profile_agg': agg}
+
+
 class SubspaceErrorBlock:
     # Reads the tracker's basis (state['U'] / state['U_true']), not the frame, but it is
     # only meaningful alongside the single-chirp/no-MIMO subspace path, so it declares

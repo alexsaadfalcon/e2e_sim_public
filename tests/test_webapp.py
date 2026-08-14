@@ -70,10 +70,12 @@ def test_registry_block_ids_unique():
 
 
 def test_registry_edges_reference_existing_nodes():
-    from webapp.pipeline_registry import BLOCKS_BY_ID, EDGES
-    for src, dst in EDGES:
+    from webapp.pipeline_registry import BLOCKS_BY_ID, EDGES, normalize_edge
+    for edge in EDGES:
+        src, dst, kind = normalize_edge(edge)
         assert src in BLOCKS_BY_ID, f"edge source {src!r} not a known block"
         assert dst in BLOCKS_BY_ID, f"edge target {dst!r} not a known block"
+        assert kind in {"toggle", "alt"}, f"edge {src}->{dst} has unknown kind {kind!r}"
 
 
 def test_registry_categories_are_known():
@@ -107,6 +109,28 @@ def test_registry_param_defaults_match_kind():
                 assert p.default in p.choices, (
                     f"{b.id}.{p.key} default {p.default!r} not among choices {p.choices}"
                 )
+
+
+def test_registry_subspace_k_has_min_one():
+    """Subspace dim k=0 (or negative) crashes deep inside e2e.simulation's
+    rank_diagnostic; the ParamSpec declares a floor so the rendered dcc.Input
+    stops the user at the UI layer."""
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+    k_spec = next(p for p in BLOCKS_BY_ID["subspace"].params if p.key == "k")
+    assert k_spec.min == 1
+
+
+def test_param_editor_k_input_has_min():
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+    from dash import dcc
+
+    state = default_block_state()
+    children = block_diagram.param_editor("subspace", state)
+    k_inputs = [c for c in children
+                if isinstance(c, dcc.Input) and c.id.get("param") == "k"]
+    assert len(k_inputs) == 1
+    assert k_inputs[0].min == 1
 
 
 def test_default_block_state_covers_every_block():
@@ -184,7 +208,10 @@ def test_build_elements_matches_registry():
     from webapp.pipeline_registry import BLOCKS, EDGES, default_block_state
 
     elements = block_diagram.build_elements(default_block_state())
-    nodes = [e for e in elements if "source" not in e["data"]]
+    # Exclude the compound-group container nodes (see block_diagram._GROUPS):
+    # they are not registry blocks and carry no "position".
+    nodes = [e for e in elements
+             if "source" not in e["data"] and "position" in e]
     edges = [e for e in elements if "source" in e["data"]]
 
     assert len(nodes) == len(BLOCKS)
@@ -238,11 +265,113 @@ def test_param_editor_unknown_block_is_graceful():
     assert isinstance(children, list) and children  # returns a "select a block" prompt
 
 
+def _find_checklist(children):
+    """Dig the (single) dcc.Checklist out of a param_editor children list."""
+    from dash import dcc
+    matches = [c for c in children if isinstance(c, dcc.Checklist)]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def test_param_editor_subspace_checkbox_disabled_while_afe_enabled():
+    """pipeline_runner always builds the AdaOja tracker whenever AFE is enabled
+    (dead no-AFE-without-subspace guard notwithstanding), so the subspace 'Enabled'
+    checkbox toggling it off is a no-op. The honest-UI fix: disable the checkbox
+    (checked/locked on) and explain why, instead of letting the user believe it
+    does something."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    assert state["afe"]["enabled"] is True  # afe is on by default
+    children = block_diagram.param_editor("subspace", state)
+
+    checklist = _find_checklist(children)
+    assert checklist.options[0]["disabled"] is True
+    assert checklist.value == ["on"]  # locked "on" regardless of stored state
+    caption_text = " ".join(
+        c.children for c in children
+        if hasattr(c, "children") and isinstance(c.children, str)
+    )
+    assert "always on while AFE is enabled" in caption_text
+
+
+def test_param_editor_subspace_checkbox_normal_when_afe_disabled():
+    """With AFE off, the subspace toggle is a real, honored control again."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    state["afe"]["enabled"] = False
+    state["subspace"]["enabled"] = False
+    children = block_diagram.param_editor("subspace", state)
+
+    checklist = _find_checklist(children)
+    assert not checklist.options[0].get("disabled")
+    assert checklist.value == []  # honors the stored (off) state
+
+
 def test_block_diagram_layout_builds():
     from webapp import block_diagram
     layout = block_diagram.layout()
     assert layout is not None
     assert getattr(layout, "children", None) is not None
+
+
+def test_positions_cover_every_registered_block_without_collisions():
+    """Every block registered in pipeline_registry.BLOCKS must have an explicit
+    position in block_diagram._POSITIONS -- otherwise it silently falls back to
+    (0, 0) and overlaps another node in the cytoscape diagram -- AND no two
+    nodes' actual rendered boxes may geometrically overlap. Tuple-equality alone
+    is not enough: this is the regression that let range_profile (1020, 270)
+    sit on top of quantizer (1000, 280) -- different tuples, overlapping boxes."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS
+
+    ids = [b.id for b in BLOCKS]
+    missing = [bid for bid in ids if bid not in block_diagram._POSITIONS]
+    assert not missing, f"blocks missing explicit positions: {missing}"
+
+    # Node box size from CYTO_STYLESHEET's base "node" selector (width/height).
+    node_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
+                       if s["selector"] == "node")
+    w = float(node_style["width"].rstrip("px"))
+    h = float(node_style["height"].rstrip("px"))
+
+    def _box(bid):
+        x, y = block_diagram._POSITIONS[bid]
+        return (x - w / 2, x + w / 2, y - h / 2, y + h / 2)
+
+    def _overlaps(a, b):
+        ax0, ax1, ay0, ay1 = a
+        bx0, bx1, by0, by1 = b
+        return ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1
+
+    boxes = {bid: _box(bid) for bid in ids}
+    colliding = []
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            if _overlaps(boxes[a], boxes[b]):
+                colliding.append((a, b))
+    assert not colliding, f"node boxes ({w}x{h}) geometrically overlap: {colliding}"
+
+
+def test_every_block_belongs_to_exactly_one_diagram_group():
+    """Every registered block must appear in exactly one of block_diagram._GROUPS
+    (the compound region containers from the redesign) -- not zero, not two."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS
+
+    membership_count = {b.id: 0 for b in BLOCKS}
+    for spec in block_diagram._GROUPS.values():
+        for bid in spec["members"]:
+            assert bid in membership_count, f"group member {bid!r} is not a registered block"
+            membership_count[bid] += 1
+
+    not_grouped = [bid for bid, n in membership_count.items() if n == 0]
+    multi_grouped = [bid for bid, n in membership_count.items() if n > 1]
+    assert not not_grouped, f"blocks not in any diagram group: {not_grouped}"
+    assert not multi_grouped, f"blocks in more than one diagram group: {multi_grouped}"
 
 
 # =============================================================================
@@ -365,6 +494,30 @@ def test_run_pipeline_maps_frame_contract_errors_to_constraint_message(
         pipeline_runner.run_pipeline(state, n_steps=1)
 
 
+def test_run_pipeline_wires_every_classic_product_block(monkeypatch, make_env_block):
+    """Regression for the range_profile gap: a block registered as a non-toggleable
+    'product' in pipeline_registry MUST actually execute in run_pipeline and MUST get
+    a figure from figures_from_outputs -- otherwise the UI presents a permanently-on
+    node that silently never runs. Guards the classic-chain products; the ADC-cube
+    chain trio (radar_cube/detector/sink) is registered-but-unwired by documented
+    design (see pipeline_runner's module docstring) and excluded here."""
+    pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=2, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    outputs = pipeline_runner.run_pipeline(default_block_state(), n_steps=1)
+    for key in ("fft", "range_az", "range_el", "range_profile_agg", "subspace_err"):
+        assert outputs.get(key), f"classic product output {key!r} missing from run_pipeline"
+
+    figs = pipeline_runner.figures_from_outputs(outputs)
+    for fig_key in ("fft", "range_az", "range_el", "range_profile", "subspace_err"):
+        assert fig_key in figs, f"figures_from_outputs has no figure for {fig_key!r}"
+
+
 def test_run_pipeline_no_longer_errors_when_rffe_disabled():
     """RFFE-off is now a valid config: the stale up-front RFFE guard must not fire.
 
@@ -426,6 +579,25 @@ def test_run_pipeline_still_requires_subspace_when_afe_enabled():
         run_pipeline(state, n_steps=1)
     except PipelineError as e:
         assert not _stale_guard_fired(e), f"stale guard still fires: {e}"
+
+
+def test_run_pipeline_k_zero_surfaces_friendly_message(monkeypatch, make_env_block):
+    """A subspace k < 1 crashes deep inside e2e.simulation.rank_diagnostic with
+    ValueError('rank_diagnostic requires k >= 1, got k=0'); the runner must
+    translate that into an actionable message instead of leaking the internal
+    function name."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["subspace"]["params"]["k"] = 0
+    with pytest.raises(pipeline_runner.PipelineError, match=r"Subspace dim k must be >= 1"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
 
 
 def test_figures_from_outputs_handles_empty_outputs():
@@ -1105,10 +1277,15 @@ def test_run_pipeline_detector_enabled_raises_clear_checkpoint_error(
 @pytest.mark.slow
 def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
         monkeypatch, make_env_block):
-    """A real run with only 'dechirp' (+impairment+quantizer) enabled must succeed
-    (no radar_cube/detector/sink so no cfg-dimension mismatch against the synthetic
-    frame) and must NOT produce the frequency-domain products (fft/range_az/...),
-    since the chain crossed into RX time."""
+    """A real run with 'dechirp' (+quantizer+sink) enabled must succeed and must
+    NOT produce the frequency-domain products (fft/range_az/...), since the chain
+    crossed into RX time. 'sink' is enabled (not radar_cube/detector, see the
+    checkpoint/multi-chirp guards tested elsewhere) purely so the downstream
+    product list isn't empty -- see test_run_pipeline_dechirp_with_no_product_raises
+    for what happens when it is. 'impairment' is deliberately left off: its
+    phase-noise stage (e2e/ml/impairments.py, not owned by this shard) hits an
+    unrelated pre-existing in-place aliasing RuntimeError on this synthetic-frame
+    path (see handoff notes) -- a separate bug from the one this test covers."""
     pytest.importorskip("torch")
     from webapp import pipeline_runner
     from webapp.pipeline_registry import default_block_state
@@ -1119,10 +1296,31 @@ def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
 
     state = default_block_state()
     state["dechirp"]["enabled"] = True
-    state["impairment"]["enabled"] = True
     state["quantizer"]["enabled"] = True
+    state["sink"]["enabled"] = True
     outputs = pipeline_runner.run_pipeline(state, n_steps=2)
 
     assert isinstance(outputs, dict)
     for stale_key in ("fft", "range_az", "range_el", "subspace_err"):
         assert stale_key not in outputs, f"{stale_key} should not appear once dechirp is on"
+
+
+def test_run_pipeline_dechirp_with_no_product_raises(monkeypatch, make_env_block):
+    """Enabling only 'dechirp' (no radar_cube/detector/sink) used to run to
+    completion with an EMPTY downstream_blocks list -- zero outputs, no error,
+    indistinguishable in the Results tab from never having run. It must now raise
+    a PipelineError naming the fix (enable a product, or disable dechirp)."""
+    torch = pytest.importorskip("torch")
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    import e2e.blocks as blocks
+
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+
+    state = default_block_state()
+    state["dechirp"]["enabled"] = True
+    with pytest.raises(pipeline_runner.PipelineError, match="Radar Cube"):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+

@@ -86,6 +86,89 @@ def test_build_model_unknown_name_raises(manifest_dict):
 
 
 # --------------------------------------------------------------------------------
+# ssm_chunk_size / --ssm-chunk plumbing (cuts SSMRadNet's selective-scan memory
+# ceiling; see e2e.ml.models.ssm's "CHUNKED SCAN" docs). CPU-only, tiny shapes -- the
+# equivalence of the chunked scan itself is covered by tests/test_ml_ssmradnet.py.
+# --------------------------------------------------------------------------------
+def test_build_model_threads_ssm_chunk_size_into_ssmradnet(manifest_dict):
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("ssmradnet", manifest_dict, device=cpu, ssm_chunk_size=7)
+    # every SelectiveSSM in both scan stages must have received the knob
+    chunk_sizes = {m.chunk_size for m in model.modules()
+                   if type(m).__name__ == "SelectiveSSM"}
+    assert chunk_sizes == {7}
+
+
+def test_build_model_ssm_chunk_size_default_is_none(manifest_dict):
+    """Omitting `ssm_chunk_size` (default `None`) must build exactly the unchunked model."""
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("ssmradnet", manifest_dict, device=cpu)
+    chunk_sizes = {m.chunk_size for m in model.modules()
+                   if type(m).__name__ == "SelectiveSSM"}
+    assert chunk_sizes == {None}
+
+
+def test_build_model_ssm_chunk_size_ignored_for_fftradnet(manifest_dict):
+    """fftradnet has no SSM; passing ssm_chunk_size must not raise or change anything."""
+    cpu = torch.device("cpu")
+    model = train_mod.build_model("fftradnet", manifest_dict, device=cpu, ssm_chunk_size=7)
+    assert isinstance(model, torch.nn.Module)
+
+
+def test_train_threads_ssm_chunk_into_build_model(tmp_path, monkeypatch):
+    """`train(..., ssm_chunk=...)` must reach `build_model`'s `ssm_chunk_size` kwarg."""
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="rd")
+
+    captured = {}
+    real_build_model = train_mod.build_model
+
+    def _spy(name, manifest, **kwargs):
+        captured.update(kwargs)
+        return real_build_model(name, manifest, **kwargs)
+
+    monkeypatch.setattr(train_mod, "build_model", _spy)
+    train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2, input_format="rd",
+                    ssm_chunk=6, device=torch.device("cpu"), seed=0)
+
+    assert captured["ssm_chunk_size"] == 6
+
+
+def test_train_ssm_chunk_default_is_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_mod, "RadarFrameDataset", _StubRadarFrameDataset)
+    manifest_path = _write_stub_manifest(tmp_path, input_format="rd")
+
+    captured = {}
+    real_build_model = train_mod.build_model
+
+    def _spy(name, manifest, **kwargs):
+        captured.update(kwargs)
+        return real_build_model(name, manifest, **kwargs)
+
+    monkeypatch.setattr(train_mod, "build_model", _spy)
+    train_mod.train(manifest_path, "ssmradnet", epochs=1, batch_size=2, input_format="rd",
+                    device=torch.device("cpu"), seed=0)
+
+    assert captured["ssm_chunk_size"] is None
+
+
+def test_cli_ssm_chunk_default_and_wiring(monkeypatch):
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "ssmradnet"])
+    assert captured["ssm_chunk"] is None
+
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "ssmradnet",
+                    "--ssm-chunk", "64"])
+    assert captured["ssm_chunk"] == 64
+
+
+# --------------------------------------------------------------------------------
 # train() / evaluate()
 # --------------------------------------------------------------------------------
 def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
@@ -136,6 +219,117 @@ def test_train_default_out_dir(tiny_manifest_path):
     default_dir = Path(tiny_manifest_path).parent / "runs" / "fftradnet"
     assert (default_dir / "best.pt").is_file()
     assert (default_dir / "history.json").is_file()
+
+
+# --------------------------------------------------------------------------------
+# accum_steps (gradient accumulation): see train.py's module docstring for why this,
+# not a bigger batch_size, is the memory lever for SSMRadNet on an 8 GiB card.
+# --------------------------------------------------------------------------------
+def test_train_accum_steps_default_matches_unset_step_count(tiny_manifest_path, tmp_path,
+                                                             monkeypatch):
+    """`accum_steps` unset (default 1) is bit-for-bit the same optimizer-step schedule
+    as passing `accum_steps=1` explicitly -- guards against the new arg silently
+    changing default behavior. Forced onto CPU: on CUDA, `amp="auto"` routes `step()`
+    through `GradScaler.step()`, whose internal found-inf skip logic (needed for AMP,
+    irrelevant to accum_steps) makes a naive `Adam.step` call-count an unreliable probe."""
+    real_step = torch.optim.Adam.step
+    counts = {"n": 0}
+
+    def counting_step(self, *args, **kwargs):
+        counts["n"] += 1
+        return real_step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.Adam, "step", counting_step)
+    train_mod.train(tiny_manifest_path, "fftradnet", epochs=2, batch_size=2,
+                     out_dir=tmp_path / "default", seed=0, device=torch.device("cpu"))
+    # train split has 4 frames -> 2 micro-batches/epoch, accum_steps=1 -> 1 step/micro-batch.
+    assert counts["n"] == 2 * 2
+
+
+def test_train_accum_steps_step_count_matches_effective_batch(tiny_manifest_path, manifest_dict,
+                                                               tmp_path, monkeypatch):
+    """`batch_size=2, accum_steps=2` (4 train frames -> 2 micro-batches/epoch, grouped
+    into 1 step) must take exactly as many optimizer steps per epoch as the
+    unaccumulated equivalent `batch_size=4, accum_steps=1` (1 micro-batch/epoch, 1
+    step) -- both are effective-batch-4. Loss trajectories are not expected to match
+    (different micro-batch schedules -> different BatchNorm running stats), so this
+    checks step COUNT and that parameters actually moved, not float equality. CPU-forced
+    for the same reason as the test above (AMP's GradScaler.step() skip logic)."""
+    real_step = torch.optim.Adam.step
+    cpu = torch.device("cpu")
+
+    def _run(batch_size, accum_steps, out_dir):
+        counts = {"n": 0}
+
+        def counting_step(self, *args, **kwargs):
+            counts["n"] += 1
+            return real_step(self, *args, **kwargs)
+
+        monkeypatch.setattr(torch.optim.Adam, "step", counting_step)
+        try:
+            train_mod.train(tiny_manifest_path, "fftradnet", epochs=3, batch_size=batch_size,
+                            accum_steps=accum_steps, out_dir=out_dir, seed=0, device=cpu)
+        finally:
+            monkeypatch.setattr(torch.optim.Adam, "step", real_step)
+        return counts["n"]
+
+    steps_unaccum = _run(4, 1, tmp_path / "unaccum")   # 1 micro-batch/epoch, no accumulation
+    steps_accum = _run(2, 2, tmp_path / "accum")       # 2 micro-batches/epoch, grouped by 2
+    assert steps_unaccum == steps_accum == 3            # 1 step/epoch x 3 epochs, either way
+
+    # Params actually moved from their (seed-reproducible) initial values in both runs.
+    torch.manual_seed(0)
+    initial = train_mod.build_model("fftradnet", manifest_dict, device=cpu)
+    initial_state = initial.state_dict()
+    for tag in ("unaccum", "accum"):
+        ckpt = torch.load(tmp_path / tag / "best.pt", map_location="cpu")
+        trained_state = ckpt["model_state"]
+        moved = any(
+            not torch.equal(trained_state[k], initial_state[k]) for k in initial_state
+        )
+        assert moved, f"{tag} run: parameters identical to initialization"
+
+
+def test_accum_group_len_partial_tail_scaling():
+    """Regression for the pre-merge review finding: the epoch's final accumulation
+    group can be PARTIAL, and each micro-batch loss must be divided by ITS group's
+    actual length, not the full accum_steps -- otherwise the tail examples are
+    systematically under-weighted every epoch. Pin the pure function exhaustively for
+    the reviewer's repro shape (5 batches, accum 3 -> groups [3,3,3] + [2,2]) and the
+    clean-division / accum=1 / single-batch edges."""
+    from e2e.ml.train import _accum_group_len
+
+    assert [_accum_group_len(i, 5, 3) for i in range(5)] == [3, 3, 3, 2, 2]
+    assert [_accum_group_len(i, 6, 3) for i in range(6)] == [3] * 6   # divides evenly
+    assert [_accum_group_len(i, 4, 1) for i in range(4)] == [1] * 4   # accum off
+    assert _accum_group_len(0, 1, 8) == 1                             # single batch
+    # Every group's members agree on their group length, and group sums equal the
+    # batch count (nothing dropped or double-counted).
+    for n, accum in [(5, 3), (7, 2), (9, 4), (8, 8), (3, 5)]:
+        lens = [_accum_group_len(i, n, accum) for i in range(n)]
+        assert sum(1 / g for g in lens) == pytest.approx(-(-n // accum))  # = n_groups
+
+
+def test_train_accum_steps_rejects_non_positive(tiny_manifest_path):
+    with pytest.raises(ValueError, match="accum_steps"):
+        train_mod.train(tiny_manifest_path, "fftradnet", epochs=1, batch_size=2,
+                        accum_steps=0, seed=0)
+
+
+def test_cli_accum_steps_default_and_wiring(monkeypatch):
+    captured = {}
+
+    def _fake_train(manifest_path, model_name, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(train_mod, "train", _fake_train)
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet"])
+    assert captured["accum_steps"] == 1
+
+    train_mod.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet",
+                    "--accum-steps", "4"])
+    assert captured["accum_steps"] == 4
 
 
 # --------------------------------------------------------------------------------

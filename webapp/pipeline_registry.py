@@ -27,6 +27,10 @@ class ParamSpec:
     default: Any
     choices: Optional[List[Any]] = None
     step: Optional[float] = None
+    # dcc.Input's `min` -- only declared where a value below it is actually invalid
+    # downstream (e.g. subspace k=0 crashes e2e.simulation.rank_diagnostic); None
+    # means "no floor", the pre-existing behavior for every other param.
+    min: Optional[float] = None
     help: str = ""
 
 
@@ -120,7 +124,7 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,
         params=[
-            ParamSpec("k", "Subspace dim k", "int", 8, step=1,
+            ParamSpec("k", "Subspace dim k", "int", 8, step=1, min=1,
                       help="Tracked subspace rank k; also used for U_true."),
         ],
         blurb="Online subspace tracking via Oja's algorithm. Required by AFE.",
@@ -149,6 +153,18 @@ BLOCKS: List[BlockSpec] = [
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
         blurb="Range-elevation power map (non-coherent over azimuth).",
+    ),
+    BlockSpec(
+        id="range_profile",
+        label="Range Profile",
+        toggleable=False,
+        category="product",
+        params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
+        blurb=("Per-channel range profile (FFT along frequency only, no aperture "
+               "transform). Compression mixes only the aperture axis, so range "
+               "survives compression even where angle does not -- this is the one "
+               "product that stays valid on compressed (reduced-dimension) "
+               "measurements without a DecompressBlock."),
     ),
     BlockSpec(
         id="subspace_err",
@@ -369,6 +385,7 @@ EDGES: List[tuple] = [
     ("subspace", "fft"),
     ("subspace", "range_az"),
     ("subspace", "range_el"),
+    ("subspace", "range_profile"),
     ("subspace", "subspace_err"),
     ("subspace", "comms"),
 
@@ -385,16 +402,30 @@ EDGES: List[tuple] = [
     ("waveform", "tx_pa"),
     ("tx_pa", "modulate"),
     ("environment", "modulate"),
-    ("rt_environment", "modulate"),
-    ("rt_environment", "rffe"),
+    ("rt_environment", "modulate", "alt"),
+    ("rt_environment", "rffe", "alt"),
     ("modulate", "rffe"),
-    ("interconnect", "dechirp"),
+    ("interconnect", "dechirp", "alt"),
     ("dechirp", "impairment"),
     ("impairment", "quantizer"),
     ("quantizer", "radar_cube"),
     ("quantizer", "detector"),
     ("quantizer", "sink"),
 ]
+
+
+def normalize_edge(edge: tuple) -> tuple:
+    """Normalize an EDGES entry to (src, dst, kind).
+
+    Most entries are plain (src, dst) 2-tuples, which default to kind="toggle"
+    (the original active/inactive-on-disable styling). A few entries are
+    3-tuples (src, dst, "alt") marking one of two mutually-exclusive source
+    paths into the same downstream block (e.g. precomputed 'environment' vs.
+    live 'rt_environment' both feeding 'modulate'/'rffe')."""
+    if len(edge) == 3:
+        return edge
+    src, dst = edge
+    return (src, dst, "toggle")
 
 
 # Quick lookups -------------------------------------------------------------------

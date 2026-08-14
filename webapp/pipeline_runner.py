@@ -151,6 +151,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             FFTBlock,
             RangeAzBlock,
             RangeElBlock,
+            RangeProfileBlock,
             SubspaceErrorBlock,
             CircuitStage,
             InterconnectStage,
@@ -251,26 +252,28 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             mantissa=int(_p(state, "afe", "mantissa")),
         )
 
-    # Subspace is required whenever AFE is on (simulation enforces this too).
-    subspace_block = None
-    if _enabled(state, "subspace") or afe_block is not None:
-        subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
-    if afe_block is not None and subspace_block is None:
-        raise PipelineError("AFE block requires the AdaOja Subspace block to be enabled.")
-    if subspace_block is None:
-        # The results view always runs SubspaceErrorBlock, which needs the tracker's
-        # 'U'; keep a subspace block even when the user toggles the stage off.
-        subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
+    # The real invariant: a subspace (AdaOja) tracker is ALWAYS built, regardless of
+    # the "subspace" toggle's state. AFE draws its combining weights from the
+    # tracker whenever it's enabled, and the results view always runs
+    # SubspaceErrorBlock, which needs the tracker's 'U' -- so there is no state in
+    # which skipping it would be correct. (There used to be a dead "AFE requires
+    # subspace" guard here; it could never fire because this line already builds
+    # the tracker whenever AFE is on. The UI reflects this honestly: see
+    # block_diagram.param_editor, which disables the subspace checkbox while AFE
+    # is enabled instead of pretending to toggle a no-op.)
+    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
 
     # --- downstream product blocks (always present unless the ADC-cube chain is --
     # active -- see below) --------------------------------------------------------
     fft_bins = int(_p_positive(state, "fft", "bins"))
     range_az_bins = int(_p_positive(state, "range_az", "bins"))
     range_el_bins = int(_p_positive(state, "range_el", "bins"))
+    range_profile_bins = int(_p_positive(state, "range_profile", "bins"))
     downstream_blocks = [
         FFTBlock(bins=fft_bins),
         RangeAzBlock(bins=range_az_bins),
         RangeElBlock(bins=range_el_bins),
+        RangeProfileBlock(bins=range_profile_bins),
         SubspaceErrorBlock(),
     ]
 
@@ -452,6 +455,21 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         downstream_blocks.append(modem_block)
         downstream_blocks.append(BERBlock())
 
+    # Enabling "dechirp" alone (no Radar Cube / Neural Detector / Frame Sink, and no
+    # Comms Head -- comms is mutually exclusive with dechirp and already rejected
+    # above) would otherwise run to completion with an EMPTY downstream_blocks
+    # list -- Simulation.run happily produces zero outputs, which the Results tab
+    # renders identically to "never ran" ("No results yet"). Fail loudly instead,
+    # before sim.run() below. Checked here (after both branches that can populate
+    # downstream_blocks for the ADC-cube case) so the more specific comms-conflict
+    # message above still wins when both apply.
+    if serial_stages_override is not None and not downstream_blocks:
+        raise PipelineError(
+            "The ADC-cube chain is enabled but no ADC-chain product (Radar "
+            "Cube / Neural Detector / Frame Sink) is enabled -- enable one, "
+            "or disable Dechirp to run the frequency-domain products."
+        )
+
     sim = Simulation(
         environment_block,
         downstream_blocks,
@@ -475,6 +493,14 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # FrameContractError: the e2e/frames.py shape-contract guards (no MIMO,
         # single chirp, aperture factorization) that used to be bare asserts.
         raise PipelineError(f"Pipeline constraint failed: {e}")
+    except ValueError as e:
+        # e2e.simulation.rank_diagnostic raises ValueError("rank_diagnostic requires
+        # k >= 1, got k=...") for a non-positive subspace k; that internal function
+        # name means nothing to a UI user, so translate it to the param they can
+        # actually fix.
+        if "rank_diagnostic" in str(e):
+            raise PipelineError("Subspace dim k must be >= 1.")
+        raise PipelineError(f"Pipeline run failed: ValueError: {e}")
     except Exception as e:  # surface anything else cleanly to the UI
         raise PipelineError(f"Pipeline run failed: {type(e).__name__}: {e}")
 
@@ -503,6 +529,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         "fft_bins": fft_bins,
         "range_az_bins": range_az_bins,
         "range_el_bins": range_el_bins,
+        "range_profile_bins": range_profile_bins,
         "n_freqs": n_freqs,
         "freq_span_hz": freq_span_hz,
         # True when the values above came from the frames' own v2 metadata (env
@@ -647,6 +674,30 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 _to_numpy_abs_db(outputs[key][-1]), title,
                 x=x, y=y, xlabel=aperture_label, ylabel=ylabel,
             )
+
+    if outputs.get("range_profile_agg"):
+        prof = outputs["range_profile_agg"][-1]
+        if hasattr(prof, "detach"):
+            prof = prof.detach().cpu().numpy()
+        prof = np.asarray(prof, dtype=float)
+        bins_rp = meta.get("range_profile_bins") or prof.shape[0]
+        if n_freqs and freq_span_hz:
+            x = _range_axis(bins_rp, freq_span_hz, n_freqs)
+            xlabel = "range (m)"
+        else:
+            x = np.arange(bins_rp)
+            xlabel = "range (bins)"
+        peak = max(float(prof.max()), 1e-12)
+        prof_db = 10 * np.log10(prof / peak + 1e-12)
+        fig = go.Figure(data=go.Scatter(x=np.asarray(x), y=prof_db, mode="lines"))
+        fig.update_layout(
+            title="Range profile (non-coherent over channels)",
+            xaxis_title=xlabel,
+            yaxis_title="power (dB rel. peak)",
+            margin=dict(l=40, r=20, t=40, b=40),
+            height=360,
+        )
+        figs["range_profile"] = fig
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]

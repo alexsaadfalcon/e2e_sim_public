@@ -4,9 +4,11 @@ Fast/tiny by construction: a shrunk `RadarConfig` (few chirps/samples), a couple
 animation frames, low DPI. `e2e.ml.scenes`/`e2e.ml.labels` are sibling shards -- if
 either isn't in the working tree yet this whole module skips cleanly.
 """
+import contextlib
 import dataclasses
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -110,6 +112,46 @@ def test_range_azimuth_map_peak_matches_known_target(tiny_cfg):
 
 
 # --------------------------------------------------------------------------------
+# _draw_radar_view orientation (regression: array/extent transpose mismatch)
+# --------------------------------------------------------------------------------
+def test_draw_radar_view_imshow_orientation_matches_extent(tiny_cfg):
+    """`ra_db` is `[n_angle, n_range]` (see `range_azimuth_map`'s docstring) but the
+    panel's `extent` puts azimuth on x and range on y -- imshow needs `[n_range,
+    n_angle]` to match. Regression for a transpose bug where the raw (untransposed)
+    array was passed to imshow: build a map with a single hot cell at a known
+    (angle_idx, range_idx) and assert the rendered AxesImage's array has that cell at
+    the position implied by the extent (row -> range, column -> azimuth), not the
+    other way around.
+    """
+    import matplotlib.pyplot as plt
+
+    from e2e.ml.labels import LabelGrid
+    from e2e.ml.scatterers import RadarPose
+
+    n_angle, n_range = 8, 5
+    angle_idx, range_idx = 2, 4  # deliberately distinct so a transpose is detectable
+    ra_db = torch.full((n_angle, n_range), -40.0)
+    ra_db[angle_idx, range_idx] = 0.0
+    sin_az_axis = np.linspace(-1.0, 1.0, n_angle)
+
+    grid = LabelGrid.for_config(tiny_cfg)
+    pose = RadarPose(position=(0.0, 0.0, 0.0), boresight=(1.0, 0.0, 0.0))
+
+    fig, ax = plt.subplots()
+    try:
+        render_scene._draw_radar_view(ax, tiny_cfg, grid, ra_db, sin_az_axis, [], pose)
+        images = ax.get_images()
+        assert len(images) == 1
+        arr = images[0].get_array()
+
+        assert arr.shape == (n_range, n_angle)  # [row=range, col=angle], not the raw ra_db shape
+        hot_row, hot_col = np.unravel_index(np.argmax(arr), arr.shape)
+        assert (hot_row, hot_col) == (range_idx, angle_idx)
+    finally:
+        plt.close(fig)
+
+
+# --------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------
 def test_cli_help_exits_zero():
@@ -150,3 +192,114 @@ def test_cli_unknown_tier_exits_nonzero(tmp_path):
         capture_output=True, text=True,
     )
     assert proc.returncode != 0
+
+
+# --------------------------------------------------------------------------------
+# _build_rt_scene_for_render -- the D4 (munich @ 77 GHz) city-scene material fix,
+# ported from the scratch probe (see e2e.environment.city_scenes / RTEnvironmentBlock.
+# get_S_pars for the pattern this mirrors). Real Sionna rendering can't run here
+# (RUN_SIONNA=1 needed, plus this box's DrJit/LLVM backend is broken -- see CLAUDE.md);
+# these tests mock `build_rt_scene`/`patched_builtin_loader` so the guarded BRANCH
+# logic itself is verified without touching Sionna at all.
+# --------------------------------------------------------------------------------
+def test_build_rt_scene_for_render_flat_scene_skips_material_patch(monkeypatch, tiny_cfg):
+    """`base_scene="flat"`/`"free"` (D0-D3) must be a pure no-op: no
+    `patched_builtin_loader` import/call, `build_rt_scene` called with the plain
+    (scenario, cfg, base_scene=..., frame_idx=0) signature."""
+    from e2e.ml import render_scene
+
+    calls = []
+    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene",
+                        lambda *a, **kw: calls.append(("build_rt_scene", a, kw)) or "SCENE")
+
+    def _boom(*a, **kw):
+        raise AssertionError("patched_builtin_loader must not be called for a flat/free scene")
+
+    monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader", _boom)
+
+    scenario = types.SimpleNamespace(base_scene="flat")
+    result = render_scene._build_rt_scene_for_render(scenario, tiny_cfg)
+
+    assert result == "SCENE"
+    assert len(calls) == 1
+    _, args, kwargs = calls[0]
+    assert args == (scenario, tiny_cfg)
+    assert kwargs == {"base_scene": "flat", "frame_idx": 0}
+
+
+def test_build_rt_scene_for_render_free_scene_also_skips_material_patch(monkeypatch, tiny_cfg):
+    from e2e.ml import render_scene
+
+    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
+    monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not be called")))
+
+    scenario = types.SimpleNamespace(base_scene="free")
+    result = render_scene._build_rt_scene_for_render(scenario, tiny_cfg)
+    assert result == "SCENE"
+
+
+def test_build_rt_scene_for_render_city_scene_wraps_in_patched_loader(monkeypatch, tiny_cfg):
+    """`base_scene="munich"` (D4) must build the scene INSIDE `patched_builtin_loader`,
+    at the config's centre frequency, with the requested policy -- this is the actual
+    fix: the scratch probe showed munich's out-of-band ITU materials (marble/brick)
+    hard-raise on `scene.frequency` assignment unless the loader is patched first."""
+    from e2e.ml import render_scene
+
+    events = []
+
+    @contextlib.contextmanager
+    def fake_patched_loader(frequency_hz, *, policy, stand_in_itu_type, report_sink=None):
+        events.append(("enter", frequency_hz, policy, stand_in_itu_type))
+        yield
+        events.append(("exit",))
+
+    def fake_build_rt_scene(scenario, cfg, *, base_scene, frame_idx):
+        assert events and events[-1] == ("enter", pytest.approx(
+            float(tiny_cfg.f0_hz) + float(tiny_cfg.bandwidth_hz) / 2.0),
+            "extrapolated", "concrete"), "build_rt_scene must run INSIDE the patched loader"
+        events.append(("build_rt_scene", base_scene, frame_idx))
+        return "SCENE"
+
+    monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader", fake_patched_loader)
+    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", fake_build_rt_scene)
+
+    scenario = types.SimpleNamespace(base_scene="munich")
+    result = render_scene._build_rt_scene_for_render(scenario, tiny_cfg)
+
+    assert result == "SCENE"
+    assert [e[0] for e in events] == ["enter", "build_rt_scene", "exit"]
+    assert events[1] == ("build_rt_scene", "munich", 0)
+
+
+def test_build_rt_scene_for_render_city_scene_passes_through_policy_overrides(monkeypatch, tiny_cfg):
+    from e2e.ml import render_scene
+
+    seen_policy = {}
+
+    @contextlib.contextmanager
+    def fake_patched_loader(frequency_hz, *, policy, stand_in_itu_type, report_sink=None):
+        seen_policy["policy"] = policy
+        seen_policy["stand_in_itu_type"] = stand_in_itu_type
+        yield
+
+    monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader", fake_patched_loader)
+    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
+
+    scenario = types.SimpleNamespace(base_scene="etoile")
+    render_scene._build_rt_scene_for_render(
+        scenario, tiny_cfg, material_policy="stand_in", stand_in_material="brick",
+    )
+
+    assert seen_policy == {"policy": "stand_in", "stand_in_itu_type": "brick"}
+
+
+def test_build_rt_tier_scenario_d4_uses_munich_base_scene_no_sionna_needed():
+    """Sanity: the D4 tier that triggers the city-scene branch above really does resolve
+    to `base_scene="munich"` -- `build_rt_tier_scenario` itself needs no Sionna (see
+    `e2e.ml.rt_scenes`'s module docstring), so this is a real (non-mocked) check."""
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    scenario = build_rt_tier_scenario("D4", frame_idx=0, seed=0, num_frames=1,
+                                      use_local_assets=False)
+    assert scenario.base_scene == "munich"

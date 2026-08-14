@@ -151,6 +151,11 @@ def rank_diagnostic(S, k, rtol=_RANK_RTOL):
     these values (AdaOjaBlock.gap_response) is consuming simulator-side
     instrumentation, spectrum-only but oracle-sourced.
     """
+    # k < 1 would silently wrap S[k-1] to S[-1] (the SMALLEST singular value) via
+    # Python negative indexing and log nonsense diagnostics; a rank request below 1
+    # is a caller bug, so fail loudly.
+    if k < 1:
+        raise ValueError(f"rank_diagnostic requires k >= 1, got k={k}")
     threshold = rtol * S[0]
     effective_rank = int((S > threshold).sum().item())
     if k < len(S):
