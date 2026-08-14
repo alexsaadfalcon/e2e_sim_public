@@ -27,6 +27,20 @@ semantic versioning.
   SSMRadNet is ~5% of peak memory (6.02 -> 5.74 GiB on an 8 GiB card), not the halving
   an activation-memory argument predicts, and it does not buy a larger batch. Batch size
   is what decides whether that model fits.
+- **`e2e/ml/rt_gen.py`'s corpus-generation path (`cfr_from_paths`, `rt_cfr_frame`,
+  `rt_synthesize_adc`) now defaults `range_migration=True`**, wiring in
+  `cfr_sum_over_paths`'s intra-frame delay-drift correction (see `doppler_validity()`,
+  above) in place of Sionna's own `Paths.cfr()`, which freezes each path's delay across
+  the CPI. `cfr_sum_over_paths` is itself verified against `Paths.cfr()` to 2.3e-4
+  relative error at `range_migration=False`, so this changes generated output only
+  through the (previously unmodelled) delay-drift term -- measured whole-cube rel-RMSE
+  8.52e-2 -> 2.30e-3 (37x) on a moving planar target (2026-08-11). **Provenance note:**
+  any corpus generated before 2026-08-14 used the uncorrected (`range_migration=False`)
+  model; pass `range_migration=False` explicitly to reproduce one deliberately. Reasoned
+  from code against the installed Sionna RT source (`Paths.a`/`.tau`/`.doppler` all carry
+  the full per-antenna shape here because generation always requests
+  `synthetic_array=False`), not executed -- this path needs Sionna RT + GPU, unavailable
+  in this environment; regeneration is a separate, later step.
 
 ### Added
 - **`e2e/main/main_tx_nonideality.py` -- ideal vs non-ideal transmitter, side by side.**
@@ -53,6 +67,18 @@ semantic versioning.
   immediately, so reduced-dimension processing was inexpressible and the reconstruction
   cost was unconditional. Compression is modelled as analog (pre-digitization, reducing
   ADC count); decompression is explicit because it is lossy for M < N.
+- **`CompressBlock` gains an explicit CONTROL x COMPUTE axis matrix**
+  (`e2e/chain/compress.py`: `CONTROL_STATIC`/`CONTROL_ADAPTIVE`,
+  `COMPUTE_IDEAL`/`COMPUTE_QUANTIZED`/`COMPUTE_NOISY`, `realize_weights`/
+  `combine_realized`), decoupling compression FIDELITY (an ideal full-precision VMM, a
+  quantized-weight combining network, or a noisy compute-in-memory array) from CONTROL
+  (a fixed matrix vs one redrawn from a subspace tracker every frame) -- previously
+  fidelity and the static-vs-adaptive choice were split across two separate,
+  non-interchangeable classes with no shared vocabulary. `e2e.blocks.AFEBlock` is now a
+  thin preset of the same primitive (adaptive control, quantized/float-model compute)
+  rather than a second implementation. `CompressBlock`'s and `AFEBlock`'s pre-existing
+  configurations are bit-exact under the new defaults (pinned in
+  `tests/test_chain_compress.py`).
 - **`doppler_validity()` / `warn_if_doppler_invalid()`** -- the one-solve Doppler model
   omits intra-frame range migration, giving an error linear in chirp index at rate
   `2*pi*B*v/(sqrt(3)*c)` and usable chirps `N = eps*sqrt(3)*c/(2*pi*B*v*T_c)`. Measured

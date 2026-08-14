@@ -242,6 +242,13 @@ class AFEBlock:
     The combining and reconstruction MATH is shared (`compress.combine` /
     `compress.reconstruct_aperture`); this class contributes the adaptive draw and the
     float weight model, not a second implementation of compression.
+
+    A thin preset of `e2e.chain.compress`'s CONTROL x COMPUTE axis matrix (see that
+    module's docstring): CONTROL_ADAPTIVE (a fresh `A` is handed in by `MeasurementStage`
+    on every call -- this class never redraws or caches it itself) x
+    COMPUTE_QUANTIZED(weight_model=WEIGHT_FLOAT). `apply_mat_mul`/`reconstruct` delegate
+    to `realize_weights`/`combine_realized`/`reconstruct_aperture` rather than carrying a
+    second implementation.
     """
 
     # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
@@ -254,10 +261,11 @@ class AFEBlock:
 
     def apply_mat_mul(self, A, V):
         """Quantize `A` (float model) and combine: returns `(Aq, Aq @ V)`."""
-        from e2e.chain.compress import WEIGHT_FLOAT, combine, quantize_weights
+        from e2e.chain.compress import COMPUTE_QUANTIZED, WEIGHT_FLOAT, combine_realized, realize_weights
 
-        Aq = quantize_weights(A, model=WEIGHT_FLOAT, exp=self.exp, mantissa=self.mantissa)
-        return Aq, combine(Aq, V)
+        Aq = realize_weights(A, COMPUTE_QUANTIZED, weight_model=WEIGHT_FLOAT, exp=self.exp,
+                             mantissa=self.mantissa)
+        return Aq, combine_realized(Aq, V, COMPUTE_QUANTIZED)
 
     def reconstruct(self, Aq, X):
         """Least-squares aperture from the compressed measurements. LOSSY for M < N --
