@@ -64,10 +64,10 @@ from e2e.scenario import munich_radar_scenario
 from e2e.comms.ofdm import OFDMModem, random_bits, qam_demod
 from e2e.comms import channel as ch
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
+from e2e.viz import fig_dir
 
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = fig_dir(__file__)
 
 
 # --------------------------------------------------------------------------------
