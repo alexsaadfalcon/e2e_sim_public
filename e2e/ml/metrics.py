@@ -35,6 +35,26 @@ tolerance (`MatchCriterion`): `max(|dr|/max_range_err_m, |dsin|/max_sin_az_err) 
 `max_sin_az_err=0.06` is roughly 3.4 degrees of azimuth error near boresight (small-angle
 `d(theta) ~= d(sin theta)` there); the corresponding angular tolerance widens off-
 boresight since `d(theta) = d(sin theta) / cos(theta)`.
+
+Per-class AP/AR (roadmap: "per-frame / per-class-normalized AP for valid cross-tier
+comparison")
+------------------------------------------------------------------------------------
+`evaluate_dataset` also reports `AP_<class>`/`AR_<class>`/`n_targets_<class>` for each of
+`classes` (default `("vehicle", "pedestrian")`) alongside the pooled `AP`/`AR`. The
+detection head is class-agnostic -- `decode_detections` scores/positions only, no
+predicted class -- so a per-class score is computed by re-running the pooled algorithm
+with the target list FILTERED to just that class (all detections still compete for those
+targets). This makes `AR_<class>` an honest, well-defined per-class recall (a target of
+class C either got matched or it didn't), but `AP_<class>` is a conservative/pessimistic
+read on precision: a detection that correctly matched a different-class target in the
+pooled evaluation counts as a false positive here, since class C's filtered target list
+has nothing left for it to match. If a class has zero targets across the whole dataset,
+its AP/AR are NaN (nothing to detect, not vacuously perfect) rather than going through the
+0/0 convention. The ROADMAP also floats a "recall-floor-restricted threshold set" as a
+cheaper alternative to full PR-curve interpolation for a fixed-recall operating point;
+that variant is not implemented here -- the roadmap entry describes it only as a
+direction, not a concrete definition (thresholds computed how, floor per-class or
+pooled, etc.), so it is left as a documented follow-up rather than guessed at.
 """
 
 from __future__ import annotations
@@ -170,6 +190,9 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     return numerator / denominator
 
 
+DEFAULT_CLASSES: Tuple[str, ...] = ("vehicle", "pedestrian")
+
+
 def evaluate_dataset(
     pred_maps: Sequence,
     target_lists: Sequence[Sequence[Target]],
@@ -177,6 +200,7 @@ def evaluate_dataset(
     *,
     thresholds: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     criterion: MatchCriterion = None,
+    classes: Sequence[str] = DEFAULT_CLASSES,
 ) -> Dict:
     """Full-dataset evaluation, mirroring RADIal's `GetFullMetrics` confidence sweep.
 
@@ -199,6 +223,11 @@ def evaluate_dataset(
     ground-truth/detection pair would otherwise be double-counted once per threshold at
     which it happens to match. Documented choice, not a RADIal behaviour (upstream does
     not report RMSE at all, only mean error at the default confidence floor).
+
+    `classes` additionally reports `AP_<class>`/`AR_<class>`/`n_targets_<class>` for each
+    class (default `DEFAULT_CLASSES = ("vehicle", "pedestrian")`) -- pass `()` to skip
+    (e.g. to avoid recursing further from inside a per-class call). See the module
+    docstring's "Per-class AP/AR" section for the exact semantics and its caveats.
     """
     if criterion is None:
         criterion = MatchCriterion()
@@ -248,7 +277,7 @@ def evaluate_dataset(
     # AP ~0.5-1.0 while recall is ~0. n_defined_precision_thresholds exposes exactly
     # how many sweep points the AP mean rests on; treat AP with a small count (and
     # always AP alongside AR) as unstable, not as model quality.
-    return {
+    result = {
         "AP": ap,
         "AR": ar,
         "n_defined_precision_thresholds": len(defined),
@@ -257,3 +286,23 @@ def evaluate_dataset(
         "range_rmse_m": _rmse(range_errs_mid),
         "sin_az_rmse": _rmse(sin_az_errs_mid),
     }
+
+    # Per-class AP/AR: see module docstring's "Per-class AP/AR" section. `classes=()`
+    # (used for the recursive per-class call itself) skips this entirely.
+    for cls in classes:
+        cls_target_lists = [[t for t in targets if t[2] == cls] for targets in target_lists]
+        n_cls_targets = sum(len(ts) for ts in cls_target_lists)
+        if n_cls_targets == 0:
+            # Nothing of this class in the dataset -- NaN (undefined), not the pooled
+            # 0/0 -> 1.0 vacuous convention, since there is genuinely nothing to score.
+            result[f"AP_{cls}"] = float("nan")
+            result[f"AR_{cls}"] = float("nan")
+        else:
+            cls_result = evaluate_dataset(pred_maps, cls_target_lists, grid,
+                                           thresholds=thresholds, criterion=criterion,
+                                           classes=())
+            result[f"AP_{cls}"] = cls_result["AP"]
+            result[f"AR_{cls}"] = cls_result["AR"]
+        result[f"n_targets_{cls}"] = n_cls_targets
+
+    return result

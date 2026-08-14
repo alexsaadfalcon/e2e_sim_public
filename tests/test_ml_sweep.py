@@ -152,8 +152,9 @@ def _make_stub_train(epochs: int):
     calls = []
 
     def _stub(manifest_path, model_name, *, epochs=epochs, batch_size=8, seed=0, out_dir=None,
-               device=None, reg_weight=100.0, lr=1e-4, gamma=2.0, **kwargs):
-        calls.append({"reg_weight": reg_weight, "lr": lr, "gamma": gamma})
+               device=None, reg_weight=100.0, lr=1e-4, gamma=2.0, accum_steps=1, **kwargs):
+        calls.append({"reg_weight": reg_weight, "lr": lr, "gamma": gamma,
+                       "accum_steps": accum_steps})
         return _canned_history(epochs, ap=_score(reg_weight, lr, gamma))
 
     return _stub, calls
@@ -200,6 +201,32 @@ def test_run_sweep_full_grid_call_count_resume_and_results_schema(tmp_path, monk
 
     # pick_best on the actual written payload agrees with the printed leaderboard's top row.
     assert sweep.pick_best(payload)["params"] == top["params"]
+
+
+def test_run_sweep_forwards_accum_steps_to_every_trial(tmp_path, monkeypatch):
+    stub, calls = _make_stub_train(epochs=3)
+    monkeypatch.setattr(sweep, "train", stub)
+
+    grid = {"reg_weight": [1.0], "lr": [1e-4], "gamma_default": 2.0, "stage2_gamma": [2.0]}
+    sweep.run_sweep(tmp_path / "manifest.json", "fftradnet", grid, epochs=3, batch_size=2,
+                     seed=0, out_dir=tmp_path / "sweep_out", accum_steps=4)
+
+    # Single stage-1 trial actually trains (stage-2's gamma=2.0 duplicates it and resumes
+    # from disk without calling train() again), so exactly one real call to inspect.
+    assert len(calls) == 1
+    assert calls[0]["accum_steps"] == 4
+
+
+def test_run_sweep_default_accum_steps_is_one(tmp_path, monkeypatch):
+    stub, calls = _make_stub_train(epochs=3)
+    monkeypatch.setattr(sweep, "train", stub)
+
+    grid = {"reg_weight": [1.0], "lr": [1e-4], "gamma_default": 2.0, "stage2_gamma": [2.0]}
+    sweep.run_sweep(tmp_path / "manifest.json", "fftradnet", grid, epochs=3, batch_size=2,
+                     seed=0, out_dir=tmp_path / "sweep_out")
+
+    assert len(calls) == 1
+    assert calls[0]["accum_steps"] == 1
 
 
 def test_run_sweep_preseeded_trial_is_skipped_not_retrained(tmp_path, monkeypatch):
@@ -294,7 +321,8 @@ def test_cli_wires_run_sweep_arguments(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sweep, "run_sweep", _fake_run_sweep)
     rc = sweep.main(["--manifest", "dummy_manifest.json", "--model", "ssmradnet",
-                     "--epochs", "7", "--batch-size", "4", "--seed", "3", "--out", str(tmp_path)])
+                     "--epochs", "7", "--batch-size", "4", "--seed", "3", "--out", str(tmp_path),
+                     "--accum-steps", "8"])
 
     assert rc == 0
     assert captured["manifest_path"] == "dummy_manifest.json"
@@ -304,6 +332,20 @@ def test_cli_wires_run_sweep_arguments(tmp_path, monkeypatch):
     assert captured["batch_size"] == 4
     assert captured["seed"] == 3
     assert captured["out_dir"] == str(tmp_path)
+    assert captured["accum_steps"] == 8
+
+
+def test_cli_accum_steps_default_is_one(tmp_path, monkeypatch):
+    captured = {}
+
+    def _fake_run_sweep(manifest_path, model_name, grid=None, **kwargs):
+        captured.update(kwargs)
+        return tmp_path / "sweep_results.json"
+
+    monkeypatch.setattr(sweep, "run_sweep", _fake_run_sweep)
+    rc = sweep.main(["--manifest", "dummy_manifest.json", "--model", "fftradnet"])
+    assert rc == 0
+    assert captured["accum_steps"] == 1
 
 
 def test_cli_model_required_and_validated():
