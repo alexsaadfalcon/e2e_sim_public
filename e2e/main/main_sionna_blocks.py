@@ -18,6 +18,7 @@ from e2e.blocks import \
     RangeAzBlock, \
     RangeElBlock, \
     SubspaceErrorBlock
+from e2e.viz import fig_dir, to_db
 
 
 
@@ -65,8 +66,7 @@ sim = Simulation(
 )
 outputs = sim.run(n_steps=2)
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = fig_dir(__file__)
 
 plt.figure()
 plt.title('Subspace tracking error per frame')
@@ -82,10 +82,12 @@ plt.savefig(os.path.join(FIG_DIR, 'sionna_blocks_subspace_err.png'), bbox_inches
 # non-coherent (power) integration over range -- a target at any range shows up,
 # not just one at range 0 (see e2e/blocks.py FFTBlock).
 for i, _fft in enumerate(outputs['fft']):
-    _fft = _fft / torch.max(torch.abs(_fft))
-    # Power quantity -> 10*log10 (matches the webapp's conversion). .cpu().numpy()
-    # so the frame's device (CPU or CUDA) doesn't matter for plotting.
-    fft_energy = (10 * torch.log10(torch.abs(_fft))).T.cpu().numpy()
+    # Power quantity -> peak-normalized dB (matches the webapp's conversion).
+    # .cpu().numpy() so the frame's device (CPU or CUDA) doesn't matter for plotting.
+    # This is an az/el (not az/range) map -- e2e.viz.imshow_ra's transpose+extent
+    # helper is specific to az/range display conventions (origin/aspect defaults
+    # this plot doesn't share), so only the dB-normalize half is consolidated here.
+    fft_energy = to_db(_fft, floor_db=-40.0).T.cpu().numpy()
     plt.figure()
     plt.title('Azimuth-Elevation power (non-coherent over range)')
     plt.imshow(fft_energy)

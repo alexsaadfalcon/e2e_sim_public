@@ -77,10 +77,10 @@ from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.comms.ofdm import OFDMModem, qam_demod, random_bits
 from e2e.comms import channel as ch
 from e2e.comms import isac
+from e2e.viz import fig_dir as _viz_fig_dir, to_db
 
 
-FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
-os.makedirs(FIG_DIR, exist_ok=True)
+FIG_DIR = _viz_fig_dir(__file__)
 
 
 def _default_cache_path(scenario):
@@ -386,7 +386,9 @@ def main(cache_path=None, fig_dir=None, seed=SEED,
 
     # ===== figures =====
     plt.figure()
-    db = 10 * np.log10(profiles / (profiles.max() + 1e-30) + 1e-12)
+    # profiles is [n_frames, n_range] (range vs. frame index, not range-azimuth --
+    # already matches imshow's [row=y, col=x] orientation, no transpose needed).
+    db = to_db(profiles, floor_db=-30.0)
     plt.imshow(db, aspect="auto", origin="lower",
               extent=[ranges[0], ranges[-1], 0, profiles.shape[0]],
               cmap="viridis", vmin=-30, vmax=0)
