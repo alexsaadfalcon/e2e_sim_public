@@ -188,3 +188,38 @@ def test_radar_s_pars_synthetic_fallback_fills_all_rows(monkeypatch):
     assert arr.shape == (n_rx, n_f)
     assert np.all(np.isfinite(arr))
     assert np.all(np.any(arr != 0, axis=1))
+
+
+def test_range_angle_map_off_broadside_collapsed_axis_not_nulled():
+    """Regression for the coherent-collapse bug (review wave 1, CONFIRMED): the
+    collapsed aperture axis must be integrated NON-coherently (power), like
+    e2e.blocks.RangeAzBlock. A target off broadside in the COLLAPSED dimension
+    (elevation, for axis='az') previously fell to ~1.7% of its true peak power
+    because the coherent sum let its elevation phase progression destructively
+    interfere. Non-coherent integration is elevation-invariant, so the peak must
+    stay comparable to the broadside case."""
+    import torch
+
+    n_x = n_y = 8
+    n_f = 64
+    freqs = np.linspace(76e9, 77e9, n_f)
+    tau = 2 * 20.0 / 299_792_458.0   # 20 m two-way delay
+
+    def make_spars(sin_el):
+        f = torch.tensor(freqs, dtype=torch.float64)
+        rng_phase = torch.exp(-2j * torch.pi * f * tau)             # [n_f]
+        y = torch.arange(n_y, dtype=torch.float64)
+        el_phase = torch.exp(1j * torch.pi * y * sin_el)            # [n_y]
+        grid = el_phase[None, :, None] * rng_phase[None, None, :]   # [1,n_y,n_f]
+        grid = grid.expand(n_x, n_y, n_f)                           # flat in azimuth
+        return grid.reshape(n_x * n_y, n_f).to(torch.complex64)
+
+    _, p_broadside = isac.range_angle_map(make_spars(0.0), freqs,
+                                          n_rx_x=n_x, n_rx_y=n_y, axis="az")
+    _, p_off = isac.range_angle_map(make_spars(0.5), freqs,
+                                    n_rx_x=n_x, n_rx_y=n_y, axis="az")
+    ratio = p_off.max() / p_broadside.max()
+    assert ratio > 0.5, (
+        f"off-broadside-elevation target lost {1 - ratio:.1%} of its peak power in "
+        "the azimuth map -- the collapsed axis is being summed coherently again"
+    )

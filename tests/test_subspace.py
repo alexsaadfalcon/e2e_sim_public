@@ -93,3 +93,25 @@ def test_oja_tracks_a_static_subspace():
         oja.add_data(X, A)
     err1 = subspace_dist_frob(oja.U, U_true).item()
     assert err1 < err0  # learning made progress
+
+
+def test_oja_zero_frame_does_not_poison_the_basis():
+    """Regression for the NaN-poisoning bug (review wave 1, CONFIRMED): a degenerate
+    all-zero measurement frame made grad/||grad|| = 0/0 = NaN, which then corrupted
+    U through every subsequent orth() with no exception. The guard must skip the
+    uninformative frame (U unchanged, still finite) and later good frames must
+    still update normally."""
+    import torch
+
+    d, k, m = 16, 2, 8
+    oja = Oja(d, k, eta=0.1, fixed_step=True)
+    U_before = oja.U.clone()
+    A = gen_A_ada(oja.U, m)
+
+    oja.add_data(torch.zeros(m, 4, dtype=torch.cfloat, device=device), A)
+    assert torch.isfinite(oja.U).all(), "zero frame produced non-finite basis"
+    assert torch.allclose(oja.U, U_before), "zero frame should be a no-op update"
+
+    X = A @ randn_complex(d, 4)
+    oja.add_data(X, A)
+    assert torch.isfinite(oja.U).all(), "tracker corrupted after the zero frame"

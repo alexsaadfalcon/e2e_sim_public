@@ -131,16 +131,22 @@ def range_angle_map(s_pars, freqs, n_rx_x=32, n_rx_y=32, angle_bins=256, range_b
         range_bins = n_f
 
     grid = s_pars.view(n_rx_x, n_rx_y, n_f)
-    # collapse one aperture dimension, beamform (FFT) over the other
+    # Beamform (FFT) over the KEPT aperture axis and range-compress FIRST, then
+    # integrate POWER (non-coherently) over the other aperture axis. The previous
+    # behavior collapsed the other axis with a COHERENT sum before transforming,
+    # letting the phase progression across it destructively interfere -- a target
+    # off broadside in the collapsed dimension was near-nulled (measured: peak at
+    # ~1.7% of its true power). Same fix as e2e.blocks.RangeAzBlock/RangeElBlock,
+    # whose docstrings describe the identical defect; this sibling was missed.
     if axis == "az":
-        aperture = torch.sum(grid, dim=1)          # [n_rx_x, n_f]
+        angle = torch.fft.fftshift(torch.fft.fft(grid, angle_bins, dim=0), dim=0)
+        rng = torch.fft.ifft(angle, range_bins, dim=2)      # [angle_bins, n_rx_y, range_bins]
+        power_t = torch.mean(torch.abs(rng) ** 2, dim=1)    # non-coherent over elevation
     else:
-        aperture = torch.sum(grid, dim=0)          # [n_rx_y, n_f]
-
-    # FFT over the aperture -> angle, IFFT over frequency -> range
-    angle = torch.fft.fftshift(torch.fft.fft(aperture, angle_bins, dim=0), dim=0)
-    rng = torch.fft.ifft(angle, range_bins, dim=1)
-    power = (torch.abs(rng) ** 2).T.cpu().numpy()  # [range_bins, angle_bins]
+        angle = torch.fft.fftshift(torch.fft.fft(grid, angle_bins, dim=1), dim=1)
+        rng = torch.fft.ifft(angle, range_bins, dim=2)      # [n_rx_x, angle_bins, range_bins]
+        power_t = torch.mean(torch.abs(rng) ** 2, dim=0)    # non-coherent over azimuth
+    power = power_t.T.cpu().numpy()                          # [range_bins, angle_bins]
 
     bw = float(freqs[-1] - freqs[0])
     df = bw / (n_f - 1) if n_f > 1 else bw

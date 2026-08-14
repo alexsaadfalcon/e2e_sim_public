@@ -114,7 +114,16 @@ class Oja(object):
             eta = self.eta0 / self.it
 
         grad, w = self.get_grad(X, A)
-        grad /= torch.norm(grad)
+        # Zero-norm guard: a degenerate frame (all-zero / non-finite measurements)
+        # yields grad == 0, and 0/0 here is NaN -- which then poisons self.U through
+        # every subsequent orth() with no exception, permanently corrupting the
+        # tracked subspace. GROUSE.get_step raises on the same condition; an ONLINE
+        # tracker mid-run prefers skipping the uninformative frame to killing the run.
+        grad_norm = torch.norm(grad)
+        if not torch.isfinite(grad_norm) or grad_norm == 0:
+            self.it += 1.0
+            return self.U
+        grad /= grad_norm
         step = -eta * grad
         self.U += step
         self.U = orth(self.U)

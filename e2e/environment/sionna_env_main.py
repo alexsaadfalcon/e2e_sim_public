@@ -9,9 +9,9 @@ freqs = np.linspace(2.7e9, 3.3e9, 1000)
 freqs -= 3e9
 
 """
-Reproduce the results from sionna_channel.py using the class-based interface.
+Reproduce the original scratch-script channel results using the class-based interface.
 """
-print("Reproducing sionna_channel.py results with class-based interface...")
+print("Reproducing scratch-script channel results with class-based interface...")
 
 # Create environment
 env = SionnaEnvironment(frequency=3.3e9, num_cars=10)
@@ -19,7 +19,7 @@ env = SionnaEnvironment(frequency=3.3e9, num_cars=10)
 # Add cars
 env.add_cars()
 
-# Place radar on car 5 (same as in the modified sionna_channel.py)
+# Place radar on car 5 (same placement as the original scratch script)
 arch_pos = [-100, 37, 10]
 arch_look_at = [-90, 37, 10]
 arch_pos_tx = [-100, 37, 15]
