@@ -64,13 +64,25 @@ OptiX) a CUDA-12.x NVIDIA driver — see the [GPU / driver / LLVM](#gpu--driver-
 section for the exact requirements.
 
 ```bash
-# Generate the default Munich radar frames.
+# Generate the default Munich radar frames (writes munich.pkl) -- this is the file
+# main_sionna_blocks.py below reads (its SionnaEnvironmentBlock('munich') call is
+# hardcoded to that filename).
 python -m e2e.environment.sionna_simple_channel
-# ...or drop --dry-run on the scenario runner for a real ray-traced generation:
-python -m e2e.environment.scenario_runner --scenario munich_radar --frames 10
 
 # Then run the runtime radar pipeline against the generated frames.
 python -m e2e.main.main_sionna_blocks
+```
+
+Real ray-traced generation is also available through the scenario runner, which writes
+its own `<scenario_name>.pkl` under `e2e/environment/sionna_sims/` (e.g. `munich_radar.pkl`
+for the `munich_radar` scenario below) -- this is a **different file** from `munich.pkl`
+above, so it is *not* picked up by `main_sionna_blocks` (hardcoded to the `'munich'`
+scenario name). Consume it via `SionnaIterator` directly (path from
+`e2e.environment.scenario_runner.default_out_path("munich_radar")`) or through the web
+UI's Scenario tab:
+
+```bash
+python -m e2e.environment.scenario_runner --scenario munich_radar --frames 10
 ```
 
 ### GPU / driver / LLVM
