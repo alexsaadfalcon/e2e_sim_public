@@ -359,6 +359,110 @@ def test_weight_models_are_distinct_and_named(torch_device):
     assert rel_err(uni) > 3.0 * rel_err(flt)
 
 
+# --------------------------------------------------------------------------------
+# CONTROL x COMPUTE: the refactored axis matrix must reproduce every pre-refactor
+# configuration bit-exactly. Reference computations below re-derive the OLD formula
+# independently (the seeded-generator recipe + quantize_weights) rather than calling
+# CompressBlock, so they pin behaviour rather than merely restating the implementation.
+# --------------------------------------------------------------------------------
+def _reference_static_matrix(m, n, seed, weight_bits, device):
+    """Independent re-derivation of CompressBlock's pre-refactor static-matrix recipe
+    (seeded complex Gaussian, unit-measurement-energy scaling, uniform quantization)."""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    real = torch.randn(m, n, generator=g)
+    imag = torch.randn(m, n, generator=g)
+    a = torch.complex(real, imag) / (2.0 * m) ** 0.5
+    return quantize_weights(a.to(torch.complex64), weight_bits).to(device)
+
+
+def test_compress_default_control_and_compute_reproduce_the_pre_refactor_output(torch_device):
+    """PIN: CompressBlock() with no new-axis kwargs must be bit-identical to the
+    pre-refactor static+uniform-quantized behaviour, both for the matrix and the
+    combined measurement."""
+    from e2e.chain.compress import combine
+
+    s = _frame(n_rx=16, device=torch_device, seed=7)
+    out = CompressBlock(n_measurements=6, weight_bits=5, seed=3).apply(_state(s))
+
+    ref_a = _reference_static_matrix(6, 16, 3, 5, torch_device)
+    assert torch.equal(out["sensing_matrix"], ref_a)
+
+    v = s.reshape(16, -1)
+    expect_x = combine(ref_a, v).reshape(6, 1, 2, 8)
+    assert torch.equal(out["s_pars"], expect_x)
+
+
+def test_compute_ideal_matches_unquantized_matmul_exactly(torch_device):
+    """`compute=COMPUTE_IDEAL` is a full-precision VMM: exact `A @ x`, no quantization."""
+    from e2e.chain.compress import COMPUTE_IDEAL, combine
+
+    s = _frame(n_rx=16, device=torch_device, seed=9)
+    block = CompressBlock(n_measurements=6, compute=COMPUTE_IDEAL, seed=3)
+    out = block.apply(_state(s))
+
+    ref_a = _reference_static_matrix(6, 16, 3, None, torch_device)   # bits=None -> unquantized
+    assert torch.equal(out["sensing_matrix"], ref_a)
+    v = s.reshape(16, -1)
+    assert torch.equal(out["s_pars"], combine(ref_a, v).reshape(6, 1, 2, 8))
+
+
+def test_compute_noisy_perturbs_the_measurement_not_the_matrix(torch_device):
+    """`compute=COMPUTE_NOISY` keeps IDEAL (unquantized) weights but corrupts the matmul
+    output -- a different hardware model from quantization, not a stricter one."""
+    from e2e.chain.compress import COMPUTE_NOISY, combine
+
+    s = _frame(n_rx=16, device=torch_device, seed=11)
+    block = CompressBlock(n_measurements=6, compute=COMPUTE_NOISY, seed=3)
+    out = block.apply(_state(s))
+
+    ref_a = _reference_static_matrix(6, 16, 3, None, torch_device)
+    assert torch.equal(out["sensing_matrix"], ref_a)   # weights are exact/unquantized
+
+    v = s.reshape(16, -1)
+    exact = combine(ref_a, v).reshape(6, 1, 2, 8)
+    assert not torch.allclose(out["s_pars"], exact)     # but the measurement is perturbed
+
+
+def test_control_adaptive_redraws_every_call_and_requires_a_generator(torch_device):
+    """`control=CONTROL_ADAPTIVE` never caches: two calls through the same generator
+    callable produce independently-drawn matrices (unlike CONTROL_STATIC, which is
+    pinned to reuse one draw by `test_compress_reuses_one_sensing_matrix_across_frames`)."""
+    from e2e.chain.compress import CONTROL_ADAPTIVE
+
+    calls = {"n": 0}
+
+    def gen(m, n):
+        calls["n"] += 1
+        g = torch.Generator(device="cpu").manual_seed(calls["n"])
+        return torch.complex(torch.randn(m, n, generator=g), torch.randn(m, n, generator=g))
+
+    block = CompressBlock(n_measurements=4, control=CONTROL_ADAPTIVE, generator=gen)
+    a1 = block.apply(_state(_frame(n_rx=8, seed=1, device=torch_device)))["sensing_matrix"]
+    a2 = block.apply(_state(_frame(n_rx=8, seed=2, device=torch_device)))["sensing_matrix"]
+    assert calls["n"] == 2
+    assert not torch.equal(a1, a2)
+
+    with pytest.raises(ValueError, match="generator"):
+        CompressBlock(n_measurements=4, control=CONTROL_ADAPTIVE)
+
+
+def test_afe_is_a_thin_preset_of_the_shared_compute_axis(torch_device):
+    """PIN: AFEBlock's refactor to delegate through realize_weights/combine_realized must
+    not change its output -- re-derive via the low-level primitives directly."""
+    from e2e.blocks import AFEBlock
+    from e2e.chain.compress import COMPUTE_QUANTIZED, WEIGHT_FLOAT, combine_realized, realize_weights
+
+    afe = AFEBlock(exp=4, mantissa=5)
+    g = torch.Generator(device="cpu").manual_seed(2)
+    a = torch.complex(torch.randn(5, 12, generator=g), torch.randn(5, 12, generator=g)).to(torch_device)
+    v = torch.complex(torch.randn(12, 6, generator=g), torch.randn(12, 6, generator=g)).to(torch_device)
+
+    aq, x = afe.apply_mat_mul(a, v)
+    ref_aq = realize_weights(a, COMPUTE_QUANTIZED, weight_model=WEIGHT_FLOAT, exp=4, mantissa=5)
+    assert torch.equal(aq, ref_aq)
+    assert torch.equal(x, combine_realized(ref_aq, v, COMPUTE_QUANTIZED))
+
+
 def test_quantize_weights_rejects_unknown_model(torch_device):
     from e2e.chain.compress import quantize_weights
 

@@ -1119,8 +1119,15 @@ def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: fl
     config the range-Doppler argmax can land on a different CODE REPLICA than the
     re-trace's (replicas sit n_chirps/n_tx Doppler bins apart and are near-equal in
     power at 2.3e-3 cube agreement) -- the range bin is identical, so compare cubes,
-    not argmaxes. `range_migration` stays False until `cfr_from_paths`'s call sites
-    adopt it deliberately; enabling it changes every generated corpus.
+    not argmaxes.
+
+    FLIPPED 2026-08-14: `cfr_from_paths` (the corpus-generation call site) now defaults
+    to `range_migration=True`, on the strength of the 37x measurement above -- corpora
+    generated before this date used the uncorrected (`range_migration=False`) model; see
+    CHANGELOG.md. THIS function's own default stays False deliberately: it is a
+    general-purpose closed-form utility (also exercised directly, with both values, by
+    `tests/test_ml_doppler_validity.py`), and `cfr_from_paths` always passes the flag
+    explicitly rather than relying on this default.
     """
     a = np.asarray(a)
     tau = np.asarray(tau)
@@ -1141,18 +1148,34 @@ def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: fl
     return (a_b * phase).sum(axis=-3)
 
 
-def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
+def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128,
+                   range_migration: bool = True) -> np.ndarray:
     """`Paths` -> RAW CFR cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`.
 
     Sionna-specific half of what used to be a single `_beat_from_paths`: samples the
     CFR on the ramp's frequency grid (`beat_frequencies`) but does NOT conjugate or
     antenna-reverse -- that generic tensor mapping is `e2e.chain.dechirp.beat_from_cfr`,
     the ONE implementation both `_beat_from_paths` (below) and `RTEnvironmentBlock`
-    delegate to. dtype/scale are whatever `paths.cfr` returns (typically complex64),
+    delegate to. dtype/scale are whatever the CFR path returns (typically complex64),
     unchanged from before this split.
 
-    `freq_chunk` bounds peak memory: `cfr` materialises a
-    `[rx, rx_ant, tx, tx_ant, num_paths, n_chirps, n_freqs]` tensor *before* summing
+    `range_migration` (default True, FLIPPED 2026-08-14 -- was False): use
+    `cfr_sum_over_paths`, the closed-form per-path CFR with the intra-frame delay-drift
+    correction, instead of Sionna's own `Paths.cfr()` (which freezes each path's delay
+    across the CPI). `cfr_sum_over_paths` is VERIFIED against `Paths.cfr()` itself to
+    2.3e-4 relative error at `range_migration=False` (see that function's docstring), so
+    this substitution changes nothing except adding the delay-drift term; MEASURED
+    whole-cube rel-RMSE 8.52e-2 -> 2.30e-3 (37x) with the correction on, on a moving
+    planar target (2026-08-11). `paths.a`/`paths.tau`/`paths.doppler` all carry the full
+    `[num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]` shape here because `_solve`
+    always requests `synthetic_array=False` (real per-element ray tracing, not an
+    analytic array-response shortcut) -- the same shape `Paths.cfr()` itself broadcasts
+    against, so no reshaping is needed before handing them to `cfr_sum_over_paths`.
+    `range_migration=False` keeps the old `Paths.cfr()` call, byte-for-byte, for anyone
+    who needs to reproduce a pre-flip corpus deliberately.
+
+    `freq_chunk` bounds peak memory: both paths materialise a
+    `[rx, rx_ant, tx, tx_ant, num_paths, n_chirps, n_freqs]`-shaped array before summing
     over paths, so a full 512-sample / 192-chirp / 50-path call needs hundreds of MB.
     Chunking over frequencies is free -- the expensive ray tracing already happened.
     """
@@ -1160,22 +1183,38 @@ def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.nd
     n_samples = freqs.size
     chunk = _cfr_freq_chunk(paths, cfg, n_chirps=n_chirps, requested=freq_chunk)
     out: List[np.ndarray] = []
+    if range_migration:
+        # f_c = f0 + B/2, the chirp centre -- see the module docstring, eq. (3), and
+        # `beat_frequencies`, which baseband-references against the same value.
+        f_c = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
+        a_re, a_im = paths.a
+        a = np.asarray(a_re.numpy()) + 1j * np.asarray(a_im.numpy())
+        tau = np.asarray(paths.tau.numpy())
+        doppler = np.asarray(paths.doppler.numpy())
     for lo in range(0, n_samples, chunk):
-        h = paths.cfr(
-            frequencies=freqs[lo:lo + chunk],
-            sampling_frequency=1.0 / float(cfg.chirp_period_s),
-            num_time_steps=int(n_chirps),
-            normalize_delays=False,   # absolute delay IS the range -- never normalize
-            normalize=False,          # keep physical amplitudes
-            out_type="numpy",
-        )
+        if range_migration:
+            h = cfr_sum_over_paths(
+                a, tau, doppler, freqs[lo:lo + chunk],
+                f_c=f_c, chirp_period_s=float(cfg.chirp_period_s),
+                n_chirps=int(n_chirps), range_migration=True,
+            )
+        else:
+            h = paths.cfr(
+                frequencies=freqs[lo:lo + chunk],
+                sampling_frequency=1.0 / float(cfg.chirp_period_s),
+                num_time_steps=int(n_chirps),
+                normalize_delays=False,   # absolute delay IS the range -- never normalize
+                normalize=False,          # keep physical amplitudes
+                out_type="numpy",
+            )
         # h: [num_rx, num_rx_ant, num_tx, num_tx_ant, n_chirps, n_freqs]; one tx/rx
         # device each, so indices 0 select them.
         out.append(np.asarray(h)[0, :, 0, :, :, :])
     return np.ascontiguousarray(np.concatenate(out, axis=-1))
 
 
-def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.ndarray:
+def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128,
+                     range_migration: bool = True) -> np.ndarray:
     """`Paths` -> beat cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`, complex64.
 
     Applies equation (3): CFR on the ramp's frequency grid (`cfr_from_paths`),
@@ -1183,7 +1222,8 @@ def _beat_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128) -> np.
     handedness") -- via `e2e.chain.dechirp.beat_from_cfr`, so this and
     `RTEnvironmentBlock` share exactly one implementation of that mapping.
     """
-    raw = cfr_from_paths(paths, cfg, n_chirps=n_chirps, freq_chunk=freq_chunk)
+    raw = cfr_from_paths(paths, cfg, n_chirps=n_chirps, freq_chunk=freq_chunk,
+                         range_migration=range_migration)
     from e2e.chain.dechirp import beat_from_cfr
 
     beat = beat_from_cfr(torch.from_numpy(raw))
@@ -1272,7 +1312,8 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                  device=None, rt_scene: Optional[RTScene] = None, max_depth: int = 2,
                  include_leakage: bool = False, diffuse_reflection: bool = True,
                  specular_reflection: bool = True, refraction: bool = False,
-                 solver_seed: int = 41, freq_chunk: int = 128) -> torch.Tensor:
+                 solver_seed: int = 41, freq_chunk: int = 128,
+                 range_migration: bool = True) -> torch.Tensor:
     """Ray-trace one radar frame and return its RAW channel frequency response.
 
     `complex64 [n_rx, n_tx, n_chirps, n_samples]` on `device` -- the pipeline's
@@ -1283,7 +1324,9 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
     RTEnvironmentBlock` both build on this one extraction path so the ray-tracing +
     CFR-sampling logic exists exactly once. See `build_rt_scene` for the scene/`rt_scene`
     parameters and `_solve` for the solver ones (both shared verbatim with
-    `rt_synthesize_adc`).
+    `rt_synthesize_adc`). `range_migration` (default True, see `cfr_from_paths`) selects
+    the intra-frame delay-drift correction; pass False to reproduce a pre-2026-08-14
+    corpus deliberately.
     """
     dev = _resolve_device(device)
     if rt_scene is None:
@@ -1293,7 +1336,8 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                    diffuse_reflection=diffuse_reflection,
                    specular_reflection=specular_reflection, refraction=refraction,
                    seed=solver_seed)
-    raw = cfr_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk)
+    raw = cfr_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk,
+                         range_migration=range_migration)
     return torch.as_tensor(raw, dtype=torch.complex64, device=dev)
 
 
@@ -1304,7 +1348,8 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
                       diffuse_reflection: bool = True, specular_reflection: bool = True,
                       refraction: bool = False, solver_seed: int = 41,
                       freq_chunk: int = 128,
-                      snr_ref_min_range_m: Optional[float] = None) -> torch.Tensor:
+                      snr_ref_min_range_m: Optional[float] = None,
+                      range_migration: bool = True) -> torch.Tensor:
     """Ray-trace one radar frame and return its dechirped ADC cube.
 
     Drop-in replacement for `e2e.ml.rd_synth.synthesize_adc(cfg, scatterers, pose, ...)`
@@ -1312,9 +1357,9 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
     on `device`, consumable by `e2e.ml.transforms` unchanged.
 
     ONE `PathSolver` solve is performed; the chirp axis comes from Sionna's Doppler
-    time-evolution (`cfr(..., sampling_frequency=1/T_c, num_time_steps=n_chirps)`), not
-    from re-tracing -- see `rt_retrace_reference` / `doppler_error_study` for the
-    ground-truth comparison this trades against.
+    time-evolution (native evolution, `range_migration` correcting the delay it freezes
+    -- see `cfr_from_paths`), not from re-tracing -- see `rt_retrace_reference` /
+    `doppler_error_study` for the ground-truth comparison this trades against.
 
     Parameters
     ----------
@@ -1325,6 +1370,9 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
     snr_db : float or None             post-2-D-FFT SNR of the strongest target
                                        (`None` disables noise); see `_peak_reference_amplitude`
     seed : int or None                 seeds the AWGN only (the RT solve uses `solver_seed`)
+    range_migration : bool             intra-frame delay-drift correction (default True,
+                                       see `cfr_from_paths`); False reproduces a
+                                       pre-2026-08-14 corpus deliberately.
     device : torch device or None      defaults to the library device
     rt_scene : RTScene or None         reuse a scene built by `build_rt_scene`
                                        (skips base-scene parsing); built here if None
@@ -1339,7 +1387,8 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
                           include_leakage=include_leakage,
                           diffuse_reflection=diffuse_reflection,
                           specular_reflection=specular_reflection, refraction=refraction,
-                          solver_seed=solver_seed, freq_chunk=freq_chunk)
+                          solver_seed=solver_seed, freq_chunk=freq_chunk,
+                          range_migration=range_migration)
 
     from e2e.chain.dechirp import DechirpBlock
 

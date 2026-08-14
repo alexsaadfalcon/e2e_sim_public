@@ -32,6 +32,19 @@ matrix itself is quantized (`weight_bits`): its entries are physical analog comb
 weights -- attenuator/phase-shifter settings -- realizable only to finite precision, and
 that imprecision is part of the measurement, not a rounding of the data.
 
+CONTROL x COMPUTE: TWO ORTHOGONAL AXES
+---------------------------------------
+Compression FIDELITY (how `y = A x` is realized) and CONTROL (how `A` is chosen) are
+independent design choices, and this module keeps them that way: `CONTROL_STATIC` /
+`CONTROL_ADAPTIVE` cross with `COMPUTE_IDEAL` / `COMPUTE_QUANTIZED` / `COMPUTE_NOISY` (see
+the constants below `CompressBlock` -- an ideal full-VMM `y = A x`, a quantized-weight
+combining network at a chosen bit depth/model, or a noisy compute-in-memory array, each
+with either a fixed matrix or one redrawn from a subspace tracker). `CompressBlock` is the
+one primitive exposing both axes; `e2e.blocks.AFEBlock` is a thin preset of it (adaptive
+control -- `MeasurementStage` supplies a fresh `A` on every call -- with quantized compute
+at the float/compute-datapath weight model), sharing `realize_weights`/`combine_realized`
+rather than a second implementation.
+
 **ORDERING CONSTRAINT, and it is a physical one, not an implementation gap.** Two steps
 in the receive chain index PHYSICAL ANTENNAS and are therefore meaningless once dim 0
 counts linear combinations of them:
@@ -87,6 +100,40 @@ from e2e.frames import (
 #: interchangeable, which is why the choice is explicit rather than a default.
 WEIGHT_UNIFORM = "uniform"   # analog control settings: constant ABSOLUTE step
 WEIGHT_FLOAT = "float"       # digital compute datapath: constant RELATIVE error
+
+
+#: CONTROL axis: how the sensing matrix `A` is CHOSEN -- orthogonal to how `y = A x` is
+#: REALIZED once chosen (the COMPUTE axis, below). `CompressBlock` composes one of each.
+#: `CONTROL_STATIC` (default) draws once (or takes `generator`'s draw once) and caches
+#: it, modelling a fixed analog combining network. `CONTROL_ADAPTIVE` redraws on every
+#: call instead of caching. This module does not itself know how to steer a draw onto a
+#: signal subspace -- that lives in `e2e.subspace`, deliberately not imported here --
+#: so adaptive control needs a `generator` that does, e.g.
+#: `lambda m, n: subspace_block.gen_A_ada(m)`; `e2e.blocks.AFEBlock`/`MeasurementStage`
+#: are exactly that (a fresh `A` supplied externally on every call), just not expressed
+#: as a `CompressBlock` instance.
+CONTROL_STATIC = "static"
+CONTROL_ADAPTIVE = "adaptive"
+
+#: COMPUTE axis: how `y = A x` is REALIZED once `A` is chosen -- the fidelity of the
+#: analog combining hardware, independent of how `A` was picked. Three non-interchangeable
+#: hardware models:
+#: `COMPUTE_IDEAL` -- full-precision weights, exact matmul, no noise. The reference
+#: `y = A x` every other mode is a non-ideal model OF (the "full VMM" case).
+#: `COMPUTE_QUANTIZED` (default, matches this module's historical behaviour) -- weights
+#: realized at finite precision (`quantize_weights`; `weight_bits`/`weight_model` select
+#: uniform-analog vs float-datapath), then an exact matmul: one non-ideal AFE
+#: architecture (a quantized combining network).
+#: `COMPUTE_NOISY` -- full-precision weights, but the matmul itself is corrupted by
+#: multiplicative output noise (`e2e.afe.afe_utils.approx_matmul`): a DIFFERENT non-ideal
+#: architecture (a noisy compute-in-memory array rather than a quantized-weight network).
+#: The two non-ideal modes are not combined by default -- they model different hardware,
+#: not different severities of the same hardware.
+COMPUTE_IDEAL = "ideal"
+COMPUTE_QUANTIZED = "quantized"
+COMPUTE_NOISY = "noisy"
+
+_COMPUTE_MODES = (COMPUTE_IDEAL, COMPUTE_QUANTIZED, COMPUTE_NOISY)
 
 
 def combine(a: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -165,6 +212,46 @@ def quantize_weights(a: torch.Tensor, bits: int = None, *, model: str = WEIGHT_U
     return torch.complex(re, im)
 
 
+def realize_weights(a: torch.Tensor, compute: str = COMPUTE_QUANTIZED, *,
+                    weight_bits: int = 8, weight_model: str = WEIGHT_UNIFORM,
+                    exp: int = 5, mantissa: int = 6) -> torch.Tensor:
+    """Apply the COMPUTE axis's weight realization to `a`.
+
+    Identity for `COMPUTE_IDEAL` and `COMPUTE_NOISY` -- the former is full precision by
+    definition, the latter's non-ideality lives in the matmul (`combine_realized`), not
+    in the stored weight setting. `COMPUTE_QUANTIZED` delegates to `quantize_weights`
+    (`weight_bits=8`/`weight_model=WEIGHT_UNIFORM` reproduces this module's historical
+    default exactly).
+    """
+    if compute == COMPUTE_QUANTIZED:
+        return quantize_weights(a, bits=weight_bits, model=weight_model, exp=exp,
+                                mantissa=mantissa)
+    if compute in (COMPUTE_IDEAL, COMPUTE_NOISY):
+        return a
+    raise ValueError(f"compute must be one of {_COMPUTE_MODES}, got {compute!r}")
+
+
+def combine_realized(a: torch.Tensor, v: torch.Tensor, compute: str = COMPUTE_QUANTIZED,
+                     *, noise_settings=None) -> torch.Tensor:
+    """Apply the COMPUTE axis's combine step.
+
+    Exact `a @ v` (`combine`) for `COMPUTE_IDEAL`/`COMPUTE_QUANTIZED` -- their
+    non-ideality, if any, already lives in `a` via `realize_weights`. `COMPUTE_NOISY`
+    instead runs `e2e.afe.afe_utils.approx_matmul` (multiplicative output noise,
+    `noise_settings` defaulting to that module's `matmul_noise_settings`) on IDEAL
+    weights -- a compute-in-memory architecture, not a quantized one.
+    """
+    if compute == COMPUTE_NOISY:
+        # Imported lazily for the same reason `quantize_weights`(WEIGHT_FLOAT) imports
+        # e2e.afe lazily: most callers never take this branch.
+        from e2e.afe.afe_utils import approx_matmul
+
+        return approx_matmul(a, v, noise_settings)
+    if compute in (COMPUTE_IDEAL, COMPUTE_QUANTIZED):
+        return combine(a, v)
+    raise ValueError(f"compute must be one of {_COMPUTE_MODES}, got {compute!r}")
+
+
 class CompressBlock:
     """Analog aperture compression: `M < N` quantized-weight linear measurements.
 
@@ -174,11 +261,24 @@ class CompressBlock:
     so `DecompressBlock` (or a subspace tracker) can use the weights that were actually
     applied, quantization included, rather than the ideal ones.
 
-    `n_measurements` is `M`. `weight_bits` is the analog combining-weight resolution
-    (None = ideal weights). `generator` optionally supplies the matrix for a given
-    `(M, N)` -- pass the AFE's adaptive draw here to reproduce the adaptive behaviour;
-    the default is a fixed random Gaussian ensemble drawn once and reused across frames,
-    which is what a static analog combining network does.
+    `n_measurements` is `M`. Two orthogonal axes, both above:
+
+    * `control` (`CONTROL_STATIC` default / `CONTROL_ADAPTIVE`) -- how `A` is CHOSEN.
+      Static caches the first draw; adaptive redraws every call from `generator`
+      (required in that mode), e.g. `lambda m, n: subspace_block.gen_A_ada(m)` to
+      reproduce what `AFEBlock`/`MeasurementStage` do.
+    * `compute` (`COMPUTE_IDEAL` / `COMPUTE_QUANTIZED` default / `COMPUTE_NOISY`) -- how
+      `y = A x` is REALIZED. Quantized takes `weight_bits`/`weight_model` (default 8-bit
+      uniform, this class's historical-and-only behaviour before this axis existed) or
+      `exp`/`mantissa` for the float model; noisy takes `noise_settings`
+      (`e2e.afe.afe_utils.matmul_noise_settings` if omitted).
+
+    `weight_bits`/`generator`/`seed` are the pre-existing constructor surface and keep
+    their historical meaning and defaults; `weight_bits=8` + `compute=COMPUTE_QUANTIZED`
+    (the defaults) reproduce this class's behaviour before `compute` existed, bit-exactly.
+    Publishes the realized sensing matrix as `state['sensing_matrix']` so `DecompressBlock`
+    (or a subspace tracker) can use the weights that were actually applied, non-ideality
+    included, rather than the ideal ones.
     """
 
     frame_capabilities = FrameCapabilities(
@@ -190,23 +290,44 @@ class CompressBlock:
     )
 
     def __init__(self, n_measurements: int, *, weight_bits: int = 8, generator=None,
-                 seed: int = 0):
+                 seed: int = 0, control: str = CONTROL_STATIC,
+                 compute: str = COMPUTE_QUANTIZED, weight_model: str = WEIGHT_UNIFORM,
+                 exp: int = 5, mantissa: int = 6, noise_settings=None):
         if n_measurements < 1:
             raise ValueError(f"n_measurements must be >= 1, got {n_measurements}")
+        if control not in (CONTROL_STATIC, CONTROL_ADAPTIVE):
+            raise ValueError(
+                f"control must be {CONTROL_STATIC!r} or {CONTROL_ADAPTIVE!r}, got {control!r}"
+            )
+        if control == CONTROL_ADAPTIVE and generator is None:
+            raise ValueError(
+                "control='adaptive' redraws A on every call and this module does not "
+                "itself know how to steer that draw (see e2e.subspace) -- pass a "
+                "`generator(m, n)` that does, e.g. a subspace tracker's gen_A_ada."
+            )
         self.n_measurements = int(n_measurements)
         self.weight_bits = weight_bits
         self.generator = generator
         self.seed = int(seed)
-        self._a = None          # cached realized (quantized) sensing matrix
+        self.control = control
+        self.compute = compute
+        self.weight_model = weight_model
+        self.exp = exp
+        self.mantissa = mantissa
+        self.noise_settings = noise_settings
+        self._a = None          # cached realized sensing matrix (CONTROL_STATIC only)
 
     def sensing_matrix(self, n_elements: int, device, dtype) -> torch.Tensor:
-        """The realized `[M, N]` combining matrix, drawn once and cached.
+        """The realized `[M, N]` combining matrix.
 
-        Cached because a static analog network has ONE set of weights: redrawing per
-        frame would model a different (and much more capable) architecture, and would
-        also make the subspace tracker's job artificially easy.
+        `control=CONTROL_STATIC` (default): drawn once and cached, because a static
+        analog network has ONE set of weights -- redrawing per frame would model a
+        different (and much more capable) architecture, and would also make the
+        subspace tracker's job artificially easy. `control=CONTROL_ADAPTIVE`: redrawn
+        (from `generator`) and realized fresh on every call, never cached.
         """
-        if self._a is not None and self._a.shape[1] == n_elements:
+        if self.control == CONTROL_STATIC and self._a is not None \
+                and self._a.shape[1] == n_elements:
             return self._a.to(device=device, dtype=dtype)
         m = self.n_measurements
         if self.generator is not None:
@@ -218,8 +339,11 @@ class CompressBlock:
             real = torch.randn(m, n_elements, generator=g)
             imag = torch.randn(m, n_elements, generator=g)
             a = torch.complex(real, imag) / (2.0 * m) ** 0.5
-        a = quantize_weights(a.to(torch.complex64), self.weight_bits)
-        self._a = a
+        a = realize_weights(a.to(torch.complex64), self.compute, weight_bits=self.weight_bits,
+                            weight_model=self.weight_model, exp=self.exp,
+                            mantissa=self.mantissa)
+        if self.control == CONTROL_STATIC:
+            self._a = a
         return a.to(device=device, dtype=dtype)
 
     def apply(self, state):
@@ -236,7 +360,8 @@ class CompressBlock:
         # Flatten the aperture, combine, and restore the frame's [*, 1, chirp, freq]
         # rank so downstream shape handling is unchanged apart from dim 0's meaning.
         v = s_pars.reshape(n_elements, n_chirp * n_freqs)
-        x = (a @ v).reshape(self.n_measurements, 1, n_chirp, n_freqs)
+        x = combine_realized(a, v, self.compute, noise_settings=self.noise_settings)
+        x = x.reshape(self.n_measurements, 1, n_chirp, n_freqs)
         return {
             "s_pars": x,
             "sensing_matrix": a,
