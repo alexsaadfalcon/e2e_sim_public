@@ -26,6 +26,32 @@ above: a pre-CFAR prototype of this module scored AP 0.0186 / AR 0.6381. That nu
 from thresholding a raw dB map with no CFAR stage, so its recall is not comparable to the
 shipped detector's -- quoting it would overstate the classical floor's recall by ~10x.
 
+TARGET-COUNT BUG, fixed 2026-08-15: every number in this docstring above this note --
+like the pre-CFAR number just above -- was measured under a `score_manifest` that
+recovered ground truth by thresholding the DENSE label map's occupancy channel
+(`labels[0] > 0.5`) instead of reading the deduplicated per-frame target list.
+`e2e.ml.labels.encode_detection_labels` writes a 3x3-cell FOOTPRINT of `1.0`s around
+each real target, so that thresholding counted every footprint cell as its own target --
+roughly 9x too many (e.g. `rt_radial_v2/radial_like_D1` val: 487 real objects -> 4383
+counted). `score_manifest` now scores against `RadarFrameDataset(...).targets(i)`, the
+SAME list `train.py`'s `_evaluate_split` uses for the model rows, so ground truth is
+counted identically for the classical baseline and every network. Re-measured (same
+pred_maps, both target-list versions, isolating the effect):
+
+  corpus (val split)               old AP    old AR    new AP    new AR
+  ti_iwr1443_D1                    0.0204    0.0565    0.0124    0.2222
+  pilot_radial/radial_like_D1      0.0043    0.0346    0.0029    0.1931
+  rt_radial_v2/radial_like_D1      0.0037    0.0291    0.0023    0.1481
+
+AP drops a little (a correctly-sized denominator changes which near-misses count) while
+AR roughly quadruples-to-quintuples (recall was never as bad as the inflated denominator
+made it look). Full table across all `ti_iwr1443` tiers (D0-D4) plus both `radial_like`
+corpora: `report/rt_ml/baseline_rescore_v1/rescore.md`. The two headline numbers above
+(AP 0.0241/AR 0.0596 for "the `ti_iwr1443` corpus"; AP 0.0044 for "a `radial_like` pilot
+corpus") predate this fix and are kept as HISTORICAL, same as the pre-CFAR number --
+their exact tier/split was not recorded precisely enough to reproduce bit-for-bit (see
+the rescore doc); do not compare them against any number measured after 2026-08-15.
+
 It also exposes a hard ceiling that no model can pass. The label grid asks for a target's
 azimuth to within `MatchCriterion.max_sin_az_err` (0.06 by default), but an array of
 `cfg.n_virtual` elements resolves no finer than ~`2 / n_virtual` in sin(azimuth). For the
@@ -64,7 +90,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import torch
@@ -194,19 +220,6 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, **kwargs) -
 # --------------------------------------------------------------------------------
 # Scoring a stored corpus
 # --------------------------------------------------------------------------------
-def _targets_from_labels(labels, grid: LabelGrid) -> List:
-    """Recover `(range_m, sin_az, class)` targets from a stored label map's positive cells.
-
-    Uses the SAME grid arithmetic `encode_detection_labels` used, so the baseline is
-    matched against exactly the targets the network is matched against.
-    """
-    occ = np.asarray(labels)[0]
-    out = []
-    for r_i, a_i in np.argwhere(occ > 0.5):
-        out.append(((r_i + 0.5) * grid.range_bin_m, (a_i + 0.5) * grid.az_bin - 1.0, "vehicle"))
-    return out
-
-
 def score_manifest(manifest_path, split: str = "val", *, limit: Optional[int] = None,
                    device=None, **kwargs) -> Dict:
     """Score the classical baseline over a stored corpus split.
@@ -214,7 +227,18 @@ def score_manifest(manifest_path, split: str = "val", *, limit: Optional[int] = 
     Returns `evaluate_dataset`'s metrics dict with a `"resolution"` entry attached (see
     `resolution_report`) and `"n_frames"`. Needs a corpus carrying raw ADC
     (`adc_code_re`/`adc_code_im`); an RD-only corpus has no ADC to beamform and raises.
+
+    Ground truth is `RadarFrameDataset(manifest_path, split=split).targets(i)` -- the
+    SAME deduplicated per-frame target list `train.py`'s `_evaluate_split` scores
+    against -- NOT re-derived from the dense label map's positive cells. A target's
+    positive footprint is 3x3 cells (`e2e.ml.labels.encode_detection_labels`), so
+    thresholding the label map directly counted every footprint cell as its own target:
+    ~9x too many, corrupting AR (recall's ground-truth-count denominator) and, through
+    it, AP (bug found post-hoc; see the docstring's HISTORICAL NOTE analogue in this
+    module's history -- `report/rt_ml/baseline_rescore_v1/rescore.md` has the old-vs-new
+    numbers this produced).
     """
+    from e2e.ml.dataset import RadarFrameDataset
     from e2e.ml.radar_config import RadarConfig
 
     manifest_path = Path(manifest_path)
@@ -227,9 +251,13 @@ def score_manifest(manifest_path, split: str = "val", *, limit: Optional[int] = 
     files = manifest["files"][split]
     if limit is not None:
         files = files[:limit]
+    # `files` is a prefix slice (or the full list) of manifest["files"][split] in order,
+    # so its positions 0..len(files)-1 line up exactly with targets_ds.files' (index i
+    # here == index i there).
+    targets_ds = RadarFrameDataset(manifest_path, split=split)
 
     pred_maps, target_lists = [], []
-    for fn in files:
+    for i, fn in enumerate(files):
         with np.load(manifest_path.parent / fn, allow_pickle=True) as z:
             if "adc_code_re" not in z.files:
                 raise ValueError(
@@ -237,11 +265,10 @@ def score_manifest(manifest_path, split: str = "val", *, limit: Optional[int] = 
                     "needs adc_code_re/adc_code_im to beamform")
             adc = torch.as_tensor(z["adc_code_re"].astype(np.float32)
                                   + 1j * z["adc_code_im"].astype(np.float32))
-            labels = z["labels"]
         if device is not None:
             adc = adc.to(device)
         pred_maps.append(classical_detection_map(cfg, adc, grid, **kwargs).cpu())
-        target_lists.append(_targets_from_labels(labels, grid))
+        target_lists.append(targets_ds.targets(i))
 
     res = dict(evaluate_dataset(pred_maps, target_lists, grid))
     res["n_frames"] = len(files)
