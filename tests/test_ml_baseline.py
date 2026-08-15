@@ -1,10 +1,13 @@
 """Tests for the classical (no-learning) CFAR baseline detector."""
 
+import json
 import math
 
+import numpy as np
 import pytest
 import torch
 
+from e2e.ml import baseline
 from e2e.ml.baseline import (
     CFAR_MAX_DB,
     CFAR_MIN_DB,
@@ -145,3 +148,106 @@ def test_range_azimuth_power_shape_matches_the_virtual_array(torch_device):
     assert power.ndim == 2
     assert torch.all(power >= 0.0)
     assert math.isfinite(float(power.sum()))
+
+
+# --------------------------------------------------------------------------------
+# score_manifest -- ground-truth target counting (regression: must be the
+# deduplicated per-frame target list, not a footprint-cell count off the dense label
+# map; see e2e.ml.labels.encode_detection_labels's 3x3-footprint convention)
+# --------------------------------------------------------------------------------
+def _write_tiny_baseline_corpus(tmp_path, cfg):
+    """A 2-frame, 2-well-separated-targets-per-frame synthetic corpus, split entirely
+    into "val" -- built by hand (not `e2e.ml.dataset.generate_dataset`) so the ADC
+    payload is deliberately pre-quantized and round-trips exactly through
+    `e2e.ml.storage`'s `CODEC_INT16`, guaranteeing the on-disk `adc_code_re`/
+    `adc_code_im` keys `score_manifest` needs to beamform.
+
+    4 real targets total, range bins far enough apart (40 bins, footprint half-width
+    1) that every 3x3 footprint stays disjoint and unclipped by the grid boundary:
+    exactly 4*9 = 36 positive label-map cells, vs. 4 deduplicated targets.
+    """
+    from e2e.ml import dataset as ml_dataset
+    from e2e.ml import storage
+    from e2e.ml.labels import encode_detection_labels, targets_in_grid
+    from e2e.ml.scatterers import RadarPose, Scatterer
+
+    grid = LabelGrid.for_config(cfg)
+    pose = RadarPose()
+    range_bin_idx_per_frame = [(20, 60), (30, 70)]  # far apart -> disjoint footprints
+
+    dataset_dir = tmp_path / "tiny_baseline_corpus"
+    dataset_dir.mkdir()
+    rng = np.random.default_rng(0)
+
+    sequences = []
+    for i, idxs in enumerate(range_bin_idx_per_frame):
+        scatterers = []
+        for ri in idxs:
+            r = (ri + 0.5) * grid.range_bin_m
+            # sin_az == 0 (mid-grid azimuth bin, unclipped) -- azimuth is not what
+            # this test is about (see the module's existing range-localization test
+            # for the same "assert azimuth deliberately not" convention).
+            scatterers.append(Scatterer(position=(r, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                                        rcs_dbsm=20.0, object_class="vehicle"))
+        labels = encode_detection_labels(grid, scatterers, pose, classes=("vehicle",))
+        targets = targets_in_grid(grid, scatterers, pose, classes=("vehicle",))
+        assert len(targets) == 2   # sanity: both scatterers landed in-grid
+
+        # Integer-valued ADC codes round-trip byte-exact through int16 storage (see
+        # e2e.ml.storage's SAFETY note) -- content is irrelevant to this test, only
+        # that adc_code_re/adc_code_im land on disk.
+        codes = rng.integers(-1000, 1000, size=(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
+        adc = codes.astype(np.complex64)
+
+        fname = f"frame_{i:05d}.npz"
+        storage.write_sample_npz(
+            dataset_dir / fname, {"adc": adc, "labels": labels.cpu().numpy()},
+            {"targets": targets}, payload_key="adc", full_scale=float(2 ** 15),
+        )
+        sequences.append([fname])
+
+    # Every sequence into "val" (score_manifest's own default split).
+    manifest_path = ml_dataset.write_manifest(
+        dataset_dir, cfg, "test_tier", sequences, grid=grid, splits=(0.0, 1.0, 0.0),
+    )
+    return manifest_path
+
+
+def test_score_manifest_targets_are_deduplicated_not_footprint_cells(tmp_path, monkeypatch):
+    """Regression for the ~9x target-inflation bug: `score_manifest` must score
+    against `RadarFrameDataset.targets()` (deduplicated, one entry per real object),
+    not the dense label map's positive-cell count (each of a target's 3x3 footprint
+    cells counted separately)."""
+    from e2e.ml.dataset import RadarFrameDataset
+
+    cfg = PRESETS["ti_iwr1443"]
+    manifest_path = _write_tiny_baseline_corpus(tmp_path, cfg)
+
+    captured = {}
+    real_evaluate_dataset = baseline.evaluate_dataset
+
+    def _spy(pred_maps, target_lists, grid, **kwargs):
+        captured["target_lists"] = target_lists
+        return real_evaluate_dataset(pred_maps, target_lists, grid, **kwargs)
+
+    monkeypatch.setattr(baseline, "evaluate_dataset", _spy)
+
+    res = baseline.score_manifest(manifest_path, split="val")
+    assert res["n_frames"] == 2
+
+    ds = RadarFrameDataset(manifest_path, split="val")
+    expected = sum(len(ds.targets(i)) for i in range(len(ds)))
+    assert expected == 4   # 2 targets/frame x 2 frames, deduplicated
+
+    got = sum(len(t) for t in captured["target_lists"])
+    assert got == expected
+
+    # Pin against the removed footprint-cell counting method directly: it would have
+    # thresholded each frame's dense label map instead.
+    footprint_cell_count = 0
+    files = json.loads(manifest_path.read_text())["files"]["val"]
+    for fn in files:
+        with np.load(manifest_path.parent / fn) as z:
+            footprint_cell_count += int((z["labels"][0] > 0.5).sum())
+    assert footprint_cell_count == 36
+    assert got != footprint_cell_count
