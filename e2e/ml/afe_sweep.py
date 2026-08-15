@@ -308,20 +308,13 @@ def evaluate_at_m(manifest_path, ckpt_path, split: str, m: int, *, seed: int = 0
     """
     manifest_path = Path(manifest_path)
     device = device if device is not None else train_mod._default_device()
-    with open(manifest_path) as f:
-        manifest = json.load(f)
-    grid = train_mod._load_grid(manifest)
+    # Shared reload seam (see train.load_model_for_eval): the no-reconstruct path
+    # supplies the M-sized manifest via the hook so the stem matches the compressed
+    # channel count; the reconstructed path uses the default corpus-manifest behavior.
+    hook = (lambda man, fmt: _manifest_at_m(man, m, fmt)) if no_reconstruct else None
+    model, manifest, grid, input_format = train_mod.load_model_for_eval(
+        manifest_path, ckpt_path, device=device, manifest_for_model=hook)
     cfg = RadarConfig.from_dict(manifest["config"])
-
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    input_format = checkpoint.get("input_format", manifest.get("input_format", "rd"))
-    if no_reconstruct:
-        manifest_for_model = _manifest_at_m(manifest, m, input_format)
-    else:
-        manifest_for_model = dict(manifest)
-        manifest_for_model["input_format"] = input_format
-    model = train_mod.build_model(checkpoint["model_name"], manifest_for_model, device=device)
-    model.load_state_dict(checkpoint["model_state"])
 
     ds = _DegradedRadarFrameDataset(manifest_path, split, input_format, m=m, seed=seed,
                                     weight_bits=weight_bits, quantize=quantize,

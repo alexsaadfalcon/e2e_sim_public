@@ -455,32 +455,60 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
 # --------------------------------------------------------------------------------
 # Evaluation-only entry point
 # --------------------------------------------------------------------------------
-def evaluate(manifest_path, checkpoint_path, *, split: str = "test", device=None) -> Dict:
-    """Rebuild a model from `checkpoint_path` and run `metrics.evaluate_dataset` on `split`.
+def load_model_for_eval(manifest_path, checkpoint_path, *, device=None,
+                        ssm_chunk_size=None, manifest_for_model=None):
+    """Shared checkpoint-reload seam for evaluation paths.
 
-    Uses `checkpoint.get("input_format", ...)` (falling back to the manifest's own
-    default for older checkpoints saved before this key existed) rather than the
-    manifest's current `input_format`, so a manifest edited after training still
-    reconstructs the model/dataset the checkpoint was actually trained with.
+    Opens `manifest_path`, loads `checkpoint_path`, resolves the trained
+    `input_format` (`checkpoint.get("input_format", ...)` falling back to the
+    manifest's own default, so a manifest edited after training still reconstructs
+    what the checkpoint was trained with), builds the model, and loads its weights.
+
+    `manifest_for_model`: optional callable `(manifest, input_format) -> dict`
+    supplying the manifest `build_model` sizes the stem from -- the hook exists for
+    callers whose model geometry differs from the corpus (e.g. `e2e.ml.afe_sweep`'s
+    no-reconstruct path sizing the stem to `M` compressed channels via
+    `_manifest_at_m`). Default: the corpus manifest with `input_format` overridden.
+
+    Returns `(model, manifest, grid, input_format)`. Extracted from `evaluate()` /
+    `afe_sweep.evaluate_at_m()`, which previously duplicated this sequence verbatim
+    (reviewed finding: two places to update in lockstep on any schema change).
     """
     manifest_path = Path(manifest_path)
     device = device if device is not None else _default_device()
-
     with open(manifest_path) as f:
         manifest = json.load(f)
     grid = _load_grid(manifest)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     input_format = checkpoint.get("input_format", manifest.get("input_format", "rd"))
-    manifest_for_model = dict(manifest)
-    manifest_for_model["input_format"] = input_format
-    model = build_model(checkpoint["model_name"], manifest_for_model, device=device)
+    if manifest_for_model is None:
+        mfm = dict(manifest)
+        mfm["input_format"] = input_format
+    else:
+        mfm = manifest_for_model(manifest, input_format)
+    model = build_model(checkpoint["model_name"], mfm, device=device,
+                        ssm_chunk_size=ssm_chunk_size)
     model.load_state_dict(checkpoint["model_state"])
+    return model, manifest, grid, input_format
+
+
+def evaluate(manifest_path, checkpoint_path, *, split: str = "test", device=None) -> Dict:
+    """Rebuild a model from `checkpoint_path` and run `metrics.evaluate_dataset` on `split`.
+
+    See `load_model_for_eval` for the input-format resolution rule.
+    """
+    device = device if device is not None else _default_device()
+    model, manifest, grid, input_format = load_model_for_eval(
+        manifest_path, checkpoint_path, device=device)
+    # Class names map 1:1 onto the registry names (FFTRadNet -> fftradnet), so the
+    # summary line needs no second checkpoint read.
+    model_name = type(model).__name__.lower()
 
     ds = _make_dataset(manifest_path, split, input_format)
     metrics = _evaluate_split(model, ds, grid, device=device)
 
-    print(f"[{checkpoint['model_name']}] {split}: AP={metrics['AP']:.3f}  "
+    print(f"[{model_name}] {split}: AP={metrics['AP']:.3f}  "
           f"AR={metrics['AR']:.3f}  range_rmse_m={metrics['range_rmse_m']:.3f}  "
           f"sin_az_rmse={metrics['sin_az_rmse']:.4f}")
     return metrics

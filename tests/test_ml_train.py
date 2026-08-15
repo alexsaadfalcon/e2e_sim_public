@@ -555,3 +555,32 @@ def test_cli_input_format_default_is_rd(monkeypatch):
     assert captured["input_format"] == "rd"
     assert captured["reg_weight"] == 100.0
     assert captured["gamma"] == 2.0
+
+
+def test_load_model_for_eval_contract(tiny_manifest_path, tmp_path):
+    """The shared reload seam (dedupe of evaluate()/afe_sweep.evaluate_at_m): returns
+    (model, manifest, grid, input_format), and the manifest_for_model hook receives
+    (manifest, resolved_input_format) and controls what build_model sees."""
+    out_dir = tmp_path / "run_reload"
+    train_mod.train(tiny_manifest_path, "fftradnet", epochs=1, batch_size=2,
+                    out_dir=out_dir, seed=0, device=torch.device("cpu"))
+    ckpt = out_dir / "best.pt"
+
+    model, manifest, grid, input_format = train_mod.load_model_for_eval(
+        tiny_manifest_path, ckpt, device=torch.device("cpu"))
+    assert isinstance(model, torch.nn.Module)
+    assert input_format in ("rd", "adc")
+    assert "config" in manifest and grid is not None
+
+    called = {}
+
+    def hook(man, fmt):
+        called["fmt"] = fmt
+        m2 = dict(man)
+        m2["input_format"] = fmt
+        return m2
+
+    model2, _, _, _ = train_mod.load_model_for_eval(
+        tiny_manifest_path, ckpt, device=torch.device("cpu"), manifest_for_model=hook)
+    assert called["fmt"] == input_format
+    assert isinstance(model2, torch.nn.Module)
