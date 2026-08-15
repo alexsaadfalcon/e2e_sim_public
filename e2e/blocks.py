@@ -364,8 +364,13 @@ class AdaOjaBlock:
         gap_response="refine": bump to `n_refine_hi` refinement passes while the gap is
         collapsed (sv_gap_norm < gap_threshold) -- spend more compute chasing the
         ambiguous cutoff. Productionized from the investigation's "reactive n_refine"
-        finding (TODO.md "TRACKER DIVERGENCE ROOT-CAUSED"): peak -46%/post -94% on the
-        30-frame munich protocol.
+        finding (a near-degenerate SV cluster at the k cutoff on real munich frames
+        makes the top-k subspace identity numerically arbitrary and spikes tracking
+        error from frame ~22): spike-mean -66% / post -93% on the 30-frame munich
+        protocol, re-measured under THIS shipped gate (sv_gap_norm, threshold 0.01).
+        An earlier -46%/-94% figure circulated from the investigation's prototype
+        ratio gate (S[k-1]/S[k] < 1.15) -- same mechanism, different gate signal;
+        quote the re-measured numbers.
         gap_response="coast": drop to 0 refinement passes (freeze U, skip the update)
         while the gap is collapsed, resuming once it reopens -- "detect-and-coast": stop
         chasing a target whose own frame-to-frame identity is numerically arbitrary

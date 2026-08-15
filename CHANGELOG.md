@@ -7,6 +7,16 @@ semantic versioning.
 ## [Unreleased]
 
 ### Changed
+- **The shipped pipeline entry points now enable the subspace tracker's reactive
+  refinement** (`AdaOjaBlock(gap_response="refine")` in the webapp runner,
+  `main_sionna_blocks`, and `main_comms_head`). The mechanism landed earlier as
+  opt-in and, until now, no default path used it -- so a user running enough munich
+  frames (~22+) still hit the documented rank-deficiency divergence with zero
+  mitigation (adversarial-panel finding). The class default remains
+  `gap_response="none"` (bit-identical legacy behavior for library users); only the
+  entry-point configurations changed. Measured on the 30-frame munich protocol
+  under the shipped gate: spike-mean -66%, post-spike -93% (compute boosted only on
+  gap-collapsed frames).
 - **The detection path now defaults to the `radial_like` preset (12 TX x 16 RX, 192
   virtual elements).** The 192-bin azimuth label grid is inherited from RADIal, where
   192 *is* the virtual-element count; the 0.06 sin(az) match tolerance is this project's
@@ -57,9 +67,15 @@ semantic versioning.
   On the pre-switch `ti_iwr1443` corpus it scored AP 0.0241 where a trained FFTRadNet
   reached 0.0084: the learned detector was losing to an FFT, which had been invisible for
   the whole campaign. On a `radial_like` pilot corpus -- where the harness is physically
-  answerable -- the ordering FLIPS: baseline AP 0.0044 against the model's 0.0168, a ~3.9x
-  win for the model. That is the result that justifies the preset switch. (400 frames,
-  12 epochs; an early number, not a headline.) `resolution_report()` states whether a config's evaluation harness is
+  answerable -- the ordering FLIPS: baseline AP 0.0044 against the model's 0.0168.
+  That ordering is the result that justifies the preset switch. (400 frames, 12
+  epochs; an early number, not a headline. CORRECTION 2026-08-15: both baseline
+  numbers in this entry were computed by the pre-fix `score_manifest`, whose target
+  counts were ~9x inflated by footprint-cell counting -- see `e2e/ml/baseline.py`'s
+  "TARGET-COUNT BUG" docstring note and `report/rt_ml/baseline_rescore_v1/`. The
+  corrected pilot baseline is AP 0.0029, so the ordering conclusion stands -- the
+  model's margin is larger, not smaller -- but do not quote the 0.0044/0.0241
+  figures or a "3.9x" ratio against any post-2026-08-15 measurement.) `resolution_report()` states whether a config's evaluation harness is
   physically answerable at all and warns when it is not.
 - **Full-vs-reduced dimension contract** (`frames.DIMENSION_*`, `require_dimension`)
   plus standalone `CompressBlock`/`DecompressBlock` (`e2e/chain/compress.py`).

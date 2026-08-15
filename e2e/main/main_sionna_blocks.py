@@ -84,7 +84,7 @@ def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=Fa
     # Track at the signal's spectral elbow (rank ~8, where the top-k subspace is well
     # defined) with enough measurements (m=512) to observe the scene's subspace drift; the
     # tracker then follows it via a per-frame SVD re-estimate. See AdaOjaBlock / ROADMAP.
-    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
+    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10, gap_response="refine")
 
     sim = Simulation(
         environment_block,

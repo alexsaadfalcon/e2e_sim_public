@@ -389,6 +389,11 @@ def run_afe_sweep(manifest_path, ckpt_path, *, split: str = "val",
         "quantize": quantize,
         "n_rx": int(cfg.n_rx),
         "m_list": [int(m) for m in m_list],
+        # Provenance: None = full split. Serialized because an artifact scored on a
+        # frame subset is NOT comparable to full-split tables, and the file itself
+        # must say which it is (claims-audit finding: an early v2 sweep artifact
+        # carried no record of its --limit 120 subset).
+        "limit": limit,
         "results": results,
     }
 

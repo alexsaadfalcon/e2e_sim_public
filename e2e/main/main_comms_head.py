@@ -131,7 +131,7 @@ def _build_simulation(environment_block, combining, freqs, k, snr_db, n_symbols,
     )
     interconnect_block = InterconnectBlock(case="case3")
     afe_block = AFEBlock()
-    subspace_block = AdaOjaBlock(N_RX, k)
+    subspace_block = AdaOjaBlock(N_RX, k, gap_response="refine")
     modem = ModemBlock(freqs, n_symbols=n_symbols, snr_db=snr_db, seed=seed,
                        combining=combining)
     downstream_blocks = [RangeAzBlock(), modem, BERBlock()]

@@ -261,7 +261,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # the tracker whenever AFE is on. The UI reflects this honestly: see
     # block_diagram.param_editor, which disables the subspace checkbox while AFE
     # is enabled instead of pretending to toggle a no-op.)
-    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10)
+    # gap_response="refine": the reactive-refinement mitigation for the munich
+    # rank-deficiency divergence, wired at the ENTRY POINT (the class default stays
+    # "none" for bit-compat) -- adversarial-panel finding: the fix existed but no
+    # shipped path used it, so default runs past ~frame 22 still diverged.
+    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10, gap_response="refine")
 
     # --- downstream product blocks (always present unless the ADC-cube chain is --
     # active -- see below) --------------------------------------------------------

@@ -49,6 +49,8 @@ from e2e.ml.rt_scene_build import (  # noqa: F401
     SIONNA_CAR_REPRESENTATIVE,
     SKIN_CONDUCTIVITY_SPM,
     SKIN_RELATIVE_PERMITTIVITY,
+    _FLAT_SCENE_XML,
+    _GROUND_MATERIAL,
     _box_mesh_path,
     _car_mesh_path,
     _load_base_scene,
