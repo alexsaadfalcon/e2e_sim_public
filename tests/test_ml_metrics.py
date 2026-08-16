@@ -235,6 +235,29 @@ def test_rmse_hand_checked_two_frames(torch_device):
     assert result["AR"] == pytest.approx(1.0)
 
 
+def test_rmse_is_nan_not_zero_when_nothing_matches_at_the_rmse_threshold(torch_device):
+    """REGRESSION (metric audit, 2026-08-16): localization RMSE is measured at ONE
+    representative threshold (the sweep point nearest 0.5). A detector whose confidence
+    ceiling sits below that threshold contributes no matched pairs there, and the old
+    empty-set convention reported 0.0 -- visually indistinguishable from flawless
+    ranging, while recall (averaged over the whole sweep) was correctly nonzero. That
+    exact pattern appeared in real SSMRadNet evaluations. Undefined must read undefined.
+    """
+    grid = LabelGrid(n_range=10, n_azimuth=10, max_range_m=10.0)
+    # Confident enough to be detected at the low end of the sweep, but below 0.5 -- so
+    # the RMSE threshold sees no detections at all while lower thresholds do.
+    pred = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32, device=torch_device)
+    pred[0, 5, 5] = 0.3
+    targets = [(5.5, 0.1, "vehicle")]
+
+    result = evaluate_dataset([pred], [targets], grid)
+
+    assert math.isnan(result["range_rmse_m"])
+    assert math.isnan(result["sin_az_rmse"])
+    # ...while recall over the sweep still correctly registers the detection.
+    assert result["AR"] > 0.0
+
+
 # --------------------------------------------------------------------------------
 # evaluate_dataset: threshold-sweep monotonicity sanity
 # --------------------------------------------------------------------------------

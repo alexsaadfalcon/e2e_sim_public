@@ -177,9 +177,17 @@ def evaluate_frame(
 
 
 def _rmse(errs: Sequence[float]) -> float:
-    """Root-mean-square of `errs`; 0.0 (documented convention) if `errs` is empty."""
+    """Root-mean-square of `errs`; NaN if `errs` is empty.
+
+    NaN, not 0.0 (the pre-2026-08-16 convention), because an empty match set means the
+    localization error is UNDEFINED, and 0.0 reads as "perfect". That misreading was
+    not hypothetical: a detector whose confidence ceiling sits below the representative
+    threshold contributes no matched pairs there, so it reported `range_rmse_m = 0.000`
+    -- indistinguishable from flawless ranging -- while its AR, averaged over the whole
+    sweep, was correctly nonzero. Undefined must look undefined.
+    """
     if not errs:
-        return 0.0
+        return float("nan")
     return math.sqrt(sum(e * e for e in errs) / len(errs))
 
 

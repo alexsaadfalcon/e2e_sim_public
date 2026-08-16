@@ -373,7 +373,14 @@ def test_evaluate_at_m_control_row_matches_undegraded_evaluate(tiny_afe_fixture)
     assert r["m"] == n_rx
     assert r["model"]["AP"] == pytest.approx(undistorted["AP"], abs=1e-5)
     assert r["model"]["AR"] == pytest.approx(undistorted["AR"], abs=1e-5)
-    assert r["model"]["range_rmse_m"] == pytest.approx(undistorted["range_rmse_m"], abs=1e-5)
+    # RMSE is NaN when nothing matches at the representative threshold (see
+    # e2e.ml.metrics._rmse) -- on this deliberately tiny fixture that is the usual
+    # case, so compare NaN-awarely rather than asserting finiteness.
+    got_rmse, want_rmse = r["model"]["range_rmse_m"], undistorted["range_rmse_m"]
+    if math.isnan(want_rmse):
+        assert math.isnan(got_rmse), "identity control must match undegraded, NaN included"
+    else:
+        assert got_rmse == pytest.approx(want_rmse, abs=1e-5)
 
 
 def test_evaluate_at_m_returns_finite_classical_and_model_metrics(tiny_afe_fixture):
@@ -386,8 +393,14 @@ def test_evaluate_at_m_returns_finite_classical_and_model_metrics(tiny_afe_fixtu
                                 batch_size=2)
     assert set(r.keys()) == {"m", "model", "classical"}
     for scorer in ("model", "classical"):
-        for key in ("AP", "AR", "range_rmse_m"):
+        for key in ("AP", "AR"):
             assert math.isfinite(r[scorer][key])
+        # range_rmse_m is legitimately NaN when no detection matches at the RMSE
+        # threshold (e2e.ml.metrics._rmse); it must still be a float, never None or
+        # a silently-zero stand-in for "undefined".
+        rmse = r[scorer]["range_rmse_m"]
+        assert isinstance(rmse, float)
+        assert math.isnan(rmse) or math.isfinite(rmse)
 
 
 def test_run_afe_sweep_end_to_end_schema_and_order(tiny_afe_fixture):
