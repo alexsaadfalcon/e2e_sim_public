@@ -177,15 +177,31 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
                                out_dir=out_dir, seed=0)
 
     assert history["epoch"] == [1, 2]
-    for key in ("train_loss", "val_AP", "val_AR", "val_range_rmse_m"):
+    for key in ("train_loss", "val_AP", "val_AR"):
         assert len(history[key]) == 2
         assert all(math.isfinite(v) for v in history[key])
+    # val_range_rmse_m is legitimately NaN when an epoch's model has no detection
+    # surviving the RMSE threshold (e2e.ml.metrics._rmse) -- routine for a barely
+    # trained model. It must still be a recorded float per epoch, never dropped and
+    # never a silently-zero stand-in for "undefined".
+    assert len(history["val_range_rmse_m"]) == 2
+    assert all(isinstance(v, float) for v in history["val_range_rmse_m"])
 
     best_pt = out_dir / "best.pt"
     history_json = out_dir / "history.json"
     assert best_pt.is_file()
     assert history_json.is_file()
-    assert json.loads(history_json.read_text()) == history
+    # NaN != NaN, so a plain dict equality would fail purely because an undefined
+    # localization RMSE round-trips as NaN (see e2e.ml.metrics._rmse). Compare
+    # NaN-awarely: the round trip must preserve every value, NaN included.
+    round_tripped = json.loads(history_json.read_text())
+    assert round_tripped.keys() == history.keys()
+    for key, values in history.items():
+        for written, original in zip(round_tripped[key], values):
+            if isinstance(original, float) and math.isnan(original):
+                assert isinstance(written, float) and math.isnan(written)
+            else:
+                assert written == original
 
     checkpoint = torch.load(best_pt, map_location="cpu")
     assert checkpoint["model_name"] == "fftradnet"
@@ -196,8 +212,9 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
     metrics = train_mod.evaluate(tiny_manifest_path, best_pt, split="test")
     assert math.isfinite(metrics["AP"])
     assert math.isfinite(metrics["AR"])
-    assert math.isfinite(metrics["range_rmse_m"])
-    assert math.isfinite(metrics["sin_az_rmse"])
+    # RMSE may be NaN (undefined) for a barely-trained model -- but must be a float.
+    assert isinstance(metrics["range_rmse_m"], float)
+    assert isinstance(metrics["sin_az_rmse"], float)
 
 
 def test_train_ssmradnet_one_epoch(tiny_manifest_path, tmp_path):
@@ -487,10 +504,13 @@ def test_train_one_epoch_input_format_adc_with_stub_dataset(tmp_path, monkeypatc
                                input_format="adc", out_dir=out_dir, seed=0)
 
     assert history["epoch"] == [1]
-    for key in ("train_loss", "train_cls_loss", "train_reg_loss", "val_AP", "val_AR",
-                "val_range_rmse_m"):
+    for key in ("train_loss", "train_cls_loss", "train_reg_loss", "val_AP", "val_AR"):
         assert len(history[key]) == 1
         assert math.isfinite(history[key][0])
+    # See the note in test_train_writes_history_and_checkpoints: undefined localization
+    # RMSE is NaN by design, and a one-epoch model routinely produces it.
+    assert len(history["val_range_rmse_m"]) == 1
+    assert isinstance(history["val_range_rmse_m"][0], float)
 
     checkpoint = torch.load(out_dir / "best.pt", map_location="cpu")
     assert checkpoint["model_name"] == "ssmradnet"
