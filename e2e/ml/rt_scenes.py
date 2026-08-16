@@ -434,7 +434,7 @@ def _sample_clutter_offset(rng: np.random.Generator,
 
 
 def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, seed: int = 0,
-                           num_frames: int = 2,
+                           num_frames: int = 2, dt: float = 1.0,
                            radar_position: Optional[Tuple[float, float, float]] = None,
                            use_local_assets: bool = False) -> Scenario:
     """Draw a deterministic RT `Scenario` at difficulty `tier`.
@@ -447,6 +447,16 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     it); it is NOT part of the determinism key -- reusing a `(tier, frame_idx, seed)`
     with a different `num_frames` keeps the same object mix/positions/velocities and
     only changes how many motion steps are resolved from them.
+
+    `dt` is the SECONDS PER FRAME the consumer will resolve this scenario with, and it
+    is applied AFTER sampling, so it never perturbs the determinism key either. Sampled
+    speeds are physical m/s; `Motion.velocity` is a per-frame displacement in metres, so
+    the stored displacement is `v * dt` and `e2e.ml.scatterers.frame_scatterers(dt=dt)`
+    differences it back to exactly `v` m/s. The default `dt=1.0` reproduces this
+    module's historical "m/s == m/frame" convention; a caller with a real frame rate
+    (e.g. `e2e.ml.chain_generate`) MUST pass `dt=1/cfg.frame_rate_hz` or every velocity
+    reaches the solver inflated by `frame_rate_hz` -- which is exactly the bug fixed on
+    2026-08-16, when a 0-8 m/s tier spec was reaching Sionna as 0-80 m/s.
 
     `radar_position` defaults to `_BASE_SCENE_RADAR_POSITION[spec.base_scene]` when the
     tier's base scene has one (currently "munich"), else the origin (`(0, 0, 1.5)`) --
@@ -497,7 +507,33 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     placed: List[Tuple[float, float, Tuple[float, float]]] = []
 
     def _motion(vel):
-        return Motion(velocity=vel) if num_frames > 1 else Motion()
+        """`Motion` carrying `vel` (m/s) as this scenario's per-frame displacement.
+
+        Two bugs lived here before 2026-08-16, both confirmed empirically:
+
+        1. This returned a STATIC `Motion()` whenever `num_frames <= 1`, silently
+           discarding the sampled velocity. That conflates INTER-frame motion (where an
+           object sits at frame k, which does need >1 frame) with INTRA-frame Doppler
+           (the shift across the chirps of a single CPI -- the basis of radar detection).
+           `generate_chain_corpus` defaults to `frames_per_scene=1`, so every RT corpus
+           ever generated contained only stationary targets, parked in the zero-Doppler
+           bin alongside all the static clutter.
+        2. `_sample_velocity` returns m/s under a `dt = 1` convention, but this value was
+           stored as a per-frame displacement and later divided by the CONSUMER's real
+           `dt = 1/frame_rate_hz`, inflating it by `frame_rate_hz`. A 0-8 m/s tier spec
+           reached the solver as 0-80 m/s -- past the unambiguous-velocity limit, so the
+           Doppler aliased.
+
+        `dt` (seconds per frame) fixes (2): the stored displacement is `vel * dt`, which
+        `e2e.ml.scatterers.frame_scatterers` finite-differences back to exactly `vel` m/s.
+        For the single-frame case there is no track to difference, so the physical
+        velocity rides on `SceneObject.velocity_mps`, which `frame_scatterers` reads for
+        static objects -- fixing (1) without inventing a positional track that a
+        one-frame scenario cannot have.
+        """
+        if num_frames > 1:
+            return Motion(velocity=tuple(v * float(dt) for v in vel))
+        return Motion()
 
     for i in range(_n_in(rng, spec.n_spheres)):
         spot = _sample_local_offset(rng, placed, "sphere")
@@ -511,6 +547,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         objects.append(SceneObject(
             name=f"sphere-{i}", kind=ObjectKind.SPHERE, position=pos, scaling=0.5,
             material="metal", object_class="vehicle", motion=_motion(vel),
+            velocity_mps=vel,
         ))
 
     # Draw every vehicle asset first, then place LARGEST FIRST. Placement can fail and
@@ -534,6 +571,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         objects.append(SceneObject(
             name=f"vehicle-{i}", kind=ObjectKind.MESH, asset=asset, position=pos,
             scaling=1.0, material="metal", object_class="vehicle", motion=_motion(vel),
+            velocity_mps=vel,
         ))
 
     for i in range(_n_in(rng, spec.n_pedestrians)):
@@ -550,7 +588,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         objects.append(SceneObject(
             name=f"pedestrian-{i}", kind=ObjectKind.MESH, asset=asset,
             position=pos, scaling=1.0, material="skin", object_class="pedestrian",
-            motion=_motion(vel),
+            motion=_motion(vel), velocity_mps=vel,
         ))
 
     for i in range(_n_in(rng, spec.n_clutter_boxes)):

@@ -7,6 +7,21 @@ semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- **RT scenario targets were stationary, and when they did move they moved 10x too
+  fast.** Two independent defects in `e2e.ml.rt_scenes.build_rt_tier_scenario`, both
+  silent, both confirmed empirically. (1) A sampled velocity was discarded whenever
+  `num_frames <= 1`, conflating inter-frame motion with the intra-frame Doppler that a
+  single CPI is built on; since `generate_chain_corpus` defaults to
+  `frames_per_scene=1`, **every RT corpus generated before 2026-08-16 contains only
+  stationary targets**, sitting in the zero-Doppler bin alongside the static clutter.
+  (2) Sampled speeds (physical m/s) were stored as per-frame displacements and later
+  divided by the consumer's real `dt`, inflating them by `frame_rate_hz` -- a 0-8 m/s
+  tier reached the solver as 0-80 m/s, past the 12.75 m/s unambiguous-velocity limit,
+  so the Doppler aliased. `build_rt_tier_scenario` now takes `dt` (seconds per frame,
+  applied after sampling so determinism is unchanged) and records the physical velocity
+  on `SceneObject.velocity_mps`, which `frame_scatterers` reads for single-frame
+  scenarios. `chain_generate` passes the real frame period. Corpora generated before
+  this date should be regenerated before their detection numbers are quoted.
 - **Range-migration corpus generation no longer exhausts host memory.** The
   2026-08-14 `range_migration=True` default routed generation through the
   closed-form per-path CFR, whose naive numpy broadcast materialises ~34 GB

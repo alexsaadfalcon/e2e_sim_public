@@ -232,3 +232,67 @@ def test_presets_smoke():
     for cfg in PRESETS.values():
         sc = sample_scene(cfg, "D1", np.random.default_rng(0))
         assert sc.validate() == []
+
+
+# --------------------------------------------------------------------------------
+# RT tier scenarios: the velocity actually handed to the ray tracer.
+# (e2e.ml.rt_scenes is pure-Python scenario construction -- no Sionna needed here.)
+# --------------------------------------------------------------------------------
+def _rt_solver_speeds(scenario, dt, classes=("vehicle", "pedestrian")):
+    """|v| in m/s exactly as `build_rt_scene` would hand each object to Sionna."""
+    from e2e.ml.scatterers import frame_scatterers
+
+    scats = frame_scatterers(scenario, 0, dt=dt)
+    return [float(np.linalg.norm(s.velocity)) for s in scats if s.object_class in classes]
+
+
+@pytest.mark.parametrize("num_frames", [1, 2, 4])
+def test_rt_tier_scenario_velocity_reaches_solver_in_physical_mps(num_frames):
+    """ORACLE (regression, 2026-08-16): the speed the ray tracer receives must equal the
+    speed the tier spec asked for -- for EVERY frame count, single-frame included.
+
+    Two bugs made this false, both silent:
+      * `num_frames <= 1` returned a static Motion, discarding the sampled velocity
+        entirely. Since `generate_chain_corpus` defaults to `frames_per_scene=1`, every
+        RT corpus ever built held only stationary targets -- parked in the zero-Doppler
+        bin with the static clutter, with radar's primary discriminant switched off.
+      * The sampled m/s was stored as a per-frame displacement and later divided by the
+        consumer's real `dt`, inflating it by `frame_rate_hz` (0-8 m/s -> 0-80 m/s,
+        past the unambiguous-velocity limit, so the Doppler aliased).
+    """
+    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
+
+    cfg = RADIAL_LIKE
+    dt = 1.0 / float(cfg.frame_rate_hz)
+    lo, hi = RT_DIFFICULTY_TIERS["D2"].speed_mps
+
+    sc = build_rt_tier_scenario("D2", frame_idx=0, seed=11000,
+                                num_frames=num_frames, dt=dt)
+    speeds = _rt_solver_speeds(sc, dt)
+    assert speeds, "tier D2 must place vehicles/pedestrians"
+
+    # Physical, and inside the tier's own range (pedestrians are additionally slower,
+    # so only the upper bound is a shared invariant).
+    assert max(speeds) <= hi + _EPS, (
+        f"solver got {max(speeds):.2f} m/s for a tier capped at {hi} m/s "
+        "-- velocity inflated by frame_rate_hz?")
+    assert max(speeds) > lo, "every target is stationary -- velocity was discarded"
+
+
+def test_rt_tier_scenario_dt_only_rescales_never_redraws():
+    """`dt` is applied AFTER sampling, so it must not perturb the determinism key: the
+    same (tier, frame_idx, seed) keeps the same object mix and headings, and only the
+    stored per-frame displacement scales."""
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    a = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=2, dt=1.0)
+    b = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=2, dt=0.1)
+
+    assert [o.name for o in a.objects] == [o.name for o in b.objects]
+    assert [o.position for o in a.objects] == [o.position for o in b.objects]
+    for oa, ob in zip(a.objects, b.objects):
+        # velocity_mps is the physical velocity and is dt-invariant...
+        assert oa.velocity_mps == ob.velocity_mps
+        # ...while the per-frame displacement scales by exactly dt.
+        for va, vb in zip(oa.motion.velocity, ob.motion.velocity):
+            assert vb == pytest.approx(va * 0.1, abs=1e-12)

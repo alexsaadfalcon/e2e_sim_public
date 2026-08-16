@@ -246,8 +246,13 @@ def generate_chain_corpus(
         # decimated vehicle meshes (car/truck/bus/trolley) and, for the city tier, sets
         # the base scene. Sampling from e2e.ml.scenes here would have produced a corpus
         # of spheres with none of the mesh work in it.
+        # dt MUST be the real frame period: sampled speeds are physical m/s, and
+        # frame_scatterers differences the stored per-frame displacement by this same
+        # dt. Omitting it inflated every velocity by frame_rate_hz (0-8 m/s tier ->
+        # 0-80 m/s at the solver, past the unambiguous-velocity limit). Fixed 2026-08-16.
         scenario = build_rt_tier_scenario(
             tier, frame_idx=i, seed=seed, num_frames=frames_per_scene,
+            dt=1.0 / float(cfg.frame_rate_hz),
             use_local_assets=use_local_assets,
         )
         tag = f"sample_scene{i:05d}"
