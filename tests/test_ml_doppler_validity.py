@@ -184,6 +184,56 @@ def test_cfr_from_paths_defaults_range_migration_on():
     assert inspect.signature(cfr_sum_over_paths).parameters["range_migration"].default is False
 
 
+def test_budgeted_cfr_matches_the_reference_under_forced_chunking():
+    """`cfr_sum_over_paths_budgeted` (the memory-bounded implementation
+    `cfr_from_paths` actually generates corpora with) must agree with the float64
+    reference broadcast to complex64 precision -- with a byte budget small enough to
+    force BOTH the path-axis and frequency-axis chunk loops to run many times, so the
+    chunk-boundary accumulation is what's being tested, not a single-block shortcut."""
+    from e2e.ml.rt_gen import cfr_sum_over_paths, cfr_sum_over_paths_budgeted
+
+    a, tau, dop = _paths(n_ant=5, n_paths=37, seed=3)
+    freqs = np.linspace(-3.7e8, 3.7e8, 23)
+    kw = dict(f_c=77e9, chirp_period_s=76e-6, n_chirps=7)
+
+    for migration in (False, True):
+        want = cfr_sum_over_paths(a, tau, dop, freqs, range_migration=migration, **kw)
+        # 4 KB budget -> a few hundred (path, freq) blocks at this problem size.
+        got = cfr_sum_over_paths_budgeted(a, tau, dop, freqs,
+                                          range_migration=migration,
+                                          byte_budget=4096, **kw)
+        assert got.dtype == np.complex64
+        assert got.shape == want.shape
+        scale = np.abs(want).max()
+        assert np.allclose(got, want.astype(np.complex64), rtol=1e-5,
+                           atol=1e-5 * scale), (
+            f"budgeted CFR diverged from the reference (migration={migration})")
+
+
+def test_budgeted_cfr_static_target_no_op_and_multi_lead_dims():
+    """The budgeted implementation must keep BOTH reference guarantees: a zero-Doppler
+    path is bit-identical with the correction on or off, and leading dims beyond one
+    antenna axis (the real call site passes [num_rx, rx_ant, num_tx, tx_ant, paths])
+    round-trip through its internal flatten/reshape unchanged."""
+    from e2e.ml.rt_gen import cfr_sum_over_paths, cfr_sum_over_paths_budgeted
+
+    rng = np.random.default_rng(11)
+    shape = (1, 3, 1, 2, 9)   # [num_rx, rx_ant, num_tx, tx_ant, paths]
+    a = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    tau = rng.uniform(1e-8, 5e-8, size=shape)
+    dop = np.zeros(shape)
+    freqs = np.linspace(-3.7e8, 3.7e8, 5)
+
+    off = cfr_sum_over_paths_budgeted(a, tau, dop, freqs, range_migration=False, **_KW)
+    on = cfr_sum_over_paths_budgeted(a, tau, dop, freqs, range_migration=True, **_KW)
+    assert np.array_equal(off, on)
+    assert off.shape == (1, 3, 1, 2, _KW["n_chirps"], freqs.size)
+
+    want = cfr_sum_over_paths(a, tau, dop, freqs, range_migration=False, **_KW)
+    scale = np.abs(want).max()
+    assert np.allclose(off, want.astype(np.complex64), rtol=1e-5, atol=1e-5 * scale)
+
+
 def test_range_migration_leaves_the_carrier_phase_alone():
     """At f_baseband = 0 the baseband term is exp(0) = 1 regardless of delay, so the
     correction cannot change the DC bin. If it does, the drift leaked into the carrier

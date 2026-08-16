@@ -348,6 +348,89 @@ def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: fl
     return (a_b * phase).sum(axis=-3)
 
 
+def cfr_sum_over_paths_budgeted(a, tau, doppler, freqs, *, f_c: float,
+                                chirp_period_s: float, n_chirps: int,
+                                range_migration: bool = False, device=None,
+                                byte_budget: int = 2 ** 28) -> np.ndarray:
+    """Memory-bounded `cfr_sum_over_paths`: same math, never materialises the full
+    `[..., n_paths, n_chirps, n_freqs]` broadcast.
+
+    WHY THIS EXISTS (2026-08-15): the naive broadcast above is fine for the reference
+    role it plays (tests, error studies, tens of paths) but is the exact tensor
+    `_cfr_freq_chunk`'s ELEMENT budget was never calibrated for -- that budget bounds
+    DrJit's lazy index width, while numpy genuinely ALLOCATES: at a realistic solve
+    (~800-3500 paths, 252 chirps, 192 antenna pairs) one complex128 temporary is
+    ~34 GB and the expression builds several, which swap-thrashed a 32 GB box without
+    ever finishing scene 0 of a corpus run. Measured, not speculated -- see
+    report/rt_ml/rt_kenney_d2_v1_gen.md.
+
+    Implementation: torch (CUDA when available -- pass `device` to override), chunked
+    over the path and frequency axes so no float64 temporary exceeds `byte_budget`
+    bytes. The three exponentials collapse into ONE phase argument accumulated in
+    float64 (the carrier term alone is ~1e6 rad, far beyond float32), wrapped modulo
+    2pi, and only then evaluated in float32 -- so the result is complex64, matching
+    what the ADC-cube consumers store anyway, with phase error ~1e-7 rad. Agreement
+    with the float64 reference is pinned by tests at 1e-5 relative; the
+    range_migration=False/True static-target bit-equality guarantee is preserved
+    because a zero Doppler makes `tau_baseband` bitwise equal to `tau`.
+
+    Same shape contract as `cfr_sum_over_paths`; returns complex64.
+    """
+    a = np.asarray(a)
+    tau = np.asarray(tau)
+    dop = np.asarray(doppler)
+    freqs = np.asarray(freqs, dtype=np.float64)
+    lead = a.shape[:-1]
+    n_paths = int(a.shape[-1])
+    n_chirps = int(n_chirps)
+    n_freqs = int(freqs.size)
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = torch.device(device)
+
+    lead_n = int(np.prod(lead)) if lead else 1
+    a_t = torch.from_numpy(np.ascontiguousarray(a.reshape(lead_n, n_paths))).to(
+        dev, torch.complex64)
+    tau_t = torch.from_numpy(np.ascontiguousarray(
+        tau.reshape(lead_n, n_paths).astype(np.float64))).to(dev)
+    dop_t = torch.from_numpy(np.ascontiguousarray(
+        dop.reshape(lead_n, n_paths).astype(np.float64))).to(dev)
+    f_t = torch.from_numpy(freqs).to(dev)                                   # [F]
+    t_t = (torch.arange(n_chirps, dtype=torch.float64, device=dev)
+           * float(chirp_period_s))                                         # [C]
+
+    out = torch.zeros(lead_n, n_chirps, n_freqs, dtype=torch.complex64, device=dev)
+    two_pi = 2.0 * np.pi
+
+    # Chunk (paths x freqs) so one [lead, p_blk, n_chirps, f_blk] float64 tensor stays
+    # under byte_budget; a handful of same-shaped successors (wrap, cos/sin, product)
+    # live at once, so the true peak is a small multiple of it.
+    unit = lead_n * n_chirps                       # elements per (path, freq) pair
+    budget_pf = max(1, (max(1, int(byte_budget)) // 8) // unit)
+    if budget_pf >= n_paths and n_paths > 0:
+        p_blk, f_blk = n_paths, max(1, min(n_freqs, budget_pf // n_paths))
+    else:
+        p_blk, f_blk = budget_pf, 1
+
+    for p0 in range(0, n_paths, p_blk):
+        p1 = min(n_paths, p0 + p_blk)
+        tau_b = tau_t[:, p0:p1, None, None]                                 # [L,Pb,1,1]
+        dop_b = dop_t[:, p0:p1, None, None]
+        a_b = a_t[:, p0:p1, None, None]
+        # [L,Pb,C,1]; with doppler == 0 this is bitwise tau_b -- the static-target
+        # no-op guarantee rides on that.
+        tau_bb = tau_b - (dop_b / float(f_c)) * t_t.view(1, 1, -1, 1) \
+            if range_migration else tau_b
+        base = -two_pi * float(f_c) * tau_b + two_pi * dop_b * t_t.view(1, 1, -1, 1)
+        for f0 in range(0, n_freqs, f_blk):
+            f1 = min(n_freqs, f0 + f_blk)
+            arg = base - two_pi * f_t[f0:f1].view(1, 1, 1, -1) * tau_bb     # [L,Pb,C,Fb]
+            arg = torch.remainder(arg, two_pi).to(torch.float32)
+            phase = torch.complex(torch.cos(arg), torch.sin(arg))
+            out[:, :, f0:f1] += (a_b * phase).sum(dim=1)
+    return out.cpu().numpy().reshape(*lead, n_chirps, n_freqs)
+
+
 def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128,
                    range_migration: bool = True) -> np.ndarray:
     """`Paths` -> RAW CFR cube `[n_rx_ant, n_tx_ant, n_chirps, n_samples]`.
@@ -381,8 +464,6 @@ def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128,
     """
     freqs = beat_frequencies(cfg)
     n_samples = freqs.size
-    chunk = _cfr_freq_chunk(paths, cfg, n_chirps=n_chirps, requested=freq_chunk)
-    out: List[np.ndarray] = []
     if range_migration:
         # f_c = f0 + B/2, the chirp centre -- see the module docstring, eq. (3), and
         # `beat_frequencies`, which baseband-references against the same value.
@@ -391,22 +472,29 @@ def cfr_from_paths(paths, cfg, *, n_chirps: int, freq_chunk: int = 128,
         a = np.asarray(a_re.numpy()) + 1j * np.asarray(a_im.numpy())
         tau = np.asarray(paths.tau.numpy())
         doppler = np.asarray(paths.doppler.numpy())
+        # The budgeted closed form does its own (path x freq) memory chunking --
+        # `_cfr_freq_chunk`'s element budget is a DrJit index bound, NOT an
+        # allocation bound, and applying it here let realistic solves (~1e3 paths)
+        # ask numpy for ~34 GB temporaries (see cfr_sum_over_paths_budgeted).
+        h = cfr_sum_over_paths_budgeted(
+            a, tau, doppler, freqs,
+            f_c=f_c, chirp_period_s=float(cfg.chirp_period_s),
+            n_chirps=int(n_chirps), range_migration=True,
+        )
+        # h: [num_rx, num_rx_ant, num_tx, num_tx_ant, n_chirps, n_freqs]; one tx/rx
+        # device each, so indices 0 select them.
+        return np.ascontiguousarray(np.asarray(h)[0, :, 0, :, :, :])
+    chunk = _cfr_freq_chunk(paths, cfg, n_chirps=n_chirps, requested=freq_chunk)
+    out: List[np.ndarray] = []
     for lo in range(0, n_samples, chunk):
-        if range_migration:
-            h = cfr_sum_over_paths(
-                a, tau, doppler, freqs[lo:lo + chunk],
-                f_c=f_c, chirp_period_s=float(cfg.chirp_period_s),
-                n_chirps=int(n_chirps), range_migration=True,
-            )
-        else:
-            h = paths.cfr(
-                frequencies=freqs[lo:lo + chunk],
-                sampling_frequency=1.0 / float(cfg.chirp_period_s),
-                num_time_steps=int(n_chirps),
-                normalize_delays=False,   # absolute delay IS the range -- never normalize
-                normalize=False,          # keep physical amplitudes
-                out_type="numpy",
-            )
+        h = paths.cfr(
+            frequencies=freqs[lo:lo + chunk],
+            sampling_frequency=1.0 / float(cfg.chirp_period_s),
+            num_time_steps=int(n_chirps),
+            normalize_delays=False,   # absolute delay IS the range -- never normalize
+            normalize=False,          # keep physical amplitudes
+            out_type="numpy",
+        )
         # h: [num_rx, num_rx_ant, num_tx, num_tx_ant, n_chirps, n_freqs]; one tx/rx
         # device each, so indices 0 select them.
         out.append(np.asarray(h)[0, :, 0, :, :, :])

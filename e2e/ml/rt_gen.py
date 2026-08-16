@@ -77,6 +77,7 @@ from e2e.ml.rt_signal_chain import (  # noqa: F401
     beat_frequencies,
     cfr_from_paths,
     cfr_sum_over_paths,
+    cfr_sum_over_paths_budgeted,
     doppler_validity,
     mimo_combine,
     rt_cfr_frame,
