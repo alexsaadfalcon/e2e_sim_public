@@ -115,3 +115,33 @@ def test_oja_zero_frame_does_not_poison_the_basis():
     X = A @ randn_complex(d, 4)
     oja.add_data(X, A)
     assert torch.isfinite(oja.U).all(), "tracker corrupted after the zero frame"
+
+
+def test_adaoja_reestimate_zero_frame_does_not_swap_the_basis():
+    """Same degenerate-frame guarantee for `AdaOjaBlock(method='reestimate')` -- the
+    SHIPPED default path, which the test above never touched (it exercises the legacy
+    `Oja` class directly).
+
+    This path fails more quietly than the legacy one: a degenerate frame makes
+    `Z = Y (Y^H U)` all-zero, and orth()/QR of a zero matrix returns a valid but
+    ARBITRARY orthonormal basis -- no NaN, no exception. Without the guard the tracker
+    silently replaces the scene's subspace with an unrelated one and keeps reporting
+    healthy-looking numbers. Found by the subspace audit, 2026-08-16.
+    """
+    from e2e.blocks import AdaOjaBlock
+
+    d, k, m = 16, 2, 8
+    block = AdaOjaBlock(d, k, m=m)
+    U_before = block.oja.U.clone()
+    A = block.gen_A_ada()
+
+    block.update(torch.zeros(m, 4, dtype=torch.cfloat, device=device), A)
+    assert torch.isfinite(block.oja.U).all(), "zero frame produced a non-finite basis"
+    assert torch.allclose(block.oja.U, U_before), \
+        "zero frame silently swapped the tracked subspace for an arbitrary basis"
+
+    # A good frame afterwards must still update the tracker normally.
+    X = A @ randn_complex(d, 4)
+    block.update(X, A)
+    assert torch.isfinite(block.oja.U).all(), "tracker corrupted after the zero frame"
+    assert not torch.allclose(block.oja.U, U_before), "good frame should still update"

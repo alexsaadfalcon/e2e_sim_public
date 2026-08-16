@@ -403,7 +403,20 @@ class AdaOjaBlock:
             # accuracy (it reaches the k-truncated-SVD floor). Row(A) still contains U's
             # anchor rows, so this recovers the signal's dominant directions.
             Y = A.conj().T @ X
-            self.oja.U = orth(Y @ (Y.conj().T @ self.oja.U))
+            Z = Y @ (Y.conj().T @ self.oja.U)
+            # Zero-norm guard, mirroring Oja.add_data's (see e2e/subspace/algorithms.py).
+            # This path is WORSE than the legacy one without it: a degenerate frame makes
+            # Z all-zero, and orth()/QR of a zero matrix returns a perfectly valid but
+            # ARBITRARY orthonormal basis -- no NaN, no exception, no log. The tracker
+            # would silently swap the scene's subspace for an unrelated one and carry on
+            # looking healthy. An online tracker prefers skipping an uninformative frame
+            # to corrupting its state. (Found by the compression/subspace audit,
+            # 2026-08-16: the existing zero-frame regression test only ever exercised the
+            # legacy Oja class, never this -- the shipped default -- path.)
+            z_norm = torch.linalg.norm(Z)
+            if not torch.isfinite(z_norm) or z_norm == 0:
+                return
+            self.oja.U = orth(Z)
         else:
             # Legacy incremental Oja step. RMS-normalize X first so the (scale-invariant)
             # tracked direction doesn't retune eta with the input's absolute volts.
