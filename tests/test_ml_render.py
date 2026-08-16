@@ -121,6 +121,48 @@ def test_range_azimuth_map_norm_peak_shifts_reference(tiny_cfg):
     assert torch.allclose(shifted_db, own_db - 20.0, atol=1e-4)
 
 
+def test_range_azimuth_power_azimuth_window_hann_suppresses_off_target_sidelobe(tiny_cfg):
+    """`azimuth_window="hann"` is a DISPLAY-only knob (detect_viz's justification for
+    defaulting the figure backdrop to it): a strong, off-boresight target's rectangular-
+    window sidelobe skirt at a DIFFERENT azimuth (same range) must be measurably lower
+    with the Hann taper than without it."""
+    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.ml.scatterers import RadarPose
+
+    scat = [render_scene.Scatterer(position=(20.0, 12.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                                   rcs_dbsm=20.0, object_class="vehicle")]
+    pose = RadarPose(position=(0.0, 0.0, 0.0), boresight=(1.0, 0.0, 0.0))
+    adc = synthesize_adc(tiny_cfg, scat, pose, snr_db=40.0, seed=0)
+
+    rect_power, sin_az_axis = render_scene.range_azimuth_power(tiny_cfg, adc)
+    hann_power, hann_sin_az = render_scene.range_azimuth_power(tiny_cfg, adc, azimuth_window="hann")
+    assert np.allclose(sin_az_axis, hann_sin_az)
+
+    range_bin = int(rect_power.max(dim=0).values.argmax())  # the target's own range
+    az_peak = int(rect_power[:, range_bin].argmax())
+    # Sample the sidelobe skirt away from the mainlobe (>= 15 bins off peak).
+    far_bins = [i for i in range(rect_power.shape[0]) if abs(i - az_peak) >= 15]
+    assert far_bins
+
+    rect_db_far = 10.0 * torch.log10(rect_power[far_bins, range_bin] / rect_power.max())
+    hann_db_far = 10.0 * torch.log10(hann_power[far_bins, range_bin].clamp_min(1e-30)
+                                     / hann_power.max())
+    # Hann's sidelobe skirt must sit meaningfully lower on average than rectangular's.
+    assert float(hann_db_far.mean()) < float(rect_db_far.mean()) - 5.0
+
+
+def test_range_azimuth_power_azimuth_window_rejects_unknown_value(tiny_cfg):
+    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.ml.scatterers import RadarPose
+
+    scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                                   rcs_dbsm=10.0, object_class="vehicle")]
+    pose = RadarPose(position=(0.0, 0.0, 0.0), boresight=(1.0, 0.0, 0.0))
+    adc = synthesize_adc(tiny_cfg, scat, pose, snr_db=30.0, seed=0)
+    with pytest.raises(ValueError, match="azimuth_window"):
+        render_scene.range_azimuth_power(tiny_cfg, adc, azimuth_window="blackman")
+
+
 def test_render_scene_gif_color_scale_is_global_and_fixed(monkeypatch, tiny_cfg, tiny_scenario,
                                                           tmp_path):
     """OWNER FEEDBACK: the color scale must be one deliberate window for the whole
