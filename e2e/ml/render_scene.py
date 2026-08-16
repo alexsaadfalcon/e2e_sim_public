@@ -204,7 +204,8 @@ def _draw_birdseye(ax, scatterers: Sequence[Scatterer], pose: RadarPose, cfg):
 # Radar-view panel
 # --------------------------------------------------------------------------------
 def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis: np.ndarray,
-                     scatterers: Sequence[Scatterer], pose: RadarPose):
+                     scatterers: Sequence[Scatterer], pose: RadarPose,
+                     title: str = "Radar view: range-azimuth power (dB)"):
     ax.clear()
     max_range = float(cfg.max_range_m)
     n_range = ra_db.shape[1]
@@ -227,7 +228,7 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     ax.set_ylim(0.0, max_range)
     ax.set_xlabel("sin(azimuth)")
     ax.set_ylabel("range (m)")
-    ax.set_title("Radar view: range-azimuth power (dB)")
+    ax.set_title(title)
     if seen_labels:
         ax.legend(loc="upper right", fontsize=7, framealpha=0.7)
 
@@ -237,13 +238,20 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
 # --------------------------------------------------------------------------------
 def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 8, seed: int = 0,
                      snr_db: Optional[float] = 30.0, dpi: int = 90,
-                     n_angle_fft: Optional[int] = None) -> Path:
-    """Render a two-panel (bird's-eye + radar-view) animated GIF for `scenario`.
+                     n_angle_fft: Optional[int] = None, ideal_panel: bool = True) -> Path:
+    """Render a bird's-eye + radar-view animated GIF for `scenario`.
 
     `cfg` (a `RadarConfig`) sets both the synthesis parameters and the frame timing
     (`dt = 1 / cfg.frame_rate_hz`, see the module docstring). `seed` seeds
     `synthesize_adc`'s noise/phase RNG per frame (`seed + frame_index`, so frames are
     reproducible but not identical). Returns `out_path` as a `Path`.
+
+    `ideal_panel` (default True) inserts a THIRD panel between the bird's-eye view
+    and the noisy radar view: the SAME frame synthesized with `snr_db=None` (receiver
+    noise disabled entirely; the per-scatterer reflection phases stay). What remains
+    in that panel is only the scene's own ray-traced-style content -- targets,
+    auxiliary scatterers, clutter -- so the ideal-vs-real pair shows exactly what the
+    non-ideal front end costs.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +260,11 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     scats_per_frame, pose_per_frame = _resolve_frames(scenario, cfg, n_frames, dt)
     grid = LabelGrid.for_config(cfg)
 
-    fig, (ax_bev, ax_rv) = plt.subplots(1, 2, figsize=(10, 4.2), dpi=dpi)
+    if ideal_panel:
+        fig, (ax_bev, ax_ideal, ax_rv) = plt.subplots(1, 3, figsize=(15, 4.2), dpi=dpi)
+    else:
+        fig, (ax_bev, ax_rv) = plt.subplots(1, 2, figsize=(10, 4.2), dpi=dpi)
+        ax_ideal = None
     fig.suptitle(f"{scenario.name}  ({cfg.name})", fontsize=10)
 
     def _update(k: int):
@@ -261,9 +273,25 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
         adc = synthesize_adc(cfg, scatterers, pose, snr_db=snr_db, seed=seed + k)
         ra_db, sin_az_axis = range_azimuth_map(cfg, adc, n_angle_fft=n_angle_fft)
         _draw_birdseye(ax_bev, scatterers, pose, cfg)
-        _draw_radar_view(ax_rv, cfg, grid, ra_db, sin_az_axis, scatterers, pose)
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        if ax_ideal is not None:
+            # Same frame, same seed (identical reflection phases), receiver noise off:
+            # the only content is the scene itself.
+            adc_ideal = synthesize_adc(cfg, scatterers, pose, snr_db=None, seed=seed + k)
+            ra_ideal, sin_az_ideal = range_azimuth_map(cfg, adc_ideal, n_angle_fft=n_angle_fft)
+            _draw_radar_view(ax_ideal, cfg, grid, ra_ideal, sin_az_ideal, scatterers, pose,
+                             title="Ideal front end: scene only (dB)")
+            _draw_radar_view(ax_rv, cfg, grid, ra_db, sin_az_axis, scatterers, pose,
+                             title="Non-ideal front end (dB)")
+        else:
+            _draw_radar_view(ax_rv, cfg, grid, ra_db, sin_az_axis, scatterers, pose)
         return ()
+
+    # ONE layout pass, primed with frame 0, then frozen: tight_layout inside the
+    # per-frame loop re-settled the axes as early frames' contents (legends, tick
+    # extents) differed, so the subplot sizes visibly shifted over the GIF's first
+    # frames. Redraws after this keep these axes positions exactly.
+    _update(0)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     writer = PillowWriter(fps=fps)
     with writer.saving(fig, str(out_path), dpi=dpi):
@@ -530,6 +558,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0, help="RNG seed (scene sampling + per-frame synthesis noise)")
     p.add_argument("--snr-db", type=float, default=30.0, help="synthesis SNR in dB (GIF mode only)")
     p.add_argument("--dpi", type=int, default=90, help="figure DPI (GIF mode only)")
+    p.add_argument("--no-ideal-panel", action="store_true",
+                   help="GIF mode: drop the noise-free 'ideal front end' middle panel "
+                        "(see render_scene_gif's ideal_panel)")
     p.add_argument("--rt", action="store_true",
                    help="ray-trace a single camera PNG of an RT tier instead of an analytic GIF "
                         "(needs Sionna RT; see render_rt_tier_png)")
@@ -580,7 +611,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     scenario = sample_scene(cfg, args.tier, rng, **sample_scene_kwargs)
 
     out_path = render_scene_gif(cfg, scenario, args.out, n_frames=args.frames, fps=args.fps,
-                                seed=args.seed, snr_db=args.snr_db, dpi=args.dpi)
+                                seed=args.seed, snr_db=args.snr_db, dpi=args.dpi,
+                                ideal_panel=not args.no_ideal_panel)
     size_mb = out_path.stat().st_size / 1e6
     print(f"wrote {out_path} ({size_mb:.2f} MB, {args.frames} frames @ {args.fps} fps)")
     return 0

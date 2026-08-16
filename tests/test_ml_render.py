@@ -63,6 +63,45 @@ def test_render_scene_gif_creates_parent_directories(tiny_cfg, tiny_scenario, tm
     assert out_path.exists()
 
 
+def test_render_scene_gif_ideal_panel_default_and_opt_out(tiny_cfg, tiny_scenario, tmp_path):
+    """Default renders THREE panels (bird's-eye | ideal front end | non-ideal front
+    end) on a 15-inch canvas; `ideal_panel=False` keeps the legacy two-panel 10-inch
+    layout. Pinned via the GIF's pixel width (figsize x dpi), the public observable."""
+    dpi = 50
+    three = tmp_path / "three.gif"
+    two = tmp_path / "two.gif"
+    render_scene.render_scene_gif(tiny_cfg, tiny_scenario, three, n_frames=2, fps=4, dpi=dpi)
+    render_scene.render_scene_gif(tiny_cfg, tiny_scenario, two, n_frames=2, fps=4, dpi=dpi,
+                                  ideal_panel=False)
+    with PIL_Image.open(three) as im:
+        assert im.size[0] == 15 * dpi
+    with PIL_Image.open(two) as im:
+        assert im.size[0] == 10 * dpi
+
+
+def test_render_scene_gif_axes_do_not_move_between_frames(monkeypatch, tiny_cfg, tiny_scenario,
+                                                          tmp_path):
+    """REGRESSION (owner feedback): the subplot sizes visibly shifted over the GIF's
+    first frames because tight_layout ran inside the per-frame update and re-settled
+    as frame contents (legends, tick extents) changed. Layout is now computed once,
+    primed with frame 0 -- so every grabbed frame must see identical axes positions."""
+    from matplotlib.animation import PillowWriter
+
+    captured = []
+    orig_grab = PillowWriter.grab_frame
+
+    def spy(self, **kwargs):
+        captured.append([tuple(np.round(ax.get_position().bounds, 6))
+                         for ax in self.fig.axes])
+        return orig_grab(self, **kwargs)
+
+    monkeypatch.setattr(PillowWriter, "grab_frame", spy)
+    render_scene.render_scene_gif(tiny_cfg, tiny_scenario, tmp_path / "stable.gif",
+                                  n_frames=3, fps=4, dpi=50)
+    assert len(captured) == 3
+    assert captured[0] == captured[1] == captured[2]
+
+
 def test_render_scene_gif_ddma_config_also_renders(tiny_scenario, tmp_path):
     """DDMA (no tdm_deinterleave step) is a distinct code path in range_azimuth_map."""
     from e2e.ml.radar_config import RADIAL_LIKE
