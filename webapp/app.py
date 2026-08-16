@@ -260,7 +260,9 @@ def _render_results(results_data, active_tab):
     cards = []
     for key, fig_dict in results_data.items():
         cards.append(html.Div(
-            dcc.Graph(figure=fig_dict),
+            # No modebar: the zoom/export toolbar overlaps each card's title at
+            # this card width, and none of its tools matter for read-only results.
+            dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
             style={"flex": "1 1 45%", "minWidth": "420px", "margin": "6px",
                    "border": "1px solid #dfe4ea", "borderRadius": "6px",
                    "padding": "4px"},

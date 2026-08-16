@@ -727,7 +727,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if gains:
             title += f", array gain {np.mean(gains):.1f} dB"
         title += ")"
-        fig = go.Figure(data=go.Scatter(y=bers, mode="lines+markers"))
+        # BER=0 (no bit errors) is common on good frames but unplottable on a log
+        # axis -- Plotly drops the points and the whole figure renders empty. Clamp
+        # to a display floor and say so, rather than showing a blank plot.
+        ber_floor = 1e-6
+        plotted = [max(b, ber_floor) for b in bers]
+        fig = go.Figure(data=go.Scatter(y=plotted, mode="lines+markers"))
         fig.update_layout(
             title=title,
             xaxis_title="Frame",
@@ -736,6 +741,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             margin=dict(l=40, r=20, t=40, b=40),
             height=360,
         )
+        if any(b < ber_floor for b in bers):
+            fig.add_annotation(
+                text=f"frames with 0 bit errors shown at the {ber_floor:g} floor",
+                xref="paper", yref="paper", x=0.5, y=1.02,
+                showarrow=False, font=dict(size=11, color="#576574"),
+            )
         figs["ber"] = fig
 
     if outputs.get("evm"):

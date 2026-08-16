@@ -359,10 +359,13 @@ def layout() -> Any:
                     elements=[],            # populated by callback from store
                     stylesheet=CYTO_STYLESHEET,
                     # fit=True re-frames the viewport to the current extent on
-                    # every (re)render -- belt-and-suspenders with the taller
-                    # container below now that the ADC-cube band pushes y to ~770.
+                    # every (re)render. Height is sized to the diagram's OWN
+                    # aspect (~1400x840 layout units): at typical panel widths
+                    # the fit zoom is width-bound (~0.7), so the fitted content
+                    # is ~600px tall -- an 820px canvas just added a dead-space
+                    # band below the diagram (flagged in the showcase capture).
                     layout={"name": "preset", "fit": True, "padding": 20},
-                    style={"width": "100%", "height": "820px"},
+                    style={"width": "100%", "height": "620px"},
                     userZoomingEnabled=True,
                     userPanningEnabled=True,
                 ),
