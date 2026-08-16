@@ -61,6 +61,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from matplotlib.animation import PillowWriter  # noqa: E402
+from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.patches import Arc, Wedge  # noqa: E402
 
 from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
@@ -119,13 +120,14 @@ def _resolve_frames(scenario, cfg, n_frames: int, dt: float):
 # --------------------------------------------------------------------------------
 # Range-azimuth map
 # --------------------------------------------------------------------------------
-def range_azimuth_map(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None):
-    """Raw ADC `[n_rx, n_chirps, n_samples]` -> `(ra_db [n_angle, n_range], sin_az_axis)`.
+def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None):
+    """Raw ADC `[n_rx, n_chirps, n_samples]` -> `(ra_power [n_angle, n_range], sin_az_axis)`.
 
-    `ra_db` is normalized so its own peak bin is 0 dB (see the module docstring for the
-    angle-FFT-then-non-coherent-Doppler-collapse recipe). `sin_az_axis` is the centre
-    sin(azimuth) of each row, ascending. Range axis (columns) is implicit:
-    `i * cfg.range_resolution_m` for column `i`.
+    Linear power (angle-FFT-then-non-coherent-Doppler-collapse recipe, see the module
+    docstring), UN-normalized -- callers pick the dB reference. This is the seam that
+    lets `render_scene_gif` normalize a whole animation against ONE global peak instead
+    of re-normalizing every frame to its own peak (which silently re-scales the color
+    map frame-to-frame).
     """
     if cfg.mimo == "tdm":
         sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
@@ -139,12 +141,25 @@ def range_azimuth_map(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None)
     power = angle_spec.abs() ** 2
     ra_power = power.max(dim=2).values  # non-coherent Doppler collapse, [n_fft, R]
 
-    eps = torch.finfo(torch.float32).tiny
-    peak = ra_power.max().clamp_min(eps)
-    ra_db = 10.0 * torch.log10((ra_power / peak).clamp_min(eps))
-
     sin_az_axis = 2.0 * (torch.arange(n_fft, dtype=torch.float32) - n_fft // 2) / n_fft
-    return ra_db.to(torch.float32).cpu(), sin_az_axis.numpy()
+    return ra_power.to(torch.float32).cpu(), sin_az_axis.numpy()
+
+
+def range_azimuth_map(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None,
+                      norm_peak: Optional[float] = None):
+    """Raw ADC `[n_rx, n_chirps, n_samples]` -> `(ra_db [n_angle, n_range], sin_az_axis)`.
+
+    `ra_db` is normalized so `norm_peak` (linear power) sits at 0 dB; with the default
+    `norm_peak=None` the map's own peak bin is the reference, the historical behavior.
+    `sin_az_axis` is the centre sin(azimuth) of each row, ascending. Range axis
+    (columns) is implicit: `i * cfg.range_resolution_m` for column `i`.
+    """
+    ra_power, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft)
+    eps = torch.finfo(torch.float32).tiny
+    peak = torch.as_tensor(float(norm_peak)) if norm_peak is not None else ra_power.max()
+    peak = peak.clamp_min(eps)
+    ra_db = 10.0 * torch.log10((ra_power / peak).clamp_min(eps))
+    return ra_db.to(torch.float32), sin_az_axis
 
 
 # --------------------------------------------------------------------------------
@@ -205,7 +220,8 @@ def _draw_birdseye(ax, scatterers: Sequence[Scatterer], pose: RadarPose, cfg):
 # --------------------------------------------------------------------------------
 def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis: np.ndarray,
                      scatterers: Sequence[Scatterer], pose: RadarPose,
-                     title: str = "Radar view: range-azimuth power (dB)"):
+                     title: str = "Radar view: range-azimuth power (dB)",
+                     vmin: float = -40.0, vmax: float = 0.0):
     ax.clear()
     max_range = float(cfg.max_range_m)
     n_range = ra_db.shape[1]
@@ -214,7 +230,7 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     # Orientation (transpose + azimuth-on-x/range-on-y) is owned by e2e.viz.imshow_ra
     # -- see its docstring for why the transpose is needed (markers below use `extent`
     # directly and are unaffected either way).
-    imshow_ra(ax, ra_db, sin_az_axis, range_axis, cmap="inferno", vmin=-40.0, vmax=0.0)
+    imshow_ra(ax, ra_db, sin_az_axis, range_axis, cmap="inferno", vmin=vmin, vmax=vmax)
 
     seen_labels = set()
     for r, sin_az, cls in targets_in_grid(grid, scatterers, pose, classes=("vehicle", "pedestrian")):
@@ -238,7 +254,8 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
 # --------------------------------------------------------------------------------
 def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 8, seed: int = 0,
                      snr_db: Optional[float] = 30.0, dpi: int = 90,
-                     n_angle_fft: Optional[int] = None, ideal_panel: bool = True) -> Path:
+                     n_angle_fft: Optional[int] = None, ideal_panel: bool = True,
+                     db_range: float = 40.0) -> Path:
     """Render a bird's-eye + radar-view animated GIF for `scenario`.
 
     `cfg` (a `RadarConfig`) sets both the synthesis parameters and the frame timing
@@ -252,6 +269,13 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     in that panel is only the scene's own ray-traced-style content -- targets,
     auxiliary scatterers, clutter -- so the ideal-vs-real pair shows exactly what the
     non-ideal front end costs.
+
+    Color scale (owner feedback): ONE deliberate scale for the whole animation, not
+    per-frame autoscale. Every radar map is referenced to the single global peak over
+    ALL frames and BOTH arms (so the ideal and non-ideal panels are directly
+    comparable, and brightness genuinely evolves as targets move), windowed to
+    `[-db_range, 0]` dB -- `db_range` defaults to 40 dB, i.e. 4 decades of power --
+    and annotated with an explicit colorbar.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,6 +283,34 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     dt = 1.0 / float(cfg.frame_rate_hz)
     scats_per_frame, pose_per_frame = _resolve_frames(scenario, cfg, n_frames, dt)
     grid = LabelGrid.for_config(cfg)
+
+    # Pass 1 -- synthesize every frame (both arms) and collect linear power maps, so
+    # the dB reference below can be the one global peak. Maps are [n_fft, n_range]
+    # float32; even a long animation is a few MB.
+    power_real: List[torch.Tensor] = []
+    power_ideal: List[torch.Tensor] = []
+    sin_az_axis = None
+    for k in range(n_frames):
+        adc = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
+                             snr_db=snr_db, seed=seed + k)
+        p, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft)
+        power_real.append(p)
+        if ideal_panel:
+            # Same frame, same seed (identical reflection phases), receiver noise off:
+            # the only content is the scene itself.
+            adc_ideal = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
+                                       snr_db=None, seed=seed + k)
+            p_ideal, _ = range_azimuth_power(cfg, adc_ideal, n_angle_fft=n_angle_fft)
+            power_ideal.append(p_ideal)
+
+    eps = torch.finfo(torch.float32).tiny
+    global_peak = max(float(p.max()) for p in power_real + power_ideal)
+    global_peak = max(global_peak, float(eps))
+
+    def _to_db(p: torch.Tensor) -> torch.Tensor:
+        return 10.0 * torch.log10((p / global_peak).clamp_min(eps))
+
+    vmin, vmax = -float(db_range), 0.0
 
     if ideal_panel:
         fig, (ax_bev, ax_ideal, ax_rv) = plt.subplots(1, 3, figsize=(15, 4.2), dpi=dpi)
@@ -270,20 +322,17 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     def _update(k: int):
         scatterers = scats_per_frame[k]
         pose = pose_per_frame[k]
-        adc = synthesize_adc(cfg, scatterers, pose, snr_db=snr_db, seed=seed + k)
-        ra_db, sin_az_axis = range_azimuth_map(cfg, adc, n_angle_fft=n_angle_fft)
         _draw_birdseye(ax_bev, scatterers, pose, cfg)
         if ax_ideal is not None:
-            # Same frame, same seed (identical reflection phases), receiver noise off:
-            # the only content is the scene itself.
-            adc_ideal = synthesize_adc(cfg, scatterers, pose, snr_db=None, seed=seed + k)
-            ra_ideal, sin_az_ideal = range_azimuth_map(cfg, adc_ideal, n_angle_fft=n_angle_fft)
-            _draw_radar_view(ax_ideal, cfg, grid, ra_ideal, sin_az_ideal, scatterers, pose,
-                             title="Ideal front end: scene only (dB)")
-            _draw_radar_view(ax_rv, cfg, grid, ra_db, sin_az_axis, scatterers, pose,
-                             title="Non-ideal front end (dB)")
+            _draw_radar_view(ax_ideal, cfg, grid, _to_db(power_ideal[k]), sin_az_axis,
+                             scatterers, pose, title="Ideal front end: scene only",
+                             vmin=vmin, vmax=vmax)
+            _draw_radar_view(ax_rv, cfg, grid, _to_db(power_real[k]), sin_az_axis,
+                             scatterers, pose, title="Non-ideal front end",
+                             vmin=vmin, vmax=vmax)
         else:
-            _draw_radar_view(ax_rv, cfg, grid, ra_db, sin_az_axis, scatterers, pose)
+            _draw_radar_view(ax_rv, cfg, grid, _to_db(power_real[k]), sin_az_axis,
+                             scatterers, pose, vmin=vmin, vmax=vmax)
         return ()
 
     # ONE layout pass, primed with frame 0, then frozen: tight_layout inside the
@@ -291,7 +340,22 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     # extents) differed, so the subplot sizes visibly shifted over the GIF's first
     # frames. Redraws after this keep these axes positions exactly.
     _update(0)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    # Right margin at 0.96, not 1.0: the colorbar body steals its width from the
+    # radar axes, but its tick labels and rotated axis label extend PAST its own
+    # axes -- at a full-width layout they clip off the figure's right edge.
+    fig.tight_layout(rect=(0, 0, 0.96, 0.94))
+    # Colorbar AFTER the layout pass (it steals its space from the radar axes once,
+    # then everything is frozen), from a standalone mappable so the per-frame
+    # ax.clear() + re-imshow cycle can never orphan it.
+    mappable = plt.cm.ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap="inferno")
+    radar_axes = [ax for ax in (ax_ideal, ax_rv) if ax is not None]
+    fig.colorbar(mappable, ax=radar_axes, fraction=0.03, pad=0.02,
+                 label="power (dB, rel. animation peak)")
+    # One throwaway draw: the colorbar's own aspect-driven width settles on the FIRST
+    # canvas draw (measured 0.019 -> 0.009 figure-fraction), which would otherwise be
+    # a visible one-frame width jump at the start of the GIF -- the same class of
+    # early-frame jitter the single tight_layout pass above exists to prevent.
+    fig.canvas.draw()
 
     writer = PillowWriter(fps=fps)
     with writer.saving(fig, str(out_path), dpi=dpi):

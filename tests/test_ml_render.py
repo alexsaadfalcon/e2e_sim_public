@@ -102,6 +102,60 @@ def test_render_scene_gif_axes_do_not_move_between_frames(monkeypatch, tiny_cfg,
     assert captured[0] == captured[1] == captured[2]
 
 
+def test_range_azimuth_map_norm_peak_shifts_reference(tiny_cfg):
+    """`norm_peak` re-references the dB scale: normalizing against 100x the map's own
+    peak must shift every bin down by exactly 20 dB (power/10log)."""
+    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.ml.scatterers import RadarPose
+
+    scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                                   rcs_dbsm=10.0, object_class="vehicle")]
+    pose = RadarPose(position=(0.0, 0.0, 0.0), boresight=(1.0, 0.0, 0.0))
+    adc = synthesize_adc(tiny_cfg, scat, pose, snr_db=30.0, seed=0)
+
+    own_db, _ = render_scene.range_azimuth_map(tiny_cfg, adc)
+    power, _ = render_scene.range_azimuth_power(tiny_cfg, adc)
+    shifted_db, _ = render_scene.range_azimuth_map(tiny_cfg, adc,
+                                                  norm_peak=float(power.max()) * 100.0)
+    assert float(own_db.max()) == pytest.approx(0.0, abs=1e-5)
+    assert torch.allclose(shifted_db, own_db - 20.0, atol=1e-4)
+
+
+def test_render_scene_gif_color_scale_is_global_and_fixed(monkeypatch, tiny_cfg, tiny_scenario,
+                                                          tmp_path):
+    """OWNER FEEDBACK: the color scale must be one deliberate window for the whole
+    animation, not per-frame autoscale. Pins three things at grab time on every frame:
+    (a) every radar image's clim is exactly (-db_range, 0); (b) a colorbar axes
+    exists; (c) at most ONE frame's radar maps touch 0 dB -- with per-frame peak
+    normalization EVERY frame would (that was the bug)."""
+    from matplotlib.animation import PillowWriter
+
+    clims, data_maxes, n_axes = [], [], []
+    orig_grab = PillowWriter.grab_frame
+
+    def spy(self, **kwargs):
+        frame_clims, frame_max = [], -np.inf
+        for ax in self.fig.axes:
+            for im in ax.get_images():
+                frame_clims.append(im.get_clim())
+                frame_max = max(frame_max, float(np.max(im.get_array())))
+        clims.append(frame_clims)
+        data_maxes.append(frame_max)
+        n_axes.append(len(self.fig.axes))
+        return orig_grab(self, **kwargs)
+
+    monkeypatch.setattr(PillowWriter, "grab_frame", spy)
+    render_scene.render_scene_gif(tiny_cfg, tiny_scenario, tmp_path / "scale.gif",
+                                  n_frames=3, fps=4, dpi=50, db_range=40.0)
+
+    for frame_clims in clims:
+        assert frame_clims and all(c == (-40.0, 0.0) for c in frame_clims)
+    # 3 panels + 1 colorbar axes.
+    assert all(n == 4 for n in n_axes)
+    # Global reference: only the frame(s) holding the global peak reach 0 dB.
+    assert sum(1 for m in data_maxes if m > -1e-4) <= 1
+
+
 def test_render_scene_gif_ddma_config_also_renders(tiny_scenario, tmp_path):
     """DDMA (no tdm_deinterleave step) is a distinct code path in range_azimuth_map."""
     from e2e.ml.radar_config import RADIAL_LIKE
