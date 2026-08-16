@@ -144,6 +144,13 @@ def test_render_scene_gif_color_scale_is_global_and_fixed(monkeypatch, tiny_cfg,
         n_axes.append(len(self.fig.axes))
         return orig_grab(self, **kwargs)
 
+    # The DEFAULT window is 80 dB, measured against the scenes' own dynamic range (the
+    # pedestrians and the noise floor both live below -38 dB; see render_scene_gif).
+    # Pinned here so a future "tidy-up" to a conventional 40 dB can't silently re-hide
+    # them. This test then passes db_range explicitly to prove the knob works.
+    import inspect
+    assert inspect.signature(render_scene.render_scene_gif).parameters["db_range"].default == 80.0
+
     monkeypatch.setattr(PillowWriter, "grab_frame", spy)
     render_scene.render_scene_gif(tiny_cfg, tiny_scenario, tmp_path / "scale.gif",
                                   n_frames=3, fps=4, dpi=50, db_range=40.0)

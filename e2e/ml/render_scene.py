@@ -120,7 +120,8 @@ def _resolve_frames(scenario, cfg, n_frames: int, dt: float):
 # --------------------------------------------------------------------------------
 # Range-azimuth map
 # --------------------------------------------------------------------------------
-def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None):
+def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None,
+                        azimuth_window: Optional[str] = None):
     """Raw ADC `[n_rx, n_chirps, n_samples]` -> `(ra_power [n_angle, n_range], sin_az_axis)`.
 
     Linear power (angle-FFT-then-non-coherent-Doppler-collapse recipe, see the module
@@ -128,6 +129,17 @@ def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = Non
     lets `render_scene_gif` normalize a whole animation against ONE global peak instead
     of re-normalizing every frame to its own peak (which silently re-scales the color
     map frame-to-frame).
+
+    `azimuth_window` optionally tapers the aperture before the angle FFT ('hann'; None
+    = the historical rectangular window). DISPLAY-ONLY knob: with a rectangular window
+    a 12-element virtual array puts its first sidelobe just 13 dB down and its skirts
+    decay slowly, so over a wide dB display a strong near target smears a bright ridge
+    across EVERY azimuth bin at its range -- which visually buries genuinely weaker
+    targets (pedestrians) sitting at the same range. A Hann taper trades ~1.6x mainlobe
+    width for far lower sidelobes and makes targets read as targets. Detection paths do
+    NOT come through here (`e2e.ml.baseline` has its own power function), so this
+    changes pictures, never metrics -- and it defaults off so every other caller
+    (`detect_viz`, `export_ssm`) keeps showing exactly what its detector saw.
     """
     if cfg.mimo == "tdm":
         sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
@@ -136,6 +148,13 @@ def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = Non
         rd = adc_to_rd(cfg, adc)
     n_channel = rd.shape[0]
     n_fft = int(n_angle_fft) if n_angle_fft is not None else max(64, n_channel)
+
+    if azimuth_window is not None:
+        if azimuth_window != "hann":
+            raise ValueError(f"unsupported azimuth_window {azimuth_window!r}; expected 'hann' or None")
+        taper = torch.hann_window(n_channel, periodic=False, dtype=torch.float32,
+                                  device=rd.device)
+        rd = rd * taper.reshape(-1, 1, 1).to(rd.dtype)
 
     angle_spec = torch.fft.fftshift(torch.fft.fft(rd, n=n_fft, dim=0), dim=0)  # [n_fft, R, D]
     power = angle_spec.abs() ** 2
@@ -146,7 +165,8 @@ def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = Non
 
 
 def range_azimuth_map(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None,
-                      norm_peak: Optional[float] = None):
+                      norm_peak: Optional[float] = None,
+                      azimuth_window: Optional[str] = None):
     """Raw ADC `[n_rx, n_chirps, n_samples]` -> `(ra_db [n_angle, n_range], sin_az_axis)`.
 
     `ra_db` is normalized so `norm_peak` (linear power) sits at 0 dB; with the default
@@ -154,7 +174,8 @@ def range_azimuth_map(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = None,
     `sin_az_axis` is the centre sin(azimuth) of each row, ascending. Range axis
     (columns) is implicit: `i * cfg.range_resolution_m` for column `i`.
     """
-    ra_power, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft)
+    ra_power, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft,
+                                                azimuth_window=azimuth_window)
     eps = torch.finfo(torch.float32).tiny
     peak = torch.as_tensor(float(norm_peak)) if norm_peak is not None else ra_power.max()
     peak = peak.clamp_min(eps)
@@ -237,8 +258,17 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
         marker, color = _GT_MARKERS.get(cls, ("x", "white"))
         label = f"GT {cls}" if cls not in seen_labels else None
         seen_labels.add(cls)
+        # Dark halo under the marker: the class colors are shared with the bird's-eye
+        # panel (so the legend reads the same across panels), but amber-on-inferno has
+        # almost no contrast wherever the map sits mid-scale -- which is exactly where
+        # the receiver noise floor lands. The halo keeps those colors legible on any
+        # background without inventing a second color language for the radar view.
+        ax.plot(sin_az, r, marker=marker, markersize=11, markerfacecolor="none",
+                markeredgecolor="black", markeredgewidth=3.2, linestyle="none",
+                zorder=4)
         ax.plot(sin_az, r, marker=marker, markersize=9, markerfacecolor="none",
-                markeredgecolor=color, markeredgewidth=1.6, linestyle="none", label=label)
+                markeredgecolor=color, markeredgewidth=1.6, linestyle="none",
+                label=label, zorder=5)
 
     ax.set_xlim(-1.0, 1.0)
     ax.set_ylim(0.0, max_range)
@@ -255,7 +285,8 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
 def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 8, seed: int = 0,
                      snr_db: Optional[float] = 30.0, dpi: int = 90,
                      n_angle_fft: Optional[int] = None, ideal_panel: bool = True,
-                     db_range: float = 40.0) -> Path:
+                     db_range: float = 80.0,
+                     azimuth_window: Optional[str] = "hann") -> Path:
     """Render a bird's-eye + radar-view animated GIF for `scenario`.
 
     `cfg` (a `RadarConfig`) sets both the synthesis parameters and the frame timing
@@ -270,12 +301,21 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     auxiliary scatterers, clutter -- so the ideal-vs-real pair shows exactly what the
     non-ideal front end costs.
 
-    Color scale (owner feedback): ONE deliberate scale for the whole animation, not
-    per-frame autoscale. Every radar map is referenced to the single global peak over
-    ALL frames and BOTH arms (so the ideal and non-ideal panels are directly
-    comparable, and brightness genuinely evolves as targets move), windowed to
-    `[-db_range, 0]` dB -- `db_range` defaults to 40 dB, i.e. 4 decades of power --
-    and annotated with an explicit colorbar.
+    Color scale: ONE deliberate scale for the whole animation, not per-frame
+    autoscale. Every radar map is referenced to the single global peak over ALL frames
+    and BOTH arms (so the ideal and non-ideal panels are directly comparable, and
+    brightness genuinely evolves as targets move), windowed to `[-db_range, 0]` dB and
+    annotated with an explicit colorbar.
+
+    `db_range` defaults to 80 dB, which is wider than a display window usually wants
+    (2-4 decades) for a MEASURED reason: on a D2 scene the two pedestrians sit at
+    -38.6 and -47.5 dB relative to the animation peak (a near-range vehicle), and the
+    receiver noise floor sits at -40.1 dB. A 40 dB window therefore clipped the far
+    pedestrian away entirely AND cut off exactly at the noise floor, which rendered
+    black -- making the ideal and non-ideal panels look identical and hiding the very
+    contrast the pair exists to show. At 80 dB the ideal arm resolves pedestrian-scale
+    returns and the non-ideal arm shows the noise floor that buries them. Narrow this
+    only after re-measuring the scene's own dynamic range.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,14 +333,16 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     for k in range(n_frames):
         adc = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
                              snr_db=snr_db, seed=seed + k)
-        p, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft)
+        p, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft,
+                                            azimuth_window=azimuth_window)
         power_real.append(p)
         if ideal_panel:
             # Same frame, same seed (identical reflection phases), receiver noise off:
             # the only content is the scene itself.
             adc_ideal = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
                                        snr_db=None, seed=seed + k)
-            p_ideal, _ = range_azimuth_power(cfg, adc_ideal, n_angle_fft=n_angle_fft)
+            p_ideal, _ = range_azimuth_power(cfg, adc_ideal, n_angle_fft=n_angle_fft,
+                                            azimuth_window=azimuth_window)
             power_ideal.append(p_ideal)
 
     eps = torch.finfo(torch.float32).tiny
