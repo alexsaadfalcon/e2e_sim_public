@@ -6,6 +6,18 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Range-migration corpus generation no longer exhausts host memory.** The
+  2026-08-14 `range_migration=True` default routed generation through the
+  closed-form per-path CFR, whose naive numpy broadcast materialises ~34 GB
+  complex128 temporaries at realistic path counts (~800-3500) -- a corpus run
+  swap-thrashed a 32 GB machine without finishing one scene. `cfr_from_paths` now
+  uses `cfr_sum_over_paths_budgeted`: the same math chunked over paths and
+  frequencies under an explicit byte budget (torch, CUDA when available), measured
+  at 29 s / 1.6 GiB peak for the worst observed solve. Results agree with the
+  float64 reference to complex64 precision (pinned by tests); pre-flip
+  `range_migration=False` generation is unaffected.
+
 ### Changed
 - **The shipped pipeline entry points now enable the subspace tracker's reactive
   refinement** (`AdaOjaBlock(gap_response="refine")` in the webapp runner,
