@@ -98,3 +98,71 @@ def test_tutorial_smoke_runs_without_disk(tmp_path, monkeypatch):
     lo, hi = res["band_loss_db"]
     assert -12.0 < lo <= hi < 0.0            # physical insertion loss over the band
     assert list(tmp_path.iterdir()) == []    # show=False -> no figure written
+
+
+# --------------------------------------------------------------------------------
+# range_profile_comparison: interconnect models vs. radar range profile.
+# --------------------------------------------------------------------------------
+
+
+def test_case3_csv_loads_and_is_physical():
+    import e2e.main.main_interconnect as mi
+
+    freq, s21 = load_interconnect_transfer(mi.CASE3_INTERCONNECT_CSV)
+    assert np.all(np.diff(freq) > 0)
+    assert freq[0] == pytest.approx(70e9)
+    assert np.all(np.abs(s21) <= 1.0 + 1e-6)   # passive
+
+
+def test_range_profile_comparison_insertion_loss_and_ripple():
+    """Re-derives the two headline numbers the owner already measured directly from
+    the shipped CSVs (mean/peak-to-peak |S21| in dB over each pipeline band)."""
+    import e2e.main.main_interconnect as mi
+
+    res = mi.range_profile_comparison(show=False, n_freqs=64)
+    il = res["insertion_loss_db"]
+    ripple = res["ripple_db"]
+    assert il["tessera_tsv"] == pytest.approx(-7.46, abs=0.05)
+    assert ripple["tessera_tsv"] == pytest.approx(0.80, abs=0.05)
+    assert il["tessera_case3"] == pytest.approx(-0.53, abs=0.05)
+    assert ripple["tessera_case3"] == pytest.approx(0.03, abs=0.02)
+    # Case3 is the collaborator's worst-of-six pick, not necessarily better than TSV --
+    # this module must never rank them; just sanity-check both are passive (loss <= 0).
+    assert il["tessera_tsv"] < 0.0 and il["tessera_case3"] < 0.0
+
+
+def test_range_profile_comparison_mainlobe_metrics():
+    """The physically-modelled interconnects (ideal/TSV/Case3) all resolve to the
+    finest possible native-resolution mainlobe (1 bin); only the legacy placeholder
+    smears it -- the figure's central, owner-specified finding."""
+    import e2e.main.main_interconnect as mi
+
+    res = mi.range_profile_comparison(show=False, n_freqs=512)
+    m = res["metrics"]
+    assert m["ideal"]["width_3db_bins"] == 1
+    assert m["tessera_tsv"]["width_3db_bins"] == 1
+    assert m["tessera_case3"]["width_3db_bins"] == 1
+    assert m["legacy_boxcar"]["width_3db_bins"] == 11
+    # Ideal has (numerically) no sidelobe at all at native resolution; the two
+    # physically-modelled interconnects show a small but real sub-mainlobe skirt from
+    # their in-band ripple, well below the mainlobe.
+    assert m["ideal"]["peak_sidelobe_db"] < -100.0
+    assert -60.0 < m["tessera_tsv"]["peak_sidelobe_db"] < -10.0
+    assert -90.0 < m["tessera_case3"]["peak_sidelobe_db"] < -40.0
+
+
+def test_range_profile_comparison_smoke_runs_without_disk(tmp_path, monkeypatch):
+    """`show=False` computes everything but touches no disk (same contract as
+    `main`); `show=True` writes exactly one figure to the (monkeypatched) path."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import e2e.main.main_interconnect as mi
+
+    monkeypatch.setattr(mi, "RANGE_PROFILE_FIG_PATH", str(tmp_path / "sub" / "out.png"))
+    res = mi.range_profile_comparison(show=False, n_freqs=64)
+    assert "metrics" in res
+    assert not (tmp_path / "sub").exists()   # show=False -> no directory/file created
+
+    res2 = mi.range_profile_comparison(show=True, n_freqs=64)
+    assert (tmp_path / "sub" / "out.png").is_file()
+    assert res2["metrics"]["legacy_boxcar"]["width_3db_bins"] >= res2["metrics"]["ideal"]["width_3db_bins"]

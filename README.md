@@ -2,6 +2,33 @@
 
 **Release v1.0**
 
+Simulate a large antenna array **end to end**: a ray-traced RF environment
+([Sionna RT](https://nvlabs.github.io/sionna/)) → analog RF front-end distortion →
+a measurement-driven interconnect → adaptive feature extraction → online subspace
+tracking → radar maps, target scenes, and OFDM communications. Every stage is a
+swappable **block**, configurable from Python or from the browser — and every figure
+below is produced by code in this repository.
+
+<p align="center">
+  <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">
+</p>
+<p align="center"><em>The web UI: edit the pipeline as a block diagram, tweak a knob, run real
+ray-traced frames through the full receive chain, and inspect the radar products — all in the browser.</em></p>
+
+## Gallery
+
+| | |
+|---|---|
+| ![Ray-traced city scene next to the range-azimuth map the pipeline computes from it](docs/media/scene_vs_ra.png) | ![A photo's raw bits sent through the OFDM comms link at four operating points](docs/media/image_link.png) |
+| *The scene and what the radar sees: a ray-traced city scene (left) and the pipeline's range-azimuth map with ground-truth targets (right).* | *Seeing is believing for comms too: a photo's bits through the same array's OFDM link — clean, noisy, and with TX power-amplifier distortion.* |
+| ![One frame traced through every pipeline stage, from raw channel response to the final azimuth-elevation map](docs/media/signal_journey.png) | ![Moving tier-D2 scene: bird's-eye view, ideal-front-end radar returns, and non-ideal-front-end radar returns](docs/media/scene_D2.gif) |
+| *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
+| ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the measurement-driven model](docs/media/interconnect_before_after.png) |
+| *The online subspace tracker watches its own spectral gap and spends extra refinement iterations only when the scene degenerates.* | *Hardware realism is data-driven: the interconnect block built from HFSS S-parameter measurements vs the legacy placeholder.* |
+
+![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
+*Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4).*
+
 ## Getting Started
 
 ### Installation
@@ -237,9 +264,36 @@ or a link-level abstraction.
 - **Frames are independent scene snapshots** with no frame-to-frame phase continuity, so
   Doppler processing across frames (as opposed to within a single frame/chirp) is not
   physically meaningful.
-- **The interconnect model is a placeholder**: a fixed 11-tap boxcar frequency response
-  (`InterconnectBlock`), independent of the scenario's `FrequencyPlan`. It stands in for
-  a real interconnect filter but is not derived from one.
+- **`InterconnectBlock` still defaults to a placeholder**: a fixed 11-tap boxcar
+  frequency response, independent of the scenario's `FrequencyPlan`. Measurement-driven
+  transfer functions are available and shipped (see below) but are opt-in.
+
+### Interconnect: placeholder vs. measured
+
+Pass `transfer_csv=` to `InterconnectBlock` and the interconnect stops being a stand-in:
+the block loads a measured |S21|(f) and resamples it onto the scenario's band. Two derived
+datasets ship in `e2e/data/interconnect/`, both from collaborator HFSS/surrogate
+S-parameter data.
+
+```bash
+python -m e2e.main.main_interconnect     # writes both figures below
+```
+
+![Interconnect transfer functions and the range profiles they produce, with the sidelobe skirt zoomed](docs/media/interconnect_range_profiles.png)
+
+*What a real interconnect costs you.* Top row: the two measured transfer functions, each
+against its own band. Bottom left: all four range profiles at native resolution — every
+data-driven arm keeps a 1-bin mainlobe, while the legacy boxcar smears it to 11 bins.
+Bottom right: the same data with the y-axis stretched over the sidelobe skirt, where the
+differences actually live. In-band ripple sets the skirt height, exactly as it should:
+0.80 dB p-p of ripple gives a −34.5 dB sidelobe, 0.03 dB gives −64.4 dB.
+
+Two honesty notes, because this figure is easy to over-read. The two models sit in
+**different bands** (Ka-band and 77 GHz automotive), so this is not a head-to-head ranking
+of designs. And the 77 GHz case shown is deliberately the **worst of six** measured
+designs — it is a conservative bound, not a typical part. Sidelobe numbers are measured at
+**native resolution**: zero-padding the transform contributes sidelobes of its own and
+would swamp the effect being shown.
 
 ## Communications and joint radar/comms (ISAC) examples
 
@@ -307,13 +361,16 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
 format, smoke-test results, and model attribution/licensing notes.
 
-`python -m e2e.ml.render_scene` renders a sampled scene (bird's-eye view + the radar's
-own range-azimuth power map) to an animated GIF, e.g. a busy D2 scene with several
-moving vehicles/pedestrians crossing the field of view:
+`python -m e2e.ml.render_scene` renders a sampled scene to an animated GIF with three
+panels: the bird's-eye view, an **ideal front end** (receiver noise disabled, so the
+only content is the scene's own targets, auxiliary scatterers, and clutter), and the
+**non-ideal front end** (the same frame through the noisy receiver) -- e.g. a busy D2
+scene with several moving vehicles/pedestrians crossing the field of view:
 
-![D2 scene: bird's-eye view and radar range-azimuth map](docs/media/scene_D2.gif)
+![D2 scene: bird's-eye view, ideal-front-end range-azimuth map, and non-ideal-front-end range-azimuth map](docs/media/scene_D2.gif)
 
-See also [a quiet single-target D0 scene](docs/media/scene_D0.gif) and a
+See also [a quiet single-target D0 scene](docs/media/scene_D0.gif), a
+[few-vehicle D1 scene](docs/media/scene_D1.gif), and a
 [dense multi-target D3 scene](docs/media/scene_D3.gif).
 
 ## Cookbook

@@ -2,18 +2,20 @@
 
 The pipeline's ``InterconnectBlock`` filters the aperture frame by an interconnect
 frequency response. By default that response is a placeholder 11-tap boxcar (a fixed
-shape, no physical units). This example shows how to instead drive it from a simulated
-Through-Silicon-Via (TSV) transfer function S21(f) that ships as CSV data
-(``e2e/data/interconnect/tessera_tsv_s21.csv``), and how it behaves over the pipeline's
-frequency band.
+shape, no physical units). This example shows how to instead drive it from simulated/
+measured interconnect transfer functions S21(f) that ship as CSV data
+(``e2e/data/interconnect/*.csv``), and how they behave over their respective bands --
+both as a raw |S21|(f) response and as a radar RANGE PROFILE (what actually reaches a
+downstream detector).
 
-The CSV was produced by an external physics-informed TSV surrogate model (not vendored
-here -- only the derived data is committed; see the data README). This tutorial needs
-only the committed CSV + numpy/torch, so it is fully reproducible.
+The CSVs were produced by an external collaborator's models (not vendored here -- only
+the derived data is committed; see the data README). This tutorial needs only the
+committed CSVs + numpy/torch, so it is fully reproducible.
 
 Run:  python -m e2e.main.main_interconnect
 """
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -38,6 +40,27 @@ FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 
 BAND = (28.5e9, 31.5e9)   # the default pipeline FrequencyPlan band
 N_FREQS = 512
+
+# A second shipped interconnect model: a 77 GHz-automotive-band S21(f), resampled (magnitude
+# from the collaborator's HFSS export, phase reconstructed as minimum-phase -- see the CSV's
+# own header) from a design the collaborator calls "Case3". Case3 is NOT a flattering pick:
+# per the collaborator, it is deliberately the WORST-PERFORMING of six HFSS-measured
+# interconnect designs they supplied, chosen specifically so that if the interconnect had any
+# visible cost to the radar product, this is the case that would show it (a conservative
+# validation bound, not a representative or best-case number). The other five designs are the
+# collaborator's private data and are not referenced anywhere in this repository -- not even
+# their numbers -- beyond that qualitative fact.
+CASE3_INTERCONNECT_CSV = (
+    Path(__file__).resolve().parent.parent / "data" / "interconnect" / "tessera_case3_s21_77ghz.csv"
+)
+CASE3_BAND = (76e9, 81e9)   # automotive radar band the Case3 export is used over
+
+# Separate from FIG_DIR (ephemeral, e2e/main/figures/): this is committed, README-facing
+# media, so it is a distinct path -- kept as a module global (not a bound default
+# parameter) for the same monkeypatch-for-tests reason as FIG_DIR above.
+RANGE_PROFILE_FIG_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "media" / "interconnect_range_profiles.png"
+)
 
 
 def main(show=True, band=BAND, n_freqs=N_FREQS):
@@ -90,5 +113,237 @@ def main(show=True, band=BAND, n_freqs=N_FREQS):
     return result
 
 
+def _band_insertion_loss_ripple(freq, s21, band):
+    """Mean insertion loss and peak-to-peak ripple (both dB of |S21|) over `band`,
+    computed from the CSV's own native sample points inside the band (no
+    interpolation) -- the most direct, least-assumption re-derivation of those two
+    numbers from the shipped data."""
+    mask = (freq >= band[0]) & (freq <= band[1])
+    db = 20 * np.log10(np.abs(s21[mask]) + 1e-12)
+    return float(db.mean()), float(db.max() - db.min())
+
+
+def _native_range_profile_db(H):
+    """Range profile of a frequency response `H` (numpy, 1-D), matching
+    RangeProfileBlock's own convention exactly: a windowless forward FFT over the
+    frequency axis, fftshifted, magnitude. Deliberately NATIVE resolution -- no
+    zero-padding/interpolation -- so this is exactly the per-bin range profile the
+    pipeline itself would produce, not an interpolated estimate (zero-padding a
+    profile that includes the legacy boxcar's sharp-edged impulse response produces
+    Gibbs-ringing artifacts that don't reflect anything about the pipeline)."""
+    H = np.asarray(H)
+    n = H.shape[-1]
+    prof = np.fft.fftshift(np.fft.fft(H))
+    mag = np.abs(prof)
+    bins = np.arange(n) - n // 2
+    mag_db = 20 * np.log10(mag / mag.max() + 1e-15)
+    return bins, mag_db
+
+
+def _mainlobe_metrics(mag_db):
+    """-3 dB mainlobe width (integer range bins) and peak sidelobe (dB) of a
+    NATIVE-resolution range profile (see `_native_range_profile_db`).
+
+    The mainlobe is the contiguous run of bins around the peak that are within 3 dB
+    of it (tie-tolerant, so a flat-topped response like the legacy boxcar's reads as
+    one wide mainlobe rather than being spuriously split into many equal-height
+    'sidelobes'). Peak sidelobe is the largest value outside that run.
+    """
+    peak = int(np.argmax(mag_db))
+    above = mag_db >= -3.0
+    lo = peak
+    while lo - 1 >= 0 and above[lo - 1]:
+        lo -= 1
+    hi = peak
+    while hi + 1 < len(above) and above[hi + 1]:
+        hi += 1
+    width = hi - lo + 1
+    mask = np.ones(len(mag_db), dtype=bool)
+    mask[lo:hi + 1] = False
+    peak_sidelobe = float(mag_db[mask].max()) if mask.any() else float("-inf")
+    return width, peak_sidelobe
+
+
+def range_profile_comparison(show=True, n_freqs=N_FREQS):
+    """Compare what different interconnect models do to the radar RANGE PROFILE --
+    the product that actually reaches a downstream detector -- rather than only to
+    the raw |S21|(f) response.
+
+    Four arms, each `InterconnectBlock.apply_interconnect` applied to a flat
+    (all-ones) frame so the output IS the arm's frequency response, then range-
+    compressed exactly as `RangeProfileBlock` does (windowless FFT over frequency):
+
+    - **ideal**: `case='case3'` identity pass-through -- no interconnect at all.
+    - **Tessera TSV**: the Ka-band (28.5-31.5 GHz) TSV surrogate (`TESSERA_INTERCONNECT_CSV`).
+    - **Tessera Case3**: the 76-81 GHz automotive-band export (`CASE3_INTERCONNECT_CSV`)
+      -- deliberately the WORST of six HFSS-measured designs the collaborator supplied
+      (see the module-level comment by `CASE3_INTERCONNECT_CSV`); this is a conservative
+      validation bound, not a best case, and no other of the six is referenced anywhere.
+    - **legacy boxcar**: `InterconnectBlock()`'s default 11-tap placeholder.
+
+    TSV and Case3 model DIFFERENT physical structures in NON-OVERLAPPING bands (Ka-band
+    vs. 77 GHz automotive) -- this function deliberately does NOT rank one against the
+    other; each is shown only against its own band and against the band-agnostic ideal/
+    legacy arms. Range-profile bin metrics (mainlobe width, sidelobe) ARE compared
+    directly across all four arms because the range axis is a dimensionless bin index,
+    not a physical frequency -- band-agnostic by construction.
+
+    Returns a dict of every computed quantity (insertion loss/ripple, per-arm mainlobe
+    width and peak sidelobe). When `show`, also builds and saves a comparison figure to
+    `RANGE_PROFILE_FIG_PATH` (a fixed, docs-facing path -- unlike `main()`, this is not
+    swept up by `main(show=False)`'s no-filesystem-writes contract, but follows the same
+    pattern: with `show=False` this function itself touches no disk).
+    """
+    freq_tsv, s21_tsv = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
+    freq_c3, s21_c3 = load_interconnect_transfer(CASE3_INTERCONNECT_CSV)
+    il_tsv, ripple_tsv = _band_insertion_loss_ripple(freq_tsv, s21_tsv, BAND)
+    il_c3, ripple_c3 = _band_insertion_loss_ripple(freq_c3, s21_c3, CASE3_BAND)
+
+    def _ones(n):
+        return torch.ones(2, 2, 1, n, dtype=torch.complex64, device=device)
+
+    arms = {
+        "ideal": ("ideal (no interconnect)",
+                  InterconnectBlock(case='case3')),
+        "tessera_tsv": ("Tessera TSV (Ka-band, 28.5-31.5 GHz)",
+                         InterconnectBlock(transfer_csv=TESSERA_INTERCONNECT_CSV, band_hz=BAND)),
+        "tessera_case3": ("Tessera Case3 (77 GHz auto, worst of 6 measured)",
+                            InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND)),
+        "legacy_boxcar": ("legacy 11-tap boxcar (placeholder)",
+                           InterconnectBlock()),
+    }
+
+    profiles, metrics = {}, {}
+    for key, (label, blk) in arms.items():
+        H = blk.apply_interconnect(_ones(n_freqs))[0, 0, 0, :].cpu().numpy()
+        bins, mag_db = _native_range_profile_db(H)
+        width, sidelobe = _mainlobe_metrics(mag_db)
+        profiles[key] = (bins, mag_db)
+        metrics[key] = {"label": label, "width_3db_bins": width, "peak_sidelobe_db": sidelobe}
+
+    result = {
+        "insertion_loss_db": {"tessera_tsv": il_tsv, "tessera_case3": il_c3},
+        "ripple_db": {"tessera_tsv": ripple_tsv, "tessera_case3": ripple_c3},
+        "metrics": metrics,
+    }
+
+    if show:
+        print("\nRange-profile comparison (native resolution, "
+              f"n_freqs={n_freqs}):")
+        for key, (label, _) in arms.items():
+            m = metrics[key]
+            print(f"  {label}: -3 dB width {m['width_3db_bins']} bin(s), "
+                  f"peak sidelobe {m['peak_sidelobe_db']:.1f} dB")
+        print(f"Tessera TSV: insertion loss {il_tsv:.2f} dB, ripple {ripple_tsv:.2f} dB p-p "
+              f"over {BAND[0]/1e9:.1f}-{BAND[1]/1e9:.1f} GHz")
+        print(f"Tessera Case3 (worst of 6 measured): insertion loss {il_c3:.2f} dB, "
+              f"ripple {ripple_c3:.2f} dB p-p over {CASE3_BAND[0]/1e9:.1f}-"
+              f"{CASE3_BAND[1]/1e9:.1f} GHz")
+
+        fig, ((ax_s21_tsv, ax_s21_c3), (ax_prof, ax_prof_zoom)) = plt.subplots(
+            2, 2, figsize=(15, 11), dpi=140)
+        fs_title, fs_label, fs_annot, fs_tick = 15, 13, 11.5, 11
+
+        # (a1) TSV |S21|(f) over its full sweep, band shaded, IL/ripple annotated.
+        db_tsv_full = 20 * np.log10(np.abs(s21_tsv) + 1e-12)
+        ax_s21_tsv.plot(freq_tsv / 1e9, db_tsv_full, color="tab:blue", lw=2)
+        ax_s21_tsv.axvspan(BAND[0] / 1e9, BAND[1] / 1e9, color="tab:orange", alpha=0.25,
+                            label="Ka-band (pipeline)")
+        ax_s21_tsv.set_title("Tessera TSV: |S21| (1-40 GHz sweep)", fontsize=fs_title)
+        ax_s21_tsv.set_xlabel("frequency (GHz)", fontsize=fs_label)
+        ax_s21_tsv.set_ylabel("|S21| (dB)", fontsize=fs_label)
+        ax_s21_tsv.text(0.97, 0.04,
+                         f"in-band ({BAND[0]/1e9:.1f}-{BAND[1]/1e9:.1f} GHz):\n"
+                         f"insertion loss {il_tsv:.2f} dB\nripple {ripple_tsv:.2f} dB p-p",
+                         transform=ax_s21_tsv.transAxes, fontsize=fs_annot, va="bottom",
+                         ha="right",
+                         bbox=dict(boxstyle="round", fc="white", ec="tab:blue", alpha=0.9))
+        ax_s21_tsv.legend(loc="upper right", fontsize=fs_annot)
+        ax_s21_tsv.grid(True, alpha=0.3)
+        ax_s21_tsv.tick_params(labelsize=fs_tick)
+
+        # (a2) Case3 |S21|(f), band shaded, IL/ripple annotated, worst-of-6 caveat.
+        db_c3_full = 20 * np.log10(np.abs(s21_c3) + 1e-12)
+        ax_s21_c3.plot(freq_c3 / 1e9, db_c3_full, color="tab:red", lw=2)
+        ax_s21_c3.axvspan(CASE3_BAND[0] / 1e9, CASE3_BAND[1] / 1e9, color="tab:orange",
+                           alpha=0.25, label="77 GHz auto band (pipeline)")
+        ax_s21_c3.set_title("Tessera Case3: |S21| (70-90 GHz sweep)\n"
+                             "worst of 6 measured designs -- conservative pick",
+                             fontsize=fs_title)
+        ax_s21_c3.set_xlabel("frequency (GHz)", fontsize=fs_label)
+        ax_s21_c3.set_ylabel("|S21| (dB)", fontsize=fs_label)
+        ax_s21_c3.text(0.03, 0.05,
+                        f"in-band ({CASE3_BAND[0]/1e9:.0f}-{CASE3_BAND[1]/1e9:.0f} GHz):\n"
+                        f"insertion loss {il_c3:.2f} dB\nripple {ripple_c3:.2f} dB p-p",
+                        transform=ax_s21_c3.transAxes, fontsize=fs_annot, va="bottom",
+                        bbox=dict(boxstyle="round", fc="white", ec="tab:red", alpha=0.9))
+        ax_s21_c3.legend(loc="upper right", fontsize=fs_annot)
+        ax_s21_c3.grid(True, alpha=0.3)
+        ax_s21_c3.tick_params(labelsize=fs_tick)
+
+        # (b) Range profile, all 4 arms, native resolution -- y-window sized from the
+        # data to resolve the mainlobe-width story (legacy's flat ~11-bin shelf vs. the
+        # other three's single-bin needle), not wasted on an empty deep-dB region.
+        colors = {"ideal": "black", "tessera_tsv": "tab:blue",
+                  "tessera_case3": "tab:red", "legacy_boxcar": "tab:gray"}
+        styles = {"ideal": "-", "tessera_tsv": "--", "tessera_case3": ":",
+                  "legacy_boxcar": "-"}
+        x_lim = 16
+        for key, (label, _) in arms.items():
+            bins, mag_db = profiles[key]
+            m = metrics[key]
+            leg = (f"{label}\n(-3 dB width {m['width_3db_bins']} bin"
+                   f"{'s' if m['width_3db_bins'] != 1 else ''}, "
+                   f"sidelobe {m['peak_sidelobe_db']:.0f} dB)")
+            ax_prof.plot(bins, mag_db, styles[key], color=colors[key], lw=2.2,
+                         marker="o", ms=3.5, label=leg)
+        ax_prof.set_xlim(-x_lim, x_lim)
+        ax_prof.set_ylim(-22, 3)
+        ax_prof.set_xlabel("range bin (native, n_freqs={})".format(n_freqs), fontsize=fs_label)
+        ax_prof.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
+        ax_prof.set_title("Range profile: mainlobe width", fontsize=fs_title)
+        ax_prof.grid(True, alpha=0.3)
+        # lower-right is empty for every arm here (legacy's shelf is at y=0 and only
+        # spans x in [-10, 0]; everything else drops to the dB floor within 1-2 bins)
+        ax_prof.legend(loc="lower right", fontsize=fs_annot - 1.5)
+        ax_prof.tick_params(labelsize=fs_tick)
+
+        # (c) Same data, zoomed to the fine dB floor beneath the mainlobe -- the only
+        # place the two physically-modelled interconnects show ANY visible cost: a
+        # sub-mainlobe skirt from their small in-band ripple/tilt. Ideal is an exact
+        # discrete delta at this resolution (no skirt at all) and the legacy boxcar's
+        # off-shelf bins sit at the float32 noise floor (~-140 dB) -- both plot below
+        # this window's floor, which is itself the honest result, not a hidden one.
+        for key, (label, _) in arms.items():
+            bins, mag_db = profiles[key]
+            ax_prof_zoom.plot(bins, mag_db, styles[key], color=colors[key], lw=2.2,
+                              marker="o", ms=3.5, label=label)
+        ax_prof_zoom.set_xlim(-x_lim, x_lim)
+        ax_prof_zoom.set_ylim(-95, -20)
+        ax_prof_zoom.set_xlabel("range bin (native, n_freqs={})".format(n_freqs), fontsize=fs_label)
+        ax_prof_zoom.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
+        ax_prof_zoom.set_title("Same data, zoomed: sub-mainlobe ripple skirt\n"
+                                "(ideal has none here; legacy boxcar is below floor)",
+                                fontsize=fs_title)
+        ax_prof_zoom.grid(True, alpha=0.3)
+        ax_prof_zoom.legend(loc="upper right", fontsize=fs_annot)
+        ax_prof_zoom.tick_params(labelsize=fs_tick)
+
+        fig.suptitle(
+            "Interconnect models vs. radar range profile\n"
+            "TSV (Ka-band) and Case3 (77 GHz, the worst of 6 measured designs) are each "
+            "shown only against their OWN band -- not a head-to-head ranking",
+            fontsize=fs_annot + 1.5, y=1.04)
+        fig.tight_layout()
+        out_path = RANGE_PROFILE_FIG_PATH
+        os.makedirs(os.path.dirname(str(out_path)), exist_ok=True)
+        fig.savefig(str(out_path), bbox_inches="tight")
+        plt.close(fig)
+        print("saved", out_path)
+
+    return result
+
+
 if __name__ == "__main__":
     main()
+    range_profile_comparison()
