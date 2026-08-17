@@ -216,6 +216,20 @@ class RadarConfig:
 # MHz/us ramp slope, and multi-Msps ADC rates) AND to give a scene scale that
 # fits vehicle/pedestrian training scenarios:
 #   - bandwidth_hz=2e9 -> range_resolution_m = c/(2B) ~= 7.5 cm.
+#     REVIEWED AND CONFIRMED 2026-08-17. The IWR1443 datasheet says "up to 4 GHz", and
+#     the question of moving there was raised explicitly. It was measured and declined,
+#     because bandwidth is not a free parameter here -- max_range = n_samples * c/(2B),
+#     so at fixed n_samples doubling B HALVES the range window:
+#         2 GHz, 512 samples  -> 7.5 cm res, 38.4 m range,  97.7 MHz/us, 12.8 m/s max vel
+#         4 GHz, 512 samples  -> 3.7 cm res, 19.2 m range, 195.3 MHz/us, 12.7 m/s
+#         4 GHz, 1024 samples -> 3.7 cm res, 38.4 m range,  97.7 MHz/us,  7.0 m/s
+#     The middle row is unusable twice over: D1 targets sit at 15-32 m and would fall
+#     outside a 19.2 m window, and 195 MHz/us is ~2x the device's ~100 MHz/us ramp class,
+#     so it would no longer be an IWR1443-like profile at all -- which was the entire
+#     reason for wanting 4 GHz. The bottom row keeps the range but halves the unambiguous
+#     velocity (targets are clamped to 80% of it, i.e. 5.6 m/s radial -- slow for vehicle
+#     scenes) and doubles every stored cube. 2 GHz is already inside the real device
+#     envelope; "up to 4 GHz" is a maximum, not a requirement.
 #   - n_samples=512 @ fs_hz=25e6 -> sweep_time_s = 20.48 us, inside
 #     chirp_period_s=25e-6 (4.5 us idle time for TX/RX settling).
 #   - ramp_slope = B/sweep_time ~= 97.7 MHz/us, at (but within) the device's
