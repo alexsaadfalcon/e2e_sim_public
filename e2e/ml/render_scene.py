@@ -49,9 +49,11 @@ import argparse
 import dataclasses
 import inspect
 import math
+import os
 import sys
+import tempfile
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -433,8 +435,9 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
 # GIF path above still runs) with no Sionna installed; only `--rt`/`render_rt_tier_png`
 # need it.
 # --------------------------------------------------------------------------------
-# Radar marker/boresight-rod colour: bright amber, chosen to stand out against the red
-# object materials (build_rt_scene's default (0.8, 0.1, 0.1)), the gray ground, and
+# Radar marker/boresight-rod colour: bright amber, chosen to stand out against the
+# per-class object colours (build_rt_scene's `_default_object_render_color` -- vehicles
+# blue, pedestrians cyan, clutter boxes violet, spheres green), the gray ground, and
 # Sionna's own (green) device icon -- so the radar reads as unmistakable at a glance.
 _RADAR_MARKER_COLOR = (1.0, 0.85, 0.0)
 # Raised from 0.8 m after review renders showed no visible marker at all: against a
@@ -448,6 +451,38 @@ _RENDER_FOV_DEG = 50.0                  # explicit (not Sionna's 45 deg default)
 # occasional oversized local asset -- e.g. the ~16 m tractor-trailer, see rt_gen's
 # LOCAL_ASSET_SPECS -- doesn't get clipped at the frame edge).
 _OBJECT_FRAMING_RADIUS_M = 9.0
+
+# Overhead ("top-down") camera direction: pass this as `camera_dir` for a true
+# vertical view (see `_build_camera`'s docstring for why straight-down needs its own
+# code path, not just a near-vertical `camera_dir` value).
+TOP_DOWN_CAMERA_DIR = (0.0, 0.0, 1.0)
+# Fixed margin ADDED to each object's real footprint radius (rt_scenes._footprint_
+# radius) when framing render_rt_topdown_gif's camera -- covers mesh detail outside
+# the placement footprint (mirrors, limbs) without reintroducing the flat, oversized
+# _OBJECT_FRAMING_RADIUS_M that made pedestrians unreadable in a top-down view.
+_TOPDOWN_FRAMING_MARGIN_M = 1.0
+# Pedestrian "flag" marker: even with a tight per-object framing radius (above), a
+# camera fit to a whole D2/D3-sized scene (targets spread over the tier's full 6-34 m
+# range envelope, see rt_scenes._RANGE_M) necessarily shows a real ~0.8 m pedestrian
+# mesh as only a few pixels -- there is no framing choice that fixes this without
+# clipping every farther-out vehicle/clutter box out of frame. Same fix already used
+# for the radar itself (see _RADAR_MARKER_COLOR's own "no visible marker at all"
+# note): a small, unmistakable, render-only sphere floating just above the
+# pedestrian's head, same colour as its legend swatch. An ordinary (non-scattering-
+# tagged) SceneObject, exactly like the radar marker -- never touches a path solve.
+_PEDESTRIAN_FLAG_RADIUS_M = 0.5
+_PEDESTRIAN_FLAG_HEIGHT_M = 2.3         # just above a ~1.74 m pedestrian mesh's head
+# `_fit_camera_position`'s own threshold for swapping its local `world_up` helper axis
+# (avoiding ITS degenerate cross product) -- reused here as the trigger for routing
+# camera construction through the explicit-orientation path instead of `Camera.look_at`
+# (see `_build_camera`), so both "near vertical" checks in this module agree.
+_NEAR_VERTICAL_DOT = 0.98
+# World +y -> screen "up", world +x -> screen "right" for the explicit top-down camera
+# orientation below -- matches `_draw_birdseye`'s (and every other bird's-eye panel's)
+# plot convention (x right, y up), calibrated empirically against Sionna's own
+# `Camera.orientation`/`.look_at()` (see tests/test_ml_render.py's calibration test),
+# not guessed.
+_TOP_DOWN_YAW_RAD = math.pi / 2.0
 
 
 def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
@@ -465,8 +500,8 @@ def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
     forward = -np.asarray(camera_dir, dtype=float)
     forward = forward / np.linalg.norm(forward)
     world_up = np.array([0.0, 0.0, 1.0])
-    if abs(float(np.dot(forward, world_up))) > 0.98:      # near-vertical view: avoid a
-        world_up = np.array([0.0, 1.0, 0.0])              # degenerate cross product
+    if abs(float(np.dot(forward, world_up))) > _NEAR_VERTICAL_DOT:  # near-vertical view:
+        world_up = np.array([0.0, 1.0, 0.0])              # avoid a degenerate cross product
     right = np.cross(forward, world_up)
     right = right / np.linalg.norm(right)
     up = np.cross(right, forward)
@@ -485,13 +520,84 @@ def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
     return cam_pos, centroid
 
 
-def _build_rt_scene_for_render(scenario, cfg, *, material_policy: str = "extrapolated",
+def _build_camera(cam_pos: np.ndarray, look_at: np.ndarray, rt):
+    """`rt.Camera` at `cam_pos` looking at `look_at`, handling the near-vertical case
+    explicitly instead of leaning on Sionna's own `Camera.look_at()`.
+
+    `Camera.look_at()` derives yaw as `atan2(target.y - cam.y, target.x - cam.x)`
+    (Sionna's own docstring: "Given a point with spherical angles theta, phi, the
+    orientation will be set to (phi, pi/2 - theta, 0)"), which is mathematically
+    undefined once that horizontal offset is (near) zero -- i.e. exactly the top-down
+    case this module needs for `TOP_DOWN_CAMERA_DIR`. Sionna's own fallback (see its
+    source) only nudges the target by a fixed, ABSOLUTE `1e-3` in x, and only when
+    position/target match EXACTLY in x/y; a `camera_dir` that is near- but not
+    exactly-vertical skips that fallback entirely and instead derives yaw from a
+    near-zero denominator -- an unpredictable function of floating-point noise, so the
+    image's "up" direction (and hence the whole frame's rotation) is effectively
+    undefined and can differ between otherwise-identical runs/platforms.
+
+    For `|forward.z| > _NEAR_VERTICAL_DOT` this instead sets the camera's `orientation`
+    (yaw, pitch, roll) Euler angles directly -- `Camera`'s OTHER public constructor path,
+    which bypasses `look_at()`'s spherical-angle derivation entirely. Pitch is the exact
+    (deterministic) value for straight-down/-up (+-90 deg); yaw is the explicit, chosen
+    constant `_TOP_DOWN_YAW_RAD` rather than whatever Sionna's internal epsilon nudge
+    happens to produce. These angle/axis conventions were calibrated empirically against
+    Sionna's own `Camera.orientation`/`.look_at()` output (not guessed or reasoned from
+    docs alone) -- see `tests/test_ml_render.py`'s calibration-derived tests.
+    """
+    cam_pos = np.asarray(cam_pos, dtype=float)
+    look_at = np.asarray(look_at, dtype=float)
+    delta = look_at - cam_pos
+    norm = float(np.linalg.norm(delta))
+    forward = delta / norm if norm > 0.0 else np.array([0.0, 0.0, -1.0])
+    if abs(float(forward[2])) > _NEAR_VERTICAL_DOT:
+        pitch = math.pi / 2.0 if forward[2] < 0.0 else -math.pi / 2.0
+        return rt.Camera(position=cam_pos.tolist(),
+                         orientation=(_TOP_DOWN_YAW_RAD, pitch, 0.0))
+    return rt.Camera(position=cam_pos.tolist(), look_at=look_at.tolist())
+
+
+def _add_pedestrian_flags(rt, rt_scene, scenario, positions) -> List[Any]:
+    """Add a small, bright `_OBJECT_COLOR_PEDESTRIAN` sphere marker floating just
+    above every `object_class="pedestrian"` object in `scenario.objects`, at the
+    matching (x, y) from `positions` (parallel list -- callers pass either each
+    object's own static `.position` for a single-frame render or a resolved
+    `frame_scatterers(...)` position per animation frame), added to `rt_scene.scene`.
+    Render-only visibility fix -- see `_PEDESTRIAN_FLAG_RADIUS_M`'s docstring for why a
+    full-scene framing can't make a real pedestrian mesh legible on its own. Returns
+    the added `SceneObject`s (unused by callers today).
+    """
+    from e2e.ml.rt_scene_build import _OBJECT_COLOR_PEDESTRIAN
+
+    added = []
+    for obj, pos in zip(scenario.objects, positions):
+        if obj.object_class != "pedestrian":
+            continue
+        mat = rt.ITURadioMaterial(f"e2e-ped-flag-mat-{obj.name}", "metal", thickness=0.01,
+                                  color=_OBJECT_COLOR_PEDESTRIAN)
+        flag = rt.SceneObject(fname=rt.scene.sphere, name=f"e2e-ped-flag-{obj.name}",
+                              radio_material=mat)
+        rt_scene.scene.edit(add=[flag])
+        flag.scaling = float(_PEDESTRIAN_FLAG_RADIUS_M)
+        flag.position = [float(pos[0]), float(pos[1]), _PEDESTRIAN_FLAG_HEIGHT_M]
+        added.append(flag)
+    return added
+
+
+def _build_rt_scene_for_render(scenario, cfg, *, frame_idx: int = 0,
+                               material_policy: str = "extrapolated",
                                stand_in_material: str = "concrete"):
-    """`build_rt_scene(scenario, cfg, ...)`, repairing city-scene materials for `cfg`'s
-    centre frequency first if `scenario.base_scene` needs it (see
+    """`build_rt_scene(scenario, cfg, frame_idx=frame_idx, ...)`, repairing city-scene
+    materials for `cfg`'s centre frequency first if `scenario.base_scene` needs it (see
     `render_rt_tier_png`'s "City-scene materials" docstring section for why). Split out
     from `render_rt_tier_png` so the branch is unit-testable without Sionna -- see
     `tests/test_ml_render.py::test_build_rt_scene_for_render_*`.
+
+    `frame_idx` selects a MOTION frame within `scenario` (its own `Scenario.num_frames`
+    /`Motion` tracks), not a different scenario draw -- see `render_rt_topdown_gif`,
+    which builds one `scenario` with `num_frames > 1` and calls this once per animation
+    frame so objects actually move across the render, unlike `render_rt_tier_png`
+    (single-frame scenario, always `frame_idx=0`).
     """
     from e2e.ml.rt_gen import build_rt_scene
 
@@ -499,7 +605,8 @@ def _build_rt_scene_for_render(scenario, cfg, *, material_policy: str = "extrapo
         # Synthetic scenes only ever use in-band materials (see
         # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, matching
         # `RTEnvironmentBlock.get_S_pars`'s same no-op branch.
-        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene,
+                              frame_idx=frame_idx)
 
     # A Sionna built-in city scene (e.g. D4's "munich"): repair its materials for this
     # radar's frequency one Python frame before `build_rt_scene` sets `scene.frequency`
@@ -510,7 +617,8 @@ def _build_rt_scene_for_render(scenario, cfg, *, material_policy: str = "extrapo
     f_center_hz = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
     with patched_builtin_loader(f_center_hz, policy=material_policy,
                                 stand_in_itu_type=stand_in_material):
-        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene, frame_idx=0)
+        return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene,
+                              frame_idx=frame_idx)
 
 
 def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: int = 0,
@@ -535,6 +643,10 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     sphere vs D3's dozen-plus spread-out objects) both stay fully in frame -- including
     the radar itself, which otherwise tends to sit at the edge of the object cluster's
     field of view -- without per-tier tuning. `resolution` is `(width, height)` pixels.
+    Pass `camera_dir=TOP_DOWN_CAMERA_DIR` for a true overhead view -- `_build_camera`
+    routes any near-vertical `camera_dir` through an explicit-orientation construction
+    instead of `Camera.look_at()`, which is genuinely ill-conditioned in that regime
+    (see that function's docstring).
 
     The radar position is marked TWICE, redundantly, so it can't be missed: Sionna's
     own tx/rx device icon (pinned to a fixed, legible `display_radius` -- its default
@@ -609,6 +721,8 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     rod.scaling = (_RADAR_BORESIGHT_LEN_M / 10.0, 0.08, 0.08)
     rod.position = (radar_pos + boresight * _RADAR_BORESIGHT_LEN_M / 2.0).tolist()
 
+    _add_pedestrian_flags(rt, rt_scene, scenario, [o.position for o in scenario.objects])
+
     # Each framed point carries an approximate world-space RADIUS (not just a bare
     # position) so the fit accounts for how big things actually are on screen -- a
     # bare-centroid distance heuristic put the (small-icon) radar right at the frame
@@ -623,7 +737,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
                                              np.asarray(radii, dtype=float),
                                              camera_dir=camera_dir, fov_deg=_RENDER_FOV_DEG,
                                              aspect=resolution[0] / resolution[1])
-    camera = rt.Camera(position=cam_pos.tolist(), look_at=centroid.tolist())
+    camera = _build_camera(cam_pos, centroid, rt)
 
     rt_scene.scene.render_to_file(camera=camera, filename=str(out_path),
                                   resolution=tuple(resolution), num_samples=num_samples,
@@ -664,6 +778,190 @@ def _caption_render(png_path: Path, lines: List[str]) -> None:
     img.save(png_path)
 
 
+def _overlay_legend(img, entries: Sequence[Tuple[str, Tuple[float, float, float]]], *,
+                    title: Optional[str] = None) -> None:
+    """Draw a colour-key legend (`[(label, rgb_0_1), ...]`) as a semi-transparent box in
+    the bottom-left corner of a PIL RGB `img`, IN PLACE, plus an optional one-line
+    `title` bar across the top (frame counter / scene name) -- same visual language as
+    `_caption_render`'s title bar. A hard `PIL` dependency for callers (unlike
+    `_caption_render`'s best-effort try/except): a viewer cannot tell a pedestrian from
+    clutter in an un-labelled render, so this is not optional for `render_rt_topdown_gif`.
+    """
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img, "RGBA")
+    if title:
+        draw.rectangle([0, 0, img.width, 22], fill=(0, 0, 0, 170))
+        draw.text((8, 4), title, fill=(255, 255, 255, 255))
+
+    pad, line_h, swatch = 8, 20, 14
+    box_w = 150
+    box_h = 2 * pad + line_h * len(entries)
+    x0, y0 = 8, img.height - box_h - 8
+    draw.rectangle([x0, y0, x0 + box_w, y0 + box_h], fill=(0, 0, 0, 170))
+    for i, (label, rgb01) in enumerate(entries):
+        rgb = tuple(int(round(255 * float(c))) for c in rgb01)
+        cy = y0 + pad + i * line_h
+        draw.rectangle([x0 + pad, cy + 2, x0 + pad + swatch, cy + 2 + swatch], fill=rgb + (255,))
+        draw.text((x0 + pad + swatch + 6, cy), label, fill=(255, 255, 255, 255))
+
+
+def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: int = 8,
+                          frame_idx: int = 0, seed: int = 0, resolution=(640, 480),
+                          num_samples: int = 64, use_local_assets: bool = True,
+                          material_policy: str = "extrapolated",
+                          stand_in_material: str = "concrete") -> Path:
+    """Ray-trace a TOP-DOWN animated GIF of `e2e.ml.rt_scenes` tier `tier`: ONE scenario,
+    objects moving over TIME. Needs Sionna RT; each animation frame is a plain geometry
+    render (no path solve, same as `render_rt_tier_png`), so an `n_frames`-frame GIF
+    costs about `n_frames` times one PNG render.
+
+    Do not confuse this module's two different `frame_idx` meanings: here (as in
+    `render_rt_tier_png`) `frame_idx`/`seed` select which scenario is DRAWN (see
+    `build_rt_tier_scenario`'s "Determinism" section) -- a different concept from the
+    per-animation-frame `frame_idx` that `_build_rt_scene_for_render`/`build_rt_scene`
+    take internally, once per k in `range(n_frames)` below, to place objects at that
+    motion step of the SAME drawn scenario.
+
+    `n_frames` is resolved via `build_rt_tier_scenario(..., num_frames=n_frames,
+    dt=1/cfg.frame_rate_hz)` -- passing `dt` here is load-bearing: `Motion.velocity` is
+    stored as a per-frame displacement, so the function's own `dt=1.0` default would
+    move every object `cfg.frame_rate_hz` times too far per animation frame (the exact
+    bug fixed in commit c212076, "RT targets ... moved 10x too fast when they moved").
+
+    The camera is ONE fixed overhead position for the whole animation -- fit against the
+    UNION of every animation frame's object positions (not just frame 0), so a target
+    that drifts across the scene never gets clipped mid-GIF and the camera itself never
+    pans (all apparent motion is real object motion). See `TOP_DOWN_CAMERA_DIR`/
+    `_build_camera` for why a genuine overhead view needs its own camera-construction
+    code path rather than a near-vertical `camera_dir` passed through `Camera.look_at()`.
+
+    Each frame is captioned with a frame counter and a colour-key LEGEND (`_overlay_
+    legend`) naming every `object_class` actually present in this draw (see
+    `rt_scene_build._default_object_render_color` for the colour mapping) plus the
+    radar's amber marker -- the whole point of a review render is that a viewer can tell
+    a pedestrian from a clutter box, which a bare colour swatch cannot do alone.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import sionna.rt as rt
+    from PIL import Image
+
+    from e2e.ml.radar_config import PRESETS
+    from e2e.ml.rt_gen import _box_mesh_path
+    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
+                                       _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
+    from e2e.ml.rt_scenes import _footprint_radius, build_rt_tier_scenario, tier_summary
+    from e2e.ml.scatterers import frame_scatterers
+    from e2e.scenario import ObjectKind
+
+    if cfg is None:
+        cfg = PRESETS["radial_like"]
+    if n_frames < 1:
+        raise ValueError(f"n_frames must be >= 1, got {n_frames}")
+
+    dt = 1.0 / float(cfg.frame_rate_hz)
+    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed,
+                                      num_frames=n_frames, dt=dt,
+                                      use_local_assets=use_local_assets)
+
+    radar_node = scenario.nodes[0]
+    radar_pos = np.asarray(radar_node.position, dtype=float)
+    look_at = (np.asarray(radar_node.look_at, dtype=float) if radar_node.look_at is not None
+              else radar_pos + np.array([1.0, 0.0, 0.0]))
+    boresight = look_at - radar_pos
+    boresight = boresight / np.linalg.norm(boresight)
+
+    # Camera framing: union of EVERY animation frame's object positions (not just
+    # frame 0), so the fixed camera never clips a target that has drifted by the time
+    # the GIF ends -- see the docstring. Framing radius is each object's REAL footprint
+    # (`rt_scenes._footprint_radius`, the same half-length used for placement/overlap
+    # checks) plus a small fixed margin -- NOT `render_rt_tier_png`'s flat
+    # `_OBJECT_FRAMING_RADIUS_M` (9 m, sized so an oblique 3D view never clips the
+    # largest local-asset vehicle). A top-down view has no perspective foreshortening
+    # to hide behind: a uniform 9 m radius per object zooms the camera out far enough
+    # that a ~0.8 m pedestrian became a few-pixel dot in review renders -- exactly the
+    # "can't really see pedestrians" feedback this GIF exists to fix.
+    points = [radar_pos, radar_pos + boresight * _RADAR_BORESIGHT_LEN_M]
+    radii = [float(_RADAR_MARKER_RADIUS_M) * 1.1, 0.3]
+    for k in range(n_frames):
+        for obj, sc in zip(scenario.objects, frame_scatterers(scenario, k, dt=dt)):
+            points.append(np.asarray(sc.position, dtype=float))
+            # D0's sphere stand-in targets are tagged `object_class="vehicle"` for
+            # RCS/dataset purposes (see rt_scenes.build_rt_tier_scenario) but are
+            # sphere-sized, not car-sized -- `build_rt_tier_scenario`'s OWN placement
+            # code special-cases this the same way (`_footprint("sphere")`, not
+            # `_footprint(obj.object_class)`, for its sphere loop); match that here so
+            # a D0/D2 sphere doesn't inflate the frame to car scale.
+            framing_class = "sphere" if obj.kind == ObjectKind.SPHERE else obj.object_class
+            radii.append(_footprint_radius(framing_class, obj.asset)
+                        + _TOPDOWN_FRAMING_MARGIN_M)
+    cam_pos, centroid = _fit_camera_position(np.asarray(points, dtype=float),
+                                             np.asarray(radii, dtype=float),
+                                             camera_dir=TOP_DOWN_CAMERA_DIR,
+                                             fov_deg=_RENDER_FOV_DEG,
+                                             aspect=resolution[0] / resolution[1])
+    camera = _build_camera(cam_pos, centroid, rt)
+
+    summary = tier_summary(scenario)
+    legend_entries: List[Tuple[str, Tuple[float, float, float]]] = []
+    if summary["n_spheres"] > 0:
+        legend_entries.append(("sphere", _OBJECT_COLOR_SPHERE))
+    if summary["n_cars"] > 0:
+        legend_entries.append(("vehicle", _OBJECT_COLOR_VEHICLE))
+    if summary["n_pedestrians"] > 0:
+        legend_entries.append(("pedestrian", _OBJECT_COLOR_PEDESTRIAN))
+    if summary["n_clutter_boxes"] > 0:
+        legend_entries.append(("clutter box", _OBJECT_COLOR_CLUTTER_BOX))
+    legend_entries.append(("radar", _RADAR_MARKER_COLOR))
+
+    frames: List["Image.Image"] = []
+    with tempfile.TemporaryDirectory(prefix="e2e-rt-topdown-") as tmp_dir:
+        for k in range(n_frames):
+            # Rebuilt fresh every animation frame (build_rt_scene loads a brand-new
+            # Sionna Scene each call -- see its own docstring), same as
+            # render_rt_tier_png's single-frame case; the marker/rod below are ordinary
+            # SceneObjects re-added to THIS frame's scene, never affecting a path solve.
+            rt_scene = _build_rt_scene_for_render(scenario, cfg, frame_idx=k,
+                                                  material_policy=material_policy,
+                                                  stand_in_material=stand_in_material)
+            rt_scene.tx.display_radius = 0.3
+            rt_scene.rx.display_radius = 0.3
+
+            marker_mat = rt.ITURadioMaterial("e2e-radar-marker-mat", "metal", thickness=0.01,
+                                             color=_RADAR_MARKER_COLOR)
+            marker = rt.SceneObject(fname=rt.scene.sphere, name="e2e-radar-marker",
+                                    radio_material=marker_mat)
+            rt_scene.scene.edit(add=[marker])
+            marker.scaling = float(_RADAR_MARKER_RADIUS_M)
+            marker.position = radar_pos.tolist()
+
+            rod_mat = rt.ITURadioMaterial("e2e-radar-boresight-mat", "metal", thickness=0.01,
+                                          color=_RADAR_MARKER_COLOR)
+            rod = rt.SceneObject(fname=_box_mesh_path(rt), name="e2e-radar-boresight",
+                                 radio_material=rod_mat)
+            rt_scene.scene.edit(add=[rod])
+            rod.scaling = (_RADAR_BORESIGHT_LEN_M / 10.0, 0.08, 0.08)
+            rod.position = (radar_pos + boresight * _RADAR_BORESIGHT_LEN_M / 2.0).tolist()
+
+            frame_scats = frame_scatterers(scenario, k, dt=dt)
+            _add_pedestrian_flags(rt, rt_scene, scenario, [sc.position for sc in frame_scats])
+
+            frame_path = os.path.join(tmp_dir, f"frame_{k:03d}.png")
+            rt_scene.scene.render_to_file(camera=camera, filename=frame_path,
+                                          resolution=tuple(resolution), num_samples=num_samples,
+                                          fov=_RENDER_FOV_DEG, show_devices=True)
+            img = Image.open(frame_path).convert("RGB")
+            _overlay_legend(img, legend_entries,
+                            title=f"{scenario.name}  top-down  frame {k + 1}/{n_frames}")
+            frames.append(img)
+
+    frames[0].save(out_path, save_all=True, append_images=frames[1:],
+                   duration=int(round(1000.0 / fps)), loop=0, optimize=True)
+    return out_path
+
+
 # --------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------
@@ -689,6 +987,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--rt", action="store_true",
                    help="ray-trace a single camera PNG of an RT tier instead of an analytic GIF "
                         "(needs Sionna RT; see render_rt_tier_png)")
+    p.add_argument("--rt-topdown-gif", action="store_true",
+                   help="ray-trace a TOP-DOWN animated GIF of an RT tier (objects moving over "
+                        "time, one scenario draw) instead of a single camera PNG (needs Sionna "
+                        "RT; see render_rt_topdown_gif). Uses --frames/--fps like the analytic "
+                        "GIF mode; implies --rt's tier vocabulary")
     p.add_argument("--frame-idx", type=int, default=0, help="RT mode: tier sample index (see rt_scenes)")
     p.add_argument("--no-local-assets", action="store_true",
                    help="RT mode: disable the local (unshipped) higher-fidelity mesh pool, "
@@ -707,6 +1010,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)
         return 2
     cfg = PRESETS[args.config]
+
+    if args.rt_topdown_gif:
+        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
+
+        if args.tier not in RT_DIFFICULTY_TIERS:
+            print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
+            return 2
+        out_path = render_rt_topdown_gif(args.tier, args.out, cfg=cfg, n_frames=args.frames,
+                                         fps=args.fps, frame_idx=args.frame_idx, seed=args.seed,
+                                         use_local_assets=not args.no_local_assets)
+        size_mb = out_path.stat().st_size / 1e6
+        print(f"wrote {out_path} ({size_mb:.2f} MB, RT tier {args.tier} top-down, "
+             f"{args.frames} frames @ {args.fps} fps)")
+        return 0
 
     if args.rt:
         from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS

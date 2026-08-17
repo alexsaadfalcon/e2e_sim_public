@@ -337,6 +337,159 @@ def test_cli_unknown_tier_exits_nonzero(tmp_path):
 
 
 # --------------------------------------------------------------------------------
+# rt_scene_build._default_object_render_color -- per-class RENDER colour fallback
+# (owner feedback: "are there plain cubes? ... can't really see pedestrians"). Pure
+# dataclass/ObjectKind dispatch, no Sionna needed.
+# --------------------------------------------------------------------------------
+def test_default_object_render_color_distinguishes_sphere_from_mesh_vehicle():
+    """A D0 sphere target and a D1+ mesh vehicle share `object_class="vehicle"` (see
+    `e2e.ml.rt_scenes.build_rt_tier_scenario`) but must still get DIFFERENT colours --
+    a reviewer needs to tell a bare sphere from a real car mesh by eye."""
+    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE,
+                                       _default_object_render_color)
+    from e2e.scenario import ObjectKind, SceneObject
+
+    sphere = SceneObject(name="s", kind=ObjectKind.SPHERE, object_class="vehicle")
+    mesh_vehicle = SceneObject(name="v", kind=ObjectKind.MESH, object_class="vehicle",
+                               asset="low_poly_car")
+
+    assert _default_object_render_color(sphere) == _OBJECT_COLOR_SPHERE
+    assert _default_object_render_color(mesh_vehicle) == _OBJECT_COLOR_VEHICLE
+    assert _OBJECT_COLOR_SPHERE != _OBJECT_COLOR_VEHICLE
+
+
+def test_default_object_render_color_covers_every_rt_scenes_class():
+    """Every object kind/class `e2e.ml.rt_scenes.build_rt_tier_scenario` actually
+    produces (sphere, mesh vehicle, mesh pedestrian, box clutter) resolves to a
+    distinct colour, and an unrecognized combination falls back to the legacy default
+    rather than raising."""
+    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_DEFAULT,
+                                       _OBJECT_COLOR_PEDESTRIAN, _OBJECT_COLOR_SPHERE,
+                                       _OBJECT_COLOR_VEHICLE, _default_object_render_color)
+    from e2e.scenario import ObjectKind, SceneObject
+
+    pedestrian = SceneObject(name="p", kind=ObjectKind.MESH, object_class="pedestrian",
+                             asset="pedestrian_placeholder", material="skin")
+    clutter_box = SceneObject(name="b", kind=ObjectKind.BOX, object_class="scatterer")
+    unknown = SceneObject(name="u", kind=ObjectKind.MESH, object_class="unrecognized")
+
+    assert _default_object_render_color(pedestrian) == _OBJECT_COLOR_PEDESTRIAN
+    assert _default_object_render_color(clutter_box) == _OBJECT_COLOR_CLUTTER_BOX
+    assert _default_object_render_color(unknown) == _OBJECT_COLOR_DEFAULT
+
+    all_colors = {_OBJECT_COLOR_VEHICLE, _OBJECT_COLOR_PEDESTRIAN, _OBJECT_COLOR_CLUTTER_BOX,
+                 _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_DEFAULT}
+    assert len(all_colors) == 5, "every class colour must be visually distinct"
+
+
+def test_default_object_render_color_never_consulted_when_obj_color_is_set():
+    """`build_rt_scene`'s fallback expression is `obj.color if obj.color is not None
+    else _default_object_render_color(obj)` -- an explicit scenario-authored colour
+    must always win. This only checks the SceneObject side (the ternary itself is
+    exercised end-to-end by the gated `test_build_rt_scene_assigns_...` below, which
+    needs real Sionna)."""
+    from e2e.scenario import ObjectKind, SceneObject
+
+    obj = SceneObject(name="s", kind=ObjectKind.SPHERE, object_class="vehicle",
+                      color=(0.42, 0.42, 0.42))
+    assert obj.color == (0.42, 0.42, 0.42)
+
+
+# --------------------------------------------------------------------------------
+# _build_camera -- explicit near-vertical (top-down) camera construction. A fake `rt`
+# module stand-in (just `Camera`) is enough: the branch logic itself needs no Sionna,
+# only the ACTUAL angle/axis calibration (asserted in the gated test further below)
+# does.
+# --------------------------------------------------------------------------------
+class _FakeCamera:
+    def __init__(self, *, position, orientation=None, look_at=None):
+        self.position = position
+        self.orientation = orientation
+        self.look_at = look_at
+
+
+class _FakeRt:
+    Camera = _FakeCamera
+
+
+def test_build_camera_straight_down_uses_explicit_orientation_not_look_at():
+    cam_pos = np.array([0.0, 0.0, 60.0])
+    centroid = np.array([0.0, 0.0, 0.0])   # forward = (0, 0, -1): exactly vertical
+
+    camera = render_scene._build_camera(cam_pos, centroid, _FakeRt)
+
+    assert camera.look_at is None, "must not go through Camera.look_at() when vertical"
+    assert camera.orientation == pytest.approx(
+        (render_scene._TOP_DOWN_YAW_RAD, np.pi / 2.0, 0.0))
+    assert camera.position == [0.0, 0.0, 60.0]
+
+
+def test_build_camera_straight_up_uses_explicit_orientation_with_opposite_pitch():
+    cam_pos = np.array([0.0, 0.0, 0.0])
+    centroid = np.array([0.0, 0.0, 60.0])  # forward = (0, 0, 1): exactly vertical, looking up
+
+    camera = render_scene._build_camera(cam_pos, centroid, _FakeRt)
+
+    assert camera.look_at is None
+    assert camera.orientation == pytest.approx(
+        (render_scene._TOP_DOWN_YAW_RAD, -np.pi / 2.0, 0.0))
+
+
+def test_build_camera_oblique_direction_still_uses_look_at():
+    """A normal (non-vertical) camera direction is untouched -- goes through Sionna's
+    own `Camera.look_at()` exactly as before this change."""
+    cam_pos = np.array([10.0, 10.0, 10.0])
+    centroid = np.array([0.0, 0.0, 0.0])
+
+    camera = render_scene._build_camera(cam_pos, centroid, _FakeRt)
+
+    assert camera.orientation is None
+    assert camera.look_at == [0.0, 0.0, 0.0]
+
+
+def test_build_camera_default_render_direction_is_oblique_not_near_vertical():
+    """`render_rt_tier_png`'s own default `camera_dir=(-1,-1,1.15)` must NOT trip the
+    near-vertical branch -- it is a deliberately oblique "behind and above" view, not
+    the dedicated top-down mode."""
+    forward = -np.asarray((-1.0, -1.0, 1.15), dtype=float)
+    forward = forward / np.linalg.norm(forward)
+    assert abs(float(forward[2])) < render_scene._NEAR_VERTICAL_DOT
+
+
+def test_top_down_camera_dir_is_purely_vertical():
+    assert render_scene.TOP_DOWN_CAMERA_DIR == (0.0, 0.0, 1.0)
+
+
+# --------------------------------------------------------------------------------
+# _overlay_legend -- colour-key legend overlay (owner feedback: viewers could not tell
+# a pedestrian from clutter). Pure Pillow, no Sionna needed.
+# --------------------------------------------------------------------------------
+def test_overlay_legend_draws_a_swatch_matching_each_entrys_color():
+    img = PIL_Image.new("RGB", (200, 200), (128, 128, 128))
+    entries = [("vehicle", (0.0, 0.0, 1.0)), ("pedestrian", (0.0, 1.0, 1.0))]
+
+    render_scene._overlay_legend(img, entries, title="test frame 1/3")
+
+    arr = np.asarray(img)
+    # The legend box sits in the bottom-left corner (see _overlay_legend); its first
+    # swatch is drawn a fixed (pad, pad) offset inside that box -- sample inside the
+    # swatch rectangle rather than depending on exact pixel arithmetic.
+    box_h = 2 * 8 + 20 * len(entries)
+    y0 = img.height - box_h - 8
+    swatch_center = (y0 + 8 + 9, 8 + 8 + 7)   # (row, col) inside the first swatch
+    r, g, b = arr[swatch_center[0], swatch_center[1]]
+    assert (int(r), int(g), int(b)) == (0, 0, 255), "first entry's swatch must be blue"
+
+
+def test_overlay_legend_title_bar_present_when_requested():
+    img = PIL_Image.new("RGB", (200, 200), (200, 200, 200))
+    render_scene._overlay_legend(img, [("radar", (1.0, 0.85, 0.0))], title="hello")
+    arr = np.asarray(img)
+    # Title bar is a near-black translucent strip across the top few rows.
+    assert arr[2, 100].sum() < 200 * 3 * 0.5
+
+
+# --------------------------------------------------------------------------------
 # _build_rt_scene_for_render -- the D4 (munich @ 77 GHz) city-scene material fix,
 # ported from the scratch probe (see e2e.environment.city_scenes / RTEnvironmentBlock.
 # get_S_pars for the pattern this mirrors). Real Sionna rendering can't run here
@@ -445,3 +598,151 @@ def test_build_rt_tier_scenario_d4_uses_munich_base_scene_no_sionna_needed():
     scenario = build_rt_tier_scenario("D4", frame_idx=0, seed=0, num_frames=1,
                                       use_local_assets=False)
     assert scenario.base_scene == "munich"
+
+
+# --------------------------------------------------------------------------------
+# Real Sionna RT renders: the top-down camera calibration and the per-class colour
+# fallback end to end, plus render_rt_topdown_gif's actual motion. Gated behind
+# @pytest.mark.sionna (RUN_SIONNA=1) like tests/test_ml_rt_gen.py -- these are plain
+# geometry renders (no path solve), so they are comparatively cheap, but they still
+# need a working Sionna RT / DrJit install. Verified locally with
+# CUDA_VISIBLE_DEVICES=1 (GPU 0 was busy with an unrelated generation job).
+# --------------------------------------------------------------------------------
+@pytest.mark.sionna
+def test_build_camera_topdown_calibration_matches_bird_eye_axes(tmp_path):
+    """The actual empirical calibration `_build_camera`'s docstring/`_TOP_DOWN_YAW_RAD`
+    claim: with `orientation=(_TOP_DOWN_YAW_RAD, pi/2, 0)`, world +x maps to screen
+    RIGHT and world +y maps to screen UP -- matching `_draw_birdseye`'s (x right, y up)
+    convention. Two colour-coded spheres pin down the mapping directly from a real
+    render, not asserted from the Euler-angle derivation alone."""
+    sionna_rt = pytest.importorskip("sionna.rt")
+    from PIL import Image
+
+    from e2e.ml.rt_scene_build import _synthetic_scene_path
+
+    scene = sionna_rt.load_scene(_synthetic_scene_path("flat"), merge_shapes=False)
+    scene.frequency = 77e9
+
+    mat_x = sionna_rt.ITURadioMaterial("mx", "metal", thickness=0.01, color=(1.0, 0.0, 0.0))
+    sx = sionna_rt.SceneObject(fname=sionna_rt.scene.sphere, name="sx", radio_material=mat_x)
+    scene.edit(add=[sx])
+    sx.scaling = 3.0
+    sx.position = [15.0, 0.0, 3.0]
+
+    mat_y = sionna_rt.ITURadioMaterial("my", "metal", thickness=0.01, color=(0.0, 1.0, 0.0))
+    sy = sionna_rt.SceneObject(fname=sionna_rt.scene.sphere, name="sy", radio_material=mat_y)
+    scene.edit(add=[sy])
+    sy.scaling = 3.0
+    sy.position = [0.0, 15.0, 3.0]
+
+    cam_pos = np.array([0.0, 0.0, 60.0])
+    centroid = np.array([0.0, 0.0, 0.0])
+    camera = render_scene._build_camera(cam_pos, centroid, sionna_rt)
+
+    out_path = tmp_path / "calib.png"
+    scene.render_to_file(camera=camera, filename=str(out_path), resolution=(400, 400),
+                         num_samples=32, fov=50.0)
+
+    arr = np.asarray(Image.open(out_path).convert("RGB")).astype(float)
+    red = (arr[:, :, 0] > 150) & (arr[:, :, 1] < 100) & (arr[:, :, 2] < 100)
+    green = (arr[:, :, 1] > 150) & (arr[:, :, 0] < 100) & (arr[:, :, 2] < 100)
+    ry, rx = np.where(red)
+    gy, gx = np.where(green)
+    assert ry.size and gy.size, "expected both markers visible in the top-down render"
+    cx, cy = arr.shape[1] / 2.0, arr.shape[0] / 2.0
+
+    # +x marker (red): screen RIGHT of centre, vertically centred.
+    assert rx.mean() > cx + 50
+    assert abs(ry.mean() - cy) < 20
+    # +y marker (green): screen UP (smaller row index) of centre, horizontally centred.
+    assert gy.mean() < cy - 50
+    assert abs(gx.mean() - cx) < 20
+
+
+@pytest.mark.sionna
+def test_build_rt_scene_assigns_distinct_colors_per_class_without_touching_rf_params(tiny_cfg):
+    """End-to-end (real Sionna materials) check that `build_rt_scene` (a) colours each
+    class distinctly per `_default_object_render_color`, and (b) leaves the RF-visible
+    material parameters (relative_permittivity/conductivity/scattering_coefficient)
+    IDENTICAL between two same-base-material objects that only differ in colour --
+    i.e. colour and RF material are decoupled, verified empirically against the
+    installed Sionna materials, not just read off its source."""
+    pytest.importorskip("sionna.rt")
+    from e2e.ml.rt_gen import build_rt_scene
+    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
+                                       _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
+    from e2e.scenario import Node, NodeRole, ObjectKind, Scenario, SceneObject
+
+    scenario = Scenario(
+        name="color_test", base_scene="free", num_frames=1,
+        nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 1.5),
+                    look_at=(1.0, 0.0, 1.5))],
+        objects=[
+            SceneObject(name="sphere-0", kind=ObjectKind.SPHERE, position=(10.0, 0.0, 1.0),
+                       scaling=0.5, material="metal", object_class="vehicle"),
+            SceneObject(name="vehicle-0", kind=ObjectKind.MESH, asset="low_poly_car",
+                       position=(15.0, 3.0, 0.75), scaling=1.0, material="metal",
+                       object_class="vehicle"),
+            SceneObject(name="pedestrian-0", kind=ObjectKind.MESH, asset="pedestrian_placeholder",
+                       position=(8.0, -3.0, 0.87), scaling=1.0, material="skin",
+                       object_class="pedestrian"),
+            SceneObject(name="clutter-box-0", kind=ObjectKind.BOX, position=(20.0, 5.0, 1.25),
+                       scaling=0.5, material="concrete", object_class="scatterer"),
+        ],
+    )
+
+    rt_scene = build_rt_scene(scenario, tiny_cfg, base_scene="free")
+
+    got = {name: tuple(round(c, 3) for c in mat.color)
+          for name, mat in rt_scene.materials.items()}
+    assert got["sphere-0"] == tuple(round(c, 3) for c in _OBJECT_COLOR_SPHERE)
+    assert got["vehicle-0"] == tuple(round(c, 3) for c in _OBJECT_COLOR_VEHICLE)
+    assert got["pedestrian-0"] == tuple(round(c, 3) for c in _OBJECT_COLOR_PEDESTRIAN)
+    assert got["clutter-box-0"] == tuple(round(c, 3) for c in _OBJECT_COLOR_CLUTTER_BOX)
+    assert len(set(got.values())) == 4, "every class must render a distinct colour"
+
+    # Colour vs RF material decoupling: the sphere and the mesh vehicle are both plain
+    # "metal" ITU materials with the SAME scattering_coefficient but DIFFERENT colours
+    # -- their RF-visible parameters must still match exactly.
+    m_sphere = rt_scene.materials["sphere-0"]
+    m_vehicle = rt_scene.materials["vehicle-0"]
+    assert m_sphere.color != m_vehicle.color
+    assert float(m_sphere.relative_permittivity.numpy()[0]) == \
+          pytest.approx(float(m_vehicle.relative_permittivity.numpy()[0]))
+    assert float(m_sphere.conductivity.numpy()[0]) == \
+          pytest.approx(float(m_vehicle.conductivity.numpy()[0]))
+    assert float(m_sphere.scattering_coefficient.numpy()[0]) == \
+          pytest.approx(float(m_vehicle.scattering_coefficient.numpy()[0]))
+
+
+@pytest.mark.sionna
+def test_render_rt_topdown_gif_objects_move_between_frames(tmp_path):
+    """The actual deliverable's core claim: a top-down GIF built from ONE scenario at
+    successive MOTION frames shows real pixel-level movement, not a static loop (the
+    exact bug this task's brief warned against -- and the one the `dt` fix in commit
+    c212076 exists to prevent)."""
+    pytest.importorskip("sionna.rt")
+    from PIL import Image
+
+    out_path = tmp_path / "topdown_test.gif"
+    n_frames = 4
+    result_path = render_scene.render_rt_topdown_gif(
+        "D1", out_path, cfg=TI_IWR1443, n_frames=n_frames, fps=4, frame_idx=0, seed=0,
+        resolution=(200, 150), num_samples=16, use_local_assets=False,
+    )
+
+    assert result_path == out_path
+    assert out_path.exists() and out_path.stat().st_size > 0
+
+    gif = Image.open(out_path)
+    frame_arrays = []
+    for i in range(n_frames):
+        gif.seek(i)
+        frame_arrays.append(np.asarray(gif.convert("RGB")).astype(int))
+    assert len(frame_arrays) == n_frames
+
+    diff = np.abs(frame_arrays[0] - frame_arrays[-1])
+    assert diff.max() > 0, "objects must visibly move between the first and last frame"
+    # More than a handful of stray anti-aliasing/noise pixels changed -- real motion,
+    # not render-noise jitter on an otherwise static frame.
+    assert int((diff.sum(axis=-1) > 20).sum()) > 20

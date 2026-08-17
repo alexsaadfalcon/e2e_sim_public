@@ -53,6 +53,57 @@ DEFAULT_SCATTERING_COEFFICIENT = 0.3
 DEFAULT_SCATTERING_PATTERN = "lambertian"
 
 # --------------------------------------------------------------------------------
+# RENDER-ONLY object colours, by category (review-render legibility, e.g.
+# e2e.ml.render_scene's RT camera path). `RadioMaterial`/`ITURadioMaterial`'s `color`
+# kwarg is documented by Sionna as "RGB color ... as displayed in the previewer and
+# renderer" (sionna/rt/radio_materials/radio_material.py) and is passed to Mitsuba as
+# its own `props["color"]` entry, entirely separate from `relative_permittivity` /
+# `conductivity` / `scattering_coefficient` / `scattering_pattern` (verified against
+# the installed Sionna source, not assumed) -- so choosing per-class colours here
+# changes nothing the path solver sees; it is purely cosmetic.
+#
+# Picked for (a) a distinct hue AND a distinct LUMINANCE per class -- a talk deck is
+# shared over video (Teams), where luma survives compression far better than fine hue
+# differences -- against the flat grey ground and the amber radar marker
+# (`e2e.ml.render_scene._RADAR_MARKER_COLOR`), and (b) keeping "sphere" (the D0
+# stand-in target -- still tagged `object_class="vehicle"` for RCS/dataset purposes,
+# see `e2e.ml.rt_scenes.build_rt_tier_scenario`) visually distinct from a real vehicle
+# mesh even though they share an `object_class`, since a reviewer needs to tell them
+# apart by eye; `_default_object_render_color` therefore checks `obj.kind` before
+# `obj.object_class`.
+_OBJECT_COLOR_VEHICLE = (0.05, 0.35, 0.95)      # saturated blue, mid luminance
+_OBJECT_COLOR_PEDESTRIAN = (0.05, 0.95, 0.95)   # bright cyan -- highest non-radar
+                                                 # luminance: pedestrians were the
+                                                 # hardest class to see in review renders
+_OBJECT_COLOR_CLUTTER_BOX = (0.55, 0.15, 0.75)  # violet, low luminance -- reads as an
+                                                 # inert obstacle, distinct from targets
+_OBJECT_COLOR_SPHERE = (0.15, 0.75, 0.15)       # green, mid-high luminance -- distinct
+                                                 # hue from every other class/the radar's
+                                                 # amber marker
+_OBJECT_COLOR_DEFAULT = (0.8, 0.1, 0.1)         # legacy single-colour fallback, kept
+                                                 # for any object_class/kind combination
+                                                 # not covered above
+
+
+def _default_object_render_color(obj) -> Tuple[float, float, float]:
+    """Per-class RENDER colour for a scenario `SceneObject` with no explicit `obj.color`
+    (see the module-level colour constants above for the mapping/rationale). Only ever
+    consulted as a *fallback*: a scenario author's explicit `obj.color` always wins (see
+    `build_rt_scene`), so this never overrides a caller's own choice.
+    """
+    from e2e.scenario import ObjectKind
+
+    if obj.kind == ObjectKind.SPHERE:
+        return _OBJECT_COLOR_SPHERE
+    if obj.kind == ObjectKind.BOX:
+        return _OBJECT_COLOR_CLUTTER_BOX
+    if obj.object_class == "pedestrian":
+        return _OBJECT_COLOR_PEDESTRIAN
+    if obj.object_class == "vehicle":
+        return _OBJECT_COLOR_VEHICLE
+    return _OBJECT_COLOR_DEFAULT
+
+# --------------------------------------------------------------------------------
 # Real object meshes (campaign R2): Sionna's bundled cars + a procedural pedestrian
 # placeholder, replacing sphere-as-car/pedestrian scatterers.
 # --------------------------------------------------------------------------------
@@ -788,14 +839,14 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
                 conductivity=SKIN_CONDUCTIVITY_SPM,
                 scattering_coefficient=float(scattering_coefficient),
                 scattering_pattern=scattering_pattern,
-                color=obj.color if obj.color is not None else (0.9, 0.75, 0.65),
+                color=obj.color if obj.color is not None else _default_object_render_color(obj),
             )
         else:
             mat = rt.ITURadioMaterial(
                 f"e2e-rt-mat-{obj.name}", obj.material, thickness=0.01,
                 scattering_coefficient=float(scattering_coefficient),
                 scattering_pattern=scattering_pattern,
-                color=obj.color if obj.color is not None else (0.8, 0.1, 0.1),
+                color=obj.color if obj.color is not None else _default_object_render_color(obj),
             )
         so = rt.SceneObject(fname=_object_mesh(rt, obj), name=f"e2e-rt-obj-{obj.name}",
                             radio_material=mat)
