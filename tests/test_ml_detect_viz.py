@@ -514,6 +514,90 @@ def test_render_perclass_bar_chart_annotates_target_counts(tmp_path, monkeypatch
     assert "503" in tick_text
 
 
+def test_panel_limits_unifies_scales_when_the_spread_is_small():
+    """When the two panels are within `unify_below` of each other, they get ONE limit.
+    Removing the hazard outright beats annotating it."""
+    tops, unified = detect_viz._panel_limits(
+        {"AP": [[0.18, 0.16]], "AR": [[0.20, 0.19]]})
+    assert unified
+    assert tops["AP"] == tops["AR"]
+
+
+def test_panel_limits_keeps_separate_scales_when_the_spread_is_large():
+    """At a 10x spread a shared axis would squash the AP bars to hairlines, so the
+    limits stay independent -- and `unified=False` obliges the caller to say so."""
+    tops, unified = detect_viz._panel_limits(
+        {"AP": [[0.015, 0.003]], "AR": [[0.200, 0.143]]})
+    assert not unified
+    assert tops["AR"] > tops["AP"]
+
+
+def test_panel_limits_ignores_nan_from_unscored_classes():
+    """A model never scored on a class contributes NaN; it must not blank the axis.
+
+    Values are deliberately far apart so the unify branch does not fire and each
+    panel's own limit is observable.
+    """
+    tops, unified = detect_viz._panel_limits(
+        {"AP": [[float("nan"), 0.03]], "AR": [[0.40, float("nan")]]})
+    assert not unified
+    assert tops["AP"] == pytest.approx(0.03 * 1.15)
+    assert tops["AR"] == pytest.approx(0.40 * 1.15)
+
+
+def test_render_perclass_bar_chart_flags_mismatched_panel_scales(tmp_path, monkeypatch):
+    """Regression for the misleading dual-axis chart a vision review caught (2026-08-16):
+    `perclass_ap_ar_bar.png` put AP (0-0.02) beside AR (0-0.20) with nothing marking the
+    10x difference, so bars of similar HEIGHT stood for numbers an order of magnitude
+    apart. Independent autoscaling is fine ONLY if the figure admits it, so when the
+    panels don't share a limit the range must appear in both titles and a caution band
+    must appear on the figure."""
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_close = plt.close
+    monkeypatch.setattr(detect_viz.plt, "close",
+                        lambda fig=None: (captured.append(fig), real_close(fig)))
+
+    models = [
+        ("classical CFAR", _fake_perclass_metrics(0.015, 0.153, 0.003, 0.143)),
+        ("SSMRadNet", _fake_perclass_metrics(0.014, 0.200, 0.007, 0.196)),
+    ]
+    detect_viz.render_perclass_bar_chart(models, tmp_path / "bar.png")
+    fig = captured[-1]
+    ax_ap, ax_ar = fig.axes[0], fig.axes[1]
+
+    # The scales really do differ here -- that is the premise of the test.
+    assert ax_ap.get_ylim()[1] != pytest.approx(ax_ar.get_ylim()[1])
+    for ax in (ax_ap, ax_ar):
+        assert "y-axis" in ax.get_title(), "mismatched panel hides its axis range"
+
+    figure_text = " ".join(t.get_text() for t in fig.texts)
+    assert "DIFFERENT y-scales" in figure_text
+    assert "not the bar heights" in figure_text
+
+
+def test_render_perclass_bar_chart_omits_the_caution_when_scales_match(tmp_path, monkeypatch):
+    """The converse: with comparable panels there is nothing to warn about, and a
+    spurious warning would train readers to ignore the real one."""
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_close = plt.close
+    monkeypatch.setattr(detect_viz.plt, "close",
+                        lambda fig=None: (captured.append(fig), real_close(fig)))
+
+    models = [("model", _fake_perclass_metrics(0.18, 0.20, 0.16, 0.19))]
+    detect_viz.render_perclass_bar_chart(models, tmp_path / "bar.png")
+    fig = captured[-1]
+
+    assert fig.axes[0].get_ylim() == fig.axes[1].get_ylim()
+    figure_text = " ".join(t.get_text() for t in fig.texts)
+    assert "DIFFERENT y-scales" not in figure_text
+    for ax in fig.axes[:2]:
+        assert "y-axis" not in ax.get_title()
+
+
 def test_render_perclass_bar_chart_three_models_and_custom_classes(tmp_path):
     models = [
         ("classical CFAR", {"AP_vehicle": 0.01, "AR_vehicle": 0.1, "n_targets_vehicle": 5}),
@@ -664,6 +748,53 @@ def test_cli_single_mode_missing_checkpoint_exits_nonzero(tiny_manifest_path, tm
         capture_output=True, text=True,
     )
     assert proc.returncode != 0
+
+
+def test_cli_perclass_mode_writes_the_bar_chart_without_a_manifest(tmp_path):
+    """The bar chart must be regenerable from tracked code alone.
+
+    Its predecessor was drawn by a scratch script that no longer exists, leaving a
+    published figure with no reproducible recipe -- the same failure that lost the
+    `tracking_refine` generator. `--perclass` takes only the metrics JSONs that the
+    evaluation already writes, so no dataset, checkpoint, or GPU is involved.
+    """
+    metrics_path = tmp_path / "m.json"
+    metrics_path.write_text(json.dumps(_fake_perclass_metrics(0.015, 0.153, 0.003, 0.143)))
+    out_path = tmp_path / "bar.png"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "e2e.ml.detect_viz",
+         "--perclass", f"classical CFAR={metrics_path}", "--out", str(out_path)],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out_path.exists() and out_path.stat().st_size > 0
+
+
+def test_cli_perclass_rejects_a_malformed_spec(tmp_path):
+    """NAME=PATH with no '=' is a typo, not a filename -- fail loudly rather than
+    drawing an empty chart."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "e2e.ml.detect_viz",
+         "--perclass", "just-a-path.json", "--out", str(tmp_path / "x.png")],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "NAME=METRICS.json" in proc.stderr
+
+
+def test_cli_without_a_frame_selection_exits_nonzero(tiny_manifest_path, fftradnet_checkpoint,
+                                                     tmp_path):
+    """--frame/--select stopped being an argparse-required group when --perclass was
+    added; the requirement still has to hold for every frame-drawing mode."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "e2e.ml.detect_viz",
+         "--manifest", str(tiny_manifest_path), "--checkpoint", str(fftradnet_checkpoint),
+         "--split", "val", "--out", str(tmp_path / "x.png")],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "--frame" in proc.stderr
 
 
 def test_cli_frame_and_select_are_mutually_exclusive(tiny_manifest_path, fftradnet_checkpoint,

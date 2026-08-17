@@ -441,6 +441,40 @@ def load_perclass_metrics(path) -> Dict:
     return json.loads(Path(path).read_text())
 
 
+def _panel_limits(panel_values: Dict[str, List[List[float]]], *, floor: float = 0.02,
+                  headroom: float = 1.15, unify_below: float = 1.5
+                  ) -> Tuple[Dict[str, float], bool]:
+    """Decide the y-limit for each panel, and whether they could be made equal.
+
+    Two side-by-side panels autoscaled independently are the classic misleading chart:
+    AP topping out at 0.02 beside AR topping out at 0.20 draws bars of similar HEIGHT
+    for numbers that differ 10x, and nothing on the figure says so. (A vision review of
+    `perclass_ap_ar_bar.png` flagged exactly this, 2026-08-16.)
+
+    Forcing a shared axis is not automatically the fix: at a 10x spread the smaller
+    panel's bars collapse to hairlines and become unreadable, which trades a misleading
+    figure for an uninformative one. So the rule is conditional --
+
+    * ratio <= `unify_below`: use ONE limit for both panels. The hazard disappears
+      outright and no caveat is needed, which is always better than a caveat.
+    * ratio >  `unify_below`: keep independent limits so both panels stay legible, and
+      return `unified=False` so the caller is obliged to say so ON the figure.
+
+    Returns `({panel_key: y_top}, unified)`. NaNs (a model never scored on a class) are
+    ignored rather than propagating and blanking the axis.
+    """
+    tops: Dict[str, float] = {}
+    for key, rows in panel_values.items():
+        finite = [v for row in rows for v in row if v == v]  # v != v -> NaN
+        tops[key] = max(floor, (max(finite) if finite else 0.0) * headroom)
+
+    lo, hi = min(tops.values()), max(tops.values())
+    unified = lo > 0.0 and (hi / lo) <= unify_below
+    if unified:
+        tops = {key: hi for key in tops}
+    return tops, unified
+
+
 def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
                               classes: Sequence[str] = ("vehicle", "pedestrian"),
                               dpi: int = 150) -> Path:
@@ -460,6 +494,11 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
     same test split) are stamped onto the class x-tick labels so sample size is never
     left for a viewer to wonder about, per the task's non-negotiable honesty rule. Bars
     carry value labels. Fonts are sized for a back-of-room read, not a paper figure.
+
+    The two panels are scaled against each other, not autoscaled independently: see
+    `_panel_limits`. Either they end up sharing one y-limit, or they do not and the
+    figure says so in the panel titles and in a caution band -- a reader must never be
+    able to compare bar heights across the panels without being told the scales differ.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -468,11 +507,20 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
     width = 0.8 / max(n_models, 1)
     x = np.arange(len(classes))
 
+    # Resolve BOTH panels' data before drawing either, so the y-limits can be chosen
+    # against each other rather than autoscaled in isolation. See `_panel_limits`.
+    panel_values = {
+        metric_key: [[float(metrics.get(f"{metric_key}_{cls}", float("nan"))) for cls in classes]
+                     for _name, metrics in models]
+        for metric_key in ("AP", "AR")
+    }
+    tops, unified = _panel_limits(panel_values)
+
     fig, (ax_ap, ax_ar) = plt.subplots(1, 2, figsize=(14.0, 6.5), dpi=dpi)
     for metric_key, ax, metric_label in (("AP", ax_ap, "Average Precision (AP)"),
                                          ("AR", ax_ar, "Average Recall (AR)")):
-        for i, (name, metrics) in enumerate(models):
-            values = [float(metrics.get(f"{metric_key}_{cls}", float("nan"))) for cls in classes]
+        for i, (name, _metrics) in enumerate(models):
+            values = panel_values[metric_key][i]
             offset = (i - (n_models - 1) / 2.0) * width
             color = _MODEL_COLORS.get(name, f"C{i}")
             bars = ax.bar(x + offset, values, width=width * 0.92, label=name, color=color,
@@ -491,9 +539,12 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
         ax.set_xticks(x)
         ax.set_xticklabels(tick_labels, fontsize=14)
         ax.set_ylabel(metric_label, fontsize=15)
-        ax.set_title(metric_label, fontsize=17, fontweight="bold")
+        # When the panels do NOT share a scale, the axis range goes in the title, where
+        # it is read at the same moment as the bars it governs.
+        title = metric_label if unified else f"{metric_label}   [y-axis 0-{tops[metric_key]:.3g}]"
+        ax.set_title(title, fontsize=17, fontweight="bold")
         ax.tick_params(axis="y", labelsize=12)
-        ax.set_ylim(0.0, max(0.02, ax.get_ylim()[1] * 1.15))
+        ax.set_ylim(0.0, tops[metric_key])
         ax.grid(axis="y", alpha=0.3, linewidth=0.6)
         ax.set_axisbelow(True)
         for spine in ("top", "right"):
@@ -501,10 +552,25 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
 
     handles, legend_labels = ax_ap.get_legend_handles_labels()
     fig.suptitle("Per-class detection performance -- rt_kenney_d2_v1 test split", fontsize=16,
-                y=0.99)
+                y=0.995)
     fig.legend(handles, legend_labels, loc="upper center", ncol=len(models), fontsize=14,
-              frameon=False, bbox_to_anchor=(0.5, 0.93))
-    fig.tight_layout(rect=(0, 0, 1, 0.88))
+              frameon=False, bbox_to_anchor=(0.5, 0.96))
+
+    if not unified:
+        # Two short lines rather than one long one: at a compressed 540p screenshare a
+        # full-width single line is the first thing to become unreadable.
+        ratio = max(tops.values()) / min(tops.values())
+        fig.text(0.5, 0.845,
+                 f"The two panels use DIFFERENT y-scales (AR axis is {ratio:.0f}x the AP axis)\n"
+                 "compare the printed numbers, not the bar heights",
+                 ha="center", va="center", fontsize=15, fontweight="bold", color="#8c1d1d",
+                 linespacing=1.35,
+                 bbox=dict(boxstyle="round,pad=0.4", facecolor="#fdf0f0", edgecolor="#8c1d1d",
+                           linewidth=1.4))
+        rect_top = 0.79
+    else:
+        rect_top = 0.90
+    fig.tight_layout(rect=(0, 0, 1, rect_top))
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -589,7 +655,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     "dataset frame -- single-checkpoint mode, or a 3-way classical-CFAR / "
                     "FFTRadNet / SSMRadNet comparison (--compare).",
     )
-    p.add_argument("--manifest", required=True, help="dataset manifest.json")
+    p.add_argument("--manifest", default=None,
+                   help="dataset manifest.json (required for every mode except --perclass)")
     p.add_argument("--split", default="val", help="dataset split (train/val/test, default val)")
     p.add_argument("--out", required=True, help="output image path (.png)")
     p.add_argument("--threshold", type=float, default=0.5,
@@ -609,7 +676,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         f"(default: {_DEFAULT_DB_SPAN:.0f}, see _DEFAULT_DB_SPAN's comment "
                         "for the measurement that picked it)")
 
-    frame_group = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("--perclass", action="append", default=None, metavar="NAME=METRICS.json",
+                   help="corpus-level mode: draw the per-class AP/AR bar chart instead of a "
+                        "frame overlay. Repeat once per model, e.g. "
+                        "--perclass 'classical CFAR=d2_test_classical.json'. Lives here, in "
+                        "tracked code, precisely so the figure's recipe cannot be lost with a "
+                        "scratch script the way its predecessor was.")
+    p.add_argument("--classes", default="vehicle,pedestrian",
+                   help="--perclass mode: comma-separated class names (default vehicle,pedestrian)")
+
+    frame_group = p.add_mutually_exclusive_group(required=False)
     frame_group.add_argument("--frame", type=int, default=None, help="explicit frame index")
     frame_group.add_argument("--select", choices=("median", "strong", "weak"), default=None,
                              help="pick a frame by ranked per-frame F1 (see "
@@ -630,6 +706,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
     device = torch.device(args.device) if args.device else None
+
+    if args.perclass:
+        models = []
+        for spec in args.perclass:
+            name, sep, path = spec.partition("=")
+            if not sep or not name.strip() or not path.strip():
+                print(f"--perclass expects NAME=METRICS.json, got {spec!r}", file=sys.stderr)
+                return 2
+            models.append((name.strip(), load_perclass_metrics(path.strip())))
+        classes = tuple(c.strip() for c in args.classes.split(",") if c.strip())
+        out = render_perclass_bar_chart(models, args.out, classes=classes)
+        print(f"wrote {out}")
+        return 0
+
+    # Every other mode reads frames, so it needs a dataset and a frame to draw.
+    if not args.manifest:
+        print("--manifest is required (except in --perclass mode)", file=sys.stderr)
+        return 2
+    if args.frame is None and args.select is None:
+        print("pick a frame: pass --frame INDEX or --select median|strong|weak",
+              file=sys.stderr)
+        return 2
 
     if args.compare:
         if not args.fftradnet_checkpoint or not args.ssmradnet_checkpoint:
