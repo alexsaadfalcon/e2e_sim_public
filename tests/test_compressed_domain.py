@@ -179,6 +179,70 @@ def test_plot_ap_vs_m_writes_a_file(tiny_cd_fixture, tmp_path):
     assert fig_path.stat().st_size > 0
 
 
+def _plot_synthetic(tmp_path, monkeypatch, native_ap, rtd=None):
+    """Draw plot_ap_vs_m from a hand-built payload and hand back the live figure.
+
+    Going through `run_compressed_domain_grid` would take a training run to produce one
+    curve shape; the plotting rules under test are pure functions of the numbers.
+    """
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda fig=None: (captured.append(fig), real_close(fig)))
+
+    payload = {
+        "model_name": "fftradnet",
+        "results": [{"m": m, "native_model": {"AP": ap},
+                     "classical_reconstructed": {"AP": 0.002}}
+                    for m, ap in native_ap.items()],
+    }
+    cd.plot_ap_vs_m(payload, tmp_path / "f.png", reconstruct_then_detect=rtd)
+    return captured[-1]
+
+
+def test_plot_ap_vs_m_marks_zero_ap_instead_of_plotting_it_on_a_log_axis(tmp_path, monkeypatch):
+    """AP = 0 means "detected nothing", which a log axis cannot express: matplotlib sends
+    it to -inf and draws the line plunging off the bottom, where it reads as "very small".
+    Zeros must appear as an explicit marker with a legend entry saying what they are."""
+    fig = _plot_synthetic(tmp_path, monkeypatch, {16: 0.05, 12: 0.04, 8: 0.06, 4: 0.07},
+                          rtd={16: 0.044, 12: 0.028, 8: 0.0, 4: 0.004})
+    ax = fig.axes[0]
+    assert ax.get_yscale() == "log", "premise: this data spans enough to go log"
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert any("AP = 0" in lbl for lbl in labels), f"zero not called out: {labels}"
+
+
+def test_plot_ap_vs_m_breaks_the_line_at_a_zero_rather_than_bridging_it(tmp_path, monkeypatch):
+    """Dropping zeros from a line is the opposite error to plotting them: it draws a
+    smooth decline straight across an M where the arm detected NOTHING. The arm's points
+    either side of a zero must land on separate line segments."""
+    fig = _plot_synthetic(tmp_path, monkeypatch, {16: 0.05, 12: 0.04, 8: 0.06, 4: 0.07},
+                          rtd={16: 0.044, 12: 0.028, 8: 0.0, 4: 0.004})
+    ax = fig.axes[0]
+    # Only the reconstruct-then-detect arm has the zero; the native-M arm legitimately
+    # spans 12 and 4 as one unbroken line. Identify the arm by its y-values.
+    rtd_values = {0.044, 0.028, 0.004}
+    rtd_lines = [ln for ln in ax.get_lines()
+                 if list(ln.get_ydata()) and set(ln.get_ydata()) <= rtd_values]
+    assert rtd_lines, "reconstruct-then-detect arm not drawn"
+    for line in rtd_lines:
+        xs = list(line.get_xdata())
+        assert not (12 in xs and 4 in xs), \
+            "the split arm bridges straight over the M=8 zero"
+
+
+def test_plot_ap_vs_m_keeps_one_arm_one_colour_across_the_break(tmp_path, monkeypatch):
+    """Two segments of the same arm must not read as two different arms."""
+    fig = _plot_synthetic(tmp_path, monkeypatch, {16: 0.05, 12: 0.04, 8: 0.06, 4: 0.07},
+                          rtd={16: 0.044, 12: 0.028, 8: 0.0, 4: 0.004})
+    ax = fig.axes[0]
+    segments = [ln for ln in ax.get_lines()
+                if list(ln.get_xdata()) in ([16, 12], [4],)]
+    assert len(segments) == 2, "expected the split arm's two segments"
+    assert segments[0].get_color() == segments[1].get_color()
+
+
 def test_markdown_summary_runs_without_error(tiny_cd_fixture, tmp_path):
     manifest_path = tiny_cd_fixture["manifest_path"]
     n_rx = tiny_cd_fixture["cfg"].n_rx

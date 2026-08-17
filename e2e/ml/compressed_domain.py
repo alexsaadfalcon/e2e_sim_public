@@ -303,25 +303,65 @@ def plot_ap_vs_m(payload: Dict, fig_path, *, reconstruct_then_detect: Optional[D
     native_ap = [r["native_model"]["AP"] for r in payload["results"]]
     classical_ap = [r["classical_reconstructed"]["AP"] for r in payload["results"]]
 
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(ms, native_ap, marker="o", label=f"{payload['model_name']} (native-M, no reconstruct)")
-    ax.plot(ms, classical_ap, marker="s", label="classical CFAR (reconstructed)")
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    arms = [(ms, native_ap, "o", f"{payload['model_name']} (native-M, no reconstruct)"),
+            (ms, classical_ap, "s", "classical CFAR (reconstructed)")]
     if reconstruct_then_detect:
         rms = [m for m in ms if m in reconstruct_then_detect]
-        rap = [reconstruct_then_detect[m] for m in rms]
-        if rap:
-            ax.plot(rms, rap, marker="^", label=f"{payload['model_name']} (reconstruct-then-detect)")
-    ax.set_xlabel("M (compressed channels)")
-    ax.set_ylabel("AP")
-    ax.set_title("Compressed-domain detection: native-M vs. reconstruct-then-detect")
-    ax.invert_xaxis()  # M decreases left -> right: reads as increasing compression
+        if rms:
+            arms.append((rms, [reconstruct_then_detect[m] for m in rms], "^",
+                         f"{payload['model_name']} (reconstruct-then-detect)"))
 
-    all_ap = native_ap + classical_ap + (list(reconstruct_then_detect.values())
-                                         if reconstruct_then_detect else [])
+    all_ap = [v for _x, ys, _m, _l in arms for v in ys]
     positive = [v for v in all_ap if v > 0]
-    if positive and max(positive) / min(positive) > 20:
+    log_scale = bool(positive) and max(positive) / min(positive) > 20
+
+    # A zero AP has no place on a log axis -- matplotlib drops it to -inf and draws a
+    # line plunging off the bottom, which reads as "very small" rather than "none". Plot
+    # the positive points as the line and mark the zeros explicitly at the floor instead.
+    floor = min(positive) / 3.0 if (log_scale and positive) else 0.0
+    zero_marked = False
+    for xs, ys, marker, label in arms:
+        # Split into contiguous runs of positive points. Simply dropping the zeros would
+        # bridge a line straight across them, drawing a smooth decline where the arm in
+        # fact detected NOTHING -- the opposite error from the one we set out to fix.
+        runs, current = [], []
+        for x, y in zip(xs, ys):
+            if y > 0:
+                current.append((x, y))
+            elif current:
+                runs.append(current)
+                current = []
+        if current:
+            runs.append(current)
+
+        color = None
+        if not runs:                # nothing positive: still needs a legend entry
+            ax.plot([], [], marker=marker, label=label, linewidth=2.5, markersize=10)
+        for i, run in enumerate(runs):
+            line, = ax.plot([x for x, _ in run], [y for _, y in run], marker=marker,
+                            label=label if i == 0 else None, linewidth=2.5, markersize=10,
+                            color=color)
+            color = line.get_color()   # keep every segment of one arm the same colour
+        zeros = [x for x, y in zip(xs, ys) if y <= 0]
+        if zeros:
+            zero_marked = True
+            ax.plot(zeros, [floor] * len(zeros), linestyle="none", marker="x",
+                    markersize=13, markeredgewidth=3, color="#b02a2a")
+
+    ax.set_xlabel("M (compressed channels)", fontsize=15)
+    ax.set_ylabel("AP", fontsize=15)
+    ax.set_title("Compressed-domain detection: native-M vs. reconstruct-then-detect",
+                 fontsize=16, fontweight="bold")
+    ax.invert_xaxis()  # M decreases left -> right: reads as increasing compression
+    ax.tick_params(labelsize=13)
+    if log_scale:
         ax.set_yscale("log")
-    ax.legend()
+    if zero_marked:
+        ax.plot([], [], linestyle="none", marker="x", markersize=13, markeredgewidth=3,
+                color="#b02a2a", label="AP = 0 (no detections)")
+    ax.legend(fontsize=12, framealpha=0.95)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
