@@ -106,8 +106,22 @@ def build_chain_simulation(
     label_grid=None, label_classes: Optional[Sequence[str]] = DEFAULT_LABEL_CLASSES,
     device=None, k: int = 1, base_scene: str = "flat",
     use_transmit_chain: bool = False, tx_pa_config=None,
+    coherent_targets: bool = True, antenna_pattern: Optional[str] = None,
+    ground_scattering_coefficient: Optional[float] = None,
+    samples_per_src: Optional[int] = None,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
+
+    `coherent_targets` / `antenna_pattern` are the 2026-08-17 target-physics fix and are
+    forwarded to `RTEnvironmentBlock` (they are ignored when the caller supplies its own
+    `environment_block`). `coherent_targets=True` adds each object's coherent specular
+    return -- without it a ray-traced target is pure Monte-Carlo speckle and earns almost
+    none of the chain's coherent processing gain (see the "HYBRID RT" banner in
+    `e2e.ml.rt_signal_chain`). `antenna_pattern=None` takes
+    `rt_scene_build.DEFAULT_ANTENNA_PATTERN` (`"tr38901"`, directive), which is what keeps
+    the flat scene's nadir ground bounce from owning the cube peak -- and therefore from
+    owning the reference `ImpairmentBlock`'s relative-power stages calibrate against. Pass
+    `coherent_targets=False, antenna_pattern="iso"` to reproduce a pre-2026-08-17 corpus.
 
     `environment_block=None` (default) builds `RTEnvironmentBlock(scenario, cfg,
     device=device, label_grid=label_grid, label_classes=label_classes)` -- real ray
@@ -141,6 +155,9 @@ def build_chain_simulation(
     env = environment_block if environment_block is not None else RTEnvironmentBlock(
         scenario, cfg, base_scene=base_scene, device=device,
         label_grid=label_grid, label_classes=label_classes,
+        coherent_targets=coherent_targets, antenna_pattern=antenna_pattern,
+        ground_scattering_coefficient=ground_scattering_coefficient,
+        samples_per_src=samples_per_src,
     )
 
     serial_stages: List[Any] = []
@@ -203,6 +220,9 @@ def generate_chain_corpus(
     label_classes: Optional[Sequence[str]] = DEFAULT_LABEL_CLASSES,
     randomizer: Optional[Callable[[int, "torch.Generator"], Dict[str, Any]]] = None,
     use_local_assets: bool = True, use_transmit_chain: bool = True,
+    coherent_targets: bool = True, antenna_pattern: Optional[str] = None,
+    ground_scattering_coefficient: Optional[float] = None,
+    samples_per_src: Optional[int] = None,
 ) -> Path:
     """Generate a radar-ML corpus by RUNNING THE COMPOSED CHAIN, one `Simulation` per
     scene (real ray tracing -- needs Sionna; see `build_chain_simulation`).
@@ -218,6 +238,13 @@ def generate_chain_corpus(
     `default_domain_randomizer()`) -- each scene's `ImpairmentBlock` gets a distinct
     seed (`seed + i * frames_per_scene`) so frames across the whole corpus don't repeat
     a randomization draw.
+
+    `coherent_targets` / `antenna_pattern` (defaults `True` / `None` -> directive) are the
+    2026-08-17 target-physics fix; see `build_chain_simulation`. **Every corpus generated
+    before 2026-08-17 used the broken combination** (speckle-only targets, isotropic
+    elements, mirror ground) and its targets sit below their own map background --
+    regenerate rather than reuse. Pass `coherent_targets=False, antenna_pattern="iso"`
+    only to reproduce one of those deliberately.
     """
     from e2e.ml.dataset import write_manifest
     from e2e.ml.labels import LabelGrid
@@ -265,6 +292,9 @@ def generate_chain_corpus(
             rffe_kwargs=rffe_kwargs, interconnect_kwargs=interconnect_kwargs,
             impairment_chain_params=randomize, impairment_seed=seed + i * frames_per_scene,
             quant_bits=quant_bits, label_grid=grid, label_classes=label_classes, device=device,
+            coherent_targets=coherent_targets, antenna_pattern=antenna_pattern,
+            ground_scattering_coefficient=ground_scattering_coefficient,
+            samples_per_src=samples_per_src,
         )
         sim.run(n_steps=frames_per_scene)
 
@@ -299,6 +329,32 @@ def build_arg_parser():
     p.add_argument("--no-rffe", action="store_true", help="disable the RFFE front-end stage")
     p.add_argument("--no-interconnect", action="store_true", help="disable the interconnect stage")
     p.add_argument("--quant-bits", type=int, default=12, help="ADC quantizer bit depth")
+    # --- target physics (2026-08-17 fix; correct behaviour is the DEFAULT) -------------
+    p.add_argument("--no-coherent-targets", action="store_true",
+                   help="drop each object's coherent specular return, leaving only the "
+                        "ray-traced diffuse speckle. REPRODUCES THE PRE-2026-08-17 BUG "
+                        "(targets below their own map background) -- regression use only")
+    p.add_argument("--antenna-pattern", default=None,
+                   help="antenna ELEMENT pattern (iso|tr38901|dipole|hw_dipole); default "
+                        "is rt_scene_build.DEFAULT_ANTENNA_PATTERN (directive). 'iso' "
+                        "reproduces the pre-2026-08-17 nadir-ground-bounce behaviour")
+    p.add_argument("--no-transmit-chain", action="store_true",
+                   help="disable the TX tributary (waveform -> PA -> modulate). "
+                        "MEASURED 2026-08-17: leaving it ON costs ~9 dB of "
+                        "target-to-background and erases the target-physics fix "
+                        "entirely (D1 median target-vs-p99 +7.5 dB off vs -1.6 dB on) -- "
+                        "suspected convention clash in ModulateBlock, see e2e/ml/README "
+                        "or the 2026-08-17 investigation. Pass this until that is settled")
+    p.add_argument("--ground-scattering", type=float, default=None,
+                   help="ground-plane scattering coefficient for the flat base scene "
+                        "(default: rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT). "
+                        "0.2-0.4 is the physically honest range for asphalt at 3.8 mm but "
+                        "costs ~37x the per-frame CFR time and ~8 dB of target margin -- "
+                        "read that constant before setting it")
+    p.add_argument("--samples-per-src", type=int, default=None,
+                   help="Sionna PathSolver Monte-Carlo ray budget (default: Sionna's own "
+                        "1e6). The dominant cost knob when the ground scatters diffusely: "
+                        "1e5 cut the path count 10x with the target metric unchanged")
     p.add_argument("--dry-run", action="store_true",
                    help="print the generation plan without ray-tracing/writing anything")
     return p
@@ -330,8 +386,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"scenes:       {args.n}  x  frames_per_scene={args.frames_per_scene}  "
               f"= {total_frames} frames")
         print(f"rffe:         {'off' if args.no_rffe else 'on'}   "
-              f"interconnect: {'off' if args.no_interconnect else 'on'}")
+              f"interconnect: {'off' if args.no_interconnect else 'on'}   "
+              f"tx chain: {'off' if args.no_transmit_chain else 'ON (see --no-transmit-chain)'}")
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
+        from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
+                                           DEFAULT_GROUND_SCATTERING_COEFFICIENT)
+        print(f"coherent targets: {'OFF (pre-2026-08-17 bug)' if args.no_coherent_targets else 'on'}"
+              f"   antenna pattern: "
+              f"{args.antenna_pattern or DEFAULT_ANTENNA_PATTERN + ' (default)'}"
+              f"   ground S: "
+              f"{DEFAULT_GROUND_SCATTERING_COEFFICIENT if args.ground_scattering is None else args.ground_scattering}"
+              f"   samples_per_src: {args.samples_per_src or 'sionna default'}")
         out_root = Path(args.out) if args.out is not None else DATASETS_DIR
         print(f"out:          {out_root / f'{args.config}_{args.tier}'}  (NOT written -- dry-run)")
         print("this path ray-traces with Sionna RT -- see report/chain_integration_design.html")
@@ -342,6 +407,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.config, args.tier, args.n, out_dir=args.out, seed=args.seed,
         frames_per_scene=args.frames_per_scene, use_rffe=not args.no_rffe,
         use_interconnect=not args.no_interconnect, quant_bits=args.quant_bits,
+        coherent_targets=not args.no_coherent_targets,
+        antenna_pattern=args.antenna_pattern,
+        ground_scattering_coefficient=args.ground_scattering,
+        samples_per_src=args.samples_per_src,
+        use_transmit_chain=not args.no_transmit_chain,
     )
     print(f"wrote {manifest_path}")
     return 0

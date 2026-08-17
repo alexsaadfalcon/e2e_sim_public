@@ -102,7 +102,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -533,6 +533,238 @@ def mimo_combine(cfg, beat: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------
+# HYBRID RT: coherent specular return per object  (PROTOTYPE, opt-in, 2026-08-17)
+# --------------------------------------------------------------------------------
+# WHY THIS EXISTS -- the defect it repairs, measured on the D0 single-sphere scene:
+#
+#   `_solve(..., specular_reflection=True, diffuse_reflection=False)` finds **ZERO**
+#   paths off a sphere, a low_poly_car, or any other curved/irregular target, at EVERY
+#   range tested (0.6 m .. 14.2 m) and at Sionna's own 15,872-facet sphere tessellation.
+#   That is not a tuning problem, it is geometry: Sionna's specular search is the image
+#   method on planar facets, which requires the facet PLANE's specular point to fall
+#   INSIDE the facet. On a convex surface of radius `a` tessellated at facet size `L`,
+#   a facet's normal is off the true surface normal by up to ~L/(2a), so the plane's
+#   monostatic specular point is displaced by ~R*L/(2a); demanding that be < L/2 gives
+#   `R < a`, INDEPENDENT of L. Refining the mesh does not help -- a faceted convex body
+#   simply has no monostatic image-method specular path at any useful range.
+#
+#   The generator's response was to make objects visible through DIFFUSE scattering
+#   (`rt_scene_build.DEFAULT_SCATTERING_COEFFICIENT = 0.3`). That gets the ENERGY
+#   roughly right -- MEASURED effective RCS of the D0 sphere (a = 0.5 m, true optical
+#   pi*a^2 = -1.05 dBsm): incoherent sum over paths = -7.1 dBsm, i.e. exactly the S^2 =
+#   0.09 (-10.5 dB) fraction the Degli-Esposti model sends into the diffuse lobe -- but
+#   it destroys the COHERENCE. The return arrives as ~300 Monte-Carlo speckle rays with
+#   random phases, spread over 6 range bins and decorrelated across the aperture
+#   (MEASURED: 20.6 dB element-to-element amplitude spread, 1.73 rad RMS phase residual
+#   against the ideal pi*sin(az) ramp, versus 0.03 rad for the analytic point target).
+#   A radar detects targets by COHERENT integration; speckle earns none of it.
+#
+# WHAT THIS ADDS: the coherent half of the return that Sionna structurally cannot find.
+# Each object contributes ONE deterministic point scatterer at its monostatic specular
+# point (the nearest point of its bounding ellipsoid along the radar line of sight),
+# with RCS `(1 - S^2) * sigma_object` -- the energy-conserving complement of the diffuse
+# lobe Sionna already computes, using the RCS the scenario layer already carries
+# (`Scatterer.rcs_dbsm` / `scatterers.DEFAULT_RCS_DBSM`). Ray tracing keeps doing
+# everything it is good at: geometry, occlusion, ground bounce, multipath, per-object
+# Doppler. Nothing here changes the traced path set; the coherent term is ADDED to the
+# CFR in Sionna's own convention (`h = sum a_i exp(-j2pi (f_c + f) tau_i) exp(j2pi f_D t)`,
+# see `cfr_sum_over_paths`), so every downstream stage is untouched.
+#
+# STATUS: DEFAULT ON since 2026-08-17 (`coherent_targets=True` on `rt_cfr_frame` /
+# `rt_synthesize_adc` / `RTEnvironmentBlock` / `chain_generate`). Pass
+# `coherent_targets=False` to reproduce a pre-2026-08-17 corpus, which is what the
+# regression tests do. Known approximations, all deliberate and listed:
+#   * bounding-ellipsoid specular point: exact for a sphere, approximate for a car mesh
+#     (the phase centre can be off by tens of cm, i.e. a few range bins, on a long
+#     vehicle). A real fix would use the mesh's own nearest visible facet.
+#   * no occlusion test: an object hidden behind another still gets its coherent return.
+#     `paths.objects` carries per-interaction object ids and is the intended gate.
+#   * flat-plate/dihedral aspect dependence is not modelled: sigma is the scenario's
+#     scalar RCS, not an angle-dependent pattern.
+_C_LIGHT = _C_LIGHT_MPS
+
+
+def _array_element_positions(position, boresight, n_elem: int, spacing_wl: float,
+                             wavelength_m: float) -> np.ndarray:
+    """World-frame positions of a `1 x n_elem` `PlanarArray`'s elements, `[n_elem, 3]`.
+
+    Mirrors what `build_rt_scene` sets up: `look_at` aims the device's local +x along
+    `boresight`, so its local +y is `normalise(z_up x boresight)` -- the same ULA axis
+    `rd_synth.array_axis` uses -- and Sionna's `PlanarArray` lays elements out at
+    `y_j = d*j - (num_cols-1)*d/2` with `d` in wavelengths.
+    """
+    p = np.asarray(position, dtype=np.float64)
+    u = np.asarray(boresight, dtype=np.float64)
+    u = u / np.linalg.norm(u)
+    y = np.cross(np.array([0.0, 0.0, 1.0]), u)
+    ny = np.linalg.norm(y)
+    if ny < 1e-12:                    # boresight straight up/down: pick any perpendicular
+        y = np.array([0.0, 1.0, 0.0])
+        ny = 1.0
+    y = y / ny
+    j = np.arange(int(n_elem), dtype=np.float64) - (int(n_elem) - 1) / 2.0
+    return p[None, :] + (j * float(spacing_wl) * float(wavelength_m))[:, None] * y[None, :]
+
+
+def _object_bbox(so) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """World-space `(centre, half_extents)` of a placed `SceneObject`, or None.
+
+    Reads the Mitsuba mesh's own AABB (`SceneObject.mi_mesh.bbox()`), so scaling,
+    position and mesh shape are all already baked in -- no mesh re-parsing, no
+    per-asset table to keep in sync.
+    """
+    try:
+        bb = so.mi_mesh.bbox()
+        lo = np.array([float(bb.min[i]) for i in range(3)], dtype=np.float64)
+        hi = np.array([float(bb.max[i]) for i in range(3)], dtype=np.float64)
+    except Exception:                                    # pragma: no cover
+        return None
+    return 0.5 * (lo + hi), np.maximum(0.5 * (hi - lo), 1e-6)
+
+
+def _specular_point(centre: np.ndarray, half: np.ndarray, radar_pos: np.ndarray) -> np.ndarray:
+    """Monostatic specular point: the near intersection of the radar LOS with the
+    object's bounding ellipsoid. Exact for a sphere; a documented approximation for
+    anything else (see the section banner)."""
+    d = centre - radar_pos
+    r = float(np.linalg.norm(d))
+    if r < 1e-9:
+        return centre.copy()
+    u = d / r
+    # ellipsoid (x/h)^2 = 1 hit distance from the centre along -u
+    t = 1.0 / math.sqrt(float(np.sum((u / half) ** 2)))
+    return centre - u * min(t, r * 0.99)
+
+
+def _rt_phase_centres(paths, rt_scene) -> dict:
+    """`{object name: (nearest visible surface point, visible?)}` read off the solve.
+
+    For each object, look at every traced path whose FIRST interaction is with that
+    object, and take the interaction vertex of the one with the shortest delay: that IS
+    the nearest visible point of the object's real mesh, from the radar, WITH occlusion
+    already applied by the ray tracer. Far better than a bounding-ellipsoid guess for an
+    extended target (a 4.5 m car's bbox nearest point can be ~2 m from where the mesh
+    actually reflects), and it costs nothing -- the solve already happened.
+
+    Returns `{}` if this Sionna build does not expose `objects`/`vertices`/`tau`.
+    """
+    try:
+        obj_ids = np.asarray(paths.objects.numpy())     # [depth, rx, rxa, tx, txa, P]
+        verts = np.asarray(paths.vertices.numpy())      # [depth, rx, rxa, tx, txa, P, 3]
+        tau = np.asarray(paths.tau.numpy())             # [rx, rxa, tx, txa, P]
+    except Exception:                                   # pragma: no cover
+        return {}
+    if obj_ids.ndim < 6 or tau.ndim < 5:                # pragma: no cover
+        return {}
+    first_obj = obj_ids[0, 0, 0, 0, 0]                  # [P], one antenna pair
+    first_v = verts[0, 0, 0, 0, 0]                      # [P, 3]
+    t0 = tau[0, 0, 0, 0]                                # [P]
+    ok = np.isfinite(t0) & (t0 > 0)
+    out = {}
+    for name, so in rt_scene.objects.items():
+        try:
+            oid = int(so.object_id)
+        except Exception:                               # pragma: no cover
+            continue
+        sel = ok & (first_obj == oid)
+        if not sel.any():
+            out[name] = (None, False)
+            continue
+        k = int(np.argmin(np.where(sel, t0, np.inf)))
+        out[name] = (first_v[k].astype(np.float64), True)
+    return out
+
+
+def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
+                        n_chirps: Optional[int] = None,
+                        scattering_coefficient: float = None,
+                        range_migration: bool = True,
+                        rcs_scale_db: float = 0.0,
+                        paths=None, apply_doppler: bool = True) -> np.ndarray:
+    """Deterministic point-scatterer CFR for every object, in Sionna's CFR convention.
+
+    Returns `[n_rx_ant, n_tx_ant, n_chirps, n_samples]` complex64, directly addable to
+    `cfr_from_paths`' output. See the section banner for the physics and the caveats.
+
+    `scattering_coefficient` is the material's `S`; the coherent term carries
+    `(1 - S^2)` of the object's RCS so coherent + diffuse conserve energy. Pass the same
+    value `build_rt_scene` was given (defaults to `rt_scene_build`'s default).
+
+    `apply_doppler=False` drops the per-object `exp(j2pi f_D t)` factor. `rt_retrace_reference`
+    needs that: it re-solves the geometry once per chirp with each object physically
+    advanced, and consumes velocity purely as that displacement (its solves use
+    `num_time_steps=1`, where Sionna's own Doppler factor is likewise 1). Leaving the
+    factor in would double-count the motion.
+    """
+    from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
+    from e2e.ml.scatterers import frame_scatterers, radar_pose
+
+    if scattering_coefficient is None:
+        scattering_coefficient = DEFAULT_SCATTERING_COEFFICIENT
+    coh_frac = max(0.0, 1.0 - float(scattering_coefficient) ** 2)
+
+    n_chirps = int(cfg.n_chirps) if n_chirps is None else int(n_chirps)
+    freqs = beat_frequencies(cfg)                                   # baseband offsets
+    f_c = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
+    lam = _C_LIGHT / f_c
+    pose = radar_pose(scenario, frame_idx)
+    scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))
+    radar_pos = np.asarray(pose.position, dtype=np.float64)
+
+    # Element positions: TX spacing is n_rx*lambda/2, RX spacing lambda/2 (build_rt_scene).
+    tx_pos = _array_element_positions(radar_pos, pose.boresight, int(cfg.n_tx),
+                                      0.5 * int(cfg.n_rx), lam)
+    rx_pos = _array_element_positions(radar_pos, pose.boresight, int(cfg.n_rx), 0.5, lam)
+
+    t = np.arange(n_chirps, dtype=np.float64) * float(cfg.chirp_period_s)
+    out = np.zeros((int(cfg.n_rx), int(cfg.n_tx), n_chirps, freqs.size), dtype=np.complex128)
+    centres = _rt_phase_centres(paths, rt_scene) if paths is not None else {}
+
+    for obj, sc in zip(scenario.objects, scats):
+        so = rt_scene.objects.get(obj.name)
+        rt_p, visible = centres.get(obj.name, (None, True))
+        if not visible:
+            continue          # ray tracer found no path to it -- occluded, stay silent
+        bb = _object_bbox(so) if so is not None else None
+        if rt_p is not None:
+            p = np.asarray(rt_p, dtype=np.float64)
+        elif bb is not None:
+            centre, half = bb
+            p = _specular_point(centre, half, radar_pos)
+        else:
+            continue
+        sigma = coh_frac * 10.0 ** ((float(sc.rcs_dbsm) + float(rcs_scale_db)) / 10.0)
+        if sigma <= 0.0:
+            continue
+        d_t = np.linalg.norm(tx_pos - p[None, :], axis=1)            # [n_tx]
+        d_r = np.linalg.norm(rx_pos - p[None, :], axis=1)            # [n_rx]
+        tau = (d_r[:, None] + d_t[None, :]) / _C_LIGHT               # [n_rx, n_tx]
+        # Sionna's own per-path amplitude convention (VERIFIED against its `paths.a`:
+        # |a|^2 = sigma lambda^2 / ((4 pi)^3 R_t^2 R_r^2) reproduces the traced sphere's
+        # measured effective RCS), unit-gain ("iso") elements.
+        amp = (math.sqrt(sigma) * lam
+               / ((4.0 * math.pi) ** 1.5 * d_r[:, None] * d_t[None, :]))
+        # Physical Doppler: f_D = -2 v_r / lambda, v_r receding-positive (see the module
+        # docstring's sign discussion -- the chain's conjugation turns this into
+        # rd_synth's chirp-to-chirp progression).
+        los = p - radar_pos
+        los = los / max(float(np.linalg.norm(los)), 1e-12)
+        v_r = float(np.dot(np.asarray(sc.velocity, dtype=np.float64), los))
+        f_d = (-2.0 * v_r / lam) if apply_doppler else 0.0
+
+        tau_b = tau[:, :, None, None]                                # [rx, tx, 1, 1]
+        t_b = t[None, None, :, None]
+        f_b = freqs[None, None, None, :]
+        tau_bb = tau_b - (f_d / f_c) * t_b if range_migration else tau_b
+        phase = (np.exp(-2j * np.pi * f_c * tau_b)
+                 * np.exp(2j * np.pi * f_d * t_b)
+                 * np.exp(-2j * np.pi * f_b * tau_bb))
+        out += amp[:, :, None, None] * phase
+
+    return np.ascontiguousarray(out.astype(np.complex64))
+
+
+# --------------------------------------------------------------------------------
 # Noise
 # --------------------------------------------------------------------------------
 def _peak_reference_amplitude(cfg, adc: np.ndarray, min_range_m: float) -> float:
@@ -601,7 +833,11 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                  include_leakage: bool = False, diffuse_reflection: bool = True,
                  specular_reflection: bool = True, refraction: bool = False,
                  solver_seed: int = 41, freq_chunk: int = 128,
-                 range_migration: bool = True) -> torch.Tensor:
+                 range_migration: bool = True,
+                 coherent_targets: bool = True,
+                 scattering_coefficient: Optional[float] = None,
+                 ground_scattering_coefficient: Optional[float] = None,
+                 samples_per_src: Optional[int] = None) -> torch.Tensor:
     """Ray-trace one radar frame and return its RAW channel frequency response.
 
     `complex64 [n_rx, n_tx, n_chirps, n_samples]` on `device` -- the pipeline's
@@ -615,17 +851,37 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
     `rt_synthesize_adc`). `range_migration` (default True, see `cfr_from_paths`) selects
     the intra-frame delay-drift correction; pass False to reproduce a pre-2026-08-14
     corpus deliberately.
+
+    `coherent_targets` (default **True** since 2026-08-17) adds the per-object coherent
+    specular return that Sionna's image method structurally cannot find -- see the
+    "HYBRID RT" banner above for the physics and the measurements. `False` reproduces a
+    pre-2026-08-17 corpus byte-for-byte. `scattering_coefficient` must match the material
+    `S` the scene was built with, because it sets the coherent/diffuse energy split
+    (`1 - S^2` coherent, `S^2` diffuse); `None` takes `rt_scene_build`'s default. When
+    this function builds the scene itself it forwards the same value, so the two cannot
+    drift apart.
     """
     dev = _resolve_device(device)
     if rt_scene is None:
-        rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
+        build_kwargs = {} if scattering_coefficient is None else {
+            "scattering_coefficient": float(scattering_coefficient)}
+        rt_scene = build_rt_scene(
+            scenario, cfg, base_scene=base_scene, frame_idx=frame_idx,
+            ground_scattering_coefficient=ground_scattering_coefficient, **build_kwargs)
 
     paths = _solve(rt_scene, max_depth=max_depth, include_leakage=include_leakage,
                    diffuse_reflection=diffuse_reflection,
                    specular_reflection=specular_reflection, refraction=refraction,
-                   seed=solver_seed)
+                   seed=solver_seed, samples_per_src=samples_per_src)
     raw = cfr_from_paths(paths, cfg, n_chirps=int(cfg.n_chirps), freq_chunk=freq_chunk,
                          range_migration=range_migration)
+    if coherent_targets:
+        # PROTOTYPE (see "HYBRID RT" banner): add the coherent specular return Sionna's
+        # image method structurally cannot find on a curved/faceted target.
+        raw = raw + coherent_target_cfr(
+            cfg, rt_scene, scenario, frame_idx=frame_idx, n_chirps=int(cfg.n_chirps),
+            scattering_coefficient=scattering_coefficient,
+            range_migration=range_migration, paths=paths)
     return torch.as_tensor(raw, dtype=torch.complex64, device=dev)
 
 
@@ -637,7 +893,11 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
                       refraction: bool = False, solver_seed: int = 41,
                       freq_chunk: int = 128,
                       snr_ref_min_range_m: Optional[float] = None,
-                      range_migration: bool = True) -> torch.Tensor:
+                      range_migration: bool = True,
+                      coherent_targets: bool = True,
+                      scattering_coefficient: Optional[float] = None,
+                      ground_scattering_coefficient: Optional[float] = None,
+                      samples_per_src: Optional[int] = None) -> torch.Tensor:
     """Ray-trace one radar frame and return its dechirped ADC cube.
 
     Drop-in replacement for `e2e.ml.rd_synth.synthesize_adc(cfg, scatterers, pose, ...)`
@@ -661,6 +921,23 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
     range_migration : bool             intra-frame delay-drift correction (default True,
                                        see `cfr_from_paths`); False reproduces a
                                        pre-2026-08-14 corpus deliberately.
+    coherent_targets : bool            add the per-object coherent specular return
+                                       (default True since 2026-08-17; see the "HYBRID
+                                       RT" banner). False reproduces a pre-2026-08-17
+                                       corpus deliberately.
+    scattering_coefficient : float or None
+                                       the material `S` the scene was built with; sets
+                                       the coherent/diffuse split. None -> the default.
+    ground_scattering_coefficient : float or None
+                                       ground roughness of the "flat" base scene; None ->
+                                       `rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT`
+                                       (read it -- a rough ground is ~37x the CFR cost).
+                                       Ignored when `rt_scene` is supplied.
+    samples_per_src : int or None       solver Monte-Carlo ray budget; None -> Sionna's own
+                                       default (1e6). The dominant cost knob once the
+                                       ground scatters diffusely: 1e5 cut the D1 path count
+                                       10x and the CFR time 9x with the target metric
+                                       unchanged to within 1.5 dB (MEASURED).
     device : torch device or None      defaults to the library device
     rt_scene : RTScene or None         reuse a scene built by `build_rt_scene`
                                        (skips base-scene parsing); built here if None
@@ -676,7 +953,11 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
                           diffuse_reflection=diffuse_reflection,
                           specular_reflection=specular_reflection, refraction=refraction,
                           solver_seed=solver_seed, freq_chunk=freq_chunk,
-                          range_migration=range_migration)
+                          range_migration=range_migration,
+                          coherent_targets=coherent_targets,
+                          scattering_coefficient=scattering_coefficient,
+                          ground_scattering_coefficient=ground_scattering_coefficient,
+                          samples_per_src=samples_per_src)
 
     from e2e.chain.dechirp import DechirpBlock
 
@@ -697,7 +978,9 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
                          include_leakage: bool = False, diffuse_reflection: bool = True,
                          specular_reflection: bool = True, refraction: bool = False,
                          solver_seed: int = 41, freq_chunk: int = 128,
-                         snr_ref_min_range_m: Optional[float] = None) -> torch.Tensor:
+                         snr_ref_min_range_m: Optional[float] = None,
+                         coherent_targets: bool = True,
+                         scattering_coefficient: Optional[float] = None) -> torch.Tensor:
     """Ground-truth ADC cube: re-solve the scene for **every chirp**.
 
     Chirp `c` is traced with every moving object advanced to `p0 + v * c * T_c` and
@@ -709,6 +992,12 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
 
     The radar itself is held fixed across the CPI, matching `rd_synth` (whose
     `RadarPose` is per-frame) and `frame_scatterers` (whose velocities are per-object).
+
+    `coherent_targets` (default True, matching `rt_cfr_frame`) adds the per-object
+    coherent specular return -- see the "HYBRID RT" banner. It MUST track the native
+    path's setting or this reference stops being a reference: a static scene's re-trace
+    and native cubes agree to <1e-4 relative only when both arms make the same choice
+    (pinned by `tests/test_ml_rt_gen.py`'s static-scene equality test).
 
     Expensive by design: cost is `n_chirps` solves instead of one. `n_chirps_cap`
     truncates the CPI (the returned cube then has `min(n_chirps, cap)` chirps, which
@@ -741,7 +1030,20 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
                            specular_reflection=specular_reflection, refraction=refraction,
                            seed=solver_seed)
             # num_time_steps=1 -> [n_rx_ant, n_tx_ant, 1, n_samples]
-            beat = _beat_from_paths(paths, cfg, n_chirps=1, freq_chunk=freq_chunk)
+            raw = cfr_from_paths(paths, cfg, n_chirps=1, freq_chunk=freq_chunk)
+            if coherent_targets:
+                # Same coherent term the native path adds, but evaluated at THIS chirp's
+                # geometry (the phase centres come from this chirp's own solve) and with
+                # the Doppler factor off -- the motion is already in the displacement.
+                raw = raw + coherent_target_cfr(
+                    cfg, rt_scene, scenario, frame_idx=frame_idx, n_chirps=1,
+                    scattering_coefficient=scattering_coefficient, paths=paths,
+                    apply_doppler=False)
+            from e2e.chain.dechirp import beat_from_cfr
+
+            beat = np.ascontiguousarray(
+                beat_from_cfr(torch.from_numpy(np.ascontiguousarray(raw))).numpy(),
+                dtype=np.complex64)
             frames.append(beat[:, :, 0, :])
     finally:
         # Leave the scene at its frame-0 geometry so the handle stays reusable.

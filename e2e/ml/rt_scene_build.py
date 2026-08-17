@@ -21,6 +21,21 @@ critical RCS lobe for small targets. This module therefore defaults to
 mid-range value for a rough painted/metallic vehicle surface at mmWave -- it is a
 modelling choice, not a measured one.
 
+Diffuse scattering alone is NOT how targets become visible, though -- see the
+"HYBRID RT" banner in `e2e.ml.rt_signal_chain`. Sionna's image-method specular search
+provably cannot find a monostatic path off a tessellated convex body at range
+(MEASURED: zero specular paths off Sionna's own 15,872-facet sphere at every range from
+0.6 m to 14.2 m, and zero off `low_poly_car`), so the diffuse lobe used to be the only
+return an object had -- speckle, with none of a real target's coherence.
+`rt_signal_chain.coherent_target_cfr` now supplies the coherent complement, and the
+`scattering_coefficient` here sets the split: `S^2` of the reflected power stays in the
+traced diffuse lobe, `1 - S^2` goes into the coherent point-scatterer term.
+
+Antenna pattern (`DEFAULT_ANTENNA_PATTERN`) and ground roughness
+(`DEFAULT_GROUND_SCATTERING_COEFFICIENT`) both changed on 2026-08-17 -- see those
+constants. The old values (`"iso"` / a perfectly specular ground) put a nadir ground
+bounce 54 dB above the target into every frame; see CHANGELOG / the constants' comments.
+
 Ground-rest placement / local (unshipped) asset library
 ---------------------------------------------------------
 `object_local_height_m` reports each object's unscaled mesh z-extent (bbox height) --
@@ -51,6 +66,68 @@ from e2e.ml.assets import DOWNLOADED_ASSET_SPECS, process_asset
 # Material defaults -- deliberately NOT Sionna's (pure specular mirror); see above.
 DEFAULT_SCATTERING_COEFFICIENT = 0.3
 DEFAULT_SCATTERING_PATTERN = "lambertian"
+
+# Antenna element pattern for the radar's TX/RX `PlanarArray`s.
+#
+# CHANGED 2026-08-17: was `"iso"`. An isotropic element radiates into the pavement under
+# the radar's own feet with unit gain, and the flat base scene's ground was a perfect
+# mirror (see `DEFAULT_GROUND_SCATTERING_COEFFICIENT`), so the specular nadir bounce at
+# `range = radar height` dominated every frame. MEASURED on the D0 single-sphere scene at
+# 1.5 m radar height: that one path carried |a|^2 = 1.60e-9 against ~2.0e-15 for the
+# target's paths, and near-range-clutter-to-target came out at +53.9 dB (D0) / +51.3 dB
+# (D1). It owned the range-FFT peak, and therefore also owned (a) the `snr_db` reference
+# `rt_signal_chain._peak_reference_amplitude` picks and (b) the cube-peak reference every
+# relative-power impairment is calibrated against (`impairments._range_fft_peak_power`).
+# Switching to a directive element dropped the nadir path 44 dB AND raised the target's
+# paths 9.2 dB (two-way boresight gain) -- a 53 dB swing in target-to-clutter.
+#
+# APPROXIMATION, stated plainly: `tr38901` is 3GPP TR 38.901's BASE-STATION element
+# pattern (65 deg HPBW in both planes, 8 dBi). It is chosen because it is the only
+# directive pattern Sionna RT bundles, NOT because it describes automotive radar
+# hardware -- a real 77 GHz automotive front-end is much narrower in elevation (~10-20
+# deg). Registering a custom Sionna antenna pattern with realistic automotive az/el
+# beamwidths is the right long-term fix; until then this is a documented stand-in whose
+# only claim is "directive, not isotropic".
+DEFAULT_ANTENNA_PATTERN = "tr38901"
+
+# Scattering coefficient of the "flat" base scene's ground plane -- now a PARAMETER
+# (`build_rt_scene(ground_scattering_coefficient=...)`), and this is its default.
+#
+# THE PHYSICS says this should NOT be 0. lambda is 3.8 mm at 78 GHz; asphalt/concrete
+# surface roughness is of order 0.5-1 mm RMS, i.e. 0.15-0.25 lambda, which is electrically
+# rough by the Rayleigh criterion and scatters a substantial fraction of the incident
+# power diffusely. A painted vehicle body panel, by contrast, is smooth to a small
+# fraction of 3.8 mm. So at mmWave the ROAD IS ROUGHER THAN THE CAR, and the pre-
+# 2026-08-17 model had it exactly inverted: cars pure-diffuse (S=0.3) and road pure-
+# specular (Sionna's 0.0 default, an optical mirror). Physically defensible values are
+# 0.2-0.4.
+#
+# THE DEFAULT IS NEVERTHELESS 0.0, deliberately, and this is a judgement call left open
+# rather than made silently. Three MEASURED reasons (ti_iwr1443 D1 seed 0, one frame,
+# coherent targets ON, directive elements):
+#
+#   ground S | paths  | CFR seconds | targets vs p99 (dB)
+#   ---------|--------|-------------|---------------------
+#     0.0    |    219 |    0.46     | +14.8, +16.9,  +7.6
+#     0.2    | 19,902 |    8.13     |  +9.2, +11.6,  +2.2
+#     0.3    | 45,207 |   18.04     |  +6.2,  +8.5,  -0.7
+#
+#   1. Cost: 206x the path count and ~37x the per-frame CFR time at S=0.3. A corpus
+#      regeneration budgeted at ~37 GPU-hours becomes several hundred. It also re-enters
+#      the >1e3-path memory regime `cfr_sum_over_paths_budgeted` exists to survive.
+#   2. It makes detection HARDER, not easier: road clutter is a broad pedestal that costs
+#      ~8 dB of target-to-background. That is CORRECT physics, but it is added scene
+#      difficulty, not a repair -- it belongs to a tier/difficulty decision, not to a
+#      bug fix, and folding it into one would confound the fix's validation.
+#   3. It is not needed to fix the reported defect. The nadir ground bounce was
+#      catastrophic *because the elements were isotropic*; with `DEFAULT_ANTENNA_PATTERN`
+#      the near-range-clutter-to-target ratio is already -9.8 dB (D0) / -13.8 dB (D1),
+#      i.e. the target dominates, with the mirror ground still in place.
+#
+# Turn it on with `--ground-scattering 0.2` (see `e2e.ml.chain_generate`'s CLI) or
+# `build_rt_scene(ground_scattering_coefficient=0.2)`. Recommended if/when road clutter
+# realism is wanted as its own tier axis, with the cost above budgeted for.
+DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0
 
 # --------------------------------------------------------------------------------
 # RENDER-ONLY object colours, by category (review-render legibility, e.g.
@@ -471,10 +548,22 @@ _GROUND_MATERIAL = "concrete"   # ITU table entry valid over 1-100 GHz (77 GHz i
 # Note the id spelling: Sionna names the loaded SceneObject after the shape id with the
 # "mesh-" prefix stripped, so a bsdf id equal to that stem ("e2e-ground") collides with
 # the object and `Scene.add` raises "Name '...' is already used by another item".
-_FLAT_SCENE_XML = f"""<scene version="2.1.0">
+def _flat_scene_xml(ground_scattering_coefficient: float
+                    = DEFAULT_GROUND_SCATTERING_COEFFICIENT) -> str:
+    """The "flat" base scene's XML at a given ground roughness.
+
+    `scattering_coefficient` IS honoured from scene XML: `ITURadioMaterial(props=...)`
+    forwards to `RadioMaterial`, which pops `scattering_coefficient` out of the Mitsuba
+    props (`radio_material.py`, `if 'scattering_coefficient' in props:`) -- verified
+    against the installed Sionna source, and empirically by the 206x path-count change it
+    produces. Emitting the field explicitly (even at 0.0, which equals Sionna's own
+    default) keeps the ground's roughness visible in the scene rather than implicit.
+    """
+    return f"""<scene version="2.1.0">
   <bsdf type="itu-radio-material" id="e2e-ground-mat">
       <string name="type" value="{_GROUND_MATERIAL}"/>
       <float name="thickness" value="0.1"/>
+      <float name="scattering_coefficient" value="{float(ground_scattering_coefficient)}"/>
   </bsdf>
   <shape type="rectangle" id="mesh-e2e-ground">
       <transform name="to_world">
@@ -485,6 +574,12 @@ _FLAT_SCENE_XML = f"""<scene version="2.1.0">
 </scene>
 """
 
+
+#: The default-roughness flat scene. Kept as a module constant because `e2e.ml.rt_gen`
+#: re-exports it and callers reference it; parameterised builds go through
+#: `_flat_scene_xml`.
+_FLAT_SCENE_XML = _flat_scene_xml()
+
 # "free": no ground, no clutter -- only the scenario's own objects. Useful when
 # validating bin placement against the point-target model, which has no ground either.
 _FREE_SCENE_XML = """<scene version="2.1.0">
@@ -492,18 +587,31 @@ _FREE_SCENE_XML = """<scene version="2.1.0">
 """
 
 _SYNTHETIC_SCENE_XML = {"flat": _FLAT_SCENE_XML, "free": _FREE_SCENE_XML}
-_synthetic_scene_paths: Dict[str, str] = {}
+#: Keyed by `(name, ground_scattering_coefficient)` -- the ground roughness is a
+#: parameter (see `DEFAULT_GROUND_SCATTERING_COEFFICIENT`), so one cached path per name
+#: would hand back a scene built at somebody else's roughness.
+_synthetic_scene_paths: Dict[Tuple[str, Optional[float]], str] = {}
 
 
-def _synthetic_scene_path(name: str) -> str:
-    """Write (once per process) and return the path of a built-in synthetic scene XML."""
-    path = _synthetic_scene_paths.get(name)
+def _synthetic_scene_path(name: str,
+                          ground_scattering_coefficient: Optional[float] = None) -> str:
+    """Write (once per process, per ground roughness) a built-in synthetic scene XML.
+
+    `ground_scattering_coefficient=None` uses `_SYNTHETIC_SCENE_XML[name]` verbatim (the
+    default-roughness flat scene, or `free`, which has no ground at all) so existing
+    single-argument callers are unaffected.
+    """
+    gsc = (None if ground_scattering_coefficient is None or name != "flat"
+           else float(ground_scattering_coefficient))
+    key = (name, gsc)
+    path = _synthetic_scene_paths.get(key)
     if path is None:
+        xml = _SYNTHETIC_SCENE_XML[name] if gsc is None else _flat_scene_xml(gsc)
         d = tempfile.mkdtemp(prefix="e2e-rt-scene-")
         path = os.path.join(d, f"{name}.xml")
         with open(path, "w") as f:
-            f.write(_SYNTHETIC_SCENE_XML[name])
-        _synthetic_scene_paths[name] = path
+            f.write(xml)
+        _synthetic_scene_paths[key] = path
     return path
 
 
@@ -530,7 +638,8 @@ class RTScene:
     materials: Dict[str, Any] = field(default_factory=dict)
 
 
-def _load_base_scene(rt, base_scene: str):
+def _load_base_scene(rt, base_scene: str,
+                     ground_scattering_coefficient: Optional[float] = None):
     """`"flat"` / `"free"` / a Sionna built-in name / a path -> a loaded `Scene`.
 
     City scenes are loaded with `merge_shapes=True`, which is the difference between a
@@ -547,7 +656,9 @@ def _load_base_scene(rt, base_scene: str):
     byte-for-byte unchanged.
     """
     if base_scene in _SYNTHETIC_SCENE_XML:
-        return rt.load_scene(_synthetic_scene_path(base_scene), merge_shapes=False)
+        return rt.load_scene(
+            _synthetic_scene_path(base_scene, ground_scattering_coefficient),
+            merge_shapes=False)
     builtin = getattr(rt.scene, base_scene, None)
     if builtin is not None:
         return rt.load_scene(builtin, merge_shapes=True)
@@ -774,7 +885,9 @@ def _object_mesh(rt, obj):
 def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 0,
                    scattering_coefficient: float = DEFAULT_SCATTERING_COEFFICIENT,
                    scattering_pattern: str = DEFAULT_SCATTERING_PATTERN,
-                   pattern: str = "iso", polarization: str = "V") -> RTScene:
+                   pattern: str = DEFAULT_ANTENNA_PATTERN,
+                   polarization: str = "V",
+                   ground_scattering_coefficient: Optional[float] = None) -> RTScene:
     """Build a monostatic FMCW-radar Sionna RT scene for `scenario` at `frame_idx`.
 
     * The scenario's first RADAR node becomes a co-located `Transmitter`/`Receiver`
@@ -794,6 +907,17 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
     `base_scene`: `"flat"` (a 400 m ground plane, the default), `"free"` (no ground --
     only the scenario's objects, matching the point-target model's environment), any
     Sionna built-in scene name (`"munich"`, `"etoile"`, ...), or a path to a scene XML.
+
+    `pattern`: the antenna ELEMENT pattern for both arrays, `DEFAULT_ANTENNA_PATTERN`
+    (`"tr38901"`, directive) by default since 2026-08-17 -- see that constant for the
+    measured reason and for the explicit statement that tr38901 is a base-station
+    pattern used as a stand-in, not a claim about automotive hardware. Pass `"iso"` to
+    reproduce a pre-2026-08-17 corpus deliberately.
+
+    `ground_scattering_coefficient`: roughness of the `"flat"` base scene's ground plane;
+    `None` takes `DEFAULT_GROUND_SCATTERING_COEFFICIENT`. Read that constant before
+    setting it -- the physically honest value (0.2-0.4) costs ~37x the per-frame CFR time
+    and ~8 dB of target-to-background, both measured. Ignored for every other base scene.
     """
     import sionna.rt as rt
 
@@ -806,7 +930,10 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
 
     f_center = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
 
-    scene = _load_base_scene(rt, base_scene)
+    gsc = (DEFAULT_GROUND_SCATTERING_COEFFICIENT
+           if ground_scattering_coefficient is None
+           else float(ground_scattering_coefficient))
+    scene = _load_base_scene(rt, base_scene, gsc)
     scene.frequency = f_center
     # TX elements are spaced n_rx * lambda/2 so the (tx, rx) pairs tile a uniform
     # lambda/2 virtual ULA -- the geometry rd_synth's `pi * v * sin(theta)` assumes.

@@ -62,6 +62,15 @@ class RTEnvironmentBlock:
     nothing needed substituting) -- read alongside `last_labels`/`last_targets` for a
     corpus's provenance of what its city was actually made of.
 
+    Target physics (CHANGED 2026-08-17): `coherent_targets=True` and a DIRECTIVE antenna
+    element pattern (`antenna_pattern=None` -> `rt_scene_build.DEFAULT_ANTENNA_PATTERN`)
+    are the defaults, because ray tracing alone does not make targets detectable -- see
+    the "HYBRID RT" banner in `e2e.ml.rt_signal_chain` and `DEFAULT_ANTENNA_PATTERN` for
+    the measurements. To reproduce a pre-2026-08-17 corpus, pass
+    `coherent_targets=False, antenna_pattern="iso"`. `ground_scattering_coefficient` and
+    `samples_per_src` are the two cost/realism knobs -- see
+    `rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT` before touching either.
+
     A fresh scene is ray-traced (via `e2e.ml.rt_gen.build_rt_scene` + `rt_cfr_frame`) on
     every `get_S_pars()` call -- the same per-frame rebuild `rt_synthesize_adc` does by
     default (not an incremental/cached scene) -- so moving-object geometry is always
@@ -74,6 +83,10 @@ class RTEnvironmentBlock:
                 refraction: bool = False, solver_seed: int = 41, freq_chunk: int = 128,
                 scattering_coefficient: Optional[float] = None,
                 scattering_pattern: Optional[str] = None,
+                coherent_targets: bool = True,
+                antenna_pattern: Optional[str] = None,
+                ground_scattering_coefficient: Optional[float] = None,
+                samples_per_src: Optional[int] = None,
                 material_policy: str = "extrapolated",
                 stand_in_material: str = "concrete",
                 label_grid=None,
@@ -97,6 +110,19 @@ class RTEnvironmentBlock:
         # resolved lazily in get_S_pars so this constructor stays Sionna-import-free.
         self.scattering_coefficient = scattering_coefficient
         self.scattering_pattern = scattering_pattern
+        # Add each object's coherent specular return on top of the traced diffuse lobe.
+        # ON by default since 2026-08-17 -- see the "HYBRID RT" banner in
+        # `e2e.ml.rt_signal_chain`; False reproduces a pre-2026-08-17 corpus.
+        self.coherent_targets = bool(coherent_targets)
+        # Antenna ELEMENT pattern; None -> `rt_scene_build.DEFAULT_ANTENNA_PATTERN`
+        # ("tr38901", directive). Pass "iso" to reproduce a pre-2026-08-17 corpus.
+        self.antenna_pattern = antenna_pattern
+        # Ground roughness of the "flat" base scene; None -> rt_scene_build's
+        # DEFAULT_GROUND_SCATTERING_COEFFICIENT. Read that constant before setting it --
+        # a rough ground is physically right but ~37x the per-frame CFR cost.
+        self.ground_scattering_coefficient = ground_scattering_coefficient
+        # Solver Monte-Carlo ray budget; None -> Sionna's own default (1e6).
+        self.samples_per_src = samples_per_src
         # None -> LabelGrid.for_config(cfg)'s defaults; see e2e.ml.labels.LabelGrid.
         self.label_grid = label_grid
         self.label_classes = tuple(label_classes) if label_classes is not None else None
@@ -138,6 +164,7 @@ class RTEnvironmentBlock:
         # at call time -- see the module docstring.
         from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
         from e2e.ml.rt_gen import (
+            DEFAULT_ANTENNA_PATTERN,
             DEFAULT_SCATTERING_COEFFICIENT,
             DEFAULT_SCATTERING_PATTERN,
             _resolve_device,
@@ -151,9 +178,13 @@ class RTEnvironmentBlock:
                    else self.scattering_coefficient)
         sc_pattern = (DEFAULT_SCATTERING_PATTERN if self.scattering_pattern is None
                      else self.scattering_pattern)
+        ant_pattern = (DEFAULT_ANTENNA_PATTERN if self.antenna_pattern is None
+                      else self.antenna_pattern)
 
         build_kwargs = dict(base_scene=self.base_scene, frame_idx=self.frame_counter,
-                           scattering_coefficient=sc_coeff, scattering_pattern=sc_pattern)
+                           scattering_coefficient=sc_coeff, scattering_pattern=sc_pattern,
+                           pattern=ant_pattern,
+                           ground_scattering_coefficient=self.ground_scattering_coefficient)
         if self.base_scene in ("flat", "free"):
             # Synthetic scenes only ever use in-band materials (see
             # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, so "flat" (the
@@ -180,6 +211,11 @@ class RTEnvironmentBlock:
             diffuse_reflection=self.diffuse_reflection,
             specular_reflection=self.specular_reflection, refraction=self.refraction,
             solver_seed=self.solver_seed, freq_chunk=self.freq_chunk,
+            # `sc_coeff` is the SAME value the scene above was built with, which is what
+            # licenses the (1 - S^2) / S^2 coherent/diffuse energy split.
+            coherent_targets=self.coherent_targets,
+            scattering_coefficient=sc_coeff,
+            samples_per_src=self.samples_per_src,
         )
 
         dt = 1.0 / float(self.cfg.frame_rate_hz)

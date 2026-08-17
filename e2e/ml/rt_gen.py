@@ -38,6 +38,8 @@ from __future__ import annotations
 from e2e.ml.rt_scene_build import (  # noqa: F401
     ASSET_LICENSES,
     CAR_ASSET_NAMES,
+    DEFAULT_ANTENNA_PATTERN,
+    DEFAULT_GROUND_SCATTERING_COEFFICIENT,
     DEFAULT_SCATTERING_COEFFICIENT,
     DEFAULT_SCATTERING_PATTERN,
     LOCAL_ASSET_SPECS,
@@ -78,6 +80,7 @@ from e2e.ml.rt_signal_chain import (  # noqa: F401
     cfr_from_paths,
     cfr_sum_over_paths,
     cfr_sum_over_paths_budgeted,
+    coherent_target_cfr,
     doppler_validity,
     mimo_combine,
     rt_cfr_frame,
