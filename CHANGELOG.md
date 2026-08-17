@@ -102,7 +102,17 @@ semantic versioning.
   "TARGET-COUNT BUG" docstring note and `report/rt_ml/baseline_rescore_v1/`. The
   corrected pilot baseline is AP 0.0029, so the ordering conclusion stands -- the
   model's margin is larger, not smaller -- but do not quote the 0.0044/0.0241
-  figures or a "3.9x" ratio against any post-2026-08-15 measurement.) `resolution_report()` states whether a config's evaluation harness is
+  figures or a "3.9x" ratio against any post-2026-08-15 measurement.
+  SECOND CORRECTION 2026-08-17: every `radial_like` number in this entry is
+  additionally a 16-ELEMENT result. `range_azimuth_power` had no DDMA branch, so
+  it formed its angle FFT across the 16 physical receivers instead of the 192
+  virtual elements (`e2e.ml.transforms.ddma_demux` now supplies the missing step).
+  Re-measured on `rt_kenney_d2_v1` with the full virtual array, the classical
+  baseline moves to AP 0.0093 / AR 0.2545, from AP 0.0181 / AR 0.1496 -- recall up
+  1.70x, precision roughly halved, because a sharper aperture resolves more real
+  targets AND more clutter. `ti_iwr1443` is TDM and is unaffected; the learned
+  models are unaffected either way, since they consume the RD cube directly.)
+  `resolution_report()` states whether a config's evaluation harness is
   physically answerable at all and warns when it is not.
 - **Full-vs-reduced dimension contract** (`frames.DIMENSION_*`, `require_dimension`)
   plus standalone `CompressBlock`/`DecompressBlock` (`e2e/chain/compress.py`).
