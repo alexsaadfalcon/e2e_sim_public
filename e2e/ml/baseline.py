@@ -98,7 +98,7 @@ import torch.nn.functional as F
 
 from e2e.ml.labels import LabelGrid
 from e2e.ml.metrics import MatchCriterion, evaluate_dataset
-from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+from e2e.ml.transforms import adc_to_rd, ddma_demux, tdm_deinterleave
 
 # CFAR ratio (dB) mapped onto the [0, 1] objectness range the metric thresholds over.
 # 0 dB == "cell equals its local noise estimate" -> objectness 0; 20 dB -> objectness 1.
@@ -144,12 +144,22 @@ def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = 
     Steps 1-3 of the module docstring. `n_angle_fft` defaults to the virtual-channel
     count, i.e. no zero-padding: an interpolated angle axis would place peaks between
     array resolution cells without adding information.
+
+    Both MIMO schemes are resolved to the full virtual array before the angle FFT: TDM by
+    de-interleaving chirps (separation in time), DDMA by slicing Doppler sub-bands
+    (separation in Doppler, so it can only happen after the Doppler FFT). Until
+    2026-08-17 the DDMA branch was missing, and this baseline formed its angle FFT over
+    the n_rx PHYSICAL receivers -- 16 standing in for `radial_like`'s 192 virtual
+    elements. Every `radial_like` classical-CFAR number produced before that date is
+    therefore a 16-element result and is not comparable to one produced after.
     """
     import dataclasses
 
     if cfg.mimo == "tdm":
         sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
         rd = adc_to_rd(sub_cfg, tdm_deinterleave(cfg, adc))
+    elif cfg.mimo == "ddma":
+        rd = ddma_demux(cfg, adc_to_rd(cfg, adc))
     else:
         rd = adc_to_rd(cfg, adc)
 

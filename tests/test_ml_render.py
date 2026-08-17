@@ -218,6 +218,62 @@ def test_render_scene_gif_ddma_config_also_renders(tiny_scenario, tmp_path):
     assert out_path.exists() and out_path.stat().st_size > 0
 
 
+def _ddma_single_target_adc(n_samples=256, sin_az=0.35, rng_m=30.0):
+    """One stationary point target at a known azimuth, on the DDMA `radial_like` config."""
+    import math
+
+    from e2e.ml.radar_config import RADIAL_LIKE
+    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.ml.scatterers import Scatterer
+
+    cfg = dataclasses.replace(RADIAL_LIKE, n_samples=n_samples)
+    pos = (rng_m * math.sqrt(1.0 - sin_az ** 2), rng_m * sin_az, 0.0)
+    sc = [Scatterer(position=pos, velocity=(0.0, 0.0, 0.0), rcs_dbsm=10.0,
+                    object_class="vehicle")]
+    return cfg, synthesize_adc(cfg, sc, snr_db=40.0, seed=0, random_phase=False), sin_az
+
+
+def test_range_azimuth_power_ddma_uses_the_full_virtual_aperture(tiny_cfg):
+    """Regression for the DDMA demux defect (found 2026-08-16, fixed 2026-08-17).
+
+    `range_azimuth_power` de-interleaved TDM into the virtual array but had no DDMA
+    branch, so for `radial_like` the angle FFT ran over the 16 PHYSICAL receivers rather
+    than the 192 virtual elements. It never looked broken: the peak still lands at the
+    right azimuth, because 16 elements are enough to LOCATE a lone target. What is lost
+    is resolution -- the mainlobe is ~12x too wide, which is what smeared targets into
+    horizontal ridges across every DDMA range-azimuth picture.
+
+    So the assertion is on WIDTH, not position. Measured on this fixture: 14 bins of 256
+    over the physical array against 1 bin demuxed.
+    """
+    import torch
+
+    from e2e.ml.transforms import adc_to_rd, ddma_demux
+
+    cfg, adc, sin_az = _ddma_single_target_adc()
+    n_fft = 256
+
+    def mainlobe_bins(rd_cube):
+        spec = torch.fft.fftshift(torch.fft.fft(rd_cube, n=n_fft, dim=0), dim=0)
+        ra = (spec.abs() ** 2).max(dim=2).values
+        col = ra[:, int(ra.argmax()) % ra.shape[1]]
+        return int((col >= col.max() / 2).sum().item())
+
+    rd = adc_to_rd(cfg, adc)
+    physical = mainlobe_bins(rd)
+    virtual = mainlobe_bins(ddma_demux(cfg, rd))
+    assert virtual * 4 <= physical, (
+        f"demuxed mainlobe ({virtual} bins) is not markedly narrower than the "
+        f"physical-array one ({physical} bins) -- the demux is not taking effect")
+
+    # And the shipped path must be the demuxed one.
+    ra_power, sin_az_axis = render_scene.range_azimuth_power(cfg, adc, n_angle_fft=n_fft)
+    peak_row = int(ra_power.argmax()) // ra_power.shape[1]
+    assert abs(float(sin_az_axis[peak_row]) - sin_az) < 0.02, "peak azimuth is wrong"
+    col = ra_power[:, int(ra_power.argmax()) % ra_power.shape[1]]
+    assert int((col >= col.max() / 2).sum().item()) == virtual
+
+
 # --------------------------------------------------------------------------------
 # range_azimuth_map
 # --------------------------------------------------------------------------------

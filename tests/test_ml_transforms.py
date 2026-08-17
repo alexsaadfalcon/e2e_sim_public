@@ -135,6 +135,61 @@ def test_tdm_deinterleave_indivisible_raises(torch_device):
 
 
 # --------------------------------------------------------------------------------
+# ddma_demux
+# --------------------------------------------------------------------------------
+def test_ddma_demux_shape_and_virtual_element_ordering(torch_device):
+    """Output is `[n_tx*n_rx, n_range, n_doppler//n_tx]` with virtual element
+    `v = t*n_rx + r` -- the indexing `rd_synth` synthesizes against (TX t sits at
+    `t*n_rx*lambda/2`, so (t, r) is element `t*n_rx + r` of a uniform lambda/2 ULA).
+    Get this ordering wrong and the angle FFT runs over a scrambled aperture, which
+    still produces a plausible-looking map."""
+    n_rx, n_range, n_doppler, n_tx = 4, 6, 24, 3
+    cfg = _RadarConfigStub(mimo="ddma", n_tx=n_tx, n_chirps=n_doppler)
+    n_sub = n_doppler // n_tx
+
+    # Zero everywhere except one Doppler bin per TX sub-band, tagged by (rx, t) so the
+    # routing is checkable. Sub-band t is centred on natural bin t*n_sub.
+    rd_nat = torch.zeros(n_rx, n_range, n_doppler, dtype=torch.complex64, device=torch_device)
+    for t in range(n_tx):
+        for rx in range(n_rx):
+            rd_nat[rx, :, t * n_sub] = complex(rx * 100 + t, 0)
+    rd = torch.fft.fftshift(rd_nat, dim=-1)      # adc_to_rd's convention
+
+    out = transforms.ddma_demux(cfg, rd)
+    assert out.shape == (n_tx * n_rx, n_range, n_sub)
+    assert out.device.type == torch_device.type
+    for t in range(n_tx):
+        for rx in range(n_rx):
+            got = out[t * n_rx + rx, 0, n_sub // 2]     # zero Doppler of that sub-band
+            assert got.real.item() == pytest.approx(rx * 100 + t)
+
+
+def test_ddma_demux_requires_ddma_mimo(torch_device):
+    cfg = _RadarConfigStub(mimo="tdm", n_tx=3)
+    rd = torch.zeros(2, 4, 9, dtype=torch.complex64, device=torch_device)
+    with pytest.raises(ValueError, match="ddma"):
+        transforms.ddma_demux(cfg, rd)
+
+
+def test_ddma_demux_indivisible_doppler_raises(torch_device):
+    """Unequal sub-bands would silently mis-assign transmitters, so refuse."""
+    cfg = _RadarConfigStub(mimo="ddma", n_tx=5)
+    rd = torch.zeros(2, 4, 12, dtype=torch.complex64, device=torch_device)   # 12 % 5 != 0
+    with pytest.raises(ValueError, match="divisible"):
+        transforms.ddma_demux(cfg, rd)
+
+
+def test_ddma_demux_single_tx_is_a_passthrough(torch_device):
+    """Invariance: with one transmitter there is nothing to de-multiplex, so the cube
+    must come back bit-identical rather than rolled by an off-by-one in the centring."""
+    cfg = _RadarConfigStub(mimo="ddma", n_tx=1, n_chirps=8)
+    rd = torch.randn(3, 4, 8, dtype=torch.complex64, device=torch_device)
+    out = transforms.ddma_demux(cfg, rd)
+    assert out.shape == rd.shape
+    assert torch.equal(out, rd)
+
+
+# --------------------------------------------------------------------------------
 # rd_to_input
 # --------------------------------------------------------------------------------
 def test_rd_to_input_shape_dtype_and_placement(torch_device):

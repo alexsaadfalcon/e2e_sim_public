@@ -126,6 +126,68 @@ def tdm_deinterleave(cfg, adc):
     return out
 
 
+def ddma_demux(cfg, rd):
+    """De-multiplex a DDMA Range-Doppler cube into a virtual-array cube.
+
+    The TDM counterpart above works on raw ADC, because TDM separates transmitters in
+    TIME and you can just pick out chirps. DDMA separates them in DOPPLER -- every TX
+    fires on every chirp, TX `t` carrying an extra per-chirp phase `2*pi*t*c/n_tx` -- so
+    the separation only exists after the Doppler FFT. Hence this takes an RD cube, not
+    ADC.
+
+    rd : complex `[n_rx, n_range, n_doppler]` as `adc_to_rd` returns it, i.e. with
+    zero-Doppler at the centre bin (`fftshift` applied).
+    Returns complex `[n_tx * n_rx, n_range, n_doppler // n_tx]`, virtual element
+    `v = t * n_rx + r`, matching the ULA indexing `rd_synth` synthesizes against
+    (TX `t` sits at `t * n_rx * lambda/2`, so the pair (t, r) is virtual element
+    `t*n_rx + r` of a uniform lambda/2 array). Each sub-band keeps the centre-bin
+    zero-Doppler convention of its input.
+
+    Why it matters: without this, an angle FFT over a DDMA cube runs across the
+    `n_rx` PHYSICAL receivers instead of the `n_tx * n_rx` virtual elements. For the
+    `radial_like` configuration that is 16 elements standing in for 192 -- a 12x loss
+    of angular resolution, which shows up as targets smeared into horizontal ridges
+    across the whole range-azimuth map.
+
+    The extraction: TX `t`'s echo is shifted by `t/n_tx` of the Doppler PRF, so its
+    replica of a target at true Doppler bin `k` lands at `k + t*n_doppler/n_tx`. Taking
+    the `n_doppler/n_tx` bins CENTRED on `t*n_doppler/n_tx` recovers TX `t` alone, with
+    zero Doppler back at the middle of the band. Centred, not `[t*n_sub, (t+1)*n_sub)`:
+    a negative Doppler wraps to the top of the natural-order axis and would otherwise
+    be attributed to the wrong transmitter.
+
+    Unambiguous Doppler shrinks by `n_tx`, which is inherent to DDMA and already
+    reflected in `RadarConfig.max_velocity_mps`; a target beyond it aliases into a
+    neighbouring transmitter's band and this function cannot tell the difference.
+    """
+    mimo = getattr(cfg, "mimo", None)
+    if mimo != "ddma":
+        raise ValueError(f"ddma_demux requires cfg.mimo == 'ddma', got {mimo!r}")
+    rd = torch.as_tensor(rd)
+    if rd.dim() != 3:
+        raise ValueError(f"rd must be [n_rx, n_range, n_doppler], got shape {tuple(rd.shape)}")
+    n_rx, n_range, n_doppler = rd.shape
+    n_tx = int(cfg.n_tx)
+    if n_tx < 1:
+        raise ValueError(f"n_tx must be >= 1, got {n_tx}")
+    if n_doppler % n_tx != 0:
+        raise ValueError(
+            f"n_doppler ({n_doppler}) is not divisible by n_tx ({n_tx}); the DDMA "
+            "sub-bands would not be equal sizes")
+    n_sub = n_doppler // n_tx
+
+    # Undo adc_to_rd's fftshift so bin 0 is zero Doppler and the t*n_sub offsets are
+    # literal indices; each extracted band is then re-centred by construction.
+    rd_nat = torch.fft.ifftshift(rd, dim=-1)
+    offsets = torch.arange(n_sub, device=rd.device) - n_sub // 2
+
+    out = torch.empty((n_tx * n_rx, n_range, n_sub), dtype=rd.dtype, device=rd.device)
+    for t in range(n_tx):
+        idx = (t * n_sub + offsets) % n_doppler
+        out[t * n_rx:(t + 1) * n_rx] = rd_nat.index_select(-1, idx)
+    return out
+
+
 # --------------------------------------------------------------------------------
 # Network-input formatting
 # --------------------------------------------------------------------------------

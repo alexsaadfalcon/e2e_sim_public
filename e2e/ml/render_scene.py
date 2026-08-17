@@ -69,7 +69,7 @@ from matplotlib.patches import Arc, Wedge  # noqa: E402
 from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
 from e2e.ml.rd_synth import synthesize_adc  # noqa: E402
 from e2e.ml.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
-from e2e.ml.transforms import adc_to_rd, tdm_deinterleave  # noqa: E402
+from e2e.ml.transforms import adc_to_rd, ddma_demux, tdm_deinterleave  # noqa: E402
 from e2e.viz import imshow_ra  # noqa: E402
 
 # Marker/color convention: loosely matches `webapp/scenario_editor.py`'s ROLE_COLORS /
@@ -153,6 +153,13 @@ def range_azimuth_power(cfg, adc: torch.Tensor, n_angle_fft: Optional[int] = Non
     if cfg.mimo == "tdm":
         sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
         rd = adc_to_rd(sub_cfg, tdm_deinterleave(cfg, adc))
+    elif cfg.mimo == "ddma":
+        # DDMA separates transmitters in Doppler, so the demux has to happen AFTER the
+        # Doppler FFT (unlike TDM, which is de-interleaved in the raw ADC). Without this
+        # the angle FFT below runs over n_rx PHYSICAL receivers rather than the
+        # n_tx*n_rx virtual elements -- 16 instead of 192 for `radial_like`, which is
+        # what smeared targets into horizontal ridges across every DDMA picture.
+        rd = ddma_demux(cfg, adc_to_rd(cfg, adc))
     else:
         rd = adc_to_rd(cfg, adc)
     n_channel = rd.shape[0]
