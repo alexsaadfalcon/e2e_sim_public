@@ -508,8 +508,13 @@ def evaluate(manifest_path, checkpoint_path, *, split: str = "test", device=None
     ds = _make_dataset(manifest_path, split, input_format)
     metrics = _evaluate_split(model, ds, grid, device=device)
 
+    # AP is interpolated precision-recall; AR is recall at ONE operating point, printed
+    # with the precision and detection count that make it readable (see e2e.ml.metrics).
     print(f"[{model_name}] {split}: AP={metrics['AP']:.3f}  "
-          f"AR={metrics['AR']:.3f}  range_rmse_m={metrics['range_rmse_m']:.3f}  "
+          f"AR={metrics['AR']:.3f} @ score>{metrics['score_threshold']:g}  "
+          f"precision={metrics['precision']:.4f}  "
+          f"({metrics['tp']} TP / {metrics['n_detections']} det / {metrics['n_targets']} GT)  "
+          f"range_rmse_m={metrics['range_rmse_m']:.3f}  "
           f"sin_az_rmse={metrics['sin_az_rmse']:.4f}")
     return metrics
 

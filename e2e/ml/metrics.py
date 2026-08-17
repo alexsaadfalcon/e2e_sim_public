@@ -8,13 +8,66 @@ RADIal's cartesian-box + IoU format.
 
 What we keep from the reference protocol
 -----------------------------------------
-* A **confidence-threshold sweep** (default 0.1..0.9 in steps of 0.1, 9 points) at a
-  *fixed* matching criterion -- this mirrors RADIal sweeping confidence at a fixed
-  IoU=0.5, just with our own "close enough in (range, sin-azimuth)" criterion
-  (`MatchCriterion`) standing in for IoU.
-* `AP`/`AR` as the simple **mean of precision/recall over the threshold sweep**, not a
-  standard interpolated-PR-curve average precision -- this matches RADIal's actual
-  (non-standard) `mAP`/`mAR` definition, not the COCO/VOC one.
+* A *fixed* matching criterion in place of RADIal's IoU>=0.5 -- our own "close enough in
+  (range, sin-azimuth)" criterion (`MatchCriterion`), since our labels have no extent.
+* Per-frame greedy matching in descending score order, TP/FP/FN pooled over the whole
+  split (not per-frame metrics averaged over frames).
+
+AP/AR definition (CHANGED 2026-08-17 -- see "The absolute-threshold-sweep bug")
+-------------------------------------------------------------------------------
+* `AP` is **all-points interpolated precision-recall average precision** -- the
+  VOC2010+/COCO convention (COCO's `TYPE=1` "area under the interpolated PR curve", not
+  VOC2007's 11-point sampled variant, and not RADIal's threshold-mean). All detections
+  in the split are pooled and ranked by score descending; precision/recall are
+  accumulated down that ranking; precision is made monotonically non-increasing by a
+  right-to-left running max; the area is integrated as
+  `AP = (1/N_gt) * sum(p_interp[k] for every rank k that is a true positive)`.
+  That closed form is exactly the rectangle-rule area, because each true positive
+  advances recall by exactly `1/N_gt` and every false positive advances it by zero.
+  It is written that way (rather than `sum((r_k - r_{k-1}) * p_interp[k])`) so the
+  perfect case sums `N_gt` exact `1.0` terms and returns **exactly** 1.0 in floating
+  point -- the oracle check in `notes/RIGOR_STANDARD.md` demands equality, not
+  approximation. Recall the detector never reaches contributes zero area, so an
+  under-recalling detector is penalized in AP as well as AR (this is the standard
+  behaviour and differs from the old threshold-mean, which could not see it).
+* `AR` is recall at **one stated operating point**: every detection the decoder emits
+  above `score_threshold` (default 0.1). It is reported alongside the human-readable
+  `AR_operating_point` string and the numeric `score_threshold`, so no reader has to
+  guess what "average recall" was averaged over -- nothing is averaged. `AR` is the
+  maximum recall the detector attains at that confidence floor.
+* Score **ties are broken pessimistically**: within a group of equal-scored detections,
+  false positives are ranked ahead of true positives, so the AP contribution of the
+  group is its end-of-group precision. A detector cannot harvest AP from an ordering it
+  did not actually produce. This matters here concretely -- `e2e.ml.baseline`'s CFAR
+  objectness is clamped to `[0, 1]`, so a saturating classical detector emits many
+  detections scored exactly 1.0.
+
+The absolute-threshold-sweep bug (why the definition changed)
+--------------------------------------------------------------
+Until 2026-08-17 `AP`/`AR` were the mean of precision/recall over the *absolute* score
+thresholds 0.1, 0.2, ..., 0.9 -- RADIal's own non-standard `mAP`/`mAR`. That silently
+assumed the detector's scores span [0, 1]. They do not: measured maximum objectness was
+0.204 (FFTRadNet) and 0.292 (SSMRadNet) on the `rt_kenney_d2_v1` test split, so every
+sweep point from 0.3 up was structurally empty. Consequences, all measured, all fixed by
+the definition above:
+
+* `AR` was capped at 2/9 = 0.222 for any detector with a sub-0.3 score ceiling -- it was
+  not recall, it was a measure of the score ceiling. Re-placing the same 9 thresholds at
+  the detectors' own score deciles, which changes not a single detection, moved it to
+  0.87/0.97/0.63.
+* `AP` rested on one or two sweep points. FFTRadNet's was the mean of P@0.1 = 0.0378 and
+  P@0.2 = 0.0000, and that second term came from 7 detections across 60 frames of which
+  none matched -- one more match would have moved the reported AP by 4.8x. Epoch to
+  epoch the reported `val_AP` swung 8x (0.0224 -> 0.1866 -> 0.0540) while `val_AR` rose
+  monotonically; the "best" epoch by AP had worse recall than every epoch after it.
+* Localization RMSE inherited the same defect: it was measured at the single sweep point
+  nearest 0.5, above every real detector's ceiling, so it was undefined for exactly the
+  models being evaluated (see `_rmse`).
+
+Neither `precision_per_threshold`/`recall_per_threshold` nor the
+`n_defined_precision_thresholds` caveat-count survive; they existed only to describe and
+hedge the threshold-mean. The PR curve backing the new `AP` is returned in full as
+`pr_curve` instead.
 
 Where we deliberately diverge
 ------------------------------
@@ -50,11 +103,8 @@ read on precision: a detection that correctly matched a different-class target i
 pooled evaluation counts as a false positive here, since class C's filtered target list
 has nothing left for it to match. If a class has zero targets across the whole dataset,
 its AP/AR are NaN (nothing to detect, not vacuously perfect) rather than going through the
-0/0 convention. The ROADMAP also floats a "recall-floor-restricted threshold set" as a
-cheaper alternative to full PR-curve interpolation for a fixed-recall operating point;
-that variant is not implemented here -- the roadmap entry describes it only as a
-direction, not a concrete definition (thresholds computed how, floor per-class or
-pooled, etc.), so it is left as a documented follow-up rather than guessed at.
+0/0 convention. The frames are decoded ONCE and the resulting detections are re-matched
+per class, so the per-class breakdown costs matching, not decoding.
 """
 
 from __future__ import annotations
@@ -180,11 +230,14 @@ def _rmse(errs: Sequence[float]) -> float:
     """Root-mean-square of `errs`; NaN if `errs` is empty.
 
     NaN, not 0.0 (the pre-2026-08-16 convention), because an empty match set means the
-    localization error is UNDEFINED, and 0.0 reads as "perfect". That misreading was
-    not hypothetical: a detector whose confidence ceiling sits below the representative
-    threshold contributes no matched pairs there, so it reported `range_rmse_m = 0.000`
-    -- indistinguishable from flawless ranging -- while its AR, averaged over the whole
-    sweep, was correctly nonzero. Undefined must look undefined.
+    localization error is UNDEFINED, and 0.0 reads as "perfect". That misreading was not
+    hypothetical: under the old absolute-threshold sweep, RMSE was measured at the sweep
+    point nearest 0.5, and a detector whose confidence ceiling sat below 0.5 contributed
+    no matched pairs there, so it reported `range_rmse_m = 0.000` -- indistinguishable
+    from flawless ranging -- while its recall was correctly nonzero. RMSE is now measured
+    at the same operating point as the rest of the metrics, which removes that specific
+    trap, but the convention stands: a detector that matches nothing at all still has an
+    empty set, and undefined must look undefined.
     """
     if not errs:
         return float("nan")
@@ -200,103 +253,214 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
 
 DEFAULT_CLASSES: Tuple[str, ...] = ("vehicle", "pedestrian")
 
+#: Confidence floor defining the detection set that the PR curve is swept over, and the
+#: operating point `AR` is reported at. This is the ONLY absolute score threshold in the
+#: metric: everything above it is ranked by score, never re-thresholded. It matches the
+#: floor of the old 0.1..0.9 sweep, so the set of detections being scored is unchanged
+#: from the pre-2026-08-17 numbers -- only what is computed from them changed.
+DEFAULT_SCORE_THRESHOLD: float = 0.1
+
+
+def _rank_detections(scored_flags: Sequence[Tuple[float, bool]]) -> List[int]:
+    """Indices of `scored_flags` ranked by score descending, false positives first on ties.
+
+    `scored_flags` is `[(score, is_true_positive), ...]` pooled over the whole split.
+    The tie-break is deliberately pessimistic (see the module docstring): a group of
+    equal-scored detections contributes its end-of-group precision, so a detector whose
+    scores saturate cannot collect AP from an ordering it never actually produced.
+    """
+    return sorted(range(len(scored_flags)),
+                  key=lambda i: (-scored_flags[i][0], scored_flags[i][1]))
+
+
+def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int) -> Dict[str, List]:
+    """Precision/recall down the pooled score ranking, plus the interpolated precision.
+
+    Returns parallel lists `score`, `is_tp`, `precision`, `recall`, `precision_interp`,
+    one entry per detection, in ranked order. `precision_interp[k] = max(precision[k:])`
+    (the right-to-left running max), i.e. precision forced monotonically non-increasing
+    in recall, which is what the VOC2010+/COCO AP integrates. Requires `n_gt > 0`.
+    """
+    order = _rank_detections(scored_flags)
+    scores: List[float] = []
+    is_tp: List[bool] = []
+    precision: List[float] = []
+    recall: List[float] = []
+    tp_cum = 0
+    for rank, i in enumerate(order, start=1):
+        score, hit = scored_flags[i]
+        if hit:
+            tp_cum += 1
+        scores.append(float(score))
+        is_tp.append(bool(hit))
+        precision.append(tp_cum / rank)
+        recall.append(tp_cum / n_gt)
+
+    interp = list(precision)
+    for k in range(len(interp) - 2, -1, -1):
+        if interp[k] < interp[k + 1]:
+            interp[k] = interp[k + 1]
+
+    return {"score": scores, "is_tp": is_tp, "precision": precision, "recall": recall,
+            "precision_interp": interp}
+
+
+def _interpolated_ap(curve: Dict[str, List], n_gt: int) -> float:
+    """Area under the interpolated PR curve, from `_pr_curve`'s output. Requires n_gt > 0.
+
+    `AP = (1/n_gt) * sum(precision_interp[k] for each rank k that is a true positive)`.
+    Each true positive advances recall by exactly `1/n_gt` and each false positive by
+    zero, so this is the rectangle-rule area under the interpolated curve; the recall
+    band the detector never reaches contributes nothing, which is what makes missed
+    ground truth cost AP and not only AR. Summing `n_gt` exact 1.0 terms makes the
+    oracle case return exactly 1.0 (see the module docstring).
+    """
+    return sum(p for p, hit in zip(curve["precision_interp"], curve["is_tp"]) if hit) / n_gt
+
+
+def _score_detections(
+    detections_per_frame: Sequence[Sequence[Detection]],
+    target_lists: Sequence[Sequence[Target]],
+    criterion: MatchCriterion,
+) -> Dict:
+    """Match already-decoded detections against `target_lists` and score the whole split.
+
+    Split out from `evaluate_dataset` so the per-class breakdown can re-match the SAME
+    decoded detections against a filtered target list without re-decoding every frame.
+
+    Returns `{"AP", "AR", "precision", "tp", "fp", "fn", "n_detections", "n_targets",
+    "pr_curve", "range_errs", "sin_az_errs"}`. `pr_curve` is `None` when there is no
+    ground truth (no recall axis exists to integrate over).
+    """
+    scored_flags: List[Tuple[float, bool]] = []
+    range_errs: List[float] = []
+    sin_az_errs: List[float] = []
+    tp = fp = fn = 0
+
+    for detections, targets in zip(detections_per_frame, target_lists):
+        matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion)
+        matched_det = {di for di, _gi in matches}
+        for di, det in enumerate(detections):
+            scored_flags.append((det[2], di in matched_det))
+        range_errs.extend(abs(detections[di][0] - targets[gi][0]) for di, gi in matches)
+        sin_az_errs.extend(abs(detections[di][1] - targets[gi][1]) for di, gi in matches)
+        tp += len(matches)
+        fp += len(unmatched_det)
+        fn += len(unmatched_gt)
+
+    n_gt = tp + fn
+    n_det = len(scored_flags)
+
+    if n_gt == 0:
+        # Nothing to detect anywhere in the split. Recall keeps the documented 0/0 -> 1.0
+        # convention (there was nothing to miss); AP has no recall axis to integrate, so
+        # it is 1.0 only if the detector also stayed silent, and 0.0 if it emitted
+        # anything at all (every detection is a false positive).
+        curve = None
+        ap = 1.0 if n_det == 0 else 0.0
+    else:
+        curve = _pr_curve(scored_flags, n_gt)
+        ap = _interpolated_ap(curve, n_gt)
+
+    # Precision is UNDEFINED, not a vacuous 1.0, when the detector emitted nothing while
+    # ground truth existed: 0/0 -> 1.0 there would print "perfect precision" for a silent
+    # model. (Under the old threshold sweep this exact confusion inflated AP; AP no
+    # longer derives from this number, but the number itself must still read honestly.)
+    precision = float("nan") if (tp + fp == 0 and fn > 0) else _safe_ratio(tp, tp + fp)
+
+    return {
+        "AP": ap,
+        "AR": _safe_ratio(tp, n_gt),
+        "precision": precision,
+        "tp": tp, "fp": fp, "fn": fn,
+        "n_detections": n_det, "n_targets": n_gt,
+        "pr_curve": curve,
+        "range_errs": range_errs, "sin_az_errs": sin_az_errs,
+    }
+
 
 def evaluate_dataset(
     pred_maps: Sequence,
     target_lists: Sequence[Sequence[Target]],
     grid: LabelGrid,
     *,
-    thresholds: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+    score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     criterion: MatchCriterion = None,
     classes: Sequence[str] = DEFAULT_CLASSES,
 ) -> Dict:
-    """Full-dataset evaluation, mirroring RADIal's `GetFullMetrics` confidence sweep.
+    """Full-dataset detection evaluation: interpolated-PR AP + recall at one operating point.
 
-    For each threshold in `thresholds`, TP/FP/FN are accumulated as raw counts over
-    *all* frames (not per-frame precision averaged over frames), then
-    `precision = TP/(TP+FP)`, `recall = TP/(TP+FN)`. The 0/0 -> 1.0 convention applies
-    only when it is genuinely vacuous (no detections AND no ground truth); a threshold
-    where the model made no detections but ground truth existed has UNDEFINED precision
-    (reported as NaN) and is excluded from the AP mean -- otherwise an under-confident
-    model would collect free precision=1.0 at every threshold above its confidence
-    ceiling and AP would overstate it (this deliberately diverges from a naive reading
-    of RADIal's sweep; AR is unaffected and still exposes the missed recall).
+    Every frame is decoded ONCE at `score_threshold` (the confidence floor -- the only
+    absolute threshold in the metric). Detections are matched to ground truth per frame,
+    greedily, in descending score order; the resulting TP/FP flags are pooled across the
+    whole split and ranked by score to build the precision-recall curve.
 
-    `AP`/`AR` are the plain mean of (defined) precision / recall over the threshold
-    sweep (RADIal's own, non-interpolated, definition -- see module docstring).
+    Returned keys
+    -------------
+    ``AP``
+        All-points interpolated average precision (VOC2010+/COCO convention). See the
+        module docstring for the exact integration and the tie-breaking rule.
+    ``AR``
+        Recall at a single stated operating point: all detections scoring above
+        `score_threshold`. Nothing is averaged over thresholds -- that was the bug this
+        replaced. ``AR_operating_point`` (human-readable) and ``score_threshold``
+        (numeric) name that operating point in the result dict itself, so a stored
+        metrics JSON is self-describing.
+    ``precision``, ``tp``, ``fp``, ``fn``, ``n_detections``, ``n_targets``
+        Raw pooled counts at the same operating point, so `AR` can be re-derived and
+        sample size is never hidden.
+    ``pr_curve``
+        `{"score", "is_tp", "precision", "recall", "precision_interp"}`, parallel lists
+        in ranked order -- the actual curve `AP` integrates, kept so the number can be
+        audited or re-plotted without re-running the model. `None` when the split has no
+        ground truth at all.
+    ``range_rmse_m``, ``sin_az_rmse``
+        Localization RMSE over all matched pairs at the SAME operating point (NaN if
+        nothing matched -- see `_rmse`). Previously these were measured at the sweep
+        point nearest 0.5, which sat above every real detector's score ceiling and so
+        was structurally undefined; measuring at the operating point the rest of the
+        metrics use removes that trap and the double-counting a multi-threshold sweep
+        would otherwise cause.
+    ``AP_<class>``, ``AR_<class>``, ``n_targets_<class>``
+        Per-class breakdown for each name in `classes` (default `DEFAULT_CLASSES`),
+        computed by re-matching the same decoded detections against a class-filtered
+        target list. Pass `classes=()` to skip. See the module docstring's "Per-class
+        AP/AR" section for the semantics and its pessimistic-precision caveat.
 
-    `range_rmse_m`/`sin_az_rmse` are computed over all matched pairs at a single
-    representative threshold -- the sweep point closest to 0.5 (exactly 0.5 for the
-    default `thresholds`) -- rather than across every threshold, since the same
-    ground-truth/detection pair would otherwise be double-counted once per threshold at
-    which it happens to match. Documented choice, not a RADIal behaviour (upstream does
-    not report RMSE at all, only mean error at the default confidence floor).
-
-    `classes` additionally reports `AP_<class>`/`AR_<class>`/`n_targets_<class>` for each
-    class (default `DEFAULT_CLASSES = ("vehicle", "pedestrian")`) -- pass `()` to skip
-    (e.g. to avoid recursing further from inside a per-class call). See the module
-    docstring's "Per-class AP/AR" section for the exact semantics and its caveats.
+    The 0/0 -> 1.0 convention applies to `AR`/`precision` only where genuinely vacuous
+    (no ground truth means nothing to miss; no detections means nothing to be wrong
+    about). A silent detector facing real ground truth scores AP = AR = 0.0.
     """
     if criterion is None:
         criterion = MatchCriterion()
-    thresholds = list(thresholds)
-    if not thresholds:
-        raise ValueError("thresholds must be non-empty")
-    mid_idx = min(range(len(thresholds)), key=lambda i: abs(thresholds[i] - 0.5))
-    mid_threshold = thresholds[mid_idx]
 
-    precision_per_threshold: Dict[float, float] = {}
-    recall_per_threshold: Dict[float, float] = {}
-    range_errs_mid: List[float] = []
-    sin_az_errs_mid: List[float] = []
+    # ONE decode pass over the split; the pooled and per-class scorings all re-match
+    # these same detections (the per-class target filter changes what a detection can
+    # match, never what the detector emitted).
+    detections_per_frame = [decode_detections(grid, pred_map, threshold=score_threshold)
+                            for pred_map in pred_maps]
 
-    for th in thresholds:
-        tp = fp = fn = 0
-        for pred_map, targets in zip(pred_maps, target_lists):
-            result = evaluate_frame(pred_map, targets, grid, threshold=th, criterion=criterion)
-            tp += result["tp"]
-            fp += result["fp"]
-            fn += result["fn"]
-            if th == mid_threshold:
-                range_errs_mid.extend(result["range_errs"])
-                sin_az_errs_mid.extend(result["sin_az_errs"])
-        # Precision is UNDEFINED at a threshold where the model made no detections
-        # while ground truth existed (tp+fp == 0, fn > 0): counting it as 1.0 would
-        # reward an under-confident model with vacuous perfect precision at every
-        # threshold above its confidence ceiling, inflating AP while AR (correctly)
-        # collapses. Such thresholds are excluded from the AP mean and reported as
-        # NaN per-threshold. The genuinely-vacuous case (no detections AND no ground
-        # truth, fn == 0) keeps the documented 0/0 -> 1.0 convention.
-        if tp + fp == 0 and fn > 0:
-            precision_per_threshold[th] = float("nan")
-        else:
-            precision_per_threshold[th] = _safe_ratio(tp, tp + fp)
-        recall_per_threshold[th] = _safe_ratio(tp, tp + fn)
+    pooled = _score_detections(detections_per_frame, target_lists, criterion)
 
-    defined = [p for p in precision_per_threshold.values() if not math.isnan(p)]
-    # A model with no detections at ANY threshold has no defined precision at all;
-    # report AP = 0.0 (it detected nothing) rather than dividing by zero.
-    ap = sum(defined) / len(defined) if defined else 0.0
-    ar = sum(recall_per_threshold.values()) / len(thresholds)
-
-    # SMALL-SAMPLE CAVEAT (results-review finding): when a model makes almost no
-    # detections, only 1-2 thresholds have defined precision and AP becomes the mean
-    # of that razor-thin sample -- a single lucky confident detection can print
-    # AP ~0.5-1.0 while recall is ~0. n_defined_precision_thresholds exposes exactly
-    # how many sweep points the AP mean rests on; treat AP with a small count (and
-    # always AP alongside AR) as unstable, not as model quality.
     result = {
-        "AP": ap,
-        "AR": ar,
-        "n_defined_precision_thresholds": len(defined),
-        "precision_per_threshold": precision_per_threshold,
-        "recall_per_threshold": recall_per_threshold,
-        "range_rmse_m": _rmse(range_errs_mid),
-        "sin_az_rmse": _rmse(sin_az_errs_mid),
+        "AP": pooled["AP"],
+        "AR": pooled["AR"],
+        "AR_operating_point": (f"recall over all detections with score > {score_threshold:g} "
+                               f"(single operating point, not a threshold average)"),
+        "score_threshold": float(score_threshold),
+        "precision": pooled["precision"],
+        "tp": pooled["tp"],
+        "fp": pooled["fp"],
+        "fn": pooled["fn"],
+        "n_detections": pooled["n_detections"],
+        "n_targets": pooled["n_targets"],
+        "pr_curve": pooled["pr_curve"],
+        "range_rmse_m": _rmse(pooled["range_errs"]),
+        "sin_az_rmse": _rmse(pooled["sin_az_errs"]),
     }
 
     # Per-class AP/AR: see module docstring's "Per-class AP/AR" section. `classes=()`
-    # (used for the recursive per-class call itself) skips this entirely.
+    # skips this entirely.
     for cls in classes:
         cls_target_lists = [[t for t in targets if t[2] == cls] for targets in target_lists]
         n_cls_targets = sum(len(ts) for ts in cls_target_lists)
@@ -306,9 +470,7 @@ def evaluate_dataset(
             result[f"AP_{cls}"] = float("nan")
             result[f"AR_{cls}"] = float("nan")
         else:
-            cls_result = evaluate_dataset(pred_maps, cls_target_lists, grid,
-                                           thresholds=thresholds, criterion=criterion,
-                                           classes=())
+            cls_result = _score_detections(detections_per_frame, cls_target_lists, criterion)
             result[f"AP_{cls}"] = cls_result["AP"]
             result[f"AR_{cls}"] = cls_result["AR"]
         result[f"n_targets_{cls}"] = n_cls_targets

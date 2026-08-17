@@ -313,8 +313,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  ** the metric demands finer azimuth accuracy than this array can resolve;")
         print("     AP/AR are capped by geometry regardless of model or corpus **")
     print(f"\nclassical CFAR baseline over {res['n_frames']} {args.split} frames:")
-    print(f"  AP = {res['AP']:.4f}   AR = {res['AR']:.4f}   "
-          f"range_rmse = {res['range_rmse_m']:.3f} m")
+    print(f"  AP = {res['AP']:.4f} (interpolated precision-recall)")
+    print(f"  AR = {res['AR']:.4f} ({res['AR_operating_point']})")
+    # A permissive CFAR floor can recall almost everything by firing everywhere, so AR is
+    # never printed without the precision and detection count that put it in context.
+    print(f"  precision = {res['precision']:.4f}   "
+          f"{res['tp']} TP / {res['n_detections']} detections / {res['n_targets']} targets")
+    print(f"  range_rmse = {res['range_rmse_m']:.3f} m")
 
     if args.out:
         Path(args.out).write_text(json.dumps(

@@ -482,6 +482,13 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
     per `models` entry -- the corpus-level capability headline (as opposed to every
     other figure in this module, which is one frame).
 
+    `AP` is `e2e.ml.metrics`' all-points interpolated precision-recall average precision
+    and `AR` is recall at that module's single stated operating point (the metrics dict
+    carries the operating point itself as `AR_operating_point`/`score_threshold`). The
+    panel labels say so: before 2026-08-17 both were means over absolute score
+    thresholds the detectors never reached, and the right panel's old "Average Recall"
+    label invited exactly the misreading that the number was recall.
+
     `models` is `[(display_name, metrics_dict), ...]`, each `metrics_dict` exactly what
     `report/rt_ml/kenney_d2/eval_perclass.py` writes (== `e2e.ml.baseline.score_manifest`
     / `e2e.ml.train._evaluate_split`'s return, JSON-round-tripped): `AP_<class>`,
@@ -517,8 +524,11 @@ def render_perclass_bar_chart(models: Sequence[Tuple[str, Dict]], out_path, *,
     tops, unified = _panel_limits(panel_values)
 
     fig, (ax_ap, ax_ar) = plt.subplots(1, 2, figsize=(14.0, 6.5), dpi=dpi)
-    for metric_key, ax, metric_label in (("AP", ax_ap, "Average Precision (AP)"),
-                                         ("AR", ax_ar, "Average Recall (AR)")):
+    # Panel labels name the actual definitions (`e2e.ml.metrics`): AP is the area under
+    # the interpolated precision-recall curve, and AR is recall at ONE stated operating
+    # point -- not, as the old label "Average Recall" implied, an average over anything.
+    for metric_key, ax, metric_label in (("AP", ax_ap, "Average Precision (interpolated PR)"),
+                                         ("AR", ax_ar, "Recall at operating point (AR)")):
         for i, (name, _metrics) in enumerate(models):
             values = panel_values[metric_key][i]
             offset = (i - (n_models - 1) / 2.0) * width

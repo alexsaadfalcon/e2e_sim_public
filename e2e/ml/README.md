@@ -249,17 +249,26 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/corpus_v1/ti_iwr1443_D1/manife
   (`e2e.ml.dataset.LABEL_CLASSES`; recorded in each manifest) — a detector must learn to
   *reject* clutter. Pass `label_classes=None` to `generate_sample` if you explicitly
   want everything labeled.
-* **AP semantics.** `metrics.evaluate_dataset` excludes thresholds where the model made
-  no detections against existing ground truth from the AP mean (undefined precision,
-  reported per-threshold as NaN) — an under-confident model does not harvest vacuous
-  `precision=1.0` above its confidence ceiling. Compare AP together with AR. This
-  exclusion has a sharp edge, though: when a model makes almost no detections, only 1-2
-  thresholds have *any* defined precision, and AP becomes the mean of that razor-thin
-  sample — a single lucky confident detection can print AP 0.5-1.0 while recall is
-  near zero (this is exactly how an earlier gamma=0 checkpoint's validation AP spiked to
-  0.667, see the recipe section above). `evaluate_dataset`'s result dict now carries
-  `n_defined_precision_thresholds`, the count backing the AP mean — treat an AP resting
-  on a small count as unstable, not as model quality.
+* **AP/AR semantics (redefined 2026-08-17).** `metrics.evaluate_dataset` reports `AP` as
+  standard **all-points interpolated precision-recall average precision** (VOC2010+/COCO):
+  every detection in the split is pooled, ranked by score, and the area under the
+  precision-monotonized PR curve is integrated. `AR` is recall at **one stated operating
+  point** — all detections above `score_threshold` (default 0.1) — with the result dict
+  carrying `AR_operating_point` and `score_threshold` so a stored metrics JSON says what
+  it measured. The full curve comes back as `pr_curve`, and `precision`/`tp`/`fp`/`fn`/
+  `n_detections`/`n_targets` come back alongside so AR is never read without its context
+  (a permissive detector can recall nearly everything by firing everywhere; AP and
+  precision are what stop that reading as quality).
+
+  This **replaced** the previous definition, which averaged precision and recall over the
+  *absolute* score thresholds 0.1…0.9. Those thresholds assumed detector scores span
+  [0, 1]; they do not, so most sweep points were structurally empty, `AR` was capped by
+  the score ceiling rather than measuring recall, and `AP` rested on one or two sweep
+  points and swung wildly between epochs. The keys `precision_per_threshold`,
+  `recall_per_threshold` and `n_defined_precision_thresholds` are **gone** — they existed
+  only to describe and hedge that mean. Every AP/AR figure quoted in the sections above
+  predates the change and needs re-deriving; the ordering between detectors was stable
+  across the redefinition, the magnitudes were not.
 * **SSMRadNet memory.** The pure-torch parallel selective scan (`e2e.ml.models.ssm`)
   materializes `[batch, L, d_inner, d_state]` state at every Hillis-Steele step (unlike a
   fused CUDA kernel, which never does), so it is memory-hungry: `batch_size=8` OOMs on an
