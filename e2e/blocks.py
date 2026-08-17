@@ -306,15 +306,38 @@ class AdaOjaBlock:
     frame_capabilities = _SINGLE_CHIRP
 
     _GAP_RESPONSES = ("none", "refine", "coast")
+    #: Recognised `method` values -- anything else used to fall through to the legacy path.
+    _METHODS = ("reestimate", "oja")
 
     def __init__(self, d, k, eta=0.1, m=None, method="reestimate", n_refine=1,
                  gap_response="none", gap_threshold=0.01, n_refine_hi=60):
         self.oja = Oja(d, k, eta=eta, fixed_step=True)
+        # Validate `method` for the same reason `gap_response` is validated below: an
+        # unrecognised string silently selects the `else` branch in `update()` -- the
+        # legacy incremental Oja step, which this class's own docstring says barely
+        # rotates the subspace and cannot follow fast drift. A typo ("Reestimate",
+        # "re-estimate") therefore yields a running pipeline with believable but far
+        # worse tracking error and no indication why. Found by a blind tier-benchmark
+        # audit, 2026-08-16, which flagged the asymmetry with gap_response.
+        if method not in self._METHODS:
+            raise ValueError(f"method must be one of {self._METHODS}, got {method!r}")
         self.method = method
         # Measurement count for the adaptive sensing matrix (rows of A). Defaults to the
         # legacy 2*k; the 'reestimate' tracker needs many more to observe drift, so
         # callers that want accurate tracking pass an explicit m (see the demos).
         self.m = m if m is not None else self.oja.k * 2
+        # m == k is a SILENT observability failure, not a slow one: gen_A_ada builds its
+        # exploratory block B with (m - k) columns, so at m == k the sensing matrix is
+        # nothing but the anchor rows U^H and no direction outside the current estimate
+        # is ever measured. The estimate then freezes bit-identically no matter how much
+        # real signal flows through -- demonstrated over 30 frames by the same audit.
+        # (m < k already fails, but obscurely, inside a negative-dimension randn.)
+        if self.m <= self.oja.k:
+            raise ValueError(
+                f"m must exceed k to observe drift outside the tracked subspace "
+                f"(got m={self.m}, k={self.oja.k}); at m == k the sensing matrix is the "
+                f"anchor rows alone and the estimate can never update"
+            )
         # Refinement iterations per frame (MeasurementStage re-draws A from the updated
         # estimate and re-estimates n_refine times). The sensing matrix's anchor rows are
         # built from the PREVIOUS estimate; on a drifting scene that stale anchor caps the

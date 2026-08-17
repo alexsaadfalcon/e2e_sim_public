@@ -145,3 +145,40 @@ def test_adaoja_reestimate_zero_frame_does_not_swap_the_basis():
     block.update(X, A)
     assert torch.isfinite(block.oja.U).all(), "tracker corrupted after the zero frame"
     assert not torch.allclose(block.oja.U, U_before), "good frame should still update"
+
+
+def test_adaoja_rejects_unknown_method_instead_of_silently_using_the_legacy_path():
+    """`method` is now validated like `gap_response` already was.
+
+    Found by a blind tier-benchmark audit (2026-08-16): `update()` dispatches with
+    `if self.method == "reestimate": ... else: <legacy oja>`, so ANY unrecognised
+    string -- a capitalisation slip, a hyphen -- silently selected the legacy
+    incremental step, which this class's own docstring says barely rotates the
+    subspace and cannot follow fast drift. The pipeline still runs and still reports
+    a plausible-looking (but far worse) tracking error, with nothing pointing at the
+    typo. Silent plausible garbage; the standard requires a loud failure.
+    """
+    from e2e.blocks import AdaOjaBlock
+
+    for good in ("reestimate", "oja"):
+        AdaOjaBlock(32, 4, m=16, method=good)          # must not raise
+    for bad in ("Reestimate", "re-estimate", "power", ""):
+        with pytest.raises(ValueError, match="method"):
+            AdaOjaBlock(32, 4, m=16, method=bad)
+
+
+def test_adaoja_rejects_m_not_greater_than_k_which_freezes_the_estimate():
+    """`m <= k` is a silent OBSERVABILITY failure, not merely a slow one.
+
+    `gen_A_ada` gives its exploratory block (m - k) columns, so at m == k the sensing
+    matrix is the anchor rows U^H alone: no direction outside the current estimate is
+    ever measured and the estimate freezes bit-identically however much real signal
+    flows through (demonstrated over 30 frames by the audit that found it). m < k did
+    fail already, but obscurely, inside a negative-dimension randn.
+    """
+    from e2e.blocks import AdaOjaBlock
+
+    AdaOjaBlock(32, 4, m=5)                            # m > k: fine
+    for bad_m in (4, 3, 0):
+        with pytest.raises(ValueError, match="m must exceed k"):
+            AdaOjaBlock(32, 4, m=bad_m)
