@@ -11,7 +11,8 @@ statistics that cannot be derived from meta alone.
 
 Radial-velocity approximation (documented, not exact)
 -------------------------------------------------------
-`meta["targets"]` gives `(range_m, sin_az, class)`; `meta["target_extras"]` gives the
+`meta["targets"]` gives `(range_m, sin_az, class, surface_range_m)`; `meta["target_extras"]`
+gives the
 target's full 3-vector `velocity_mps` but NOT its position. To recover a radial
 (line-of-sight) velocity component from `(range_m, sin_az, velocity_mps)` alone, this
 module reconstructs the line-of-sight *direction* (not the position, which is not
@@ -144,14 +145,21 @@ def _frame_record(meta: Dict[str, Any], grid: Dict[str, float]) -> Dict[str, Any
     cells: List[tuple] = []
     edge_count = 0
 
-    for (r, sin_az, cls), extra in zip(targets, extras):
+    for target, extra in zip(targets, extras):
+        # (range_m, sin_azimuth, object_class[, surface_range_m]) -- see
+        # `e2e.ml.labels.targets_in_grid`. `range_m` is the object's CENTRE (what the
+        # range/velocity statistics are about); the optional surface range is where its
+        # label footprint sits, so it is what the grid-cell/edge bookkeeping must use.
+        # A pre-2026-08-17 corpus has three fields and the two coincide.
+        r, sin_az, cls = target[0], target[1], target[2]
+        r_cell = target[3] if len(target) > 3 else r
         class_counts[cls] += 1
         ranges.append(r)
         sin_azs.append(sin_az)
         rcs_by_class.setdefault(cls, []).append(float(extra["rcs_dbsm"]))
         radial_by_class.setdefault(cls, []).append(_radial_velocity(sin_az, extra["velocity_mps"]))
 
-        ci = min(int(r / grid["range_bin_m"]), grid["n_range"] - 1)
+        ci = min(int(r_cell / grid["range_bin_m"]), grid["n_range"] - 1)
         cj = min(int((sin_az + 1.0) / grid["az_bin"]), grid["n_azimuth"] - 1)
         cells.append((ci, cj))
         if ci < 1 or ci >= grid["n_range"] - 1 or cj < 1 or cj >= grid["n_azimuth"] - 1:

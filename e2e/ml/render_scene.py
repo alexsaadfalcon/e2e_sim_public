@@ -273,7 +273,10 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     marked = targets_in_grid(grid, scatterers, pose, classes=_RADAR_MARKED_CLASSES)
     # Clutter first so real targets draw on top of it.
     order = {c: i for i, c in enumerate(_RADAR_MARKED_CLASSES)}
-    for r, sin_az, cls in sorted(marked, key=lambda t: order.get(t[2], 99)):
+    for tgt in sorted(marked, key=lambda t: order.get(t[2], 99)):
+        # (range_m, sin_azimuth, object_class[, surface_range_m]) -- see
+        # `e2e.ml.labels.targets_in_grid`; index rather than unpack.
+        r, sin_az, cls = tgt[0], tgt[1], tgt[2]
         marker, color = _GT_MARKERS.get(cls, ("x", "white"))
         is_clutter = cls == "scatterer"
         label = (("clutter" if is_clutter else f"GT {cls}")

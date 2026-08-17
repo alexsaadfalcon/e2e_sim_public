@@ -88,9 +88,9 @@ def test_decode_model_frame_returns_expected_structure(tiny_manifest_path, fftra
     ds = RadarFrameDataset(tiny_manifest_path, split="val")
     assert fd.targets == ds.targets(0)
     for det in fd.detections:
-        assert len(det) == 3
-        r, sin_az, score = det
-        assert isinstance(r, float) and isinstance(sin_az, float) and isinstance(score, float)
+        assert len(det) == 4
+        r, sin_az, score, surface_r = det
+        assert all(isinstance(v, float) for v in (r, sin_az, score, surface_r))
         assert score > 0.1  # threshold used to decode
 
 

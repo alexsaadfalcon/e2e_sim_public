@@ -89,7 +89,8 @@ def test_generate_sample_tdm_shapes_and_dtypes(registered_tiny_cfg, torch_device
     assert sample["labels"].device.type == "cpu"
     assert isinstance(sample["targets"], list)
     for t in sample["targets"]:
-        assert len(t) == 3
+        # (centre_range_m, sin_azimuth, object_class, surface_range_m)
+        assert len(t) == 4
     assert sample["meta"]["config"] == cfg.name
     assert sample["meta"]["mimo"] == "tdm"
     # target_extras: one entry per target, same order, with rcs/velocity present.
@@ -235,7 +236,7 @@ def test_frames_per_scene_moving_target_matches_velocity(tmp_path, registered_ti
         with np.load(manifest_path.parent / fname) as data:
             meta = json.loads(str(data["meta"].item()))
         assert len(meta["targets"]) == 1  # TIER's first tier (D0) has exactly one vehicle
-        r, sin_az, cls = meta["targets"][0]
+        r, sin_az, cls = meta["targets"][0][:3]   # centre range; surface is [3]
         assert cls == "vehicle"
         cos_az = math.sqrt(max(0.0, 1.0 - sin_az ** 2))
         positions.append((r * cos_az, r * sin_az))
@@ -286,7 +287,7 @@ def test_radar_frame_dataset_len_getitem_targets_and_split_filter(
     tlist = train_ds.targets(0)
     assert isinstance(tlist, list)
     for t in tlist:
-        assert len(t) == 3
+        assert len(t) == 4
 
     with pytest.raises(ValueError):
         ml_dataset.RadarFrameDataset(manifest_path, split="bogus")

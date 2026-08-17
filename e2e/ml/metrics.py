@@ -89,6 +89,18 @@ tolerance (`MatchCriterion`): `max(|dr|/max_range_err_m, |dsin|/max_sin_az_err) 
 `d(theta) ~= d(sin theta)` there); the corresponding angular tolerance widens off-
 boresight since `d(theta) = d(sin theta) / cos(theta)`.
 
+WHICH range (2026-08-17): the range axis of that criterion is the **surface** range --
+where the target's nearest reflecting face is, which is what a detector fires on and what
+`e2e.ml.labels` now puts the objectness footprint on. Both tuple kinds carry it as an
+optional 4th element (`_surface_range`; a 3-tuple is a point target). The RANGE-REGRESSION
+error (`range_rmse_m`) is measured separately, against the object CENTRE, from element 0
+of the same tuples -- so "did you find it" and "did you size it" stay two different
+numbers and neither can hide the other.
+
+The 2.0 m tolerance is NOT to be widened to paper over a labelling offset. MEASURED: at
+an 8 m tolerance, a detector fed uniformly RANDOM ranges scores the same recall as the
+real one -- i.e. the tolerance buys AP by making the range axis officially unmeasured.
+
 Per-class AP/AR (roadmap: "per-frame / per-class-normalized AP for valid cross-tier
 comparison")
 ------------------------------------------------------------------------------------
@@ -115,8 +127,21 @@ from typing import Dict, List, Sequence, Tuple
 
 from e2e.ml.labels import LabelGrid, decode_detections
 
-Detection = Tuple[float, float, float]   # (range_m, sin_azimuth, score)
-Target = Tuple[float, float, str]        # (range_m, sin_azimuth, object_class)
+# (range_m, sin_azimuth, score[, surface_range_m]) -- see `e2e.ml.labels.decode_detections`
+Detection = Tuple[float, ...]
+# (range_m, sin_azimuth, object_class[, surface_range_m]) -- see `labels.targets_in_grid`
+Target = Tuple
+
+
+def _surface_range(item) -> float:
+    """The SURFACE range of a detection/target tuple; its centre range if it has none.
+
+    `e2e.ml.labels` appends a 4th element (the surface range) to both tuple kinds; a
+    3-element tuple is a POINT target, whose surface and centre coincide -- so this is
+    also what keeps hand-built `(range, sin_az, score)` / `(range, sin_az, class)` tuples
+    behaving exactly as they did before 2026-08-17.
+    """
+    return float(item[3]) if len(item) > 3 else float(item[0])
 
 
 @dataclass(frozen=True)
@@ -126,6 +151,8 @@ class MatchCriterion:
     A detection matches a target iff both `|dr| <= max_range_err_m` AND
     `|dsin| <= max_sin_az_err`, expressed as a single normalized distance
     `max(|dr|/max_range_err_m, |dsin|/max_sin_az_err) <= 1.0` (see `match_detections`).
+    `dr` is a difference of SURFACE ranges -- see the module docstring's "Matching
+    criterion" section, including why widening `max_range_err_m` is not an option.
     """
 
     max_range_err_m: float = 2.0
@@ -133,7 +160,8 @@ class MatchCriterion:
 
 
 def _normalized_distance(det: Detection, tgt: Target, criterion: MatchCriterion) -> float:
-    dr = abs(det[0] - tgt[0]) / criterion.max_range_err_m
+    """Match distance, computed on the SURFACE range (see `_surface_range`)."""
+    dr = abs(_surface_range(det) - _surface_range(tgt)) / criterion.max_range_err_m
     ds = abs(det[1] - tgt[1]) / criterion.max_sin_az_err
     return max(dr, ds)
 
@@ -204,10 +232,12 @@ def evaluate_frame(
 
     `pred_map` is anything `decode_detections` accepts (a `[3, n_range, n_azimuth]`
     label/prediction tensor). `targets` is the `targets_in_grid`-style list of
-    `(range_m, sin_azimuth, object_class)` tuples.
+    `(range_m, sin_azimuth, object_class[, surface_range_m])` tuples.
 
     Returns `{"tp", "fp", "fn", "range_errs", "sin_az_errs"}`; the error lists hold one
-    entry per matched pair (empty if nothing matched).
+    entry per matched pair (empty if nothing matched). Matching is on the surface range,
+    the returned `range_errs` are centre-vs-centre (element 0 of both tuples) -- see the
+    module docstring.
     """
     if criterion is None:
         criterion = MatchCriterion()
@@ -416,7 +446,10 @@ def evaluate_dataset(
         ground truth at all.
     ``range_rmse_m``, ``sin_az_rmse``
         Localization RMSE over all matched pairs at the SAME operating point (NaN if
-        nothing matched -- see `_rmse`). Previously these were measured at the sweep
+        nothing matched -- see `_rmse`). `range_rmse_m` scores the REGRESSED object
+        CENTRE against the true centre; matching itself happened on the surface (see
+        "Matching criterion"), so a detector that finds every target but cannot size it
+        keeps its AP/AR and pays here instead. Previously these were measured at the sweep
         point nearest 0.5, which sat above every real detector's score ceiling and so
         was structurally undefined; measuring at the operating point the rest of the
         metrics use removes that trap and the double-counting a multi-threshold sweep

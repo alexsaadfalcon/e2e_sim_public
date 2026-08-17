@@ -40,6 +40,13 @@ Scope / explicitly out of scope
   20 m/s), which is accepted as out of scope alongside the other amplitude idealisms.
 * Single elevation cut: a ULA measures only the direction cosine along its axis, so
   an elevated target is indistinguishable from a coplanar one at the same cosine.
+* ONE point per object, and (since 2026-08-17) that point sits at the object's nearest
+  SURFACE along the line of sight rather than at its geometric centre whenever the
+  scatterer knows its own size (`Scatterer.extent_m`; see `_scattering_point`). A real
+  extended target is a distribution of scatterers, not a point -- this only fixes WHERE
+  the single stand-in sits, which is the same choice `rt_signal_chain.coherent_target_cfr`
+  makes and the same place `e2e.ml.labels` marks. Scatterers with no declared extent are
+  unaffected.
 
 All tensors are torch complex64 on the shared `device` (cuda if available).
 """
@@ -94,12 +101,45 @@ def _resolve_device(dev):
     return device if dev is None else torch.device(dev)
 
 
-def _unpack_scatterers(scatterers):
-    """Stack scatterer attributes into float64 arrays: (positions, velocities, rcs_dbsm)."""
+def _scattering_point(sc, origin):
+    """Where this scatterer's single point of return sits, in world coordinates.
+
+    Its `position` (the object's geometric CENTRE) when nothing is known about its size,
+    and its nearest SURFACE point along the line of sight when an extent is
+    (`e2e.ml.geometry.nearest_surface_point`). A monostatic return comes off the nearest
+    face, not the middle of the body: this is the same specular-point stand-in
+    `e2e.ml.rt_signal_chain.coherent_target_cfr` places its coherent term on, and the same
+    point `e2e.ml.labels` writes its objectness footprint at -- one answer, three layers.
+    MEASURED offsets: 2.2 m for a 4.4 m car, 7.87 m for a 15.7 m semi.
+
+    Point scatterers (no `extent_m`, which is every hand-built `Scatterer` and everything
+    from a `SYNTHETIC_BASE_SCENE` scene) are untouched, so the analytic tiers this module
+    exists for synthesize bit-for-bit as they did before 2026-08-17.
+    """
+    centre = np.asarray(sc.position, dtype=np.float64).reshape(3)
+    extent = getattr(sc, "extent_m", None)
+    if extent is None:
+        return centre
+    from e2e.ml.geometry import nearest_surface_point
+
+    return nearest_surface_point(centre, 0.5 * np.asarray(extent, dtype=np.float64),
+                                 origin, yaw_rad=float(getattr(sc, "yaw_rad", 0.0)))
+
+
+def _unpack_scatterers(scatterers, origin=None):
+    """Stack scatterer attributes into float64 arrays: (positions, velocities, rcs_dbsm).
+
+    `origin` is the radar's position; when given, each scatterer's position is resolved
+    through `_scattering_point` (surface, not centre, for objects with a known extent).
+    """
     k = len(scatterers)
     if k == 0:
         return (np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0,)))
-    pos = np.stack([np.asarray(s.position, dtype=np.float64).reshape(3) for s in scatterers])
+    if origin is not None:
+        pos = np.stack([_scattering_point(s, origin) for s in scatterers])
+    else:
+        pos = np.stack([np.asarray(s.position, dtype=np.float64).reshape(3)
+                        for s in scatterers])
     vel = np.stack([np.asarray(getattr(s, "velocity", (0.0, 0.0, 0.0)),
                                dtype=np.float64).reshape(3) for s in scatterers])
     rcs = np.array([float(getattr(s, "rcs_dbsm", 0.0)) for s in scatterers], dtype=np.float64)
@@ -179,7 +219,7 @@ def synthesize_adc(cfg, scatterers, radar_pose=None, *, snr_db=30.0, seed=None,
     u_ax = array_axis(pose)
 
     # ---------------------------------------------------------------- geometry
-    pos, vel, rcs_dbsm = _unpack_scatterers(scatterers)
+    pos, vel, rcs_dbsm = _unpack_scatterers(scatterers, origin)
     los = pos - origin[None, :]                             # radar -> scatterer, [K,3]
     r0 = np.linalg.norm(los, axis=1)                        # range at chirp 0, [K]
     keep = r0 > 1e-6                                        # a target at the phase centre is meaningless

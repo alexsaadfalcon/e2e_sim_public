@@ -38,8 +38,8 @@ Sample format
                  it from "adc" at load time -- see below).
       "labels":  float32 CPU tensor, [3, grid.n_range, grid.n_azimuth] -- see
                  `e2e.ml.labels.encode_detection_labels`,
-      "targets": list of (range_m, sin_az, object_class) tuples, one per scene
-                 scatterer that falls inside the label grid (`e2e.ml.labels.targets_in_grid`),
+      "targets": list of (range_m, sin_az, object_class, surface_range_m) tuples, one per
+                 scene scatterer inside the label grid (`e2e.ml.labels.targets_in_grid`),
       "meta":    small dict of scalar provenance (frame_idx, snr_db, seed, cfg.name,
                  cfg.mimo, radar pose) PLUS "target_extras": a list parallel to
                  "targets" (same order/length) of {"rcs_dbsm", "velocity_mps"} dicts --
@@ -163,28 +163,23 @@ def _target_extras(grid, scatterers, pose, classes) -> List[Dict[str, Any]]:
     tuple, in the SAME order (so callers can `zip(meta["targets"],
     meta["target_extras"])`).
 
-    Deliberately duplicates (rather than imports) `labels.py`'s private
-    `_range_sin_az`/`_in_grid` geometry -- a few lines of plain vector math -- so this
-    module does not reach into a sibling module's underscore-prefixed internals. The
-    sampled RCS/velocity used to synthesize a frame are otherwise discarded after
-    synthesis (baked into the ADC's signal amplitude/phase only, not separably
+    Calls `labels.target_geometry` (the encoder's OWN public geometry helper) rather than
+    re-deriving range/azimuth: this list must stay index-for-index parallel to
+    `targets_in_grid`, and since 2026-08-17 the in-grid test is made on the target's
+    SURFACE point, not its centre -- a re-derivation would silently drift at the grid
+    boundary. The sampled RCS/velocity used to synthesize a frame are otherwise discarded
+    after synthesis (baked into the ADC's signal amplitude/phase only, not separably
     recoverable from it), so this is the one place they can be cheaply recorded.
     """
-    import numpy as _np
-
-    from e2e.ml.rd_synth import array_axis
+    from e2e.ml.labels import target_geometry
 
     keep = None if classes is None else set(classes)
-    origin = _np.asarray(pose.position, dtype=_np.float64)
-    axis = array_axis(pose)
     out: List[Dict[str, Any]] = []
     for sc in scatterers:
         if keep is not None and sc.object_class not in keep:
             continue
-        los = _np.asarray(sc.position, dtype=_np.float64) - origin
-        r = float(_np.linalg.norm(los))
-        sin_az = 0.0 if r < 1e-6 else float((los / r) @ axis)
-        if not (0.0 <= r < grid.max_range_m and abs(sin_az) < 1.0):
+        r_surface, sin_az, _r_centre = target_geometry(sc, pose)
+        if not (0.0 <= r_surface < grid.max_range_m and abs(sin_az) < 1.0):
             continue
         out.append({
             "rcs_dbsm": float(sc.rcs_dbsm),
@@ -556,7 +551,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         return x, y
 
     def targets(self, idx: int):
-        """Decoded target list (`(range_m, sin_az, object_class)` tuples) for frame `idx`.
+        """Decoded target list (`(range_m, sin_az, object_class, surface_range_m)`) for `idx`.
 
         Reads only the npz's "meta" entry -- `np.load`'s `NpzFile` decompresses each
         array lazily per-key access, so skipping "adc"/"input"/"labels" here avoids

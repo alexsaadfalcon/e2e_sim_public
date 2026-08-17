@@ -20,9 +20,18 @@ from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 from e2e.scenario import Node, NodeRole, Scenario
 
 
-def _scene(target_pos, target_vel):
+def _scene(target_pos, target_vel, base_scene="synthetic"):
+    """A one-vehicle scenario.
+
+    `base_scene="synthetic"` (the default here) declares POINT targets -- which is what
+    `rd_synth` synthesizes and what the exact-bin assertions below are about. Pass a
+    meshed base scene ("flat") to get an object with a real extent, whose return (and
+    whose label) then sits on its nearest SURFACE, ~1 m nearer than its centre for the
+    sphere primitive `vehicle()` defaults to. See `e2e.ml.scatterers.SYNTHETIC_BASE_SCENE`.
+    """
     return Scenario(
         name="ml_integration",
+        base_scene=base_scene,
         nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 0.0),
                     look_at=(10.0, 0.0, 0.0))],
         objects=[vehicle("car", target_pos, velocity=target_vel)],
@@ -71,17 +80,23 @@ def test_ti_tdm_scenario_hits_expected_range_doppler_angle_bins(torch_device):
     assert abs(int(spec.argmax()) - k_ang) <= 1.0
 
 
-def test_generate_sample_input_peak_lands_in_label_footprint(torch_device):
+@pytest.mark.parametrize("base_scene", ["synthetic", "flat"])
+def test_generate_sample_input_peak_lands_in_label_footprint(base_scene, torch_device):
     """The seam test: nothing else ties the INPUT tensor's range axis to the LABEL
     grid's range axis through the actual generate_sample path. A refactor that
     changed range_stride handling, FFT bin ordering, or LabelGrid.for_config would
-    silently desynchronize input from labels without this check."""
+    silently desynchronize input from labels without this check.
+
+    Run BOTH ways round: with point targets ("synthetic") and with a meshed object
+    ("flat"), whose return and whose objectness footprint both move to its nearest
+    surface. The 2026-08-17 surface convention only holds together if signal and label
+    move TOGETHER -- if either layer forgot, the peak leaves the footprint here."""
     from e2e.ml.dataset import generate_sample
     from e2e.ml.labels import LabelGrid
     from e2e.scenario import Motion, SceneObject
 
     cfg = TI_IWR1443
-    sc = _scene((20.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+    sc = _scene((20.0, 0.0, 0.0), (0.0, 0.0, 0.0), base_scene=base_scene)
     # Add background clutter close to the vehicle: it must contribute SIGNAL but
     # never LABELS (a detector rejects clutter, it does not report it).
     sc.objects.append(SceneObject(name="clutter", position=(12.0, 3.0, 0.0),

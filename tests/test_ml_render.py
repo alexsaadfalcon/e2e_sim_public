@@ -286,6 +286,10 @@ def test_range_azimuth_map_peak_matches_known_target(tiny_cfg):
 
     scenario = Scenario(
         name="single_target",
+        # POINT target: this checks `rd_synth`'s bin placement against the object's own
+        # position, so the object must not carry an extent (a meshed scene's object
+        # returns from its nearest SURFACE instead -- see e2e.ml.geometry).
+        base_scene="synthetic",
         nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 0.0),
                     look_at=(1.0, 0.0, 0.0))],
         # tiny_cfg's shrunk n_samples gives a small max_range_m -- place the target

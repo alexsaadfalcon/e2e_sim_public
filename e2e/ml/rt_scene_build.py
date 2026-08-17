@@ -62,9 +62,44 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from e2e.ml.assets import DOWNLOADED_ASSET_SPECS, process_asset
+from e2e.ml.geometry import scene_seed_for
 
 # Material defaults -- deliberately NOT Sionna's (pure specular mirror); see above.
 DEFAULT_SCATTERING_COEFFICIENT = 0.3
+
+# Below this speed an object is treated as parked and gets a deterministic heading
+# instead of one derived from its velocity vector (atan2 of ~zero is meaningless).
+_YAW_MOVING_EPS_MPS = 0.05
+
+
+def object_yaw_rad(scatterer, obj_name: str, *, scene_seed: int = 0) -> float:
+    """Heading (radians about +z) for one scene object.
+
+    Until 2026-08-17 no orientation was applied at all: every mesh sat axis-aligned and
+    the radar looks down +x, so **every vehicle in every corpus was nose-on**. Two
+    consequences, both measured: the corpora contain no aspect-dependent RCS variation
+    whatsoever, and the centre-vs-surface label offset had near-zero within-class
+    variance (0.03-0.24 m), which made it look like a per-class constant a model could
+    learn. With real headings a car's offset spreads over [W/2, L/2] = [1.0, 2.2] m.
+
+    A moving object faces its direction of travel -- the right model for a vehicle, and
+    it costs nothing because the velocity is already per-frame. A parked one gets a
+    deterministic pseudo-random heading keyed on its name and the scene seed, so scenes
+    stay reproducible (`build_rt_tier_scenario` guarantees determinism in
+    (tier, frame_idx, seed) and that guarantee has to survive this).
+
+    Spheres are rotationally symmetric, so this is a no-op for them; it matters for
+    boxes and for the vehicle/pedestrian meshes.
+    """
+    vx, vy = float(scatterer.velocity[0]), float(scatterer.velocity[1])
+    if math.hypot(vx, vy) > _YAW_MOVING_EPS_MPS:
+        return math.atan2(vy, vx)
+    # Deterministic, and stable against dict ordering / insertion order: derived only
+    # from the object's own name and the scene seed.
+    h = 2166136261
+    for ch in f"{scene_seed}:{obj_name}".encode("utf-8"):
+        h = ((h ^ ch) * 16777619) & 0xFFFFFFFF
+    return 2.0 * math.pi * (h / 4294967296.0)
 DEFAULT_SCATTERING_PATTERN = "lambertian"
 
 # Antenna element pattern for the radar's TX/RX `PlanarArray`s.
@@ -980,6 +1015,11 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
         scene.edit(add=[so])
         so.scaling = float(obj.scaling)
         so.position = [float(c) for c in sc.position]
+        # Heading. Without this every mesh is axis-aligned and, since the radar looks
+        # down +x, every vehicle is nose-on -- no aspect diversity anywhere in any
+        # corpus. See `object_yaw_rad`.
+        so.orientation = [object_yaw_rad(sc, obj.name,
+                                         scene_seed=scene_seed_for(scenario)), 0.0, 0.0]
         # Per-object velocity is what `field_calculator._update_doppler_shift` reads at
         # each scattering interaction; without it every path's Doppler is identically 0.
         so.velocity = [float(v) for v in sc.velocity]

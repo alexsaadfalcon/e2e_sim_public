@@ -11,15 +11,18 @@ Sub-modules
 * `radar_config` -- dependency-free `RadarConfig` dataclass (chirp/frame timing,
   derived range/velocity resolution and limits) plus reference presets
   (`TI_IWR1443`, `RADIAL_LIKE`). No torch/numpy required.
-* `scatterers`   -- point-scatterer scene generation for synthetic radar targets.
+* `scatterers`   -- scenario -> per-frame scatterer/pose bridge (position, velocity,
+  RCS, class, and the object's own extent/heading).
+* `geometry`     -- object bounding extents, in-plane yaw, and the monostatic SURFACE
+  point shared by the label encoder, `rd_synth` and the ray-traced signal chain.
 * `rd_synth`     -- raw-ADC cube synthesis (dechirped FMCW beat signal, shape
   [n_rx, n_chirps, n_samples]) from scatterers + RadarConfig; range-Doppler
   tensors are derived from it via `transforms`.
 * `transforms`   -- ADC -> range-Doppler transforms, TDM virtual-array
   deinterleave, real/imag input packing, per-channel normalization stats.
 * `labels`       -- LabelGrid (range x sin-azimuth output geometry) + FFTRadNet-
-  style detection-label encoding (3x3 footprint + per-cell residuals) and the
-  matching decoder.
+  style detection-label encoding (3x3 footprint on the target's SURFACE + per-cell
+  residuals toward its CENTRE) and the matching decoder.
 * `scenes`       -- randomized vehicle/pedestrian/clutter scene sampler with
   difficulty tiers D0-D3 (`DIFFICULTY_TIERS`).
 * `dataset`      -- end-to-end sample/dataset generation (scenario -> ADC -> RD

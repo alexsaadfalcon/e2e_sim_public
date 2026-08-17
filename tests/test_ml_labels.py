@@ -96,7 +96,7 @@ def test_encode_decode_round_trip_recovers_subbin_precision(torch_device):
 
     # match each decoded detection to its nearest true target and check sub-bin accuracy
     remaining = list(targets)
-    for r_dec, sin_az_dec, score in decoded:
+    for r_dec, sin_az_dec, score, _surface in decoded:
         best = min(remaining, key=lambda t: abs(t[0] - r_dec) + abs(t[1] - sin_az_dec))
         remaining.remove(best)
         r_true, sin_az_true = best
@@ -116,7 +116,7 @@ def test_decode_beats_raw_cell_quantization(torch_device):
     label = encode_detection_labels(grid, [sc], pose)
     decoded = decode_detections(grid, label, threshold=0.5)
     assert len(decoded) == 1
-    r_dec, sin_az_dec, _ = decoded[0]
+    r_dec, sin_az_dec, _score, _surface = decoded[0]
 
     raw_cell_r = (10 + 0.5) * grid.range_bin_m
     raw_cell_az = -1.0 + (20 + 0.5) * grid.az_bin
@@ -148,10 +148,12 @@ def test_targets_in_grid_filters_mixed_scene():
 
     result = targets_in_grid(grid, [near, far], pose)
     assert len(result) == 1
-    r, sin_az, cls = result[0]
+    r, sin_az, cls, surface_r = result[0]
     assert r == pytest.approx(10.0, abs=1e-6)
     assert sin_az == pytest.approx(0.1, abs=1e-6)
     assert cls == "vehicle"
+    # point scatterer (no extent): surface == centre
+    assert surface_r == pytest.approx(10.0, abs=1e-6)
 
 
 # --------------------------------------------------------------------------------
@@ -199,3 +201,149 @@ def test_decode_works_on_given_device(torch_device):
     label = encode_detection_labels(grid, [_target(8.0, 0.0)], pose).to(torch_device)
     decoded = decode_detections(grid, label, threshold=0.5)
     assert len(decoded) == 1
+
+
+# --------------------------------------------------------------------------------
+# Surface footprint / centre regression (2026-08-17 convention)
+# --------------------------------------------------------------------------------
+def _extended_target(r_centre, sin_az, extent_m, yaw_rad=0.0, object_class="vehicle"):
+    """A Scatterer with real geometry, centred at `(r_centre, sin_az)` in the z=0 plane."""
+    y = r_centre * sin_az
+    x = math.sqrt(max(r_centre * r_centre - y * y, 0.0))
+    return Scatterer(position=(x, y, 0.0), velocity=(0.0, 0.0, 0.0), rcs_dbsm=10.0,
+                     object_class=object_class, extent_m=extent_m, yaw_rad=yaw_rad)
+
+
+def test_point_target_encoding_is_unchanged_by_the_surface_convention(torch_device):
+    """A scatterer with no known extent IS a point: its footprint must still sit on its
+    own cell and its target tuple must still report that same range twice. This is the
+    guarantee that the analytic (`rd_synth`) path is bit-for-bit unaffected."""
+    grid = LabelGrid(n_range=40, n_azimuth=40, max_range_m=40.0)
+    pose = RadarPose()
+    r_true = 17.37
+    label = encode_detection_labels(grid, [_target(r_true, 0.1)], pose)
+    rows = torch.nonzero(label[0])[:, 0]
+    ci = int(r_true / grid.range_bin_m)
+    assert int(rows.min()) == ci - 1 and int(rows.max()) == ci + 1
+
+    (r_centre, _sin_az, _cls, r_surface), = targets_in_grid(grid, [_target(r_true, 0.1)], pose)
+    assert r_surface == pytest.approx(r_centre)
+    assert r_centre == pytest.approx(r_true, abs=1e-6)
+
+
+def test_footprint_sits_on_the_surface_and_regression_points_at_the_centre(torch_device):
+    """The whole convention in one assertion pair: objectness where the energy is, the
+    regression channels still reconstructing the object's CENTRE exactly."""
+    grid = LabelGrid(n_range=128, n_azimuth=192, max_range_m=38.4)   # ti_iwr1443 geometry
+    pose = RadarPose()
+    length = 4.4                                   # low_poly_car, end-on (yaw 0, target at +x)
+    r_centre = 20.0
+    sc = _extended_target(r_centre, 0.0, (length, 1.8, 1.5), yaw_rad=0.0)
+
+    r_surface_expected = r_centre - length / 2.0
+    (r_c, _sin_az, _cls, r_s), = targets_in_grid(grid, [sc], pose)
+    assert r_c == pytest.approx(r_centre, abs=1e-6)
+    assert r_s == pytest.approx(r_surface_expected, abs=1e-6)
+
+    label = encode_detection_labels(grid, [sc], pose)
+    rows = torch.nonzero(label[0])[:, 0]
+    ci_surface = int(r_surface_expected / grid.range_bin_m)
+    assert int(rows.min()) == ci_surface - 1 and int(rows.max()) == ci_surface + 1
+    # ... and NOT on the centre cell: 2.2 m is more than a footprint away.
+    assert int(r_centre / grid.range_bin_m) > int(rows.max())
+
+    # Every footprint cell independently reconstructs the CENTRE (the RADIal per-cell
+    # residual guarantee, unchanged -- only what it points at moved).
+    for i, j in torch.nonzero(label[0]).tolist():
+        r_cell = (i + 0.5) * grid.range_bin_m
+        assert r_cell + float(label[1, i, j]) * grid.range_bin_m == pytest.approx(
+            r_centre, abs=2e-3)
+
+    decoded = decode_detections(grid, label, threshold=0.5)
+    assert len(decoded) == 1
+    r_dec, _sin_dec, _score, r_surface_dec = decoded[0]
+    assert r_dec == pytest.approx(r_centre, abs=1e-3)              # centre, sub-bin exact
+    assert abs(r_surface_dec - r_surface_expected) <= 1.5 * grid.range_bin_m
+
+
+def test_broadside_and_end_on_footprints_differ(torch_device):
+    """Yaw is not decoration: the same car labelled end-on and broadside puts its
+    footprint in different range cells, because it really does reflect from different
+    places. An axis-aligned implementation cannot produce this."""
+    grid = LabelGrid(n_range=128, n_azimuth=192, max_range_m=38.4)
+    pose = RadarPose()
+    end_on = _extended_target(20.0, 0.0, (4.4, 1.8, 1.5), yaw_rad=0.0)
+    broadside = _extended_target(20.0, 0.0, (4.4, 1.8, 1.5), yaw_rad=math.pi / 2)
+
+    (_c1, _s1, _k1, surf_end), = targets_in_grid(grid, [end_on], pose)
+    (_c2, _s2, _k2, surf_broad), = targets_in_grid(grid, [broadside], pose)
+    assert surf_end == pytest.approx(20.0 - 2.2, abs=1e-6)
+    assert surf_broad == pytest.approx(20.0 - 0.9, abs=1e-6)
+
+    rows_end = torch.nonzero(encode_detection_labels(grid, [end_on], pose)[0])[:, 0]
+    rows_broad = torch.nonzero(encode_detection_labels(grid, [broadside], pose)[0])[:, 0]
+    assert int(rows_broad.min()) > int(rows_end.max())
+
+
+def test_range_residual_bound_and_regression_loss_scale(torch_device):
+    """The widened range-residual bound, and the loss-scale consequence of widening it.
+
+    Residuals are still in BIN units (a unit slip to metres is the failure mode this
+    catches) and span `[-1.5, 1.5 + delta/range_bin]`. Because a 15.7 m semi at
+    `ti_iwr1443`'s 0.3 m output bins puts that upper end near 27 bins, the smooth-L1
+    regression term now starts deep in its LINEAR regime instead of its quadratic one --
+    measured here, not assumed -- and the exact-prediction case must still be zero, i.e.
+    the widened target stays representable.
+    """
+    from e2e.ml.losses import masked_regression_loss
+
+    grid = LabelGrid(n_range=128, n_azimuth=192, max_range_m=38.4)
+    pose = RadarPose()
+    r_centre = 30.0
+    for length in (4.4, 15.7):
+        sc = _extended_target(r_centre, 0.0, (length, 2.5, 3.0), yaw_rad=0.0)
+        label = encode_detection_labels(grid, [sc], pose)
+        mask = label[0]
+        res = label[1][mask > 0]
+        delta_bins = (length / 2.0) / grid.range_bin_m
+        assert float(res.min()) >= delta_bins - 1.5 - 1e-3
+        assert float(res.max()) <= delta_bins + 1.5 + 1e-3
+
+        # Zero-prediction (an untrained head): smooth-L1 is |x| - 0.5 out here.
+        zero = torch.zeros_like(label[1:])
+        loss_zero = float(masked_regression_loss(zero[None], label[None, 1:], mask[None]))
+        assert loss_zero == pytest.approx(delta_bins - 0.5, abs=1.6)
+        # Exact prediction: still exactly zero, so the target remains learnable.
+        assert float(masked_regression_loss(label[None, 1:], label[None, 1:],
+                                            mask[None])) == 0.0
+
+
+def test_widened_residual_does_not_change_the_regression_gradient_scale(torch_device):
+    """The loss-scale check behind the widened bound.
+
+    Smooth-L1 SATURATES its gradient at 1 per element, so pushing the range residual from
+    ~1.5 bins out to ~26 grows the loss VALUE (MEASURED at `reg_weight=100`, zero-
+    regression prediction, 3 targets: reg term 0.76 -> 6.6 for a car -> 17.6 for a 15.7 m
+    semi) while leaving the optimization signal alone. Pinned here so a future switch to a
+    plain L2 regression -- which does NOT saturate, and where a 26-bin residual would be
+    ~300x the old gradient -- cannot land silently.
+    """
+    from e2e.ml.losses import detection_loss
+
+    grid = LabelGrid(n_range=128, n_azimuth=192, max_range_m=38.4)
+    pose = RadarPose()
+    grads = {}
+    for name, extent in (("point", None), ("semi", (15.7, 2.9, 3.9))):
+        sc = (_target(30.0, 0.1) if extent is None
+              else _extended_target(30.0, 0.1, extent))
+        label = encode_detection_labels(grid, [sc], pose).cpu()
+        pred = torch.zeros_like(label)
+        pred[0] = 1e-3
+        pred = pred[None].clone().requires_grad_(True)
+        loss, _parts = detection_loss(pred, label[None])
+        loss.backward()
+        grads[name] = (float(pred.grad[0, 1:].abs().max()),
+                       float(pred.grad[0, 1:].abs().sum()))
+
+    assert grads["semi"][0] == pytest.approx(grads["point"][0], rel=1e-6)   # per-cell cap
+    assert grads["semi"][1] <= 1.5 * grads["point"][1]                      # measured 1.25x

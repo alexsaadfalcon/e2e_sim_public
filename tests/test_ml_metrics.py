@@ -588,3 +588,136 @@ def test_classes_empty_tuple_omits_per_class_keys():
     assert "AP_vehicle" not in result
     assert "AR_vehicle" not in result
     assert result["AP"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------------
+# ACCEPTANCE (2026-08-17 surface-label convention): the delta-cliff
+# --------------------------------------------------------------------------------
+#: `ti_iwr1443`'s own output geometry (n_samples/4 range bins over its 38.4 m swath), so
+#: these numbers are the shipped preset's, not a convenient toy grid.
+_TI_GRID = dict(n_range=128, n_azimuth=192, max_range_m=38.4)
+
+#: (name, length_m) of the shipped asset fleet's size classes, with their MEASURED
+#: centre-to-surface offsets: a car hides 2.2 m, a semi 7.85 m. Everything from "car"
+#: up exceeds `MatchCriterion.max_range_err_m` (2.0 m), which is what made this a cliff
+#: rather than a slope -- oracle AP measured 1.00 at 1.75 m of offset, 0.21 at 2.00 m,
+#: 0.00 from 2.20 m.
+_SIZE_CLASSES = [("sphere", 1.0), ("pedestrian", 0.53), ("car", 4.4), ("bus", 8.0),
+                 ("trolley", 11.9), ("truck", 15.7)]
+
+
+def _extended(r_centre, sin_az, length, object_class="vehicle"):
+    y = r_centre * sin_az
+    x = math.sqrt(max(r_centre * r_centre - y * y, 0.0))
+    return Scatterer(position=(x, y, 0.0), velocity=(0.0, 0.0, 0.0), rcs_dbsm=10.0,
+                     object_class=object_class, extent_m=(length, 1.9, 1.5), yaw_rad=0.0)
+
+
+def _detector_firing_at(grid, ranges_m, sin_azs):
+    """A prediction map built WITHOUT the label encoder: a 3x3 objectness plateau on each
+    given (range, sin_az) cell and NO regression estimate (zeros).
+
+    That is what a real detector produces -- it fires where the energy is and has no size
+    model with which to convert that into an object centre -- so scoring it is a genuine
+    test of the convention, not the encoder marking its own homework.
+    """
+    pred = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32)
+    for r, sin_az in zip(ranges_m, sin_azs):
+        ci = min(int(r / grid.range_bin_m), grid.n_range - 1)
+        cj = min(int((sin_az + 1.0) / grid.az_bin), grid.n_azimuth - 1)
+        # Peaked, not flat: a real detector's objectness has a maximum at the cell it
+        # fired on, and that is what makes the decode's kept cell unambiguous. (The
+        # ground-truth encoder's plateau is deliberately flat, so ITS decode can keep any
+        # of the nine -- worth up to +-1.5 bins, still far inside the match tolerance.)
+        pred[0, max(ci - 1, 0):ci + 2, max(cj - 1, 0):cj + 2] = 0.9
+        pred[0, ci, cj] = 1.0
+    return pred
+
+
+#: Ranges are chosen so each target's SURFACE lands exactly on a range-bin CENTRE, which
+#: removes decode's cell quantization from these tests: the detector below then fires at
+#: precisely the true surface, and every number here is a statement about the convention
+#: rather than about rounding.
+_SURFACE_CELLS = (60, 100)
+
+
+def _targets_with_surfaces_on_cell_centres(grid, length, sin_az=0.0):
+    """Scatterers of the given length whose surfaces sit on `_SURFACE_CELLS`' centres."""
+    out = []
+    for ci in _SURFACE_CELLS:
+        surface = (ci + 0.5) * grid.range_bin_m
+        out.append(_extended(surface + length / 2.0, sin_az, length))
+    return out
+
+
+@pytest.mark.parametrize("name,length", _SIZE_CLASSES)
+def test_detector_firing_at_the_true_surface_scores_ap_one(name, length):
+    """ACCEPTANCE TEST for the surface-label convention.
+
+    A detector that fires exactly where an extended object reflects must score AP = AR =
+    1.0 for EVERY size class -- including the car-, bus-, trolley- and truck-sized ones
+    that were total losses under centre labels. `range_rmse_m` is reported separately and
+    is allowed to be large here: this detector has no size estimate, so it cannot place
+    the object's centre, and the metric must say so instead of hiding it in AP.
+    """
+    grid = LabelGrid(**_TI_GRID)
+    pose = RadarPose()
+    scatterers = _targets_with_surfaces_on_cell_centres(grid, length)
+    targets = targets_in_grid(grid, scatterers, pose)
+    assert len(targets) == 2
+    for tgt in targets:                       # end-on: the near face is half a length away
+        assert tgt[0] - tgt[3] == pytest.approx(length / 2.0, abs=1e-6)
+
+    pred = _detector_firing_at(grid, [t[3] for t in targets], [t[1] for t in targets])
+    result = evaluate_dataset([pred], [targets], grid)
+
+    assert result["AP"] == 1.0
+    assert result["AR"] == 1.0
+    assert result["fp"] == 0 and result["fn"] == 0
+    # Localization of the CENTRE is a different question, and it is answered separately.
+    assert result["range_rmse_m"] == pytest.approx(length / 2.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("name,length", _SIZE_CLASSES)
+def test_centre_labels_reproduce_the_cliff_the_surface_labels_removed(name, length):
+    """CONTROL for the test above: score the SAME detector against the pre-2026-08-17
+    convention (targets that claim the object sits at its centre). Everything at or past
+    a 2.0 m offset -- car, bus, trolley, truck -- collapses to AP 0, which is the defect,
+    reproduced on demand so a regression cannot quietly restore it."""
+    grid = LabelGrid(**_TI_GRID)
+    pose = RadarPose()
+    scatterers = _targets_with_surfaces_on_cell_centres(grid, length)
+    targets = targets_in_grid(grid, scatterers, pose)
+    centre_only = [(t[0], t[1], t[2]) for t in targets]        # 3-tuple == point target
+
+    pred = _detector_firing_at(grid, [t[3] for t in targets], [t[1] for t in targets])
+    result = evaluate_dataset([pred], [centre_only], grid)
+
+    if length / 2.0 > MatchCriterion().max_range_err_m:
+        assert result["AP"] == 0.0 and result["AR"] == 0.0
+    else:
+        assert result["AP"] == 1.0 and result["AR"] == 1.0     # small targets were fine
+
+
+def test_matching_uses_the_surface_while_rmse_uses_the_centre():
+    """The two numbers must be independent. Two detectors fire at the same (correct)
+    surface cells and so must both score AP = AR = 1.0; only their range REGRESSION
+    differs, and only `range_rmse_m` may notice."""
+    grid = LabelGrid(**_TI_GRID)
+    pose = RadarPose()
+    length = 8.0                                               # bus-sized: delta = 4.0 m
+    scatterers = _targets_with_surfaces_on_cell_centres(grid, length)
+    targets = targets_in_grid(grid, scatterers, pose)
+
+    no_size_model = _detector_firing_at(grid, [t[3] for t in targets],
+                                        [t[1] for t in targets])
+    sizes_correctly = no_size_model.clone()
+    sizes_correctly[1] = (length / 2.0) / grid.range_bin_m     # residual toward the centre
+
+    blind = evaluate_dataset([no_size_model], [targets], grid)
+    sighted = evaluate_dataset([sizes_correctly], [targets], grid)
+
+    assert blind["AP"] == sighted["AP"] == 1.0
+    assert blind["AR"] == sighted["AR"] == 1.0
+    assert blind["range_rmse_m"] == pytest.approx(length / 2.0, abs=1e-6)
+    assert sighted["range_rmse_m"] == pytest.approx(0.0, abs=1e-6)

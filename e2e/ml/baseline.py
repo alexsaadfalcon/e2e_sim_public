@@ -219,6 +219,13 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, **kwargs) -
     Channel 0 is the CFAR objectness; the two regression channels are zero, so a decoded
     detection sits at its cell centre. That is the honest classical behaviour -- there is
     no sub-cell refinement without an interpolation stage this baseline deliberately omits.
+
+    Since the 2026-08-17 surface-label convention that also means this baseline reports
+    each object's SURFACE as its centre: CFAR fires where the energy is (which is exactly
+    what the metric MATCHES on, so AP/AR are unaffected) but has no size model to convert
+    that into an object centre, so its `range_rmse_m` carries the full centre-to-surface
+    offset -- ~2.2 m for a car. Undoing that would take an extent estimator, not a
+    threshold. See `e2e.ml.labels`.
     """
     power = range_azimuth_power(cfg, adc, n_angle_fft=kwargs.pop("n_angle_fft", None))
     obj = cfar_objectness(_to_grid(power, cfg, grid), **kwargs)

@@ -107,6 +107,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
+from e2e.ml.geometry import nearest_surface_point
 from e2e.ml.rt_scene_build import RTScene, build_rt_scene
 
 # See the module docstring's "Element ordering / array handedness" section.
@@ -625,15 +626,15 @@ def _object_bbox(so) -> Optional[Tuple[np.ndarray, np.ndarray]]:
 def _specular_point(centre: np.ndarray, half: np.ndarray, radar_pos: np.ndarray) -> np.ndarray:
     """Monostatic specular point: the near intersection of the radar LOS with the
     object's bounding ellipsoid. Exact for a sphere; a documented approximation for
-    anything else (see the section banner)."""
-    d = centre - radar_pos
-    r = float(np.linalg.norm(d))
-    if r < 1e-9:
-        return centre.copy()
-    u = d / r
-    # ellipsoid (x/h)^2 = 1 hit distance from the centre along -u
-    t = 1.0 / math.sqrt(float(np.sum((u / half) ** 2)))
-    return centre - u * min(t, r * 0.99)
+    anything else (see the section banner).
+
+    Delegates to `e2e.ml.geometry.nearest_surface_point`, which is the SAME function
+    `e2e.ml.labels` puts its objectness footprint on -- the label and the energy must not
+    be computed by two implementations that can drift apart. No yaw is passed: `half`
+    here comes from the Mitsuba mesh's WORLD-space AABB (`_object_bbox`), which already
+    has the object's placed orientation baked in.
+    """
+    return nearest_surface_point(centre, half, radar_pos)
 
 
 def _rt_phase_centres(paths, rt_scene) -> dict:

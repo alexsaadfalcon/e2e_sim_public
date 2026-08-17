@@ -79,7 +79,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from e2e.ml import storage  # noqa: E402
-from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
+from e2e.ml.labels import LabelGrid, target_geometry, targets_in_grid  # noqa: E402
 from e2e.ml.radar_config import RadarConfig  # noqa: E402
 from e2e.ml.render_scene import _draw_birdseye, _draw_radar_view, range_azimuth_map  # noqa: E402
 from e2e.ml.rt_scenes import VEHICLE_FOOTPRINT_M, build_rt_tier_scenario, vehicle_asset_class  # noqa: E402
@@ -147,8 +147,12 @@ def verify_gt_match(stored_targets: Sequence[Sequence[Any]],
                     context: str, tol: float = 1e-6) -> None:
     """Raise `AssertionError` (STOP, per the brief) if the reconstructed scene's
     ground truth does not match the npz's own stored `meta["targets"]`."""
-    stored = [(float(r), float(s), str(c)) for r, s, c in stored_targets]
-    rebuilt = [(float(r), float(s), str(c)) for r, s, c in rebuilt_targets]
+    # Slice to the first three fields: `targets_in_grid` appends an optional 4th
+    # (surface range, see `e2e.ml.labels`), and a corpus written before 2026-08-17 has
+    # only three. The first three are unchanged in meaning and value by that addition,
+    # so comparing them is still the honest divergence check this guard exists to be.
+    stored = [(float(t[0]), float(t[1]), str(t[2])) for t in stored_targets]
+    rebuilt = [(float(t[0]), float(t[1]), str(t[2])) for t in rebuilt_targets]
     if len(stored) != len(rebuilt):
         raise AssertionError(
             f"GT mismatch for {context}: stored {len(stored)} targets, "
@@ -178,20 +182,6 @@ def _target_extent_m(obj) -> Optional[Tuple[float, float]]:
     return None
 
 
-def _range_sin_az(position, pose) -> Tuple[float, float]:
-    """Duplicates `e2e.ml.labels._range_sin_az` (private sibling-module geometry;
-    same duplication convention `e2e.ml.dataset._target_extras` uses)."""
-    from e2e.ml.rd_synth import array_axis
-
-    origin = np.asarray(pose.position, dtype=np.float64).reshape(3)
-    los = np.asarray(position, dtype=np.float64).reshape(3) - origin
-    r = float(np.linalg.norm(los))
-    if r < 1e-6:
-        return r, 0.0
-    sin_az = float((los / r) @ array_axis(pose))
-    return r, sin_az
-
-
 def build_target_records(grid: LabelGrid, scenario, scats, pose,
                          label_classes: Sequence[str]) -> List[Dict[str, Any]]:
     """Per-target label record, one per in-grid `label_classes` scatterer, in the
@@ -204,16 +194,21 @@ def build_target_records(grid: LabelGrid, scenario, scats, pose,
     for obj, sc in zip(scenario.objects, scats):
         if obj.object_class not in keep:
             continue
-        r, sin_az = _range_sin_az(sc.position, pose)
-        if not (0.0 <= r < grid.max_range_m and abs(sin_az) < 1.0):
+        r_surface, sin_az, r = target_geometry(sc, pose)
+        if not (0.0 <= r_surface < grid.max_range_m and abs(sin_az) < 1.0):
             continue
         extent = _target_extent_m(obj)
-        ci = min(int(r / range_bin_m), grid.n_range - 1)
+        # Grid cell of the OBJECTNESS FOOTPRINT, i.e. of the surface point -- matching
+        # `e2e.ml.labels.encode_detection_labels` since 2026-08-17. `range_m` stays the
+        # object centre (what the regression channels encode); `surface_range_m` is the
+        # nearest-face range the footprint sits on.
+        ci = min(int(r_surface / range_bin_m), grid.n_range - 1)
         cj = min(int((sin_az + 1.0) / az_bin), grid.n_azimuth - 1)
         cos_az = float(np.sqrt(max(0.0, 1.0 - sin_az ** 2)))
         records.append({
             "class": obj.object_class,
             "range_m": r,
+            "surface_range_m": r_surface,
             "sin_azimuth": sin_az,
             "azimuth_deg": float(np.degrees(np.arcsin(np.clip(sin_az, -1.0, 1.0)))),
             "x_m": r * cos_az,
@@ -317,9 +312,9 @@ class SSMExportDataset(torch.utils.data.Dataset):
     not required.
 
     `targets` is the sample's `labels/sample_?????.json`'s `"targets"` list,
-    loaded as plain Python dicts (schema: `class`, `range_m`, `azimuth_deg`,
-    `sin_azimuth`, `x_m`, `y_m`, `extent_m`, `rcs_dbsm`, `velocity_mps`,
-    `grid_row`, `grid_col` -- see the README).
+    loaded as plain Python dicts (schema: `class`, `range_m`, `surface_range_m`,
+    `azimuth_deg`, `sin_azimuth`, `x_m`, `y_m`, `extent_m`, `rcs_dbsm`,
+    `velocity_mps`, `grid_row`, `grid_col` -- see the README).
     """
 
     def __init__(self, root):
@@ -399,8 +394,15 @@ cosine -- an elevated target is indistinguishable from a coplanar one at the sam
 cosine).
 
 The detection LABEL GRID (`grid_row`, `grid_col` in each target record) is
-`(range, sin(azimuth))`, `grid_row = min(int(range_m / range_bin_m), n_range - 1)`,
+`(range, sin(azimuth))`, `grid_row = min(int(surface_range_m / range_bin_m), n_range - 1)`,
 `grid_col = min(int((sin_azimuth + 1) / az_bin), n_azimuth - 1)`.
+
+`range_m` is the object's geometric CENTRE; `surface_range_m` is its nearest face along
+the line of sight, which is where the radar return actually comes from and therefore
+where the objectness footprint is written (the regression channels encode the centre as
+an offset from that cell). The two differ by ~2.4 m for a car and ~7.8 m for a semi;
+`surface_range_m == range_m` only for a point-like target. Detection/matching is a
+question about `surface_range_m`; sizing is a question about `range_m`.
 
 ## File layout
 
@@ -430,7 +432,8 @@ contract this mirrors) with these arrays/keys:
     `payload_key`, `shape`, `dtype`, `codec`, `codec_meta` (`{{"scale":..., "dtype":...}}`),
     `impairment_params` (per-frame randomized phase-noise/leakage/clutter settings --
     see `e2e.ml.chain_generate.default_domain_randomizer`), `targets` (the SAME
-    `(range_m, sin_azimuth, class)` tuples the labels JSON expands with more fields).
+    `(range_m, sin_azimuth, class, surface_range_m)` tuples the labels JSON expands
+    with more fields).
 
 ## int16 decode formula
 

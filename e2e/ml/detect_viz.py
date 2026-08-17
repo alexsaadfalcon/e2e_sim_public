@@ -92,7 +92,8 @@ class FrameDetections:
     """Decoded detections + ground truth for one frame, from ONE detector.
 
     `detections`/`targets` are exactly `e2e.ml.metrics.Detection`/`Target` tuples
-    (`(range_m, sin_azimuth, score)` / `(range_m, sin_azimuth, object_class)`), decoded
+    (`(range_m, sin_azimuth, score, surface_range_m)` /
+    `(range_m, sin_azimuth, object_class, surface_range_m)`), decoded
     through the SAME `e2e.ml.labels.decode_detections` call `evaluate_frame`/
     `evaluate_dataset` use at the same `(grid, threshold)` -- so this object's contents
     cannot disagree with a reported AP/AR number for the same inputs.
@@ -306,7 +307,10 @@ def plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, targets, detecti
     imshow_ra(ax, ra_db, sin_az_axis, range_axis_m, cmap="inferno", vmin=vmin, vmax=vmax)
 
     seen_labels = set()
-    for r, sin_az, cls in targets:
+    for tgt in targets:
+        # Tuples are (range_m, sin_azimuth, object_class[, surface_range_m]) -- index
+        # rather than unpack, so the optional surface element does not break this.
+        r, sin_az, cls = tgt[0], tgt[1], tgt[2]
         style = _GT_STYLE.get(cls, dict(marker="x", markeredgecolor="white"))
         label = f"GT {cls}" if cls not in seen_labels else None
         seen_labels.add(cls)
@@ -314,7 +318,8 @@ def plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, targets, detecti
                 linestyle="none", label=label, **style)
 
     det_label = f"detection (score>={threshold:.2f})"
-    for r, sin_az, score in detections:
+    for det in detections:
+        r, sin_az, score = det[0], det[1], det[2]
         ax.plot(sin_az, r, marker="+", markersize=10 + 6 * float(score), color=_DET_COLOR,
                 markeredgewidth=1.8, linestyle="none",
                 label=det_label if det_label not in seen_labels else None)

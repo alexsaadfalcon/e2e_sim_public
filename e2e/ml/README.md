@@ -127,13 +127,27 @@ channel-first — see `transforms.rd_to_input`), where `R = cfg.n_samples` alway
 `encode_detection_labels`), e.g. `(3, 128, 192)` for the defaults above
 (`range_stride=4` on `n_samples=512` → `n_range=128`; `n_azimuth=192` is a free parameter):
 
-* channel 0 — objectness, a `1.0` 3×3 footprint centred on each target's `(range,
-  sin-azimuth)` cell, `0.0` elsewhere.
-* channels 1–2 — range/azimuth regression residuals, defined per footprint cell (not
-  just the centre cell) so any of the 9 cells can reconstruct the exact target position.
+* channel 0 — objectness, a `1.0` 3×3 footprint centred on each target's **surface**
+  `(range, sin-azimuth)` cell, `0.0` elsewhere.
+* channels 1–2 — range/azimuth regression residuals toward the object's **centre**,
+  defined per footprint cell (not just the target's own cell) so any of the 9 cells can
+  reconstruct the exact target position.
 
 The output grid is `(range, sin(azimuth))`, not `(range, angle_degrees)` — azimuth is
 stored as the ULA direction cosine on a uniform `[-1, 1)` axis.
+
+**Surface vs centre** (2026-08-17). A radar return comes from a target's nearest
+reflecting face, which for a car is ~2.4 m — about 8 output range bins — in front of the
+geometric centre (7.8 m for a semi). Objectness therefore marks the **surface**, where the
+energy is; the regression head still predicts the **centre**, because a downstream tracker
+integrates centre-of-mass kinematics. `metrics.evaluate_dataset` matches detections on the
+surface at an unchanged 2.0 m tolerance and reports `range_rmse_m` against the centre, so
+"did you find it" and "did you size it" stay separate numbers. The surface point is
+`e2e.ml.geometry.nearest_surface_point`, the same one `rt_signal_chain` places its coherent
+scatterer on and `rd_synth` places its point target at. `targets_in_grid` tuples are
+`(centre_range_m, sin_azimuth, class, surface_range_m)` and `decode_detections` tuples are
+`(range_m, sin_azimuth, score, surface_range_m)` — both append-only, and a 3-element tuple
+still means a point target.
 
 **Manifest** (`manifest.json`, one per `<config>_<tier>` dataset directory):
 

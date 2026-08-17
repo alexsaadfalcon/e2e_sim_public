@@ -20,6 +20,7 @@ from typing import List, Optional
 import numpy as np
 
 from e2e.environment.motion import resolve_motion
+from e2e.ml.geometry import object_extent_m, object_yaw_rad, scene_seed_for
 from e2e.scenario import Motion, NodeRole, Scenario, SceneObject, Vec3
 
 # Coarse per-class radar-cross-section defaults (dBsm), used when a SceneObject doesn't
@@ -32,6 +33,15 @@ DEFAULT_RCS_DBSM = {
     "pedestrian": -5.0,
     "scatterer": 0.0,
 }
+
+#: `Scenario.base_scene` value marking a scene whose objects are POINT targets: there is
+#: no ray tracer and no mesh, and `e2e.ml.rd_synth.synthesize_adc` puts each object's
+#: entire return at its `position`. `e2e.ml.scenes` (the analytic tier sampler) sets it.
+#: Such objects get NO `extent_m`, because giving them one would move the label off the
+#: energy -- the exact defect the surface convention exists to remove. Every other
+#: `base_scene` ("flat"/"free"/a Sionna scene name) means real geometry is placed and
+#: traced, so extents apply.
+SYNTHETIC_BASE_SCENE = "synthetic"
 
 # Frame-to-frame time step (seconds) assumed when the caller doesn't supply one.
 # `e2e.scenario.Motion.velocity` is documented as "a constant displacement (meters)
@@ -47,11 +57,26 @@ DEFAULT_DT_S = 1.0
 
 @dataclass
 class Scatterer:
-    """A single point scatterer at one frame: position/velocity in the scene frame."""
-    position: Vec3   # meters, scene frame
+    """A single scatterer at one frame: position/velocity in the scene frame.
+
+    `position` is the object's geometric CENTRE. `extent_m`/`yaw_rad` carry just enough
+    geometry for a consumer to work out where the object's SURFACE is along a given line
+    of sight (`e2e.ml.geometry.nearest_surface_point`) -- which is where a real radar
+    return comes from, and therefore where `e2e.ml.labels` puts its objectness footprint.
+    Both default to "unknown", which every consumer must treat as a POINT target
+    (surface == centre); a hand-built `Scatterer(position, velocity, rcs, cls)` keeps
+    exactly its pre-2026-08-17 meaning.
+    """
+    position: Vec3   # meters, scene frame -- the object's geometric centre
     velocity: Vec3   # m/s
     rcs_dbsm: float
     object_class: str
+    #: (length, width, height) in metres, in the object's own frame (local +x = length),
+    #: after `SceneObject.scaling`. `None` = unknown geometry -> point target.
+    extent_m: Optional[Vec3] = None
+    #: Heading of the object's local +x, radians about world +z (see
+    #: `e2e.ml.geometry.object_yaw_rad`).
+    yaw_rad: float = 0.0
 
 
 @dataclass
@@ -112,10 +137,19 @@ def frame_scatterers(scenario: Scenario, frame_idx: int, dt: float = DEFAULT_DT_
       `velocity_mps` when set, else zero.
     - `rcs_dbsm`: the object's own field when set, else `DEFAULT_RCS_DBSM[object_class]`
       (unknown classes fall back to the "scatterer" default).
+    - `extent_m` / `yaw_rad`: the object's bbox extents and in-plane heading, resolved by
+      `e2e.ml.geometry` from the same `(kind, asset, scaling)` dispatch the RT scene
+      builder loads its mesh from. These let a consumer find the object's SURFACE along a
+      line of sight instead of assuming a point at its centre; see `e2e.ml.labels`.
+      `extent_m` is `None` for a `SYNTHETIC_BASE_SCENE` scenario, whose objects genuinely
+      ARE points (nothing is meshed and `rd_synth` radiates from `position`).
     """
     n = scenario.num_frames
     if not (0 <= frame_idx < n):
         raise ValueError(f"frame_idx {frame_idx} out of range [0, {n})")
+
+    # Point-target scene -> no extents (see SYNTHETIC_BASE_SCENE).
+    meshed = str(getattr(scenario, "base_scene", "")) != SYNTHETIC_BASE_SCENE
 
     scatterers: List[Scatterer] = []
     for obj in scenario.objects:
@@ -139,6 +173,13 @@ def frame_scatterers(scenario: Scenario, frame_idx: int, dt: float = DEFAULT_DT_
             velocity=velocity,
             rcs_dbsm=rcs_dbsm,
             object_class=obj.object_class,
+            extent_m=object_extent_m(obj) if meshed else None,
+            # `name`/`scene_seed` make this defer to the heading the RT scene builder
+            # will actually place the mesh at (`rt_scene_build.object_yaw_rad`, called
+            # there with the SAME scene_seed) -- labels must not assume a different
+            # orientation than the geometry was built with.
+            yaw_rad=object_yaw_rad(obj, velocity, name=obj.name,
+                                   scene_seed=scene_seed_for(scenario)),
         ))
     return scatterers
 

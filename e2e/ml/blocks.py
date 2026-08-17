@@ -327,7 +327,7 @@ class NeuralDetectorBlock:
     n_range_out, n_azimuth_out]}` (channel 0 sigmoid objectness, channels 1-2
     raw range/azimuth regression residuals, matching `e2e.ml.labels`'s
     convention) plus `{'ml_detections': [...]}` (decoded `(range_m,
-    sin_azimuth, score)` tuples via `e2e.ml.labels.decode_detections`) IF a
+    sin_azimuth, score, surface_range_m)` tuples via `e2e.ml.labels.decode_detections`) IF a
     `grid` is available. `state['adc']` itself is left UNTOUCHED -- the
     returned dict never includes it.
 

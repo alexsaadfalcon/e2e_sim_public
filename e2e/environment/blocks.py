@@ -44,7 +44,8 @@ class RTEnvironmentBlock:
     from the SAME scatterer/pose solve used for the ray trace (no re-derivation
     downstream), caching them on `self.last_labels` (`e2e.ml.labels.
     encode_detection_labels`'s float32 `[3, n_range, n_azimuth]` map) and
-    `self.last_targets` (the raw `(range_m, sin_azimuth, object_class)` list from
+    `self.last_targets` (the raw `(range_m, sin_azimuth, object_class, surface_range_m)`
+    list from
     `targets_in_grid`). Read them right after `get_S_pars()`, before the next `step()`
     (or the next `get_S_pars()` call at a new frame) overwrites them.
 
