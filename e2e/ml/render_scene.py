@@ -84,8 +84,15 @@ _COLORS = {"vehicle": _COLOR_VEHICLE, "pedestrian": _COLOR_PEDESTRIAN, "scattere
 # overwhelming arrows on a scene tens of metres across.
 _VELOCITY_ARROW_S = 1.5
 
-# GT marker style on the range-azimuth panel.
-_GT_MARKERS = {"vehicle": ("s", _COLOR_VEHICLE), "pedestrian": ("o", _COLOR_PEDESTRIAN)}
+# GT marker style on the range-azimuth panel. Clutter is drawn too (grey, matching the
+# bird's-eye panel's scatterer colour) because without it a viewer reads every unmarked
+# bright return as a missed detection, when most of them are labelled clutter doing
+# exactly what clutter does. Owner-requested, 2026-08-16.
+_GT_MARKERS = {"vehicle": ("s", _COLOR_VEHICLE), "pedestrian": ("o", _COLOR_PEDESTRIAN),
+               "scatterer": (".", _COLOR_CLUTTER)}
+#: Classes marked on the radar panel, in draw order (clutter first, so real targets
+#: sit on top of it rather than behind).
+_RADAR_MARKED_CLASSES = ("scatterer", "vehicle", "pedestrian")
 
 
 # --------------------------------------------------------------------------------
@@ -254,10 +261,22 @@ def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis:
     imshow_ra(ax, ra_db, sin_az_axis, range_axis, cmap="inferno", vmin=vmin, vmax=vmax)
 
     seen_labels = set()
-    for r, sin_az, cls in targets_in_grid(grid, scatterers, pose, classes=("vehicle", "pedestrian")):
+    marked = targets_in_grid(grid, scatterers, pose, classes=_RADAR_MARKED_CLASSES)
+    # Clutter first so real targets draw on top of it.
+    order = {c: i for i, c in enumerate(_RADAR_MARKED_CLASSES)}
+    for r, sin_az, cls in sorted(marked, key=lambda t: order.get(t[2], 99)):
         marker, color = _GT_MARKERS.get(cls, ("x", "white"))
-        label = f"GT {cls}" if cls not in seen_labels else None
+        is_clutter = cls == "scatterer"
+        label = (("clutter" if is_clutter else f"GT {cls}")
+                 if cls not in seen_labels else None)
         seen_labels.add(cls)
+        if is_clutter:
+            # Small, grey, no halo: present so unmarked bright returns are not misread
+            # as missed targets, but deliberately quieter than the real targets.
+            ax.plot(sin_az, r, marker="o", markersize=5, markerfacecolor="none",
+                    markeredgecolor=color, markeredgewidth=1.1, linestyle="none",
+                    label=label, alpha=0.75, zorder=3)
+            continue
         # Dark halo under the marker: the class colors are shared with the bird's-eye
         # panel (so the legend reads the same across panels), but amber-on-inferno has
         # almost no contrast wherever the map sits mid-scale -- which is exactly where

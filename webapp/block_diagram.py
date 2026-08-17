@@ -53,12 +53,16 @@ _POSITIONS = {
 
     # RX-time ADC-cube tributary, on its own band well below everything else,
     # branching off interconnect: dechirp -> impairment -> quantizer -> products.
-    "dechirp": (600, 620),
-    "impairment": (800, 620),
-    "quantizer": (1000, 620),
-    "radar_cube": (1240, 580),
-    "detector": (1240, 660),
-    "sink": (1240, 740),
+    # y bumped +120 (2026-08-16): `comms` is the last row of grp_products, and that
+    # compound box plus its padding reached y~568 while grp_adc's box started at ~532 --
+    # the two REGION boxes overlapped even though no two NODES did, which is exactly the
+    # gap the old node-only overlap test could not see.
+    "dechirp": (600, 740),
+    "impairment": (800, 740),
+    "quantizer": (1000, 740),
+    "radar_cube": (1240, 700),
+    "detector": (1240, 780),
+    "sink": (1240, 860),
 }
 
 # Compound region groups (Cytoscape native `data.parent`; see build_elements).

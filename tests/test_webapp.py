@@ -356,6 +356,45 @@ def test_positions_cover_every_registered_block_without_collisions():
     assert not colliding, f"node boxes ({w}x{h}) geometrically overlap: {colliding}"
 
 
+def test_diagram_group_boxes_do_not_overlap_each_other():
+    """The compound REGION boxes must not overlap either.
+
+    Node-vs-node checking is not sufficient and missed a real defect (owner-reported,
+    2026-08-16): `comms` is the last row of grp_products, so that group's box -- the
+    children's extent grown by the `:parent` padding -- reached down into grp_adc's box
+    even though no two individual node boxes touched. Cytoscape draws those boxes, so a
+    reader sees the collision the old test could not.
+    """
+    from webapp import block_diagram
+
+    node_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
+                      if s["selector"] == "node")
+    w = float(node_style["width"].rstrip("px"))
+    h = float(node_style["height"].rstrip("px"))
+    parent_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
+                        if s["selector"] == "node:parent")
+    pad = float(str(parent_style["padding"]).rstrip("px"))
+
+    def _group_box(gid):
+        xs, ys = [], []
+        for bid in block_diagram._GROUPS[gid]["members"]:
+            x, y = block_diagram._POSITIONS[bid]
+            xs += [x - w / 2, x + w / 2]
+            ys += [y - h / 2, y + h / 2]
+        return (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+
+    gids = list(block_diagram._GROUPS)
+    boxes = {g: _group_box(g) for g in gids}
+    colliding = []
+    for i, a in enumerate(gids):
+        for b in gids[i + 1:]:
+            ax0, ax1, ay0, ay1 = boxes[a]
+            bx0, bx1, by0, by1 = boxes[b]
+            if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
+                colliding.append((a, b, boxes[a], boxes[b]))
+    assert not colliding, f"group region boxes overlap (padding {pad}px): {colliding}"
+
+
 def test_every_block_belongs_to_exactly_one_diagram_group():
     """Every registered block must appear in exactly one of block_diagram._GROUPS
     (the compound region containers from the redesign) -- not zero, not two."""
