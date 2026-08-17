@@ -228,6 +228,12 @@ Two caveats, stated exactly because it would be easy to over-read this table:
   detector.** The best observed test AP across everything tried here is 0.196, AR at
   most ~0.37 — enough to demonstrate the dataset-generation → training → evaluation
   plumbing works end to end, not a tuned detector.
+- **Do not compare these numbers to the published FFTRadNet or SSMRadNet results.** The
+  comparison is not defined: those numbers are on a different dataset (real RADIal
+  recordings, not our generated corpora), they match detections by box IoU where we use a
+  point tolerance, and their evaluation runs real NMS. A side-by-side table would be
+  meaningless in either direction. The ported architectures are here to exercise this
+  pipeline, not to reproduce their papers' scores.
 
 Reproduce with `e2e.ml.train`, e.g.:
 
