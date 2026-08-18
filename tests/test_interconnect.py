@@ -166,3 +166,37 @@ def test_range_profile_comparison_smoke_runs_without_disk(tmp_path, monkeypatch)
     res2 = mi.range_profile_comparison(show=True, n_freqs=64)
     assert (tmp_path / "sub" / "out.png").is_file()
     assert res2["metrics"]["legacy_boxcar"]["width_3db_bins"] >= res2["metrics"]["ideal"]["width_3db_bins"]
+
+
+# --------------------------------------------------------------------------------
+# before_after_comparison: the README gallery's compact 4-arm figure.
+# --------------------------------------------------------------------------------
+
+
+def test_before_after_comparison_smoke_runs_without_disk(tmp_path, monkeypatch):
+    """Same no-disk-on-`show=False` / writes-one-file-on-`show=True` contract as
+    `range_profile_comparison`, and the same 4 arms (same metrics)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import e2e.main.main_interconnect as mi
+
+    monkeypatch.setattr(mi, "BEFORE_AFTER_FIG_PATH", str(tmp_path / "sub" / "out.png"))
+    res = mi.before_after_comparison(show=False, n_freqs=64)
+    assert not (tmp_path / "sub").exists()
+
+    res2 = mi.before_after_comparison(show=True, n_freqs=64)
+    assert (tmp_path / "sub" / "out.png").is_file()
+    m = res2["metrics"]
+    assert set(m) == {"ideal", "tessera_tsv", "tessera_case3", "legacy_boxcar"}
+    assert m["legacy_boxcar"]["width_3db_bins"] > m["ideal"]["width_3db_bins"]
+
+
+def test_arm_styling_covers_every_arm_with_distinct_colors():
+    """Every arm has a color and linestyle, and no two arms share a color -- the
+    owner's distinguishability complaint, checked structurally."""
+    import e2e.main.main_interconnect as mi
+
+    arms = mi._interconnect_arms()
+    assert set(mi.ARM_COLORS) == set(arms)
+    assert set(mi.ARM_STYLES) == set(arms)
+    assert len(set(mi.ARM_COLORS.values())) == len(mi.ARM_COLORS)

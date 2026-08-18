@@ -62,6 +62,24 @@ RANGE_PROFILE_FIG_PATH = (
     Path(__file__).resolve().parents[2] / "docs" / "media" / "interconnect_range_profiles.png"
 )
 
+# The README's top-of-page gallery figure: a compact, docs-facing "before/after" view of
+# the same 4 arms as `range_profile_comparison`, distinct from RANGE_PROFILE_FIG_PATH
+# (which also carries the raw |S21|(f) sweeps). Kept as its own module global for the
+# same monkeypatch-for-tests reason as the paths above.
+BEFORE_AFTER_FIG_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "media" / "interconnect_before_after.png"
+)
+
+# Shared per-arm styling for every multi-arm figure in this module. Colors are chosen to
+# be distinct, saturated hues that stay distinguishable after video-call compression --
+# NOT relying on linestyle alone (legacy_boxcar used to be "tab:gray", which desaturates
+# toward black/ideal on a compressed screen share; tab:purple is unambiguous next to
+# black/blue/red). Linestyle still varies per arm as a second, redundant cue.
+ARM_COLORS = {"ideal": "black", "tessera_tsv": "tab:blue",
+              "tessera_case3": "tab:red", "legacy_boxcar": "tab:purple"}
+ARM_STYLES = {"ideal": "-", "tessera_tsv": "--", "tessera_case3": ":",
+              "legacy_boxcar": "-."}
+
 
 def main(show=True, band=BAND, n_freqs=N_FREQS):
     """Load the shipped interconnect model, show how InterconnectBlock applies it, and
@@ -164,6 +182,39 @@ def _mainlobe_metrics(mag_db):
     return width, peak_sidelobe
 
 
+def _interconnect_arms():
+    """The 4 arms shared by every multi-arm figure in this module (ideal, the two
+    measured Tessera datasets, and the legacy boxcar placeholder) -- see
+    `range_profile_comparison`'s docstring for what each one is and is not."""
+    return {
+        "ideal": ("ideal (no interconnect)",
+                  InterconnectBlock(case='case3')),
+        "tessera_tsv": ("Tessera TSV (Ka-band, 28.5-31.5 GHz)",
+                         InterconnectBlock(transfer_csv=TESSERA_INTERCONNECT_CSV, band_hz=BAND)),
+        "tessera_case3": ("Tessera Case3 (77 GHz auto, worst of 6 measured)",
+                            InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND)),
+        "legacy_boxcar": ("legacy 11-tap boxcar (placeholder)",
+                           InterconnectBlock()),
+    }
+
+
+def _arm_profiles_and_metrics(arms, n_freqs):
+    """Apply each arm to a flat (all-ones) frame and range-compress at native
+    resolution (see `_native_range_profile_db`). Returns (profiles, metrics) dicts
+    keyed the same as `arms`."""
+    def _ones(n):
+        return torch.ones(2, 2, 1, n, dtype=torch.complex64, device=device)
+
+    profiles, metrics = {}, {}
+    for key, (label, blk) in arms.items():
+        H = blk.apply_interconnect(_ones(n_freqs))[0, 0, 0, :].cpu().numpy()
+        bins, mag_db = _native_range_profile_db(H)
+        width, sidelobe = _mainlobe_metrics(mag_db)
+        profiles[key] = (bins, mag_db)
+        metrics[key] = {"label": label, "width_3db_bins": width, "peak_sidelobe_db": sidelobe}
+    return profiles, metrics
+
+
 def range_profile_comparison(show=True, n_freqs=N_FREQS):
     """Compare what different interconnect models do to the radar RANGE PROFILE --
     the product that actually reaches a downstream detector -- rather than only to
@@ -199,27 +250,8 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
     il_tsv, ripple_tsv = _band_insertion_loss_ripple(freq_tsv, s21_tsv, BAND)
     il_c3, ripple_c3 = _band_insertion_loss_ripple(freq_c3, s21_c3, CASE3_BAND)
 
-    def _ones(n):
-        return torch.ones(2, 2, 1, n, dtype=torch.complex64, device=device)
-
-    arms = {
-        "ideal": ("ideal (no interconnect)",
-                  InterconnectBlock(case='case3')),
-        "tessera_tsv": ("Tessera TSV (Ka-band, 28.5-31.5 GHz)",
-                         InterconnectBlock(transfer_csv=TESSERA_INTERCONNECT_CSV, band_hz=BAND)),
-        "tessera_case3": ("Tessera Case3 (77 GHz auto, worst of 6 measured)",
-                            InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND)),
-        "legacy_boxcar": ("legacy 11-tap boxcar (placeholder)",
-                           InterconnectBlock()),
-    }
-
-    profiles, metrics = {}, {}
-    for key, (label, blk) in arms.items():
-        H = blk.apply_interconnect(_ones(n_freqs))[0, 0, 0, :].cpu().numpy()
-        bins, mag_db = _native_range_profile_db(H)
-        width, sidelobe = _mainlobe_metrics(mag_db)
-        profiles[key] = (bins, mag_db)
-        metrics[key] = {"label": label, "width_3db_bins": width, "peak_sidelobe_db": sidelobe}
+    arms = _interconnect_arms()
+    profiles, metrics = _arm_profiles_and_metrics(arms, n_freqs)
 
     result = {
         "insertion_loss_db": {"tessera_tsv": il_tsv, "tessera_case3": il_c3},
@@ -284,10 +316,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
         # (b) Range profile, all 4 arms, native resolution -- y-window sized from the
         # data to resolve the mainlobe-width story (legacy's flat ~11-bin shelf vs. the
         # other three's single-bin needle), not wasted on an empty deep-dB region.
-        colors = {"ideal": "black", "tessera_tsv": "tab:blue",
-                  "tessera_case3": "tab:red", "legacy_boxcar": "tab:gray"}
-        styles = {"ideal": "-", "tessera_tsv": "--", "tessera_case3": ":",
-                  "legacy_boxcar": "-"}
+        colors, styles = ARM_COLORS, ARM_STYLES
         x_lim = 16
         for key, (label, _) in arms.items():
             bins, mag_db = profiles[key]
@@ -344,6 +373,89 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
     return result
 
 
+def before_after_comparison(show=True, n_freqs=N_FREQS):
+    """Compact "before/after" range-profile figure for the README's top-of-page
+    gallery (`BEFORE_AFTER_FIG_PATH`): the legacy placeholder against the
+    measurement-driven arms, all 4 at once.
+
+    This is deliberately a smaller figure than `range_profile_comparison` (no raw
+    |S21|(f) sweeps, just the range-profile story), but it hits the same
+    distinguishability problem: 3 of the 4 arms collapse to a near-ideal single-bin
+    spike at native resolution, so an overlay with ONE linear y-axis makes them look
+    identical. This uses two panels sharing x but not y -- a "broken axis" in effect
+    -- so every arm is visible on its own natural scale:
+      (top) the mainlobe itself, where the legacy boxcar's 11-bin smear is obviously
+        different in WIDTH from the other three's 1-bin needles;
+      (bottom) the same data zoomed into the sub-mainlobe skirt, where ideal/TSV/
+        Case3 -- indistinguishable up top -- separate by DEPTH (their differing
+        in-band ripple sets differing sidelobe floors).
+    Same caveats as `range_profile_comparison` apply and are stated on the figure:
+    TSV and Case3 are different, non-overlapping bands (not a ranking), and Case3 is
+    deliberately the worst of six measured designs (a conservative bound).
+    """
+    arms = _interconnect_arms()
+    profiles, metrics = _arm_profiles_and_metrics(arms, n_freqs)
+    colors, styles = ARM_COLORS, ARM_STYLES
+    x_lim = 16
+
+    if show:
+        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(8.5, 9), dpi=140,
+                                              sharex=True)
+        fs_title, fs_label, fs_annot, fs_tick = 14, 12.5, 11, 10.5
+
+        for key, (label, _) in arms.items():
+            bins, mag_db = profiles[key]
+            m = metrics[key]
+            leg = (f"{label}\n(-3 dB width {m['width_3db_bins']} bin"
+                   f"{'s' if m['width_3db_bins'] != 1 else ''}, "
+                   f"sidelobe {m['peak_sidelobe_db']:.0f} dB)")
+            ax_top.plot(bins, mag_db, styles[key], color=colors[key], lw=2.4,
+                        marker="o", ms=4, label=leg)
+            ax_bot.plot(bins, mag_db, styles[key], color=colors[key], lw=2.4,
+                        marker="o", ms=4, label=label)
+
+        ax_top.set_xlim(-x_lim, x_lim)
+        ax_top.set_ylim(-22, 3)
+        ax_top.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
+        ax_top.set_title("BEFORE vs. AFTER: mainlobe width\n"
+                          "legacy placeholder smears 1 bin -> 11; every "
+                          "measurement-driven arm stays at native resolution",
+                          fontsize=fs_title)
+        ax_top.grid(True, alpha=0.3)
+        # "lower left", not "lower right": the range profile is symmetric about bin 0 and
+        # the boxcar's 11-bin plateau runs to the LEFT of it, so a right-hand legend covers
+        # the very feature this panel exists to show. The lower-left quadrant is empty.
+        ax_top.legend(loc="lower left", fontsize=fs_annot - 1, ncol=1)
+        ax_top.tick_params(labelsize=fs_tick)
+
+        ax_bot.set_xlim(-x_lim, x_lim)
+        ax_bot.set_ylim(-95, -20)
+        ax_bot.set_xlabel(f"range bin (native, n_freqs={n_freqs})", fontsize=fs_label)
+        ax_bot.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
+        ax_bot.set_title("Same data, y-axis broken and zoomed to the skirt\n"
+                          "(the only place ideal/TSV/Case3 separate from each other)",
+                          fontsize=fs_title)
+        ax_bot.grid(True, alpha=0.3)
+        ax_bot.legend(loc="upper right", fontsize=fs_annot)
+        ax_bot.tick_params(labelsize=fs_tick)
+
+        fig.suptitle(
+            "Interconnect range response: legacy placeholder vs. the "
+            "measurement-driven models\n"
+            "TSV (Ka-band) and Case3 (77 GHz, worst of 6 measured designs) are each "
+            "in their OWN band -- not a head-to-head ranking",
+            fontsize=fs_annot + 1.5, y=1.02)
+        fig.tight_layout()
+        out_path = BEFORE_AFTER_FIG_PATH
+        os.makedirs(os.path.dirname(str(out_path)), exist_ok=True)
+        fig.savefig(str(out_path), bbox_inches="tight")
+        plt.close(fig)
+        print("saved", out_path)
+
+    return {"metrics": metrics}
+
+
 if __name__ == "__main__":
     main()
     range_profile_comparison()
+    before_after_comparison()
