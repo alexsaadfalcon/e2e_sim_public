@@ -166,6 +166,20 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "font-weight": "bold",
             "color": "#576574",
             "padding": "18px",
+            # The generic "node" selector above sets text-wrap: wrap + a
+            # 130px text-max-width for the small 160px block boxes; ":parent"
+            # only overrides SOME of those properties, so group headers were
+            # inheriting that narrow wrap width too. Cytoscape auto-grows a
+            # compound box to fit its (top-aligned) label, but that auto-grow
+            # under-counts a *wrapped, multi-line* label's real rendered
+            # height -- grp_adc's longest label wrapped to 3 lines and
+            # visibly poked out above its own box, into the gap above it
+            # (comms/grp_products). Turning wrap off for group headers lets
+            # cytoscape auto-size the box to the label's single-line width
+            # instead (which it measures accurately), removing the
+            # under-counted-height failure mode instead of papering over it
+            # with a bigger guessed padding number.
+            "text-wrap": "none",
         },
     },
     # grp_adc's label calls out a real constraint (mutually exclusive with the
