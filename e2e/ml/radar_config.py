@@ -315,7 +315,52 @@ RADIAL_LIKE = RadarConfig(
     mimo="ddma",
 )
 
-PRESETS = {"ti_iwr1443": TI_IWR1443, "radial_like": RADIAL_LIKE}
+# --------------------------------------------------------------------------------
+# BENCHMARK_V1 -- the first configuration on which a detection benchmark is VALID.
+# --------------------------------------------------------------------------------
+# Both older presets are broken for detection scoring, in exactly opposite ways, and every
+# detection number produced by this project before 2026-08-18 sits on one of them:
+#
+#   ti_iwr1443:  12 virtual elements -> Rayleigh sin(az) = 0.1667, against a match
+#                tolerance of 0.06. The metric demands 2.8x finer azimuth than the array
+#                can physically resolve, so a PERFECT detector scores as a miss.
+#   radial_like: 192 virtual elements resolves azimuth beautifully, but DDMA over 12 TX
+#                shrinks the unambiguous velocity span to +-1.06 m/s while the scene
+#                sampler draws targets at 0-8 m/s. Every moving target ALIASES in Doppler.
+#                (RADIAL_LIKE's own comment above says "training data must stay under THIS
+#                limit to be alias-free" -- the corpora violate it.) Aliasing lands targets
+#                anywhere on the Doppler axis including zero, which destroys the strongest
+#                clutter discriminant an automotive radar has: MEASURED, a zero-Doppler
+#                notch removes the TARGETS (Pd 0.098 -> 0.000) rather than the clutter.
+#
+# This preset satisfies both constraints at once, and nothing else about it is exotic:
+#
+#   answerable azimuth : 4 x 16 = 64 virtual -> Rayleigh 2/64 = 0.0312, i.e. 1.9x finer
+#                        than the 0.06 match tolerance, so the metric can be satisfied.
+#   unaliased Doppler  : TDM over 4 TX at a 25 us chirp period gives a per-TX PRI of
+#                        100 us, so v_max = lambda/(4*n_tx*T_c) = 9.69 m/s -- above the
+#                        8 m/s the scene sampler draws.
+#   physically feasible: sweep time = 512/25 MHz = 20.48 us, inside the 25 us chirp period.
+#   R_max 102.4 m at 20 cm range resolution (B = 749.5 MHz, as radial_like).
+#
+# TDM rather than DDMA on purpose: DDMA divides the unambiguous Doppler span by n_tx, which
+# is precisely what broke radial_like. With only 4 TX, TDM's cost (a 1/4 duty cycle per
+# transmitter) is the cheaper trade.
+BENCHMARK_V1 = RadarConfig(
+    name="benchmark_v1",
+    f0_hz=77e9,
+    bandwidth_hz=749.5e6,
+    n_tx=4,
+    n_rx=16,
+    n_chirps=256,
+    n_samples=512,
+    fs_hz=25e6,
+    chirp_period_s=25e-6,
+    mimo="tdm",
+)
+
+PRESETS = {"ti_iwr1443": TI_IWR1443, "radial_like": RADIAL_LIKE,
+           "benchmark_v1": BENCHMARK_V1}
 
 
 if __name__ == "__main__":

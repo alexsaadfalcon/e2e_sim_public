@@ -138,7 +138,9 @@ def resolution_report(cfg, grid: LabelGrid, criterion: Optional[MatchCriterion] 
     }
 
 
-def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = None) -> torch.Tensor:
+def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = None,
+                        angle_window: bool = True,
+                        doppler_notch_bins: int = 0) -> torch.Tensor:
     """Raw ADC `[n_rx, n_chirps, n_samples]` -> real power `[n_angle, n_range]`.
 
     Steps 1-3 of the module docstring. `n_angle_fft` defaults to the virtual-channel
@@ -164,9 +166,40 @@ def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = 
         rd = adc_to_rd(cfg, adc)
 
     n_channel = rd.shape[0]
+
+    # ANGLE WINDOW. `adc_to_rd` Hann-windows range and Doppler, but the aperture FFT was
+    # bare -- a rectangular aperture has a -13.3 dB peak sidelobe, which lands squarely in
+    # the 6-14 dB CFAR range where targets live, and aperture sidelobes spread along
+    # AZIMUTH at the target's own range. That is exactly the measured signature: ~99% of
+    # detections diffuse rather than clustered on targets. MEASURED: the window cuts false
+    # alarms 30x at a 10 dB threshold. It also costs ~1.8 dB of coherent gain and widens
+    # the mainlobe, so it is not free -- but an unwindowed aperture is not a choice anyone
+    # would defend, it was an omission.
+    if angle_window:
+        w = torch.hann_window(n_channel, periodic=False, device=rd.device,
+                              dtype=torch.float32).to(rd.dtype)
+        rd = rd * w.view(-1, 1, 1)
+
     n_fft = int(n_angle_fft) if n_angle_fft is not None else n_channel
     angle = torch.fft.fftshift(torch.fft.fft(rd, n=n_fft, dim=0), dim=0)   # [n_fft, R, D]
-    return (angle.abs() ** 2).max(dim=2).values                            # [n_fft, R]
+    power = angle.abs() ** 2
+
+    # ZERO-DOPPLER NOTCH (MTI). Stationary clutter -- ground, buildings, bumper -- sits at
+    # zero Doppler; moving targets do not. This is the canonical automotive rejector and
+    # it is why collapsing Doppler before detection throws away the strongest discriminant
+    # the sensor has.
+    #
+    # OFF BY DEFAULT, and the reason matters: it only works when the targets are NOT
+    # aliased. On `radial_like` (DDMA over 12 TX, v_max +-1.06 m/s) targets moving 0-8 m/s
+    # wrap around the Doppler axis and land anywhere INCLUDING zero, so notching removes
+    # the targets rather than the clutter -- MEASURED, Pd 0.098 -> 0.000. Use it on a
+    # config whose v_max exceeds the scene's speeds (see `benchmark_v1`).
+    if doppler_notch_bins > 0:
+        c = power.shape[2] // 2          # adc_to_rd fftshifts Doppler; zero is the centre
+        power = power.clone()
+        power[:, :, max(0, c - doppler_notch_bins):c + doppler_notch_bins + 1] = 0.0
+
+    return power.max(dim=2).values                                         # [n_fft, R]
 
 
 def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
@@ -213,7 +246,28 @@ def cfar_objectness(power: torch.Tensor, *, guard: int = CFAR_GUARD, train: int 
     return obj.clamp_(0.0, 1.0)[0, 0]
 
 
-def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, **kwargs) -> torch.Tensor:
+def group_peaks(obj: torch.Tensor, *, radius: int = 1) -> torch.Tensor:
+    """Local-maximum suppression: keep a cell only if it is the max of its neighbourhood.
+
+    Without this the detector reports every cell above threshold, and a single target
+    lights its whole footprint -- MEASURED at ~9 detections per target, which is exactly
+    the 3x3 positive footprint `labels.encode_detection_labels` paints. That invalidates a
+    classical-vs-learned comparison in BOTH directions: it inflates the classical detector's
+    true-positive count if the matcher accepts duplicates, and destroys its precision if
+    the matcher does not.
+
+    Real detectors group peaks before reporting. `radius=1` is a 3x3 neighbourhood, matched
+    to the label footprint; ties keep the first occurrence, which is why the comparison is
+    `>=` against the pooled max only at the cell that attains it.
+    """
+    k = 2 * radius + 1
+    pooled = F.max_pool2d(obj[None, None], k, stride=1, padding=radius)[0, 0]
+    return torch.where(obj >= pooled, obj, torch.zeros_like(obj))
+
+
+def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
+                            peak_grouping: bool = True, group_radius: int = 1,
+                            **kwargs) -> torch.Tensor:
     """Raw ADC -> a `[3, n_range, n_azimuth]` map in the detector's own output format.
 
     Channel 0 is the CFAR objectness; the two regression channels are zero, so a decoded
@@ -227,8 +281,15 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, **kwargs) -
     offset -- ~2.2 m for a car. Undoing that would take an extent estimator, not a
     threshold. See `e2e.ml.labels`.
     """
-    power = range_azimuth_power(cfg, adc, n_angle_fft=kwargs.pop("n_angle_fft", None))
+    power = range_azimuth_power(
+        cfg, adc,
+        n_angle_fft=kwargs.pop("n_angle_fft", None),
+        angle_window=kwargs.pop("angle_window", True),
+        doppler_notch_bins=kwargs.pop("doppler_notch_bins", 0),
+    )
     obj = cfar_objectness(_to_grid(power, cfg, grid), **kwargs)
+    if peak_grouping:
+        obj = group_peaks(obj, radius=group_radius)
     out = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32, device=obj.device)
     out[0] = obj
     return out

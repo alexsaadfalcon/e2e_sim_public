@@ -169,3 +169,57 @@ def add_thermal_noise(adc: torch.Tensor, cfg, *, seed: int,
     w = torch.randn(tuple(adc.shape) + (2,), generator=gen, device=adc.device,
                     dtype=torch.float32) * math.sqrt(n_w / 2.0)
     return adc + torch.view_as_complex(w.contiguous()).to(adc.dtype)
+
+
+class ThermalNoiseBlock:
+    """Chain stage: put the cube on an ABSOLUTE power scale and add the thermal floor.
+
+    Sits between `DechirpBlock` (which produces `adc`) and `ImpairmentBlock` (which adds
+    leakage/clutter/phase noise). That position is the whole point: impairments are
+    specified relative to a reference, and until this block runs there is no absolute
+    reference in the chain for them to be relative TO. Everything the corpora suffered
+    from -- F35's ceiling, F42's missing floor -- traces to impairments being calibrated
+    against the only thing available, which was the cube's own contents.
+
+    Two operations, both scalar:
+      * multiply by `sqrt(P_tx)`, which turns `rt_signal_chain`'s arbitrary-unit amplitude
+        into an absolute received voltage (that amplitude already carries antenna gain,
+        RCS, wavelength and R^4 -- transmit power is the only missing factor);
+      * add complex Gaussian noise of power `k*T*B*F`.
+
+    Deterministic from `seed`, per frame, in the same style as `ImpairmentBlock`: frame i
+    uses `seed + i`, so two runs with the same seed reproduce bit-identically and a
+    different seed does not.
+    """
+
+    def __init__(self, cfg, *, seed: int = 0, enabled: bool = True):
+        from e2e.chain.receive import _RX_TIME
+
+        self.frame_capabilities = _RX_TIME
+        self.cfg = cfg
+        self.seed = int(seed)
+        self.enabled = bool(enabled)
+        self._frame_idx = 0
+
+    def reset(self):
+        """Rewind the per-frame counter (and hence the seed sequence) to frame 0."""
+        self._frame_idx = 0
+
+    def apply(self, state):
+        adc = state["adc"]
+        if not self.enabled:
+            return {"adc": adc}
+        scaled = adc * tx_amplitude_scale(self.cfg)
+        out = add_thermal_noise(scaled, self.cfg, seed=self.seed + self._frame_idx)
+        self._frame_idx += 1
+        # Recorded so a frame can always say what floor it was generated against -- the
+        # number that makes every impairment dB value on it meaningful.
+        return {"adc": out,
+                "link_budget": {
+                    "tx_power_dbm": _get(self.cfg, "tx_power_dbm", DEFAULT_TX_POWER_DBM),
+                    "noise_figure_db": _get(self.cfg, "noise_figure_db",
+                                            DEFAULT_NOISE_FIGURE_DB),
+                    "noise_bandwidth_hz": noise_bandwidth_hz(self.cfg),
+                    "thermal_noise_w": thermal_noise_power_w(self.cfg),
+                    "seed": self.seed + self._frame_idx - 1,
+                }}

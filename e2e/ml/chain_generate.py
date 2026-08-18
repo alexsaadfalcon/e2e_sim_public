@@ -109,6 +109,7 @@ def build_chain_simulation(
     coherent_targets: bool = True, antenna_pattern: Optional[str] = None,
     ground_scattering_coefficient: Optional[float] = None,
     samples_per_src: Optional[int] = None,
+    use_link_budget: bool = True,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
 
@@ -192,6 +193,15 @@ def build_chain_simulation(
         ic_kwargs.setdefault("band_hz", (75e9, 81e9))
         serial_stages.append(InterconnectStage(InterconnectBlock(**ic_kwargs)))
     serial_stages.append(DechirpBlock(cfg))
+    # The link budget goes BETWEEN dechirp and impairments, and the position is the whole
+    # point. Impairments are specified relative to a reference; before this stage runs
+    # there is no absolute reference in the chain for them to be relative TO, so they were
+    # calibrated against the only thing available -- the cube's own contents, which scale
+    # with the target. That is F35's ceiling and F42's missing floor, and both dissolve
+    # once the cube is on an absolute scale with a real k*T*B*F floor beneath it.
+    if use_link_budget:
+        from e2e.ml.link_budget import ThermalNoiseBlock
+        serial_stages.append(ThermalNoiseBlock(cfg, seed=impairment_seed))
     serial_stages.append(
         ImpairmentBlock(cfg, impairment_chain_params, seed=impairment_seed)
     )
