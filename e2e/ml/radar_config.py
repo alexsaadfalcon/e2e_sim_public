@@ -55,6 +55,20 @@ class RadarConfig:
     mimo: str = "tdm"       # "tdm" | "ddma" | "single"
     frame_rate_hz: float = 10.0
 
+    # ---- link budget --------------------------------------------------------
+    # These three turn an arbitrary-scale cube into absolute power, and they are
+    # consequently THE DIFFICULTY DIAL for every generated corpus: they set the absolute
+    # SNR of every target at every range. See `e2e.ml.link_budget` for the derivation and
+    # for why the chain had no absolute reference at all before them
+    # (notes/ESTABLISHED_FACTS.md F35/F42).
+    #
+    # Datasheet-plausible for a TI IWR1443-class 77 GHz automotive MMIC, reviewed by an
+    # independent RF pass, NOT measured from a specific part. Do not tune them to make a
+    # detector's curves look better -- that is the failure mode they exist to end.
+    tx_power_dbm: float = 12.0        # per transmit channel
+    noise_figure_db: float = 15.0     # receiver, referenced at the antenna input
+    temperature_k: float = 290.0      # IEEE noise-figure reference, a definition
+
     def __post_init__(self):
         # Normalize the mimo tag once, at construction. rd_synth lower-cases its
         # local copy, but the derived properties below compare exact strings; a
