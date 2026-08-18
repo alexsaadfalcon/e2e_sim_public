@@ -19,7 +19,9 @@ from e2e.ml.impairments import (  # noqa: E402
     apply_leakage,
     apply_phase_noise,
 )
-from e2e.ml.radar_config import RadarConfig  # noqa: E402
+from e2e.ml.radar_config import PRESETS, RadarConfig  # noqa: E402
+
+np = pytest.importorskip("numpy")
 
 
 @pytest.fixture
@@ -358,3 +360,70 @@ def test_stage_seed_is_stable_across_processes():
         for seed in ("0", "1", "12345")
     }
     assert len(runs) == 1, f"stage_seed varies with PYTHONHASHSEED: {runs}"
+
+
+# --------------------------------------------------------------------------------
+# The F35 ceiling: what the calibration reference does to target-to-clutter ratio.
+# --------------------------------------------------------------------------------
+def _cube_with_noise_floor_and_target(cfg, target_gain_db, *, k=40, n_rx=4, n_chirps=16):
+    """A fixed thermal-like noise floor plus a target TONE whose amplitude is swept.
+
+    The noise floor must be present and fixed, and the target must be the only thing that
+    moves -- that is the whole experiment. A pure tone with no noise will NOT do: its
+    time-domain median and peak are the same number, so it cannot tell the two references
+    apart (this test was written after that mistake).
+    """
+    n_s = int(cfg.n_samples)
+    g = torch.Generator().manual_seed(7)
+    noise = (torch.randn(n_rx, n_chirps, n_s, generator=g)
+             + 1j * torch.randn(n_rx, n_chirps, n_s, generator=g)).to(torch.complex64) * 0.01
+    t = torch.arange(n_s, dtype=torch.float32)
+    tone = torch.exp(2j * math.pi * k * t / n_s).to(torch.complex64)[None, None, :]
+    return noise + tone * (10.0 ** (float(target_gain_db) / 20.0))
+
+
+def _target_to_background_db(adc, k=40):
+    x = adc[0, 0].numpy()
+    p = np.abs(np.fft.fft(x))
+    lo, hi = max(0, k - 2), k + 3
+    return 20.0 * np.log10(p[lo:hi].max() / np.median(np.delete(p, np.arange(lo, hi))))
+
+
+@pytest.mark.parametrize("reference,expect_responds", [("peak", False), ("noise", True)])
+def test_clutter_reference_decides_whether_target_gains_survive(reference, expect_responds):
+    """Calibrating clutter against the CUBE PEAK makes target-to-clutter invariant to
+    target strength -- a hard ceiling in which no RF/scene physics improvement can ever
+    improve detectability (notes/ESTABLISHED_FACTS.md F35). Against the NOISE FLOOR, a
+    target improvement shows up 1:1, as it must.
+
+    This is pinned because the ceiling was invisible for months and cost a campaign's
+    worth of misattributed measurements.
+    """
+    cfg = PRESETS["radial_like"]
+    ratios = []
+    for gain_db in (0.0, 20.0):
+        adc = _cube_with_noise_floor_and_target(cfg, gain_db)
+        out = apply_clutter(adc, cfg,
+                            ClutterParams(total_relative_db=-10.0, reference=reference),
+                            seed=1)
+        ratios.append(_target_to_background_db(out))
+    delta = ratios[1] - ratios[0]
+    if expect_responds:
+        assert delta > 15.0, (
+            f"reference={reference!r}: a 20 dB stronger target moved target-to-clutter by "
+            f"only {delta:.2f} dB; the impairment is still tracking the target")
+    else:
+        assert abs(delta) < 2.0, (
+            f"reference={reference!r} is the legacy peak-relative behaviour and must stay "
+            f"invariant for corpus reproducibility, but moved {delta:.2f} dB")
+
+
+def test_unknown_power_reference_fails_loudly():
+    """A typo'd reference must raise, not silently pick one -- the two give different
+    physics."""
+    cfg = PRESETS["radial_like"]
+    adc = _cube_with_noise_floor_and_target(cfg, 0.0)
+    with pytest.raises(ValueError, match="unknown power reference"):
+        apply_clutter(adc, cfg, ClutterParams(reference="Noise"), seed=1)
+    with pytest.raises(ValueError, match="unknown power reference"):
+        apply_leakage(adc, cfg, LeakageParams(reference="thermal"), seed=1)

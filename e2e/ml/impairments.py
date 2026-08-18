@@ -66,6 +66,57 @@ def _range_fft_peak_power(adc: torch.Tensor) -> float:
     return float(torch.max(mag2).item())
 
 
+def _noise_floor_power(adc: torch.Tensor) -> float:
+    """Robust, TARGET-INSENSITIVE noise-floor reference: the MEDIAN range-FFT power.
+
+    This exists to replace `_range_fft_peak_power` as the calibration reference for the
+    relative-power impairments, and the reason is structural rather than cosmetic.
+
+    A few targets occupy a handful of cells out of tens of thousands, so the median of the
+    range-FFT power IS the noise floor, and -- unlike the peak -- it does not move when a
+    target gets stronger. Calibrating injected clutter/leakage against the PEAK made the
+    target-to-impairment ratio exactly invariant to target strength (MEASURED: 0.00 dB of
+    change across a 20 dB change in target power), which put a hard ceiling on the corpus:
+    no improvement to the RF front end, antenna pattern, scene geometry or target
+    scattering could ever improve detectability. See notes/ESTABLISHED_FACTS.md F35.
+
+    Median rather than mean: the mean is pulled by the same strong returns the peak is.
+    Median rather than a low percentile: a low percentile of a range-FFT tracks the
+    window's stopband rather than the noise.
+    """
+    mag2 = torch.abs(torch.fft.fft(adc, dim=-1)) ** 2
+    return float(torch.median(mag2).item())
+
+
+#: Which reference the relative-power impairments are calibrated against.
+#:   "noise" -- the cube's noise floor (`_noise_floor_power`). Physically meaningful:
+#:             `leakage_relative_db` etc. then read as dB ABOVE THE NOISE FLOOR, the way a
+#:             link budget states them, and target improvements show up in target-to-
+#:             impairment ratio as they should.
+#:   "peak"  -- the cube's own peak (`_range_fft_peak_power`). The pre-2026-08-17 behaviour,
+#:             kept ONLY so an existing corpus can be reproduced bit-for-bit. It ties the
+#:             injected background to the signal it is supposed to compete with, which is
+#:             the F35 ceiling. Do not use it for new corpora.
+REFERENCE_NOISE = "noise"
+REFERENCE_PEAK = "peak"
+DEFAULT_POWER_REFERENCE = REFERENCE_PEAK   # flipped to "noise" only with the owner's
+                                           # re-derived link budget -- see F35. Changing
+                                           # this default changes every generated corpus.
+
+
+def _reference_power(adc: torch.Tensor, reference: str) -> float:
+    """Dispatch for the two calibration references. Fails loudly on a typo rather than
+    silently falling back -- picking the wrong one silently changes the physics."""
+    if reference == REFERENCE_NOISE:
+        return _noise_floor_power(adc)
+    if reference == REFERENCE_PEAK:
+        return _range_fft_peak_power(adc)
+    raise ValueError(
+        f"unknown power reference {reference!r}; expected {REFERENCE_NOISE!r} "
+        f"(dB above the noise floor) or {REFERENCE_PEAK!r} (legacy, dB below the cube "
+        f"peak -- see ESTABLISHED_FACTS F35 for why that one is a ceiling)")
+
+
 def _sample_gamma(n: int, shape: float, *, generator: torch.Generator,
                    device: torch.device) -> torch.Tensor:
     """Marsaglia-Tsang Gamma(`shape`, scale=1) sampler, driven by `generator`.
@@ -302,9 +353,14 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
 class LeakageParams:
     """Direct TX-RX coupling and a short-range bumper/radome reflection."""
 
-    leakage_relative_db: float = -5.0    # near-zero-delay coupling tone, dB rel. cube peak
+    leakage_relative_db: float = -5.0    # near-zero-delay coupling tone, dB rel. `reference`
     bumper_range_m: float = 0.2          # bumper/radome reflection range, m
-    bumper_relative_db: float = -15.0    # bumper tone power, dB rel. cube peak
+    bumper_relative_db: float = -15.0    # bumper tone power, dB rel. `reference`
+    # "peak" (legacy, the F35 ceiling) or "noise" (dB above the noise floor). The dB
+    # values above are calibrated for "peak" and are NOT meaningful under "noise" -- a
+    # leakage tone 5 dB BELOW the noise floor is invisible. Switching the reference
+    # requires re-deriving these numbers from a link budget.
+    reference: str = DEFAULT_POWER_REFERENCE
 
 
 def apply_leakage(adc: torch.Tensor, cfg, params: LeakageParams, *, seed: int) -> torch.Tensor:
@@ -319,15 +375,17 @@ def apply_leakage(adc: torch.Tensor, cfg, params: LeakageParams, *, seed: int) -
     a monostatic coupling/short-range reflection has no meaningful per-chirp Doppler
     or, at this fidelity, per-antenna gain variation.
 
-    Power is calibrated against `_range_fft_peak_power(adc)` (the cube's peak,
-    measured on the INPUT before this function adds anything), so e.g.
-    `leakage_relative_db=-5` places the leakage tone's range-FFT peak power 5 dB below
-    the strongest existing return.
+    Power is calibrated against `params.reference`, measured on the INPUT before this
+    function adds anything. Under the legacy `"peak"` reference,
+    `leakage_relative_db=-5` places the tone 5 dB below the strongest existing return --
+    which ties the injected impairment to the target and is the F35 ceiling. Under
+    `"noise"` the same field reads as dB above the noise floor, the way a link budget
+    states it, and the numbers must be re-derived accordingly.
     """
     n_rx, n_chirps, n_samples = adc.shape
     device, dtype = adc.device, adc.dtype
 
-    p_ref = _range_fft_peak_power(adc)
+    p_ref = _reference_power(adc, params.reference)
 
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
@@ -358,7 +416,11 @@ class ClutterParams:
     density: float = 0.5           # scatterers per unambiguous range bin
     nu: float = 1.0                # K-distribution texture shape (small -> heavier tail)
     doppler_std_mps: float = 0.05  # per-scatterer radial-velocity std, m/s
-    total_relative_db: float = -10.0  # total clutter power, dB rel. cube's TIME-DOMAIN peak
+    total_relative_db: float = -10.0  # total clutter power, dB rel. `reference`
+    # "peak" (legacy) or "noise". Same caveat as LeakageParams: the dB value above is
+    # calibrated for "peak" and must be re-derived as a clutter-to-noise ratio to be
+    # meaningful under "noise".
+    reference: str = DEFAULT_POWER_REFERENCE
 
 
 def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -> torch.Tensor:
@@ -372,9 +434,18 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
     standard sea/ground-clutter model). Total injected power is calibrated to
     `total_relative_db` dB relative to the INPUT cube's time-domain peak power
     (`max(|adc|^2)`) -- unlike `apply_leakage`'s coherent single-bin taps, clutter is a
-    sum of many uncorrelated returns, so a time-domain (not range-FFT) peak is the
-    simpler well-defined reference; despite the "clutter-to-noise ratio" phrasing in
-    the design brief, no explicit noise floor is assumed to be present in `adc`.
+    sum of many uncorrelated returns, so a time-domain (not range-FFT) statistic is the
+    simpler well-defined reference.
+
+    HISTORICAL NOTE, because the original choice was deliberate and is worth preserving:
+    this docstring used to end "despite the 'clutter-to-noise ratio' phrasing in the
+    design brief, no explicit noise floor is assumed to be present in `adc`." That was an
+    honest compromise under a premise that has since changed -- the chain now carries a
+    physical thermal floor from `e2e.circuit.rffe_model`'s 4kTR model, so a
+    clutter-to-NOISE ratio is well defined. Calibrating against the peak instead ties the
+    injected clutter to the target that usually sets that peak, making
+    target-to-clutter exactly invariant to target strength (F35). `reference="noise"`
+    uses the time-domain MEDIAN power, which the targets do not move.
     """
     n_rx, n_chirps, n_samples = adc.shape
     device, dtype = adc.device, adc.dtype
@@ -391,7 +462,22 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
 
     gain = _k_distributed_gain(n_scat, n_rx, float(params.nu), generator=gen, device=device)  # [n_scat, n_rx]
 
-    peak_power = float(torch.max(torch.abs(adc) ** 2).item())
+    if params.reference == REFERENCE_NOISE:
+        # NOT the time-domain median. A target is a TONE in the beat signal, so it is
+        # present in every fast-time sample and the time-domain median tracks it -- MEASURED,
+        # that estimator left target-to-clutter just as invariant as the peak did. The
+        # target is sparse only in the RANGE-FFT domain, so estimate the noise there and
+        # convert back:
+        #   per-bin FFT noise power for white noise of time-power sigma^2 is N*sigma^2, and
+        #   |FFT|^2 is exponential, whose MEDIAN is ln(2) times its mean.
+        # Hence sigma^2 = median(|FFT|^2) / (N * ln 2).
+        peak_power = _noise_floor_power(adc) / (float(n_samples) * math.log(2.0))
+    elif params.reference == REFERENCE_PEAK:
+        peak_power = float(torch.max(torch.abs(adc) ** 2).item())
+    else:
+        raise ValueError(
+            f"unknown power reference {params.reference!r}; expected "
+            f"{REFERENCE_NOISE!r} or {REFERENCE_PEAK!r} (see ESTABLISHED_FACTS F35)")
     target_total = peak_power * (10.0 ** (float(params.total_relative_db) / 10.0))
     mean_power = target_total / n_scat
     gain = gain * math.sqrt(mean_power)
