@@ -219,7 +219,7 @@ def generate_chain_corpus(
     range_stride: int = 4, n_azimuth: int = 192, device=None,
     label_classes: Optional[Sequence[str]] = DEFAULT_LABEL_CLASSES,
     randomizer: Optional[Callable[[int, "torch.Generator"], Dict[str, Any]]] = None,
-    use_local_assets: bool = True, use_transmit_chain: bool = True,
+    use_local_assets: bool = True, use_transmit_chain: bool = False,
     coherent_targets: bool = True, antenna_pattern: Optional[str] = None,
     ground_scattering_coefficient: Optional[float] = None,
     samples_per_src: Optional[int] = None,
@@ -245,6 +245,16 @@ def generate_chain_corpus(
     elements, mirror ground) and its targets sit below their own map background --
     regenerate rather than reuse. Pass `coherent_targets=False, antenna_pattern="iso"`
     only to reproduce one of those deliberately.
+
+    `use_transmit_chain` defaults to **False**, and that default changed in v1.1. It used
+    to be True, which silently cancelled the target-physics fix above: MEASURED, with the
+    TX tributary on, median target-vs-background is **-1.6 dB**; with it off, **+7.4 dB**.
+    `ModulateBlock` multiplies `s_pars` by the transmitted chirp's spectrum, but
+    `rt_cfr_frame`'s `s_pars` axis is already a beat/time index, not a conventional
+    frequency response -- so enabling it applies a second, incompatible modulation. That
+    convention clash is UNRESOLVED; until it is, RT corpora carry no TX-side PA
+    distortion, and turning this back on will produce a corpus whose targets do not stand
+    out from their own background.
     """
     from e2e.ml.dataset import write_manifest
     from e2e.ml.labels import LabelGrid
