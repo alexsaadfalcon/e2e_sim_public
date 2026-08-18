@@ -76,6 +76,56 @@ def test_beat_mapping_bit_exact_against_reference(torch_device):
     assert torch.equal(new_beat.cpu(), torch.from_numpy(ref_beat))
 
 
+def test_beat_from_cfr_is_exactly_invertible(torch_device):
+    """The CFR -> dechirped-record bridge loses NOTHING, and this pins it.
+
+    The recurring architecture critique is that the pipeline's frequency-domain
+    products (FFT / range-azimuth / range-elevation / subspace) consume `s_pars`, a
+    channel frequency response, which "a real receiver cannot observe -- only ADC
+    samples are observable". The premise is false for an FMCW ramp: the ramp sweeps
+    frequency linearly in time, so the dechirped beat sample at fast-time index n is
+    the channel response at the ramp's instantaneous frequency, and `beat_from_cfr`
+    implements exactly that -- a complex conjugate plus an antenna-axis reversal (a
+    handedness convention, see the module docstring). Both are bijections, so the CFR
+    tensor and the dechirped ADC record are ONE measurement in two coordinate systems.
+
+    What the ADC branch genuinely adds is downstream and irreversible: MIMO combining,
+    injected impairments, full-scale clipping, uniform quantization. That is a fidelity
+    gap, not a domain error, and it is covered by the receive-chain tests.
+
+    This test is the invariance leg of that argument (RIGOR_STANDARD): construct the
+    inverse independently here, and require BIT equality -- `allclose` would let a
+    scaling or a dropped conjugate through.
+    """
+    s_pars = _random_s_pars(5, 3, 2, 7, torch_device, seed=11)
+    beat = beat_from_cfr(s_pars)
+
+    # The inverse, written out here rather than imported, so this is a cross-check
+    # against an independent expression and not a tautology.
+    undone = torch.flip(beat, dims=(0, 1)) if ANTENNA_INDEX_REVERSED else beat
+    assert torch.equal(undone.conj(), s_pars)
+
+    # ...and it is an involution up to that flip: applying the bridge twice returns
+    # the original, which fails loudly if the conjugate is ever dropped.
+    assert torch.equal(beat_from_cfr(beat), s_pars)
+
+
+def test_beat_from_cfr_preserves_the_range_profile(torch_device):
+    """Same measurement => same range compression, up to the conjugate's mirroring of
+    the range axis. A magnitude-domain check, so it catches an error the bit-exact test
+    above cannot: one that is invertible but physically wrong."""
+    s_pars = _random_s_pars(4, 1, 1, 32, torch_device, seed=12)
+    beat = beat_from_cfr(s_pars)
+
+    def profile(x):
+        return (torch.abs(torch.fft.fft(x, dim=-1)) ** 2).reshape(-1, x.shape[-1]).mean(0)
+
+    rp_cfr = profile(s_pars)
+    # conj mirrors the FFT axis about DC: bin k <-> bin (-k) mod N.
+    rp_adc = torch.roll(torch.flip(profile(beat), dims=(0,)), 1, dims=0)
+    assert torch.allclose(rp_cfr, rp_adc, rtol=1e-5, atol=1e-6 * float(rp_cfr.max()))
+
+
 def test_tdm_combine_bit_exact_against_reference(torch_device):
     """TDM/single combine is pure indexing (no arithmetic) -- must be EXACTLY equal."""
     cfg = _cfg(n_tx=3, n_rx=4, n_chirps=9, n_samples=5, mimo="tdm")
