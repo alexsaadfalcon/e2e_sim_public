@@ -46,11 +46,15 @@ determinism/pool-composition tests hold either way.
   77 GHz-valid built-in scene, a re-authored copy of munich/etoile with a marble-free
   material set, or a non-automotive (<=60 GHz) `RadarConfig` preset for D3 specifically.
 
-Determinism: `build_rt_tier_scenario(tier, frame_idx, seed)` draws every random value
-from a `numpy.random.Generator` seeded ONLY by `(tier, frame_idx, seed)` (via a stable
-SHA-256-derived seed -- NOT Python's salted `hash()`, which is not process-stable), so
-the same triple reproduces the identical `Scenario` (byte-for-byte via `to_json`)
-regardless of call order or process. `frame_idx` is a sample index here (matching
+Determinism: `build_rt_tier_scenario(tier, corpus_tag, frame_idx, seed)` draws every
+random value from a `numpy.random.Generator` seeded ONLY by `(tier, frame_idx, seed,
+corpus_tag)` (via a stable SHA-256-derived seed -- NOT Python's salted `hash()`, which
+is not process-stable), so the same quadruple reproduces the identical `Scenario`
+(byte-for-byte via `to_json`) regardless of call order or process. `corpus_tag` is
+REQUIRED (see `_stable_seed`'s docstring): without a corpus-identity salt, two corpora
+sharing `(tier, seed)` drew byte-identical scenes at every `frame_idx`, which is how a
+real train/val/test leak across two named corpora happened. `frame_idx` is a sample
+index here (matching
 `e2e.ml.scenes.sample_scene`'s per-draw usage), not a motion-track frame -- the returned
 Scenario's OWN `num_frames`/`Motion` fields carry any per-frame motion.
 
@@ -271,12 +275,26 @@ def _resolve_tier(tier: Union[str, RTTierSpec]) -> RTTierSpec:
     return RT_DIFFICULTY_TIERS[tier]  # raises KeyError on an unknown tier name
 
 
-def _stable_seed(tier: str, frame_idx: int, seed: int) -> int:
+def _stable_seed(tier: str, frame_idx: int, seed: int, corpus_tag: str) -> int:
     """A `numpy.random.Generator` seed derived deterministically from `(tier,
-    frame_idx, seed)`, stable across processes/platforms (unlike Python's salted
-    `hash()`, which must NOT be used here -- it is randomized per interpreter run
-    unless `PYTHONHASHSEED` is fixed)."""
-    digest = hashlib.sha256(f"{tier}:{int(frame_idx)}:{int(seed)}".encode()).digest()
+    frame_idx, seed, corpus_tag)`, stable across processes/platforms (unlike Python's
+    salted `hash()`, which must NOT be used here -- it is randomized per interpreter
+    run unless `PYTHONHASHSEED` is fixed).
+
+    `corpus_tag` is REQUIRED (no default) and folded into the hash because corpus
+    identity used to be absent from the seed entirely: two DIFFERENT corpora sharing
+    the same `(tier, seed)` (e.g. two runs of `generate_chain_corpus` with the default
+    `seed=0`) drew IDENTICAL scenes at every `frame_idx`. An audit caught this live --
+    `rt_ablation_txoff`'s entire val+test split (70 scenes) sat inside BOTH
+    `rt_corpus_v1/ti_iwr1443_D1`'s and `rt_no_interconnect/ti_iwr1443_D1`'s train
+    splits, because all three corpora were generated with the same tier/seed and no
+    corpus-identity salt -- any conclusion drawn by comparing across that pair was
+    measured on train-contaminated data. A default value here would silently
+    reintroduce that bug for every caller that forgets to pass one; making it required
+    forces the caller to state what corpus this draw belongs to."""
+    digest = hashlib.sha256(
+        f"{corpus_tag}:{tier}:{int(frame_idx)}:{int(seed)}".encode()
+    ).digest()
     return int.from_bytes(digest[:4], "big")
 
 
@@ -457,20 +475,28 @@ def _sample_clutter_offset(rng: np.random.Generator,
     return None
 
 
-def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, seed: int = 0,
-                           num_frames: int = 2, dt: float = 1.0,
+def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, corpus_tag: str, frame_idx: int = 0,
+                           seed: int = 0, num_frames: int = 2, dt: float = 1.0,
                            radar_position: Optional[Tuple[float, float, float]] = None,
                            use_local_assets: bool = False) -> Scenario:
     """Draw a deterministic RT `Scenario` at difficulty `tier`.
 
-    `frame_idx`/`seed` together select the draw (see the module docstring's
-    "Determinism" section) -- calling this twice with the same `(tier, frame_idx,
-    seed)` returns byte-for-byte identical scenarios (`Scenario.to_json()` equal);
-    changing either changes the draw. `num_frames` sets the returned Scenario's own
-    frame count (each moving object gets a constant-velocity `Motion` track spanning
-    it); it is NOT part of the determinism key -- reusing a `(tier, frame_idx, seed)`
-    with a different `num_frames` keeps the same object mix/positions/velocities and
-    only changes how many motion steps are resolved from them.
+    `corpus_tag` is REQUIRED and identifies which corpus this draw belongs to (see
+    `_stable_seed`'s docstring for why: without it, two corpora sharing `(tier, seed)`
+    draw byte-identical scenes at every `frame_idx`, which is how a real cross-corpus
+    train/val/test leak happened). Pass the dataset directory name (e.g.
+    `f"{cfg_name}_{tier}"`) for a real corpus; a test that just wants *a* scene can
+    pass any fixed string.
+
+    `frame_idx`/`seed`/`corpus_tag` together select the draw (see the module
+    docstring's "Determinism" section) -- calling this twice with the same `(tier,
+    frame_idx, seed, corpus_tag)` returns byte-for-byte identical scenarios
+    (`Scenario.to_json()` equal); changing any of them changes the draw. `num_frames`
+    sets the returned Scenario's own frame count (each moving object gets a
+    constant-velocity `Motion` track spanning it); it is NOT part of the determinism
+    key -- reusing a `(tier, frame_idx, seed, corpus_tag)` with a different
+    `num_frames` keeps the same object mix/positions/velocities and only changes how
+    many motion steps are resolved from them.
 
     `dt` is the SECONDS PER FRAME the consumer will resolve this scenario with, and it
     is applied AFTER sampling, so it never perturbs the determinism key either. Sampled
@@ -508,7 +534,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
     Raises `KeyError` for an unknown tier name (see `RT_DIFFICULTY_TIERS`).
     """
     spec = _resolve_tier(tier)
-    rng = np.random.default_rng(_stable_seed(spec.name, frame_idx, seed))
+    rng = np.random.default_rng(_stable_seed(spec.name, frame_idx, seed, corpus_tag))
 
     if radar_position is None:
         radar_position = _BASE_SCENE_RADAR_POSITION.get(spec.base_scene, _DEFAULT_RADAR_POSITION)

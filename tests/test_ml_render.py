@@ -655,7 +655,7 @@ def test_build_rt_tier_scenario_d4_uses_munich_base_scene_no_sionna_needed():
     `e2e.ml.rt_scenes`'s module docstring), so this is a real (non-mocked) check."""
     from e2e.ml.rt_scenes import build_rt_tier_scenario
 
-    scenario = build_rt_tier_scenario("D4", frame_idx=0, seed=0, num_frames=1,
+    scenario = build_rt_tier_scenario("D4", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                       use_local_assets=False)
     assert scenario.base_scene == "munich"
 

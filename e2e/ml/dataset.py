@@ -116,7 +116,9 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -145,6 +147,49 @@ def _json_default(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     raise TypeError(f"object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _stable_scene_seed(corpus_tag: str, scene_index: int, seed: int) -> int:
+    """A `numpy.random.Generator` seed salted with `corpus_tag`, mirroring
+    `e2e.ml.rt_scenes._stable_seed` (see that function's docstring for the full
+    rationale). Plain `seed + scene_index` (this module's ORIGINAL scheme) has the
+    same latent bug the RT path had: two corpora built with the same `seed` draw
+    IDENTICAL scenes at every `scene_index`, which is exactly how
+    `rt_ablation_txoff`'s val+test split ended up duplicated inside two other
+    corpora's train splits. `corpus_tag` is REQUIRED, not defaulted, so a caller
+    cannot silently reintroduce the collision by forgetting to pass one.
+
+    Not shared code with `rt_scenes._stable_seed` (different call signature -- this
+    one has no `tier`, since `corpus_tag` already encodes it via the
+    `f"{cfg_name}_{tier}"` dataset-directory convention `generate_dataset` uses) but
+    deliberately the same construction (SHA-256 over a stable string, not Python's
+    salted `hash()`) for the same reasons.
+    """
+    digest = hashlib.sha256(f"{corpus_tag}:{int(scene_index)}:{int(seed)}".encode()).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
+def _generator_git_commit() -> str:
+    """Short SHA of HEAD at call time, or `"unknown"` if git/the repo is unavailable.
+
+    Provenance-only: a long corpus-generation run must never crash over this, so any
+    failure (git not installed, not a repo, detached weirdness, etc.) is swallowed.
+    This is what makes "same seed, different code" detectable after the fact instead
+    of silently producing near-duplicate scenes across generation runs -- see
+    `write_manifest`'s `generator_git_commit` field.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent, capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0:
+            sha = out.stdout.strip()
+            if sha:
+                return sha
+    except Exception:
+        pass
+    return "unknown"
 
 
 # --------------------------------------------------------------------------------
@@ -282,7 +327,9 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     (via `write_manifest`, the manifest-writing tail factored out below) by running the
     composed block chain instead of calling `generate_sample` per frame.
 
-    Each scene draws its own `rng = np.random.default_rng(seed + i)` and
+    Each scene draws its own `rng = np.random.default_rng(_stable_scene_seed(corpus_tag,
+    i, seed))` (`corpus_tag` is the dataset directory name, e.g. `f"{cfg_name}_{tier}"`
+    -- see that function's docstring for why plain `seed + i` is not enough) and
     `scenario = sample_scene(cfg, tier, rng, n_frames=frames_per_scene)`; when
     `frames_per_scene == 1` (default) this is exactly the original one-frame-per-scene
     behavior. When `frames_per_scene > 1`, the SAME scene yields `frames_per_scene`
@@ -297,7 +344,10 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     sequence across train/test would leak the sequence's identity/motion into both.
     Each per-frame synthesis seed is `seed + i * frames_per_scene + t` (distinct per
     frame, so repeated frames of one sequence don't get identical noise realizations),
-    so results are exactly reproducible for a given `(seed, n_frames, frames_per_scene)`.
+    so results are exactly reproducible for a given `(seed, n_frames, frames_per_scene)`
+    -- the SCENE content additionally depends on `corpus_tag` (`out_dir`'s
+    `<cfg_name>_<tier>` directory name), so two calls with the same `seed` but
+    different `out_dir`/`cfg_name`/`tier` draw different scenes, by design.
 
     Returns the path to the written `manifest.json`.
     """
@@ -319,9 +369,10 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     dataset_dir = out_root / f"{cfg_name}_{tier}"
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
+    corpus_tag = dataset_dir.name
     sequences: List[List[str]] = []
     for i in range(n_frames):
-        rng = np.random.default_rng(seed + i)
+        rng = np.random.default_rng(_stable_scene_seed(corpus_tag, i, seed))
         scenario = sample_scene(cfg, tier, rng, n_frames=frames_per_scene)
         scene_meta = scene_summary(scenario)
 
@@ -351,13 +402,15 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
         sequences.append(scene_files)
 
     return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
-                          snr_db=snr_db, frames_per_scene=frames_per_scene, splits=splits)
+                          snr_db=snr_db, frames_per_scene=frames_per_scene, splits=splits,
+                          corpus_tag=corpus_tag)
 
 
 def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
                    grid=None, seed: int = 0, snr_db: Optional[float] = None,
                    frames_per_scene: int = 1, splits: Tuple[float, ...] = (0.8, 0.1, 0.1),
-                   label_classes: Sequence[str] = LABEL_CLASSES) -> Path:
+                   label_classes: Sequence[str] = LABEL_CLASSES,
+                   corpus_tag: Optional[str] = None) -> Path:
     """Write a manifest_version-2 `manifest.json` for a corpus already written to
     `dataset_dir` -- the manifest-writing tail factored out of `generate_dataset` so
     OTHER producers of the same on-disk schema (namely `e2e.ml.chain_generate`, which
@@ -370,6 +423,18 @@ def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
     validated/touched here. The split (`_split_bounds`) is applied at the SCENE level,
     same as `generate_dataset`. `grid` is optional (an `e2e.ml.labels.LabelGrid` or
     None if the caller has none to record).
+
+    `corpus_tag` records which corpus-identity salt (see `rt_scenes._stable_seed` /
+    `_stable_scene_seed`) the frames in `dataset_dir` were actually drawn with;
+    defaults to `dataset_dir.name` (both producers already name that directory
+    `f"{cfg_name}_{tier}"`, the same string they pass as the seed salt), so callers
+    that already follow that convention don't need to pass it explicitly. Recorded
+    alongside `generator_git_commit` (short HEAD SHA, `"unknown"` if git is
+    unavailable -- see `_generator_git_commit`) so "same seed, different code" is
+    DETECTABLE from the manifest instead of silently producing near-duplicate scenes:
+    `rt_scenes.py`'s own scene-sampling logic changed between two real generation
+    runs that reused a seed, so same-index scenes from those runs were near-duplicates
+    with no on-disk record of it.
     """
     dataset_dir = Path(dataset_dir)
     bounds = _split_bounds(len(sequences), splits)  # scene-level bounds
@@ -394,6 +459,8 @@ def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
         "seed": seed,
         "frames_per_scene": frames_per_scene,
         "label_classes": list(label_classes) if label_classes is not None else None,
+        "corpus_tag": corpus_tag if corpus_tag is not None else dataset_dir.name,
+        "generator_git_commit": _generator_git_commit(),
         "files": files,
         "sequences": sequences,
     }

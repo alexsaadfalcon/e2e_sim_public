@@ -636,7 +636,21 @@ def _build_rt_scene_for_render(scenario, cfg, *, frame_idx: int = 0,
                               frame_idx=frame_idx)
 
 
+#: Corpus tag used by every RENDER path in this module.
+#:
+#: `rt_scenes._stable_seed` salts the scene-determinism key with a corpus identity so two
+#: corpora sharing a numeric seed cannot draw the same scenes. Renders are figures, not
+#: corpora -- they illustrate what a tier looks like rather than reproducing a specific
+#: dataset -- so they get one fixed, documented tag instead of inventing one per call.
+#:
+#: Consequence worth knowing: a render will NOT reproduce the scene of a corpus frame
+#: unless you pass that corpus's own tag (`--corpus-tag`). If you want to picture a
+#: specific stored frame, read its tag out of the corpus manifest.
+RENDER_CORPUS_TAG = "render"
+
+
 def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: int = 0,
+                       corpus_tag: str = RENDER_CORPUS_TAG,
                        resolution=(1280, 720), camera_dir=(-1.0, -1.0, 1.15),
                        num_samples: int = 128, use_local_assets: bool = True,
                        caption: bool = True, material_policy: str = "extrapolated",
@@ -701,7 +715,8 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     if cfg is None:
         cfg = PRESETS["radial_like"]
 
-    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed, num_frames=1,
+    scenario = build_rt_tier_scenario(tier, corpus_tag=corpus_tag, frame_idx=frame_idx,
+                                      seed=seed, num_frames=1,
                                       use_local_assets=use_local_assets)
     rt_scene = _build_rt_scene_for_render(scenario, cfg, material_policy=material_policy,
                                           stand_in_material=stand_in_material)
@@ -956,7 +971,8 @@ def _render_rt_topdown_frames(scenario, cfg, *, n_frames: int, dt: float,
 
 
 def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: int = 8,
-                          frame_idx: int = 0, seed: int = 0, resolution=(640, 480),
+                          frame_idx: int = 0, seed: int = 0,
+                          corpus_tag: str = RENDER_CORPUS_TAG, resolution=(640, 480),
                           num_samples: int = 64, use_local_assets: bool = True,
                           material_policy: str = "extrapolated",
                           stand_in_material: str = "concrete") -> Path:
@@ -994,7 +1010,8 @@ def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: 
         raise ValueError(f"n_frames must be >= 1, got {n_frames}")
 
     dt = 1.0 / float(cfg.frame_rate_hz)
-    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed,
+    scenario = build_rt_tier_scenario(tier, corpus_tag=corpus_tag, frame_idx=frame_idx,
+                                      seed=seed,
                                       num_frames=n_frames, dt=dt,
                                       use_local_assets=use_local_assets)
 
@@ -1170,6 +1187,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "e2e.ml.scenes.DIFFICULTY_TIERS -- an analytic sample_scene() scenario has "
                         "no mesh for a camera to render.")
     p.add_argument("--frame-idx", type=int, default=0, help="RT mode: tier sample index (see rt_scenes)")
+    p.add_argument("--corpus-tag", default=RENDER_CORPUS_TAG,
+                   help="corpus identity salted into the scene seed. Defaults to "
+                        f"{RENDER_CORPUS_TAG!r}; pass a CORPUS's own tag (from its "
+                        "manifest) to picture one of that corpus's stored frames."),
     p.add_argument("--no-local-assets", action="store_true",
                    help="RT mode: disable the local (unshipped) higher-fidelity mesh pool, "
                         "use only Sionna-bundled meshes (see render_rt_tier_png)")
@@ -1209,7 +1230,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
             return 2
         dt = 1.0 / float(cfg.frame_rate_hz)
-        scenario = build_rt_tier_scenario(args.tier, frame_idx=args.frame_idx, seed=args.seed,
+        scenario = build_rt_tier_scenario(args.tier, corpus_tag=args.corpus_tag,
+                                          frame_idx=args.frame_idx, seed=args.seed,
                                           num_frames=args.frames, dt=dt,
                                           use_local_assets=not args.no_local_assets)
         out_path = render_scene_gif_2x2(cfg, scenario, args.out, n_frames=args.frames,

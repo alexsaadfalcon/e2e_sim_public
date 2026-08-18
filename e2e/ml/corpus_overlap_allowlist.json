@@ -1,0 +1,21 @@
+{
+  "_comment": "Declared-intentional cross-corpus scene reuse for e2e.ml.check_corpus_overlap. Each entry is an unordered [corpus_a, corpus_b] pair (corpus = manifest.json's parent directory, path relative to the scan root, POSIX-separated). A pair here is NOT a bug -- it is documented reuse the owner chose; anything NOT here that the gate finds is a real, undeclared leak.",
+  "pairs": [
+    ["rt_no_interconnect/ti_iwr1443_D1", "rt_corpus_v1/ti_iwr1443_D1"],
+    ["pilot_radial/radial_like_D1", "sweep/gentle/ti_iwr1443_D1"],
+    ["pilot_radial/radial_like_D1", "sweep/moderate/ti_iwr1443_D1"],
+    ["pilot_radial/radial_like_D1", "sweep/overnight/ti_iwr1443_D1"],
+    ["pilot_radial/radial_like_D1", "sweep/strong/ti_iwr1443_D1"],
+    ["pilot_radial/radial_like_D1", "sweep/v_gentle/ti_iwr1443_D1"],
+    ["sweep/gentle/ti_iwr1443_D1", "sweep/moderate/ti_iwr1443_D1"],
+    ["sweep/gentle/ti_iwr1443_D1", "sweep/overnight/ti_iwr1443_D1"],
+    ["sweep/gentle/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
+    ["sweep/gentle/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
+    ["sweep/moderate/ti_iwr1443_D1", "sweep/overnight/ti_iwr1443_D1"],
+    ["sweep/moderate/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
+    ["sweep/moderate/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
+    ["sweep/overnight/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
+    ["sweep/overnight/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
+    ["sweep/strong/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"]
+  ]
+}

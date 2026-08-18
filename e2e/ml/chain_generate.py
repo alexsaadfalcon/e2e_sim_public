@@ -288,7 +288,8 @@ def generate_chain_corpus(
         # dt. Omitting it inflated every velocity by frame_rate_hz (0-8 m/s tier ->
         # 0-80 m/s at the solver, past the unambiguous-velocity limit). Fixed 2026-08-16.
         scenario = build_rt_tier_scenario(
-            tier, frame_idx=i, seed=seed, num_frames=frames_per_scene,
+            tier, corpus_tag=dataset_dir.name, frame_idx=i, seed=seed,
+            num_frames=frames_per_scene,
             dt=1.0 / float(cfg.frame_rate_hz),
             use_local_assets=use_local_assets,
         )
@@ -313,7 +314,7 @@ def generate_chain_corpus(
 
     return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
                           snr_db=None, frames_per_scene=frames_per_scene, splits=splits,
-                          label_classes=label_classes or ())
+                          label_classes=label_classes or (), corpus_tag=dataset_dir.name)
 
 
 # --------------------------------------------------------------------------------

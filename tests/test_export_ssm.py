@@ -70,7 +70,7 @@ def tiny_rt_manifest(tmp_path_factory):
     sequences = []
     rng = np.random.default_rng(1)
     for i in range(N):
-        scenario = build_rt_tier_scenario(TIER, frame_idx=i, seed=SEED, num_frames=1,
+        scenario = build_rt_tier_scenario(TIER, corpus_tag="unit-test", frame_idx=i, seed=SEED, num_frames=1,
                                           use_local_assets=True)
         scats = frame_scatterers(scenario, 0, dt=1.0)
         pose = radar_pose(scenario, 0)
@@ -99,9 +99,14 @@ def tiny_rt_manifest(tmp_path_factory):
         )
         sequences.append([fname])
 
+    # The SAME corpus_tag the scenes were drawn with, recorded in the manifest. This is
+    # the whole point of the salt: generation and reconstruction must agree on the tag, and
+    # the manifest is where that agreement is written down. write_manifest would otherwise
+    # default to the temp directory's name and reconstruction would rebuild a different
+    # scene -- which is exactly the failure this test exists to catch.
     manifest_path = write_manifest(dataset_dir, cfg, TIER, sequences, grid=grid, seed=SEED,
                                    snr_db=None, frames_per_scene=1, splits=(1.0, 0.0, 0.0),
-                                   label_classes=label_classes)
+                                   label_classes=label_classes, corpus_tag="unit-test")
     return manifest_path
 
 
@@ -155,8 +160,14 @@ def test_reconstruct_scene_gt_matches_fixture(tiny_rt_manifest):
     grid = LabelGrid(**manifest["grid"])
     for fname in manifest["files"]["train"]:
         scene_idx, frame_idx = export_ssm._parse_scene_frame(fname)
+        # corpus_tag is part of the scene-determinism key now (rt_scenes._stable_seed),
+        # so reconstruction has to be told which corpus it is reconstructing. Read it
+        # from the manifest exactly as export_ssm.export does -- hard-coding a tag here
+        # would let the test pass while the real path reconstructs a different scene.
         _scenario, scats, pose = export_ssm.reconstruct_scene(
-            TIER, SEED, scene_idx, frame_idx, 1, use_local_assets=True)
+            TIER, SEED, scene_idx, frame_idx, 1,
+            corpus_tag=manifest.get("corpus_tag") or dataset_dir.name,
+            use_local_assets=True)
         rebuilt = targets_in_grid(grid, scats, pose, classes=("vehicle", "pedestrian"))
         with np.load(dataset_dir / fname, allow_pickle=True) as data:
             meta = json.loads(str(data["meta"].item()))

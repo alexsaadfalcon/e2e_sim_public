@@ -266,7 +266,7 @@ def test_rt_tier_scenario_velocity_reaches_solver_in_physical_mps(num_frames):
     dt = 1.0 / float(cfg.frame_rate_hz)
     lo, hi = RT_DIFFICULTY_TIERS["D2"].speed_mps
 
-    sc = build_rt_tier_scenario("D2", frame_idx=0, seed=11000,
+    sc = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=0, seed=11000,
                                 num_frames=num_frames, dt=dt)
     speeds = _rt_solver_speeds(sc, dt)
     assert speeds, "tier D2 must place vehicles/pedestrians"
@@ -285,8 +285,8 @@ def test_rt_tier_scenario_dt_only_rescales_never_redraws():
     stored per-frame displacement scales."""
     from e2e.ml.rt_scenes import build_rt_tier_scenario
 
-    a = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=2, dt=1.0)
-    b = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=2, dt=0.1)
+    a = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=2, dt=1.0)
+    b = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=2, dt=0.1)
 
     assert [o.name for o in a.objects] == [o.name for o in b.objects]
     assert [o.position for o in a.objects] == [o.position for o in b.objects]

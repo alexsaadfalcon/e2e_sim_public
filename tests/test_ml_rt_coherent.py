@@ -385,7 +385,7 @@ def test_chain_generate_cli_exposes_the_reproduction_flags():
 def _d0_scene():
     from e2e.ml.rt_scenes import build_rt_tier_scenario
 
-    return build_rt_tier_scenario("D0", frame_idx=0, seed=0, num_frames=1,
+    return build_rt_tier_scenario("D0", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                   use_local_assets=False)
 
 

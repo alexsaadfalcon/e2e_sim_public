@@ -106,7 +106,7 @@ def test_pedestrian_placeholder_path_is_cached():
 # --------------------------------------------------------------------------------
 @pytest.mark.parametrize("tier", sorted(RT_DIFFICULTY_TIERS))
 def test_every_tier_builds_a_valid_scenario(tier):
-    sc = build_rt_tier_scenario(tier, frame_idx=0, seed=1, num_frames=2)
+    sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=1, num_frames=2)
     assert sc.validate() == []
     assert len(sc.nodes) == 1
     summary = tier_summary(sc)
@@ -114,27 +114,32 @@ def test_every_tier_builds_a_valid_scenario(tier):
 
 
 def test_tier_determinism_same_triple_is_byte_identical():
-    a = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=4)
-    b = build_rt_tier_scenario("D2", frame_idx=3, seed=7, num_frames=4)
+    a = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=4)
+    b = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=4)
     assert a.to_json() == b.to_json()
 
 
 def test_tier_determinism_num_frames_is_not_part_of_the_key():
     """Same (tier, frame_idx, seed) with a different num_frames keeps the same object
     mix/positions -- only the returned Scenario's own frame count changes."""
-    a = build_rt_tier_scenario("D1", frame_idx=0, seed=5, num_frames=2)
-    b = build_rt_tier_scenario("D1", frame_idx=0, seed=5, num_frames=9)
+    a = build_rt_tier_scenario("D1", corpus_tag="unit-test", frame_idx=0, seed=5, num_frames=2)
+    b = build_rt_tier_scenario("D1", corpus_tag="unit-test", frame_idx=0, seed=5, num_frames=9)
     assert [o.name for o in a.objects] == [o.name for o in b.objects]
     assert [o.position for o in a.objects] == [o.position for o in b.objects]
     assert a.num_frames == 2 and b.num_frames == 9
 
 
-@pytest.mark.parametrize("vary", ["frame_idx", "seed", "tier"])
+@pytest.mark.parametrize("vary", ["frame_idx", "seed", "tier", "corpus_tag"])
 def test_tier_determinism_changing_any_key_component_changes_the_draw(vary):
-    base = dict(tier="D2", frame_idx=0, seed=1)
+    base = dict(tier="D2", frame_idx=0, seed=1, corpus_tag="unit-test")
     changed = dict(base)
     if vary == "tier":
         changed["tier"] = "D3"
+    elif vary == "corpus_tag":
+        # The 2026-08-18 fix: corpus identity is now PART of the determinism key --
+        # two corpora sharing (tier, frame_idx, seed) must draw different scenes (see
+        # e2e.ml.rt_scenes._stable_seed's docstring for the leak this closes).
+        changed["corpus_tag"] = "a-different-corpus"
     else:
         changed[vary] = base[vary] + 1
 
@@ -144,17 +149,17 @@ def test_tier_determinism_changing_any_key_component_changes_the_draw(vary):
 
 
 def test_d0_is_spheres_only_d1_is_cars_only():
-    d0 = build_rt_tier_scenario("D0", frame_idx=0, seed=0)
+    d0 = build_rt_tier_scenario("D0", corpus_tag="unit-test", frame_idx=0, seed=0)
     assert all(o.kind == ObjectKind.SPHERE for o in d0.objects)
 
-    d1 = build_rt_tier_scenario("D1", frame_idx=0, seed=0)
+    d1 = build_rt_tier_scenario("D1", corpus_tag="unit-test", frame_idx=0, seed=0)
     assert len(d1.objects) > 0
     assert all(o.kind == ObjectKind.MESH and o.asset in _DEFAULT_VEHICLE_POOL for o in d1.objects)
 
 
 def test_d2_and_d3_mix_cars_and_pedestrians():
     for tier in ("D2", "D3"):
-        sc = build_rt_tier_scenario(tier, frame_idx=1, seed=2)
+        sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=1, seed=2)
         classes = {o.object_class for o in sc.objects}
         assert "vehicle" in classes
         # not every draw is guaranteed a pedestrian (count ranges include 0), so check
@@ -167,7 +172,7 @@ def test_d2_and_d3_mix_cars_and_pedestrians():
 
 
 def test_car_objects_reference_a_known_vehicle_asset_name():
-    sc = build_rt_tier_scenario("D3", frame_idx=4, seed=9)
+    sc = build_rt_tier_scenario("D3", corpus_tag="unit-test", frame_idx=4, seed=9)
     cars = [o for o in sc.objects if o.object_class == "vehicle" and o.kind == ObjectKind.MESH]
     assert cars, "expected at least one vehicle in this draw"
     for c in cars:
@@ -186,7 +191,7 @@ def test_duplicate_sionna_car_name_problem_cannot_come_back():
     seen = set()
     for tier in ("D2", "D3"):
         for seed in range(30):
-            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=seed)
             for o in sc.objects:
                 if o.object_class == "vehicle" and o.kind == ObjectKind.MESH \
                         and vehicle_asset_class(o.asset) == "car":
@@ -200,7 +205,7 @@ def test_no_uniform_draw_over_all_seventeen_sionna_names():
     dup_names = set(CAR_ASSET_NAMES) - {SIONNA_CAR_REPRESENTATIVE}
     for tier in ("D1", "D2", "D3"):
         for seed in range(20):
-            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=seed)
             for o in sc.objects:
                 if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
                     assert o.asset not in dup_names
@@ -211,7 +216,7 @@ def test_a_tier_draws_more_than_just_cars_over_many_seeds():
     non-"car" vehicle class (truck/bus/trolley) -- the "realistic mix" fix."""
     classes_seen = set()
     for seed in range(60):
-        sc = build_rt_tier_scenario("D3", frame_idx=0, seed=seed)
+        sc = build_rt_tier_scenario("D3", corpus_tag="unit-test", frame_idx=0, seed=seed)
         for o in sc.objects:
             if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
                 classes_seen.add(vehicle_asset_class(o.asset))
@@ -232,7 +237,7 @@ def test_clutter_boxes_do_not_sit_in_a_targets_line_of_sight():
 
     for tier in ("D2", "D3"):
         for seed in range(40):
-            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed)
+            sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=seed)
             rx0, ry0, _ = sc.nodes[0].position
             targets = [(o.position[0] - rx0, o.position[1] - ry0) for o in sc.objects
                       if o.object_class in ("vehicle", "pedestrian")]
@@ -268,7 +273,7 @@ def test_every_object_position_z_is_ground_rest_centre(tier):
     world z=0 -- z=0 is what Sionna's `SceneObject.position` setter would then use as
     the bbox CENTER, burying the bottom half of the object below ground (see
     `e2e.ml.rt_gen`'s module docstring)."""
-    sc = build_rt_tier_scenario(tier, frame_idx=0, seed=1, num_frames=1)
+    sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=1, num_frames=1)
     for o in sc.objects:
         expected_z = 0.5 * object_local_height_m(o.kind, o.asset) * float(o.scaling)
         assert o.position[2] == pytest.approx(expected_z, abs=1e-9), \
@@ -339,7 +344,7 @@ def test_use_local_assets_false_stays_within_the_default_pool():
     non-downloaded) name -- regardless of whether this machine happens to have those
     local files."""
     for tier in sorted(RT_DIFFICULTY_TIERS):
-        sc = build_rt_tier_scenario(tier, frame_idx=2, seed=5, num_frames=1)
+        sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=2, seed=5, num_frames=1)
         for o in sc.objects:
             if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
                 assert o.asset in _DEFAULT_VEHICLE_POOL
@@ -356,7 +361,7 @@ def test_use_local_assets_true_stays_within_the_expanded_pool():
     ped_pool = {PEDESTRIAN_ASSET_NAME} | set(LOCAL_PEDESTRIAN_ASSET_NAMES)
     for tier in ("D1", "D2", "D3"):
         for seed in range(5):
-            sc = build_rt_tier_scenario(tier, frame_idx=0, seed=seed, num_frames=1,
+            sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=seed, num_frames=1,
                                         use_local_assets=True)
             for o in sc.objects:
                 if o.object_class == "vehicle" and o.kind == ObjectKind.MESH:
@@ -445,7 +450,7 @@ def test_d1_tier_scene_solves_to_nonzero_return_monostatically(sionna_rt):
     from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene
 
     cfg = dataclasses.replace(TI_IWR1443, name="rt_mesh_test", n_chirps=8, n_samples=64)
-    scenario = build_rt_tier_scenario("D1", frame_idx=0, seed=0, num_frames=1)
+    scenario = build_rt_tier_scenario("D1", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1)
 
     rt_scene = build_rt_scene(scenario, cfg, base_scene="free", frame_idx=0)
     paths = _solve(rt_scene, max_depth=2, include_leakage=False, diffuse_reflection=True,
@@ -471,7 +476,7 @@ def test_every_placed_object_rests_on_or_above_ground(sionna_rt, tier, use_local
     docstring -- so this must hold either way)."""
     from e2e.ml.radar_config import TI_IWR1443
 
-    scenario = build_rt_tier_scenario(tier, frame_idx=0, seed=0, num_frames=1,
+    scenario = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                       use_local_assets=use_local_assets)
     if not scenario.objects:
         pytest.skip(f"{tier} draw at this seed placed zero objects")
@@ -619,7 +624,7 @@ def test_placed_objects_do_not_interpenetrate():
     overlaps = pairs = 0
     for tier in ("D0", "D1", "D2", "D3"):
         for frame in range(25):
-            objects = build_rt_tier_scenario(tier, frame_idx=frame, seed=17).objects
+            objects = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=frame, seed=17).objects
             for i in range(len(objects)):
                 for j in range(i + 1, len(objects)):
                     a, b = box(objects[i]), box(objects[j])
@@ -639,7 +644,7 @@ def test_no_vehicle_extends_back_through_the_radar():
     closest = float("inf")
     for tier in ("D1", "D2", "D3"):
         for frame in range(30):
-            for obj in build_rt_tier_scenario(tier, frame_idx=frame, seed=3,
+            for obj in build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=frame, seed=3,
                                               use_local_assets=True).objects:
                 if obj.object_class != "vehicle" or obj.name.startswith("sphere"):
                     continue

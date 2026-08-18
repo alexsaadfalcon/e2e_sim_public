@@ -127,13 +127,23 @@ def select_train_files(manifest: Dict[str, Any], n: int) -> List[str]:
 # Scene reconstruction + GT verification
 # --------------------------------------------------------------------------------
 def reconstruct_scene(tier: str, seed: int, scene_idx: int, frame_idx: int,
-                      frames_per_scene: int, *, use_local_assets: bool = True):
+                      frames_per_scene: int, *, corpus_tag: str,
+                      use_local_assets: bool = True):
     """`(scenario, scatterers, pose)` for one stored sample -- see the module
     docstring's "Scene reconstruction" section for why these exact arguments
-    reproduce the corpus generator's own scene byte-for-byte."""
+    reproduce the corpus generator's own scene byte-for-byte.
+
+    `corpus_tag` is part of the scene-determinism key (see
+    `rt_scenes._stable_seed`): the corpus identity is salted into the seed so that two
+    corpora sharing a numeric seed cannot draw the same scenes. Reconstruction therefore
+    has to be told which corpus it is reconstructing, and it must be the tag that corpus
+    was GENERATED with -- read it from the manifest, never guess it. Required, with no
+    default, because a default here would silently reconstruct the wrong scene and
+    everything downstream would look plausible.
+    """
     scenario = build_rt_tier_scenario(
-        tier, frame_idx=scene_idx, seed=seed, num_frames=frames_per_scene,
-        use_local_assets=use_local_assets,
+        tier, corpus_tag=corpus_tag, frame_idx=scene_idx, seed=seed,
+        num_frames=frames_per_scene, use_local_assets=use_local_assets,
     )
     dt = 1.0  # frame_scatterers' own default DEFAULT_DT_S; chain_generate never
     # overrides it (build_chain_simulation has no per-frame dt knob), so this matches.
@@ -521,6 +531,11 @@ def export(manifest_path, n: int, out_dir, *, render: bool = True,
     cfg = RadarConfig.from_dict(manifest["config"])
     tier = manifest["tier"]
     seed = int(manifest["seed"])
+    # Corpora generated before the seed salt landed carry no tag. Fall back to the
+    # convention the salt itself uses (the dataset directory name), which is what those
+    # corpora would have been given -- and say so, because a silent fallback that picks
+    # the wrong tag reconstructs a different scene than the one on disk.
+    corpus_tag = manifest.get("corpus_tag") or Path(manifest_path).parent.name
     frames_per_scene = int(manifest.get("frames_per_scene", 1))
     grid = LabelGrid(**manifest["grid"])
     label_classes = tuple(manifest.get("label_classes") or _LABEL_CLASSES_DEFAULT)
@@ -543,6 +558,7 @@ def export(manifest_path, n: int, out_dir, *, render: bool = True,
         scenario, scats, pose = reconstruct_scene(
             tier, seed, scene_idx, frame_idx, frames_per_scene,
             use_local_assets=use_local_assets,
+            corpus_tag=corpus_tag,
         )
         rebuilt_targets = targets_in_grid(grid, scats, pose, classes=label_classes)
 
