@@ -65,6 +65,7 @@ DEFAULT_OUT = os.path.join(FIG_DIR, "tracking_refine.png")
 C_BASE = "#C1362F"
 C_REFINE = "#1F6FB2"
 C_GATE = "#4A4A4A"
+C_CONST = "#1B7837"   # constant HIGH effort -- the honesty arm (F36)
 
 
 class _ReorderedEnvironmentBlock(SionnaEnvironmentBlock):
@@ -130,9 +131,16 @@ def collapse_window_order(gaps, threshold, *, n_degenerate=25, n_pre=25, n_recov
     return order, spans
 
 
-def _run_arm(scenario, n_steps, gap_response, env=None):
-    """One pipeline run; returns the per-frame diagnostic lists we plot."""
+def _run_arm(scenario, n_steps, gap_response, env=None, n_refine=None):
+    """One pipeline run; returns the per-frame diagnostic lists we plot.
+
+    `n_refine` is the BASELINE effort per frame (the gate raises it; it is not the gate).
+    Exposed so the figure can carry a constant-HIGH-effort arm alongside the gated one --
+    without it the figure invites the reading that the gate is what makes tracking good,
+    when in fact it is the compute (see this module's docstring, and F36).
+    """
     env = env if env is not None else SionnaEnvironmentBlock(scenario)
+    n_refine = N_REFINE if n_refine is None else int(n_refine)
     sim = Simulation(
         env,
         [SubspaceErrorBlock()],
@@ -141,7 +149,7 @@ def _run_arm(scenario, n_steps, gap_response, env=None):
                   physical_scale=bool(getattr(env, "physical_scale", None))),
         InterconnectBlock(case="case3"),
         AFEBlock(),
-        AdaOjaBlock(N_RX, K, m=M, n_refine=N_REFINE, gap_response=gap_response,
+        AdaOjaBlock(N_RX, K, m=M, n_refine=n_refine, gap_response=gap_response,
                     gap_threshold=GAP_THRESHOLD, n_refine_hi=N_REFINE_HI),
     )
     out = sim.run(n_steps=n_steps)
@@ -200,7 +208,8 @@ _ORDER_NOTE = ("Frame order constructed: played forward into the collapse, then 
                "for 69 of 100 frames. The tracker's response is real; the ordering is not.")
 
 
-def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_order=False):
+def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_order=False,
+                 const_hi=None):
     frames = range(len(refine["subspace_err"]))
     runs = _degenerate_runs(refine["sv_gap_norm"], threshold)
     recoveries = _recovered_windows(refine["sv_gap_norm"], threshold)
@@ -213,6 +222,12 @@ def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_or
                 label=f"fixed effort (gap_response='none', {N_REFINE} pass/frame)")
     ax_err.plot(frames, refine["subspace_err"], color=C_REFINE, lw=2.0,
                 label=f"reactive gate (gap_response='refine', up to {N_REFINE_HI})")
+    # The arm that keeps the figure honest. Without it a reader concludes the GATE is what
+    # makes tracking good; with it they can see that constant high effort is better
+    # everywhere, and that what the gate actually buys is COMPUTE, not accuracy. See F36.
+    if const_hi is not None:
+        ax_err.plot(frames, const_hi["subspace_err"], color=C_CONST, lw=1.8, ls="--",
+                    label=f"constant high effort ({N_REFINE_HI} passes EVERY frame)")
     ax_err.set_ylabel("subspace error", fontsize=12)
     ax_err.set_yscale("log")
     # The two-arm legend lives BELOW the panels, not inside ax_err. In-axes it sat upper
@@ -262,8 +277,19 @@ def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_or
     stats = summarize(base, refine, threshold)
     drop = stats.get("degenerate_improvement")
     if drop is not None and drop == drop:
-        ax_err.text(0.985, 0.06,
-                    f"while collapsed: {drop * 100:.0f}% lower tracking error",
+        # State the TRADE, not just the win. "N% lower error while collapsed" is true but
+        # compares 1 pass against N_REFINE_HI passes inside the collapsed window -- it
+        # measures the value of the compute, not of reacting to the gap, and the same
+        # number would appear if the gate fired at random. With the constant-effort arm
+        # present the honest claim is the compute saving. See notes F36.
+        if const_hi is not None and const_hi.get("n_refine_used"):
+            used = refine["n_refine_used"]
+            mean_gated = (sum(used) / len(used)) if used else float("nan")
+            msg = (f"gate matches constant effort while collapsed, "
+                   f"for {mean_gated / max(N_REFINE_HI, 1) * 100:.0f}% of its compute")
+        else:
+            msg = f"while collapsed: {drop * 100:.0f}% lower error than fixed 1-pass effort"
+        ax_err.text(0.985, 0.06, msg,
                     transform=ax_err.transAxes, ha="right", va="bottom", fontsize=11.5,
                     color=C_REFINE, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.35", facecolor="#FFFFFF",
@@ -345,6 +371,12 @@ def main(argv=None):
     p.add_argument("--window", type=int, nargs=3, default=(25, 25, 25),
                    metavar=("PRE", "DEGENERATE", "RECOVER"),
                    help="frame counts per leg for --frame-order collapse-window")
+    p.add_argument("--no-constant-arm", action="store_true",
+                   help="omit the constant-high-effort arm. It is ON by default because "
+                        "without it the figure reads as 'the gate makes tracking good' "
+                        "when the truth is 'the compute does' -- constant effort beats the "
+                        "gate everywhere OUTSIDE the collapse (measured 0.037 vs 0.575). "
+                        "See notes/ESTABLISHED_FACTS.md F36.")
     p.add_argument("--probe-steps", type=int, default=100,
                    help="frames of the baseline arm used to LOCATE the collapse before "
                         "building the window")
@@ -374,6 +406,7 @@ def main(argv=None):
                 "--cache path rather than silently plotting the wrong run.")
         args.n_steps = payload.get("n_steps", args.n_steps)
         base, refine = payload["base"], payload["refine"]
+        const_hi = payload.get("const_hi")
         print(f"reusing cached diagnostics from {cache}")
     else:
         n_steps, mk_env, spans = args.n_steps, (lambda: None), None
@@ -393,10 +426,15 @@ def main(argv=None):
             def mk_env():
                 return _ReorderedEnvironmentBlock(args.scenario, order)
 
-        print(f"[1/2] baseline arm  (gap_response='none')   {n_steps} frames ...")
+        print(f"[1/3] baseline arm    (1 pass/frame)          {n_steps} frames ...")
         base = _run_arm(args.scenario, n_steps, "none", env=mk_env())
-        print(f"[2/2] reactive arm  (gap_response='refine') {n_steps} frames ...")
+        print(f"[2/3] reactive arm    (gated 1 -> {N_REFINE_HI})         {n_steps} frames ...")
         refine = _run_arm(args.scenario, n_steps, "refine", env=mk_env())
+        const_hi = None
+        if not args.no_constant_arm:
+            print(f"[3/3] constant-effort arm ({N_REFINE_HI} every frame) {n_steps} frames ...")
+            const_hi = _run_arm(args.scenario, n_steps, "none", env=mk_env(),
+                                n_refine=N_REFINE_HI)
         args.n_steps = n_steps
         if cache is not None:
             cache.parent.mkdir(parents=True, exist_ok=True)
@@ -405,11 +443,13 @@ def main(argv=None):
                                          "frame_order": args.frame_order,
                                          "window": list(args.window),
                                          "spans": spans,
-                                         "base": base, "refine": refine}, indent=1))
+                                         "base": base, "refine": refine,
+                                         "const_hi": const_hi}, indent=1))
             print(f"cached diagnostics to {cache}")
 
     out = build_figure(base, refine, args.out,
-                       constructed_order=(args.frame_order == "collapse-window"))
+                       constructed_order=(args.frame_order == "collapse-window"),
+                       const_hi=const_hi)
     print(f"wrote {out}")
     for key, value in summarize(base, refine).items():
         print(f"  {key}: {value}")
