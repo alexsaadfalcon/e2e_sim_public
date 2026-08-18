@@ -11,7 +11,9 @@ matplotlib.use("Agg")            # headless, matches the example scripts' own co
 import matplotlib.pyplot as plt
 
 from e2e.comms.ofdm import qam_constellation
-from e2e.comms.constellation_viz import plot_constellation, _constellation_colors
+from e2e.comms.constellation_viz import (
+    plot_constellation, _constellation_colors, _checkerboard_colors, _grid_row_col,
+)
 
 
 @pytest.mark.parametrize("bits_per_symbol", [2, 4, 6])
@@ -112,6 +114,57 @@ def test_plot_constellation_accepts_torch_tensors():
     sc = plot_constellation(ax, rx, const)
     plt.close(fig)
     assert sc.get_offsets().shape[0] == const.numel()
+
+
+@pytest.mark.parametrize("bits_per_symbol", [2, 4, 6])
+def test_checkerboard_neighbours_never_share_a_hue(bits_per_symbol):
+    """The whole point of checkerboard mode: every 4-/8-connected neighbour on
+    the I/Q grid (including diagonals) must get a DIFFERENT hue, so a
+    mis-decoded (wrong-cell) symbol is visible as a wrong-coloured dot."""
+    const = qam_constellation(bits_per_symbol).cpu().numpy()
+    colors = _checkerboard_colors(const)
+    row, col, side = _grid_row_col(const)
+    pos_to_idx = {(int(r), int(c)): i for i, (r, c) in enumerate(zip(row, col))}
+    for (r, c), i in pos_to_idx.items():
+        for dr, dc in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]:
+            j = pos_to_idx.get((r + dr, c + dc))
+            if j is None:
+                continue
+            assert not np.allclose(colors[i], colors[j]), \
+                f"neighbours {(r, c)} and {(r + dr, c + dc)} share a hue"
+
+
+def test_checkerboard_uses_at_least_four_hues():
+    const = qam_constellation(6).cpu().numpy()   # 64-QAM, 8x8 grid
+    colors = _checkerboard_colors(const)
+    uniq = {tuple(np.round(c, 6)) for c in colors}
+    assert len(uniq) >= 4
+
+
+def test_plot_constellation_checkerboard_mode_colors_by_ground_truth():
+    """Same ground-truth-coloring contract as bitrev mode, just via the
+    checkerboard palette -- a drifted point must still be colored as what it
+    was actually TRANSMITTED as."""
+    const = qam_constellation(4).cpu().numpy()   # 16-QAM
+    tx = np.array([const[0], const[1]])
+    rx = np.array([const[1] * 0.999, const[1]])
+
+    fig, ax = plt.subplots()
+    sc = plot_constellation(ax, rx, const, tx_syms=tx, color_mode="checkerboard")
+    plt.close(fig)
+
+    colors = _checkerboard_colors(const)
+    face = sc.get_facecolor()
+    assert np.allclose(face[0, :3], colors[0, :3], atol=1e-6)
+    assert np.allclose(face[1, :3], colors[1, :3], atol=1e-6)
+
+
+def test_plot_constellation_rejects_unknown_color_mode():
+    const = qam_constellation(4).cpu().numpy()
+    fig, ax = plt.subplots()
+    with pytest.raises(ValueError):
+        plot_constellation(ax, const, const, color_mode="bogus")
+    plt.close(fig)
 
 
 def test_works_for_all_supported_qam_orders():

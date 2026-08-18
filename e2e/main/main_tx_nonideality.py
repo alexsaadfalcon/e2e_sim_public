@@ -56,9 +56,13 @@ Input backoff (IBO) is defined relative to `a_knee = TxPAConfig.a_sat /
 extrapolation of the AM/AM curve would just reach saturation -- the standard textbook
 IBO reference point, even though the smooth Rapp knee means the amplifier is already
 visibly compressing a couple dB before that point. The OFDM waveform is normalized to
-unit average power, then scaled so its RMS amplitude sits `backoff_db` below `a_knee`;
-by construction (verified algebraically in this module and empirically in its tests)
-`10*log10(a_knee**2 / mean(|scaled|**2)) == backoff_db`.
+unit average power, then scaled so its RMS power sits `backoff_db` relative to `a_knee`.
+`backoff_db` is NEGATIVE-going: 0 dB means driven AT `a_knee` (full power, most
+compressed), and more negative means further BELOW `a_knee` (less power, more linear)
+-- i.e. `backoff_db` reads like a power/gain reduction, not a bare magnitude, matching
+how "input backoff" is reported on a device datasheet or a link budget. By construction
+(verified algebraically in this module and empirically in its tests)
+`10*log10(mean(|scaled|**2) / a_knee**2) == backoff_db`.
 
 Honesty about what this PSD/ACPR plot is NOT
 -----------------------------------------------
@@ -197,7 +201,10 @@ def _peak_sidelobe_db(power, guard_bins=3):
 def _run_one_backoff(backoff_db, normalized_up, a_knee, tx_pa, H_ripple, off,
                       fft_size, cp_len, oversample, H_sc, snr_db, modem, n_symbols,
                       tx_data_ref, rng_seed):
-    scale = a_knee * 10 ** (-backoff_db / 20.0)
+    # backoff_db <= 0: 0 dB drives AT a_knee (full power); more negative backs
+    # further off (see module docstring's "Backoff convention"). Do NOT flip the
+    # sign here without also flipping the docstring's algebraic identity.
+    scale = a_knee * 10 ** (backoff_db / 20.0)
     driven_up = normalized_up * scale
 
     ideal_eff = _undersample_freq(driven_up, fft_size, cp_len, oversample, off)
@@ -237,14 +244,15 @@ def main(backoff_db_list=None, aggressive_backoff_db=None, fft_size=64, cp_len=1
     """Run the ideal-vs-non-ideal TX A/B and return a results dict (numbers only, no
     matplotlib) so tests can assert on the physics without touching figures.
 
-    `backoff_db_list` defaults to 0..12 dB in 2 dB steps (the range the task brief
-    asks for); `aggressive_backoff_db` defaults to the SMALLEST (most compressed)
-    backoff in that list.
+    `backoff_db_list` defaults to 0, -3, -6, -9, -12 dB (0 = driven at `a_knee`, more
+    negative = further backed off -- see module docstring's "Backoff convention");
+    `aggressive_backoff_db` defaults to the LARGEST (least negative, i.e. closest to
+    `a_knee`, most compressed) backoff in that list.
     """
     if backoff_db_list is None:
-        backoff_db_list = list(range(0, 13, 2))
+        backoff_db_list = [0, -3, -6, -9, -12]
     if aggressive_backoff_db is None:
-        aggressive_backoff_db = min(backoff_db_list)
+        aggressive_backoff_db = max(backoff_db_list)
 
     scenario = munich_radar_scenario()
     freqs = scenario.frequency.linspace()
@@ -406,16 +414,40 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
                    target_range_m, bits_per_symbol, const, tx_data_ref):
     agg_b = results["aggressive_backoff_db"]
 
-    # (1) headline: EVM vs backoff
+    # (1) headline: EVM vs backoff. backoff_db is NEGATIVE-going (0 dB = driven at
+    # a_knee, more negative = further backed off, see module docstring) -- plot it
+    # exactly as returned, do not flip/relabel it here.
+    evm_ideal_pct = np.array(results["evm_ideal"]) * 100.0
+    evm_nonideal_pct = np.array(results["evm_nonideal"]) * 100.0
+    noise_floor_pct = float(np.mean(evm_ideal_pct))   # ~constant by construction (see docstring)
+
     plt.figure()
-    plt.plot(backoff_db_list, np.array(results["evm_ideal"]) * 100.0, "o-", label="ideal TX")
-    plt.plot(backoff_db_list, np.array(results["evm_nonideal"]) * 100.0, "s-", label="non-ideal TX (PA)")
-    plt.xlabel("input backoff (dB)")
+    plt.plot(backoff_db_list, evm_ideal_pct, "o-", color="tab:blue",
+              label="linear TX (thermal noise floor only)")
+    plt.plot(backoff_db_list, evm_nonideal_pct, "s-", color="tab:orange",
+              label="Rapp PA model (AM/AM + AM/PM)")
+    plt.xlabel("input backoff (dB, relative to a_knee -- 0 dB = driven at saturation knee)")
     plt.ylabel("EVM (% RMS)")
     plt.title(f"EVM vs backoff -- {2 ** bits_per_symbol}-QAM OFDM, "
               f"measured PAPR = {results['papr_db']:.1f} dB")
     plt.grid(True)
-    plt.legend()
+    # Make explicit ON THE FIGURE (not only the caption) what the blue curve IS and
+    # why the two converge: the blue "linear TX" arm never touches the PA at all, so
+    # its flat EVM is the noise+estimation FLOOR the orange (PA) arm is asymptoting
+    # toward as backoff drives the PA further into its linear region -- convergence
+    # at large (very negative) backoff is the physics result (backing off linearizes
+    # the PA), not a coincidence or a plotting artifact.
+    plt.axhline(noise_floor_pct, color="tab:blue", linestyle=":", alpha=0.5, linewidth=1)
+    plt.annotate(
+        f"held constant across the whole sweep: channel + AWGN noise floor\n"
+        f"(~{noise_floor_pct:.1f}% EVM) -- the linear-TX curve traces this floor;\n"
+        "the PA curve approaches it as backoff linearizes the amplifier",
+        xy=(0.03, 0.95), xycoords="axes fraction", fontsize=7.5, va="top", ha="left",
+        bbox=dict(boxstyle="round", fc="white", alpha=0.85))
+    # Lower right, not centre right: the data runs bottom-left to top-right, so a
+    # centred legend sits ON the PA curve between -6 and -3 dB and hides the steepest
+    # part of the very trend the figure exists to show.
+    plt.legend(loc="lower right")
     evm_path = os.path.join(FIG_DIR, "tx_nonideality_evm_vs_backoff.png")
     plt.savefig(evm_path, dpi=120, bbox_inches="tight")
     plt.close()
@@ -428,11 +460,39 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
     # colored by what it actually WAS, not a nearest-point decision.
     tx_ref = tx_data_ref.reshape(-1).cpu().numpy()
     fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    # checkerboard color_mode: 4-hue 2x2 tile by grid parity so no two NEIGHBOURING
+    # 64-QAM cells share a hue -- a mis-decoded (wrong-cell) symbol shows up as a
+    # wrong-coloured dot, which the previous single-hue-per-16/64-cluster palette
+    # washed out in the dense non-ideal panel.
     plot_constellation(axes[0], eq_ideal, const, tx_syms=tx_ref,
-                       title=f"ideal TX ({agg_b:.0f} dB IBO)")
+                       title=f"linear TX ({agg_b:.0f} dB IBO)", color_mode="checkerboard")
     plot_constellation(axes[1], eq_nonideal, const, tx_syms=tx_ref,
-                       title=f"non-ideal TX ({agg_b:.0f} dB IBO)")
-    fig.suptitle("RX constellation post-EQ: AM/AM compression + AM/PM rotation")
+                       title=f"Rapp PA model ({agg_b:.0f} dB IBO)", color_mode="checkerboard")
+    # Identical axis limits on both panels (driven off the IDEAL lattice + a common
+    # margin, not each panel's own data range) so the PA's compression reads as the
+    # cloud SHRINKING inside a fixed frame, not as matplotlib silently rescaling the
+    # non-ideal panel's axes to make the compressed cloud look normal-sized again.
+    const_np = const.detach().cpu().numpy() if hasattr(const, "detach") else np.asarray(const)
+    # A 99.9th percentile rather than a hard max: a handful of far outliers in the
+    # compressed cloud otherwise set the frame for BOTH panels, shrinking the 64-QAM
+    # lattice into the middle third of each axis and wasting the resolution that makes
+    # individual symbols distinguishable at screenshare size. The outliers are still
+    # drawn; they just no longer dictate the zoom.
+    # Frame the LATTICE, not the clouds, and frame it per-AXIS rather than by radius.
+    # A 64-QAM lattice is square: its corner point sets max|c| = sqrt(2) x the per-axis
+    # extent, so a radius-based limit reserves the corners of the frame for points that
+    # can never appear and squeezes the constellation into the middle. Per-axis extent
+    # x 1.35 leaves room for the compressed cloud's spread while letting the eight
+    # columns fill the panel, which is what makes an individual symbol distinguishable
+    # at screenshare size.
+    _axis_extent = max(float(np.max(np.abs(const_np.real))),
+                       float(np.max(np.abs(const_np.imag))))
+    lim = 1.35 * _axis_extent
+    for a in axes:
+        a.set_xlim(-lim, lim)
+        a.set_ylim(-lim, lim)
+    fig.suptitle("RX constellation post-EQ: AM/AM compression + AM/PM rotation "
+                 "(linear TX = same axes, no PA)")
     const_path = os.path.join(FIG_DIR, "tx_nonideality_constellation.png")
     fig.savefig(const_path, dpi=120, bbox_inches="tight")
     plt.close(fig)

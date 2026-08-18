@@ -47,7 +47,7 @@ def test_oversample_undersample_round_trip_is_exact():
 # end-to-end run
 # --------------------------------------------------------------------------------
 def test_main_runs_end_to_end_and_returns_expected_keys():
-    r = _run(backoff_db_list=[0, 6, 12])
+    r = _run(backoff_db_list=[0, -6, -12])
     expected_keys = {
         "source", "papr_db", "backoff_db_list", "aggressive_backoff_db",
         "evm_ideal", "evm_nonideal", "acpr_ideal_db", "acpr_nonideal_db",
@@ -55,7 +55,7 @@ def test_main_runs_end_to_end_and_returns_expected_keys():
         "psl_ideal_db", "psl_nonideal_db",
     }
     assert expected_keys.issubset(r.keys())
-    assert r["backoff_db_list"] == [0, 6, 12]
+    assert r["backoff_db_list"] == [0, -6, -12]
     assert len(r["evm_ideal"]) == 3
     assert len(r["evm_nonideal"]) == 3
     assert np.all(np.isfinite(r["evm_ideal"]))
@@ -65,7 +65,7 @@ def test_main_runs_end_to_end_and_returns_expected_keys():
 
 def test_main_does_not_touch_disk_when_show_is_false(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "FIG_DIR", str(tmp_path))
-    _run(backoff_db_list=[0, 12])
+    _run(backoff_db_list=[0, -12])
     assert list(tmp_path.iterdir()) == []
 
 
@@ -80,16 +80,18 @@ def test_measured_papr_is_in_the_expected_ofdm_range():
 
 
 def test_nonideal_evm_exceeds_ideal_at_aggressive_backoff():
-    """At the most compressed (lowest) backoff, the PA-distorted arm must be
-    measurably worse than the distortion-free arm -- the headline claim."""
-    r = _run(backoff_db_list=[0, 6, 12])
+    """At the most compressed (least-negative / 0 dB, i.e. driven AT a_knee)
+    backoff, the PA-distorted arm must be measurably worse than the
+    distortion-free arm -- the headline claim."""
+    r = _run(backoff_db_list=[0, -6, -12])
     assert r["evm_nonideal"][0] > r["evm_ideal"][0] * 2.0
 
 
 def test_nonideal_evm_improves_monotonically_with_backoff():
-    """Backing off further from saturation must not make the non-ideal arm worse
+    """Backing off further from saturation (more NEGATIVE backoff_db, see module
+    docstring's "Backoff convention") must not make the non-ideal arm worse
     (allow a hair of floating-point slack, no allowance for a real reversal)."""
-    r = _run(backoff_db_list=[0, 3, 6, 9, 12])
+    r = _run(backoff_db_list=[0, -3, -6, -9, -12])
     evm = r["evm_nonideal"]
     for prev, nxt in zip(evm[:-1], evm[1:]):
         assert nxt <= prev + 1e-6
@@ -100,7 +102,7 @@ def test_ideal_evm_is_near_zero_and_flat_across_backoff():
     equalization cancels the shared drive-level scale factor exactly (see the
     module docstring's algebra) -- so ideal EVM should be small AND essentially
     constant across the whole sweep."""
-    r = _run(backoff_db_list=[0, 4, 8, 12], snr_db=45.0)
+    r = _run(backoff_db_list=[0, -4, -8, -12], snr_db=45.0)
     evm = np.asarray(r["evm_ideal"])
     assert np.all(evm < 0.05)
     assert (evm.max() - evm.min()) < 1e-3
@@ -127,6 +129,18 @@ def test_radar_side_sensing_cost_is_reported_and_finite():
     assert np.isfinite(r["psl_nonideal_db"])
 
 
-def test_aggressive_backoff_defaults_to_minimum_of_sweep():
-    r = _run(backoff_db_list=[2, 5, 9])
-    assert r["aggressive_backoff_db"] == 2
+def test_aggressive_backoff_defaults_to_maximum_of_sweep():
+    """backoff_db is negative-going (0 dB = driven at a_knee, more negative =
+    further backed off) -- the MOST aggressive/compressed point in a sweep is
+    therefore the LARGEST (least negative) value, not the smallest."""
+    r = _run(backoff_db_list=[-9, -5, -2])
+    assert r["aggressive_backoff_db"] == -2
+
+
+def test_backoff_db_sign_matches_driven_power_convention():
+    """0 dB backoff must drive harder (worse EVM) than -12 dB -- i.e. the sign
+    convention documented in the module docstring ('Backoff convention': 0 dB =
+    driven at a_knee, more negative = further below it) actually matches the
+    arithmetic, not just the axis label."""
+    r = _run(backoff_db_list=[0, -12])
+    assert r["evm_nonideal"][0] > r["evm_nonideal"][1]

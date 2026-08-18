@@ -195,19 +195,40 @@ def _make_figures(results, range_az, source, snr_db):
     plt.savefig(ber_path, dpi=120, bbox_inches="tight")
     plt.close()
 
-    # (b) mean EVM per mode, bar chart annotated with array gain
-    plt.figure()
+    # (b) mean EVM per mode, bar chart annotated with array gain.
+    # Wide-short figure (not the square matplotlib default): this figure sits in a
+    # ~5.8 x 2.55 in slide box (~2.3:1), and a tall default figure gets scaled down
+    # to fit the box's HEIGHT, leaving most of the box's width empty. figsize below
+    # matches that box aspect so the figure fills the box instead of floating in it.
+    fig = plt.figure(figsize=(8.6, 3.6))
     means = [results[m]["evm"].mean() for m in MODES]
     bars = plt.bar(MODES, means)
+    # LOG y, and this is not a cosmetic preference. The single-element arm sits near 0.65
+    # while all three combining arms sit near 0.02, so on a linear axis the combining bars
+    # are three indistinguishable slivers on the floor -- and the comparison this figure
+    # exists to make is EGC vs MRC vs subspace, not "combining beats not combining", which
+    # nobody doubts. A log axis is the only one on which all four arms are readable at
+    # once, and it is the natural axis for a quantity spanning a decade and a half.
+    plt.yscale("log")
+    lo = min(m for m in means if m > 0)
+    plt.ylim(lo / 3.0, max(means) * 3.0)
     for bar, mode in zip(bars, MODES):
         gain = results[mode]["gain_db"]
         label = f"{gain:+.1f} dB gain" if gain is not None else "no combining"
-        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), label,
-                 ha="center", va="bottom", fontsize=9)
-    plt.ylabel("mean EVM (RMS fraction)")
-    plt.title("Comms head mean EVM per combining mode")
+        # Print the EVM as well as the gain: on a log axis a reader cannot eyeball the
+        # ratio between two bars the way they can on a linear one, so the number that
+        # separates the three combining arms has to be written down.
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() * 1.12,
+                 f"{label}\nEVM {bar.get_height() * 100:.2f}%",
+                 ha="center", va="bottom", fontsize=11.5)
+    plt.ylabel("mean EVM (RMS fraction)", fontsize=13)
+    plt.title("Comms head mean EVM per combining mode  (log scale)", fontsize=15)
+    plt.grid(True, axis="y", which="both", alpha=0.3)
+    plt.xticks(fontsize=13)
+    plt.yticks(fontsize=12)
+    fig.tight_layout()
     evm_path = os.path.join(FIG_DIR, "comms_head_evm_gain.png")
-    plt.savefig(evm_path, dpi=120, bbox_inches="tight")
+    plt.savefig(evm_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     # radar head, SAME pipeline run: range-azimuth map (RangeAzBlock -> [az, range]).

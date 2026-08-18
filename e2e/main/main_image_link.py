@@ -251,24 +251,43 @@ def _make_figure(original, tx_syms, results, operating_points, source, const):
 
     # leftmost column: original image (top), ideal/noiseless TX reference constellation (bottom)
     axes[0, 0].imshow(original, cmap="gray", interpolation="nearest", vmin=0, vmax=255)
-    axes[0, 0].set_title("Original", fontsize=11)
+    axes[0, 0].set_title("Original", fontsize=15)
     axes[0, 0].axis("off")
 
-    # tx_syms sit EXACTLY on the ideal lattice (noiseless TX), so coloring by nearest
-    # constellation point (no separate tx_syms= needed -- it decides against itself)
-    # doubles as a color legend for the per-point panels below, which color by the
-    # SAME transmitted-symbol ground truth. mark_ideal=False: every point already
-    # IS its own ideal marker here, so drawing both on top of each other would just
-    # hide one of the two.
-    plot_constellation(axes[1, 0], tx_syms, const, s=25, title="TX (ideal)",
-                       mark_ideal=False)
-    axes[1, 0].tick_params(labelsize=8)
+    # tx_syms sit EXACTLY on the ideal lattice (noiseless TX); pass it as BOTH rx_syms
+    # and tx_syms (ground truth) so the color is decided the same TRANSMITTED-symbol
+    # way as every other panel (not a nearest-point decision against itself), doubling
+    # as a color legend for the panels below. checkerboard: 4-hue 2x2 tile by grid
+    # parity so no two neighbouring cells share a hue (see constellation_viz module
+    # docstring). mark_ideal=False: every point already IS its own ideal marker here,
+    # so drawing both on top of each other would just hide one of the two.
+    plot_constellation(axes[1, 0], tx_syms, const, tx_syms=tx_syms, s=25,
+                       title="TX (ideal)", mark_ideal=False, color_mode="checkerboard")
+    axes[1, 0].tick_params(labelsize=11)
+    # plot_constellation's own ax.set_title takes no fontsize kwarg; bump it after
+    # the call -- legibility floor for a figure downscaled to a ~540px-tall slide.
+    axes[1, 0].title.set_fontsize(14)
+
+    # Frame the LATTICE, not the clouds, identically across every constellation panel
+    # (same rationale/derivation as main_tx_nonideality.py's `_axis_extent`/`lim`): a
+    # QAM lattice is square, so a radius-based (max|c|) limit reserves the frame's
+    # corners for points that can never appear and squeezes the constellation into the
+    # middle third. Per-axis extent x 1.35 instead. `const` is unit-avg-power and every
+    # panel below is separately normalized to unit RMS (see the per-point loop), so the
+    # SAME ideal-lattice-derived limit is the right scale for all of them, including
+    # this noiseless TX reference panel.
+    const_np = const.detach().cpu().numpy() if hasattr(const, "detach") else np.asarray(const)
+    _axis_extent = max(float(np.max(np.abs(const_np.real))),
+                       float(np.max(np.abs(const_np.imag))))
+    lim = 1.35 * _axis_extent
+    axes[1, 0].set_xlim(-lim, lim)
+    axes[1, 0].set_ylim(-lim, lim)
 
     for i, point in enumerate(operating_points):
         col = i + 1
         r = results[point["name"]]
         axes[0, col].imshow(r["image"], cmap="gray", interpolation="nearest", vmin=0, vmax=255)
-        axes[0, col].set_title(f"{point['label']}\nBER={r['ber']:.2e}", fontsize=11)
+        axes[0, col].set_title(f"{point['label']}\nBER={r['ber']:.2e}", fontsize=15)
         axes[0, col].axis("off")
 
         syms = r["rx_syms"]
@@ -282,11 +301,15 @@ def _make_figure(original, tx_syms, results, operating_points, source, const):
         # normalization above only rescales the plotted x/y, not which ideal point
         # each sample decides toward) so a wrong-colored point in the wrong cluster
         # is a genuine symbol error, consistent with the "TX (ideal)" legend panel.
+        # checkerboard: see module docstring / TX-panel comment above.
         plot_constellation(axes[1, col], syms, const, tx_syms=tx_syms, s=3,
-                           title=f"{point['name']} (unit RMS)")
-        axes[1, col].tick_params(labelsize=8)
+                           title=f"{point['name']} (unit RMS)", color_mode="checkerboard")
+        axes[1, col].tick_params(labelsize=11)
+        axes[1, col].title.set_fontsize(14)
+        axes[1, col].set_xlim(-lim, lim)
+        axes[1, col].set_ylim(-lim, lim)
 
-    fig.suptitle(f"Image through the OFDM comms link (channel: {source})", fontsize=13)
+    fig.suptitle(f"Image through the OFDM comms link (channel: {source})", fontsize=18)
     fig.tight_layout()
     fig_path = os.path.join(FIG_DIR, "image_link.png")
     fig.savefig(fig_path, dpi=200, bbox_inches="tight")
