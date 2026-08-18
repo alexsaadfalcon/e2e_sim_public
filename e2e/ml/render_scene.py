@@ -830,65 +830,36 @@ def _overlay_legend(img, entries: Sequence[Tuple[str, Tuple[float, float, float]
         draw.text((x0 + pad + swatch + 6, cy), label, fill=(255, 255, 255, 255))
 
 
-def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: int = 8,
-                          frame_idx: int = 0, seed: int = 0, resolution=(640, 480),
-                          num_samples: int = 64, use_local_assets: bool = True,
-                          material_policy: str = "extrapolated",
-                          stand_in_material: str = "concrete") -> Path:
-    """Ray-trace a TOP-DOWN animated GIF of `e2e.ml.rt_scenes` tier `tier`: ONE scenario,
-    objects moving over TIME. Needs Sionna RT; each animation frame is a plain geometry
-    render (no path solve, same as `render_rt_tier_png`), so an `n_frames`-frame GIF
-    costs about `n_frames` times one PNG render.
-
-    Do not confuse this module's two different `frame_idx` meanings: here (as in
-    `render_rt_tier_png`) `frame_idx`/`seed` select which scenario is DRAWN (see
-    `build_rt_tier_scenario`'s "Determinism" section) -- a different concept from the
-    per-animation-frame `frame_idx` that `_build_rt_scene_for_render`/`build_rt_scene`
-    take internally, once per k in `range(n_frames)` below, to place objects at that
-    motion step of the SAME drawn scenario.
-
-    `n_frames` is resolved via `build_rt_tier_scenario(..., num_frames=n_frames,
-    dt=1/cfg.frame_rate_hz)` -- passing `dt` here is load-bearing: `Motion.velocity` is
-    stored as a per-frame displacement, so the function's own `dt=1.0` default would
-    move every object `cfg.frame_rate_hz` times too far per animation frame (the exact
-    bug fixed in commit c212076, "RT targets ... moved 10x too fast when they moved").
-
-    The camera is ONE fixed overhead position for the whole animation -- fit against the
-    UNION of every animation frame's object positions (not just frame 0), so a target
-    that drifts across the scene never gets clipped mid-GIF and the camera itself never
-    pans (all apparent motion is real object motion). See `TOP_DOWN_CAMERA_DIR`/
-    `_build_camera` for why a genuine overhead view needs its own camera-construction
-    code path rather than a near-vertical `camera_dir` passed through `Camera.look_at()`.
-
-    Each frame is captioned with a frame counter and a colour-key LEGEND (`_overlay_
-    legend`) naming every `object_class` actually present in this draw (see
-    `rt_scene_build._default_object_render_color` for the colour mapping) plus the
-    radar's amber marker -- the whole point of a review render is that a viewer can tell
-    a pedestrian from a clutter box, which a bare colour swatch cannot do alone.
+def _render_rt_topdown_frames(scenario, cfg, *, n_frames: int, dt: float,
+                              resolution=(640, 480), num_samples: int = 64,
+                              use_local_assets: bool = True,
+                              material_policy: str = "extrapolated",
+                              stand_in_material: str = "concrete",
+                              caption_frames: bool = True) -> List[Any]:
+    """Ray-trace `n_frames` TOP-DOWN camera frames of an ALREADY-BUILT `scenario`, at
+    successive motion steps `frame_idx=0..n_frames-1`, under ONE fixed camera fit to the
+    union of every frame's object positions. This is `render_rt_topdown_gif`'s own
+    per-frame rendering loop/camera-fit logic, split out so a caller that already owns a
+    `scenario` (e.g. `render_scene_gif_2x2`, which must share ITS `scenario`/frame
+    indices with the analytic bird's-eye/range-azimuth panels) can drive the same
+    machinery without an independent scenario draw. `render_rt_topdown_gif` itself calls
+    this too, unchanged in behaviour. Needs Sionna RT (imported lazily). Returns a list
+    of `PIL.Image.Image` (RGB), NOT saved to a file. `caption_frames=False` still draws
+    the colour-key legend but drops the per-frame "top-down frame k/n" title bar, for a
+    caller that embeds each frame inside its own titled subplot.
     """
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
     import sionna.rt as rt
     from PIL import Image
 
-    from e2e.ml.radar_config import PRESETS
     from e2e.ml.rt_gen import _box_mesh_path
     from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
                                        _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
-    from e2e.ml.rt_scenes import _footprint_radius, build_rt_tier_scenario, tier_summary
+    from e2e.ml.rt_scenes import _footprint_radius, tier_summary
     from e2e.ml.scatterers import frame_scatterers
     from e2e.scenario import ObjectKind
 
-    if cfg is None:
-        cfg = PRESETS["radial_like"]
     if n_frames < 1:
         raise ValueError(f"n_frames must be >= 1, got {n_frames}")
-
-    dt = 1.0 / float(cfg.frame_rate_hz)
-    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed,
-                                      num_frames=n_frames, dt=dt,
-                                      use_local_assets=use_local_assets)
 
     radar_node = scenario.nodes[0]
     radar_pos = np.asarray(radar_node.position, dtype=float)
@@ -977,12 +948,185 @@ def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: 
                                           resolution=tuple(resolution), num_samples=num_samples,
                                           fov=_RENDER_FOV_DEG, show_devices=True)
             img = Image.open(frame_path).convert("RGB")
-            _overlay_legend(img, legend_entries,
-                            title=f"{scenario.name}  top-down  frame {k + 1}/{n_frames}")
+            title = f"{scenario.name}  top-down  frame {k + 1}/{n_frames}" if caption_frames else None
+            _overlay_legend(img, legend_entries, title=title)
             frames.append(img)
+
+    return frames
+
+
+def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: int = 8,
+                          frame_idx: int = 0, seed: int = 0, resolution=(640, 480),
+                          num_samples: int = 64, use_local_assets: bool = True,
+                          material_policy: str = "extrapolated",
+                          stand_in_material: str = "concrete") -> Path:
+    """Ray-trace a TOP-DOWN animated GIF of `e2e.ml.rt_scenes` tier `tier`: ONE scenario,
+    objects moving over TIME. Needs Sionna RT; each animation frame is a plain geometry
+    render (no path solve, same as `render_rt_tier_png`), so an `n_frames`-frame GIF
+    costs about `n_frames` times one PNG render.
+
+    Do not confuse this module's two different `frame_idx` meanings: here (as in
+    `render_rt_tier_png`) `frame_idx`/`seed` select which scenario is DRAWN (see
+    `build_rt_tier_scenario`'s "Determinism" section) -- a different concept from the
+    per-animation-frame `frame_idx` that `_build_rt_scene_for_render`/`build_rt_scene`
+    take internally, once per k in `range(n_frames)` (inside `_render_rt_topdown_frames`),
+    to place objects at that motion step of the SAME drawn scenario.
+
+    `n_frames` is resolved via `build_rt_tier_scenario(..., num_frames=n_frames,
+    dt=1/cfg.frame_rate_hz)` -- passing `dt` here is load-bearing: `Motion.velocity` is
+    stored as a per-frame displacement, so the function's own `dt=1.0` default would
+    move every object `cfg.frame_rate_hz` times too far per animation frame (the exact
+    bug fixed in commit c212076, "RT targets ... moved 10x too fast when they moved").
+
+    The camera fit, per-frame render loop, and legend overlay are
+    `_render_rt_topdown_frames` (see that function for the camera/legend details); this
+    wrapper only draws the scenario and saves the returned frames to a GIF.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    from e2e.ml.radar_config import PRESETS
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    if cfg is None:
+        cfg = PRESETS["radial_like"]
+    if n_frames < 1:
+        raise ValueError(f"n_frames must be >= 1, got {n_frames}")
+
+    dt = 1.0 / float(cfg.frame_rate_hz)
+    scenario = build_rt_tier_scenario(tier, frame_idx=frame_idx, seed=seed,
+                                      num_frames=n_frames, dt=dt,
+                                      use_local_assets=use_local_assets)
+
+    frames = _render_rt_topdown_frames(
+        scenario, cfg, n_frames=n_frames, dt=dt, resolution=resolution,
+        num_samples=num_samples, use_local_assets=use_local_assets,
+        material_policy=material_policy, stand_in_material=stand_in_material,
+    )
 
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=int(round(1000.0 / fps)), loop=0, optimize=True)
+    return out_path
+
+
+# --------------------------------------------------------------------------------
+# 2x2 combined GIF: analytic bird's-eye + REAL RT top-down render + ideal/non-ideal
+# range-azimuth maps, all four panels driven from ONE scenario/frame index.
+# --------------------------------------------------------------------------------
+def render_scene_gif_2x2(cfg, scenario, out_path, *, n_frames: int = 10, fps: int = 8,
+                         seed: int = 0, snr_db: Optional[float] = 30.0, dpi: int = 90,
+                         n_angle_fft: Optional[int] = None, db_range: float = 80.0,
+                         azimuth_window: Optional[str] = "hann",
+                         rt_resolution=(640, 480), rt_num_samples: int = 64,
+                         use_local_assets: bool = False,
+                         material_policy: str = "extrapolated",
+                         stand_in_material: str = "concrete") -> Path:
+    """2x2 layout: bird's-eye (top-left) | RT top-down camera render (top-right) |
+    ideal-front-end range-azimuth map (bottom-left) | non-ideal range-azimuth map
+    (bottom-right). Needs Sionna RT (imported lazily, via `_render_rt_topdown_frames`)
+    AND a `scenario` with REAL geometry -- i.e. NOT `e2e.ml.scenes.sample_scene`'s
+    `base_scene="synthetic"` point-target scenes, which have no mesh for a camera to
+    render (see `e2e.ml.scatterers.SYNTHETIC_BASE_SCENE`). Build `scenario` with
+    `e2e.ml.rt_scenes.build_rt_tier_scenario(tier, num_frames=n_frames,
+    dt=1/cfg.frame_rate_hz, ...)` instead -- passing `dt` there is load-bearing (see that
+    function's own docstring: omitting it inflates every velocity `frame_rate_hz`-fold).
+
+    SAME-SCENE GUARANTEE: every panel is driven from this one `scenario` object and the
+    same per-animation-frame index `k` -- nothing here draws an independent scenario.
+    The analytic panels use `_resolve_frames`/`frame_scatterers`/`radar_pose`, exactly
+    `render_scene_gif`'s own machinery; the RT panel uses `_render_rt_topdown_frames`
+    (`render_rt_topdown_gif`'s own per-frame camera-fit/render loop), called with this
+    same `scenario` and `n_frames` rather than letting it draw one internally.
+
+    Color scale: identical convention to `render_scene_gif` -- ONE global dB reference
+    over every frame and BOTH radar panels (see that function's docstring for the
+    measured 80 dB `db_range` rationale). The RT panel is a plain RGB camera image, so
+    it has no dB scale of its own and is not part of that normalization.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    dt = 1.0 / float(cfg.frame_rate_hz)
+
+    # RT render pass first -- one heavy Sionna job, driven by the SAME scenario/frame
+    # indices the analytic passes below use (see docstring's same-scene guarantee).
+    rt_frames = _render_rt_topdown_frames(
+        scenario, cfg, n_frames=n_frames, dt=dt, resolution=rt_resolution,
+        num_samples=rt_num_samples, use_local_assets=use_local_assets,
+        material_policy=material_policy, stand_in_material=stand_in_material,
+        caption_frames=False,
+    )
+    rt_arrays = [np.asarray(im) for im in rt_frames]
+
+    scats_per_frame, pose_per_frame = _resolve_frames(scenario, cfg, n_frames, dt)
+    grid = LabelGrid.for_config(cfg)
+
+    # Pass over every frame -- same ideal/non-ideal synthesis + global-peak dB reference
+    # as render_scene_gif (see that function for why this is a global, not per-frame,
+    # reference).
+    power_real: List[torch.Tensor] = []
+    power_ideal: List[torch.Tensor] = []
+    sin_az_axis = None
+    for k in range(n_frames):
+        adc = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
+                             snr_db=snr_db, seed=seed + k)
+        p, sin_az_axis = range_azimuth_power(cfg, adc, n_angle_fft=n_angle_fft,
+                                            azimuth_window=azimuth_window)
+        power_real.append(p)
+        adc_ideal = synthesize_adc(cfg, scats_per_frame[k], pose_per_frame[k],
+                                   snr_db=None, seed=seed + k)
+        p_ideal, _ = range_azimuth_power(cfg, adc_ideal, n_angle_fft=n_angle_fft,
+                                        azimuth_window=azimuth_window)
+        power_ideal.append(p_ideal)
+
+    eps = torch.finfo(torch.float32).tiny
+    global_peak = max(float(p.max()) for p in power_real + power_ideal)
+    global_peak = max(global_peak, float(eps))
+
+    def _to_db(p: torch.Tensor) -> torch.Tensor:
+        return 10.0 * torch.log10((p / global_peak).clamp_min(eps))
+
+    vmin, vmax = -float(db_range), 0.0
+
+    fig, ((ax_bev, ax_rt), (ax_ideal, ax_rv)) = plt.subplots(2, 2, figsize=(12, 9), dpi=dpi)
+    fig.suptitle(f"{scenario.name}  ({cfg.name})", fontsize=10)
+
+    def _update(k: int):
+        scatterers = scats_per_frame[k]
+        pose = pose_per_frame[k]
+        _draw_birdseye(ax_bev, scatterers, pose, cfg)
+
+        ax_rt.clear()
+        # aspect="auto" fills the (fixed) subplot cell exactly -- avoids letterboxing
+        # when the RT render's pixel aspect ratio doesn't exactly match the cell's.
+        ax_rt.imshow(rt_arrays[k], aspect="auto")
+        ax_rt.set_title("RT top-down render (real Sionna RT geometry)")
+        ax_rt.set_xticks([])
+        ax_rt.set_yticks([])
+
+        _draw_radar_view(ax_ideal, cfg, grid, _to_db(power_ideal[k]), sin_az_axis,
+                         scatterers, pose, title="Ideal front end: scene only",
+                         vmin=vmin, vmax=vmax)
+        _draw_radar_view(ax_rv, cfg, grid, _to_db(power_real[k]), sin_az_axis,
+                         scatterers, pose, title="Non-ideal front end",
+                         vmin=vmin, vmax=vmax)
+        return ()
+
+    # Same one-layout-pass-then-freeze trick as render_scene_gif (see its comment) --
+    # keeps every grabbed frame's axes positions identical.
+    _update(0)
+    fig.tight_layout(rect=(0, 0, 0.96, 0.94))
+    mappable = plt.cm.ScalarMappable(norm=Normalize(vmin=vmin, vmax=vmax), cmap="inferno")
+    fig.colorbar(mappable, ax=[ax_ideal, ax_rv], fraction=0.03, pad=0.02,
+                 label="power (dB, rel. animation peak)")
+    fig.canvas.draw()
+
+    writer = PillowWriter(fps=fps)
+    with writer.saving(fig, str(out_path), dpi=dpi):
+        for k in range(n_frames):
+            _update(k)
+            writer.grab_frame()
+    plt.close(fig)
     return out_path
 
 
@@ -993,7 +1137,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m e2e.ml.render_scene",
         description="Render an animated bird's-eye + radar-view GIF of a sampled e2e.ml scene "
-                    "(or, with --rt, a single ray-traced camera PNG of an e2e.ml.rt_scenes tier).",
+                    "(or, with --rt, a single ray-traced camera PNG; --rt-topdown-gif, a "
+                    "ray-traced top-down GIF; --rt-panel, a 2x2 bird's-eye+RT+ideal+non-ideal "
+                    "GIF -- all of an e2e.ml.rt_scenes tier).",
     )
     p.add_argument("--tier", required=True,
                    help="difficulty tier (e2e.ml.scenes.DIFFICULTY_TIERS, or "
@@ -1016,6 +1162,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "time, one scenario draw) instead of a single camera PNG (needs Sionna "
                         "RT; see render_rt_topdown_gif). Uses --frames/--fps like the analytic "
                         "GIF mode; implies --rt's tier vocabulary")
+    p.add_argument("--rt-panel", action="store_true",
+                   help="2x2 GIF: bird's-eye | RT top-down camera render | ideal-front-end "
+                        "range-azimuth | non-ideal range-azimuth, all four panels driven from ONE "
+                        "e2e.ml.rt_scenes RT-tier scenario (needs Sionna RT; see "
+                        "render_scene_gif_2x2). Implies --rt's tier vocabulary, not "
+                        "e2e.ml.scenes.DIFFICULTY_TIERS -- an analytic sample_scene() scenario has "
+                        "no mesh for a camera to render.")
     p.add_argument("--frame-idx", type=int, default=0, help="RT mode: tier sample index (see rt_scenes)")
     p.add_argument("--no-local-assets", action="store_true",
                    help="RT mode: disable the local (unshipped) higher-fidelity mesh pool, "
@@ -1046,6 +1199,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                                          use_local_assets=not args.no_local_assets)
         size_mb = out_path.stat().st_size / 1e6
         print(f"wrote {out_path} ({size_mb:.2f} MB, RT tier {args.tier} top-down, "
+             f"{args.frames} frames @ {args.fps} fps)")
+        return 0
+
+    if args.rt_panel:
+        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
+
+        if args.tier not in RT_DIFFICULTY_TIERS:
+            print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
+            return 2
+        dt = 1.0 / float(cfg.frame_rate_hz)
+        scenario = build_rt_tier_scenario(args.tier, frame_idx=args.frame_idx, seed=args.seed,
+                                          num_frames=args.frames, dt=dt,
+                                          use_local_assets=not args.no_local_assets)
+        out_path = render_scene_gif_2x2(cfg, scenario, args.out, n_frames=args.frames,
+                                        fps=args.fps, seed=args.seed, snr_db=args.snr_db,
+                                        dpi=args.dpi, use_local_assets=not args.no_local_assets)
+        size_mb = out_path.stat().st_size / 1e6
+        print(f"wrote {out_path} ({size_mb:.2f} MB, RT tier {args.tier} 2x2, "
              f"{args.frames} frames @ {args.fps} fps)")
         return 0
 
