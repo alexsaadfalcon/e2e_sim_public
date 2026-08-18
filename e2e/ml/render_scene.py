@@ -461,6 +461,10 @@ _RENDER_FOV_DEG = 50.0                  # explicit (not Sionna's 45 deg default)
 # occasional oversized local asset -- e.g. the ~16 m tractor-trailer, see rt_gen's
 # LOCAL_ASSET_SPECS -- doesn't get clipped at the frame edge).
 _OBJECT_FRAMING_RADIUS_M = 9.0
+# Slack multiplied onto the fitted camera distance, so the outermost framed point sits
+# just inside the frame rather than exactly on its edge. `render_rt_tier_png(zoom=...)`
+# divides this; it is named rather than inlined so the two stay in one place.
+_RENDER_CAMERA_MARGIN = 1.2
 
 # Overhead ("top-down") camera direction: pass this as `camera_dir` for a true
 # vertical view (see `_build_camera`'s docstring for why straight-down needs its own
@@ -496,7 +500,8 @@ _TOP_DOWN_YAW_RAD = math.pi / 2.0
 
 
 def _fit_camera_position(points: np.ndarray, radii: np.ndarray, *, camera_dir,
-                         fov_deg: float, aspect: float, margin: float = 1.2):
+                         fov_deg: float, aspect: float,
+                         margin: float = _RENDER_CAMERA_MARGIN):
     """`(camera_position, look_at)` that keeps every `points[i]` (inflated by
     `radii[i]`) inside a `fov_deg`-wide (horizontal, Mitsuba `fov_axis="x"` convention)
     camera looking along `-camera_dir` at the points' centroid, positioned back along
@@ -635,7 +640,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
                        resolution=(1280, 720), camera_dir=(-1.0, -1.0, 1.15),
                        num_samples: int = 128, use_local_assets: bool = True,
                        caption: bool = True, material_policy: str = "extrapolated",
-                       stand_in_material: str = "concrete"):
+                       stand_in_material: str = "concrete", zoom: float = 1.0):
     """Ray-trace `e2e.ml.rt_scenes` tier `tier` and save a camera render (array +
     objects) as a PNG at `out_path`. Needs Sionna RT; this is a plain geometry render
     (no path solve -- `Scene.render_to_file` needs no `PathSolver` output unless a
@@ -743,10 +748,19 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     for o in scenario.objects:
         points.append(np.asarray(o.position, dtype=float))
         radii.append(_OBJECT_FRAMING_RADIUS_M)
+    # `zoom` > 1 pulls the camera in by shrinking the fit margin. The fit above frames
+    # the radar marker AND every object, and the radar sits at the edge of the object
+    # cluster rather than inside it, so the automatic framing is necessarily wide --
+    # correct for an overview, too wide to read a pedestrian. Zoom trades guaranteed
+    # "everything is in frame" for legibility, so it is opt-in and defaults to 1.0
+    # (unchanged framing); at zoom > ~1.4 the radar marker starts leaving the frame.
+    if not zoom > 0.0:
+        raise ValueError(f"zoom must be > 0, got {zoom}")
     cam_pos, centroid = _fit_camera_position(np.asarray(points, dtype=float),
                                              np.asarray(radii, dtype=float),
                                              camera_dir=camera_dir, fov_deg=_RENDER_FOV_DEG,
-                                             aspect=resolution[0] / resolution[1])
+                                             aspect=resolution[0] / resolution[1],
+                                             margin=_RENDER_CAMERA_MARGIN / float(zoom))
     camera = _build_camera(cam_pos, centroid, rt)
 
     rt_scene.scene.render_to_file(camera=camera, filename=str(out_path),
