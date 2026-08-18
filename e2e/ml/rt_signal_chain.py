@@ -676,6 +676,66 @@ def _rt_phase_centres(paths, rt_scene) -> dict:
     return out
 
 
+def _element_field_amplitude(pattern: str, boresight, direction) -> float:
+    """|field| of ONE array element in `direction`, for Sionna's named element `pattern`.
+
+    Gain, not decoration. The traced diffuse return already receives this factor -- Sionna
+    applies the element pattern inside the solve -- while `coherent_target_cfr` synthesizes
+    its return analytically and so has to apply it explicitly. When it did not, and the
+    scene used the shipped `tr38901` element, 91% of every target's RCS (the coherent
+    fraction at `S=0.3`) was radiated and received isotropically while the 9% diffuse
+    remainder got the full directive gain -- suppressing targets relative to a background
+    that was never penalised the same way. See notes/ESTABLISHED_FACTS.md F32.
+
+    Convention, calibrated against Sionna's own pattern functions rather than assumed:
+    `v_tr38901_pattern(theta, phi)` returns a complex FIELD whose `|c|^2` is the gain, and
+    `(theta=pi/2, phi=0)` is the element's boresight (MEASURED: 8.00 dB there for
+    `tr38901`, 0.00 dB for `iso`). `build_rt_scene`'s `look_at` puts the device's local +x
+    along `boresight` and its local +y along `normalise(z_up x boresight)`, so a world
+    direction maps to Sionna's spherical angles through that frame.
+
+    ONE evaluation per target, shared by every element: across a metre-scale aperture at
+    tens of metres the per-element pattern angle varies by well under a degree (the per-
+    element PHASE, which does matter, is handled separately by the path-length term).
+    """
+    if not pattern or str(pattern) == "iso":
+        return 1.0
+    import drjit as dr
+    import mitsuba as mi
+    if mi.variant() is None:
+        mi.set_variant("cuda_ad_mono_polarized")
+    from sionna.rt import antenna_pattern as _ap
+
+    fn = getattr(_ap, f"v_{pattern}_pattern", None)
+    if fn is None:
+        raise ValueError(
+            f"no Sionna element pattern 'v_{pattern}_pattern'; coherent_target_cfr cannot "
+            f"apply the element gain the traced path already has. Known: iso, tr38901, "
+            f"dipole, hw_dipole.")
+
+    b = np.asarray(boresight, dtype=np.float64)
+    b = b / max(float(np.linalg.norm(b)), 1e-12)
+    z_up = np.array([0.0, 0.0, 1.0])
+    y_loc = np.cross(z_up, b)
+    n = float(np.linalg.norm(y_loc))
+    if n < 1e-9:                      # boresight straight up/down: pick any transverse axis
+        y_loc = np.array([0.0, 1.0, 0.0])
+        n = 1.0
+    y_loc = y_loc / n
+    z_loc = np.cross(b, y_loc)
+
+    d = np.asarray(direction, dtype=np.float64)
+    d = d / max(float(np.linalg.norm(d)), 1e-12)
+    dx, dy, dz = float(d @ b), float(d @ y_loc), float(d @ z_loc)
+    theta = math.acos(max(-1.0, min(1.0, dz)))
+    phi = math.atan2(dy, dx)
+
+    c = fn(dr.cuda.ad.Float(theta), dr.cuda.ad.Float(phi))
+    re = float(np.asarray(c[0].numpy()).reshape(-1)[0])
+    im = float(np.asarray(c[1].numpy()).reshape(-1)[0])
+    return math.hypot(re, im)
+
+
 def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
                         n_chirps: Optional[int] = None,
                         scattering_coefficient: float = None,
@@ -742,14 +802,21 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
         tau = (d_r[:, None] + d_t[None, :]) / _C_LIGHT               # [n_rx, n_tx]
         # Sionna's own per-path amplitude convention (VERIFIED against its `paths.a`:
         # |a|^2 = sigma lambda^2 / ((4 pi)^3 R_t^2 R_r^2) reproduces the traced sphere's
-        # measured effective RCS), unit-gain ("iso") elements.
-        amp = (math.sqrt(sigma) * lam
+        # measured effective RCS), times the element field gain applied below.
+        los = p - radar_pos
+        los = los / max(float(np.linalg.norm(los)), 1e-12)
+        # ELEMENT GAIN. The traced diffuse return gets this from Sionna inside the solve;
+        # this analytic term has to apply it explicitly or the two halves of the same
+        # target are radiated through different antennas (F32). Squared because it applies
+        # once on transmit and once on receive -- TX and RX arrays are co-located and share
+        # a boresight, so one evaluation serves both.
+        g_elem = _element_field_amplitude(getattr(rt_scene, "antenna_pattern", "iso"),
+                                          pose.boresight, los)
+        amp = (g_elem * g_elem * math.sqrt(sigma) * lam
                / ((4.0 * math.pi) ** 1.5 * d_r[:, None] * d_t[None, :]))
         # Physical Doppler: f_D = -2 v_r / lambda, v_r receding-positive (see the module
         # docstring's sign discussion -- the chain's conjugation turns this into
         # rd_synth's chirp-to-chirp progression).
-        los = p - radar_pos
-        los = los / max(float(np.linalg.norm(los)), 1e-12)
         v_r = float(np.dot(np.asarray(sc.velocity, dtype=np.float64), los))
         f_d = (-2.0 * v_r / lam) if apply_doppler else 0.0
 

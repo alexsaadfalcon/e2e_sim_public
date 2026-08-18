@@ -669,6 +669,13 @@ class RTScene:
     cfg: Any                          # RadarConfig
     base_scene: str
     f_center_hz: float
+    # The ELEMENT pattern both arrays were built with. Recorded on the scene rather than
+    # left implicit because the coherent-target path (`rt_signal_chain.coherent_target_cfr`)
+    # has to apply the SAME element gain the traced diffuse return already got; when the two
+    # disagreed, 91% of every target's energy was synthesized with isotropic elements while
+    # the 9% diffuse remainder received the directive gain. Carrying it here makes them
+    # agree by construction instead of by two call sites remembering to pass the same string.
+    antenna_pattern: str = "iso"
     solver: Any = None                # sionna.rt.PathSolver (created on first solve)
     materials: Dict[str, Any] = field(default_factory=dict)
 
@@ -1027,4 +1034,5 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
         materials[obj.name] = mat
 
     return RTScene(scene=scene, tx=tx, rx=rx, objects=objects, cfg=cfg,
-                   base_scene=base_scene, f_center_hz=f_center, materials=materials)
+                   base_scene=base_scene, f_center_hz=f_center,
+                   antenna_pattern=str(pattern), materials=materials)
