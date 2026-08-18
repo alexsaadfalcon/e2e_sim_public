@@ -183,13 +183,25 @@ def _degenerate_runs(gaps, threshold, min_len=2):
     return [r for r in runs if r[1] - r[0] + 1 >= min_len]
 
 
-def _recovered_windows(gaps, threshold, min_len=2):
-    """Runs of frames ABOVE threshold that sit between two collapses — the recoveries."""
+def _recovered_windows(gaps, threshold, min_len=2, include_trailing=False):
+    """Runs of frames ABOVE threshold that sit between two collapses — the recoveries.
+
+    `include_trailing` also counts the stretch AFTER the final collapse. It is off by
+    default because a run that merely ends without collapsing again has not demonstrated
+    anything; but the `--frame-order collapse-window` sequence is built as
+    pre / degenerate / recovery precisely so that the tail IS the recovery, and with a
+    single collapse in the sequence the between-collapses rule finds nothing at all --
+    so the figure silently loses the third act it was ordered to show.
+    """
     runs = _degenerate_runs(gaps, threshold, min_len=1)
     out = []
     for (_, end_prev), (start_next, _) in zip(runs, runs[1:]):
         if start_next - end_prev - 1 >= min_len:
             out.append((end_prev + 1, start_next - 1))
+    if include_trailing and runs:
+        last_end = runs[-1][1]
+        if len(gaps) - last_end - 1 >= min_len:
+            out.append((last_end + 1, len(gaps) - 1))
     return out
 
 
@@ -208,41 +220,142 @@ _ORDER_NOTE = ("Frame order constructed: played forward into the collapse, then 
                "for 69 of 100 frames. The tracker's response is real; the ordering is not.")
 
 
+def _median(xs):
+    ys = sorted(xs)
+    n = len(ys)
+    if n == 0:
+        return float("nan")
+    return ys[n // 2] if n % 2 else 0.5 * (ys[n // 2 - 1] + ys[n // 2])
+
+
+def _fixed_effort_cost(series, runs, threshold=None, tail_factor=3.0):
+    """What a collapse costs ONE fixed-effort arm. Returns a dict, not a mean.
+
+    MEDIANS, not means, and the reason is the finding itself. An adversarial review
+    recomputed both on the same 69-frame run and found they disagree by a factor of
+    nearly three on the high-effort arm:
+
+        1 pass/frame  : mean 2.43x, median 2.32x   -> agree; the cost is UNIFORM
+        60 passes/frame: mean 4.48x, median 1.67x  -> disagree; the cost is a TAIL
+
+    At 60 passes the typical collapsed frame barely notices the collapse (1.67x), but 8
+    of 25 collapsed frames blow past three times the healthy median, the worst reaching
+    ~20x it. Reporting the mean alone says "degeneracy costs 4.6x at high effort", which
+    reads as a uniform degradation and is not what the data shows; reporting the median
+    alone says "1.7x, barely anything" and hides the blow-ups that actually break a
+    tracker. So this returns both the median ratio AND the size of the tail, and the
+    figure prints both.
+
+    Only meaningful for an arm whose effort does NOT change with the gap -- that is the
+    whole point (see `build_figure`). Returns NaNs rather than raising when there is no
+    collapse in the sequence, so a caller plotting a non-degenerate run still works.
+    """
+    nan = float("nan")
+    empty = {"pre": nan, "deg": nan, "ratio": nan, "n_tail": 0, "n_deg": 0, "worst": nan}
+    if not runs:
+        return empty
+    first_lo = runs[0][0]
+    pre = [x for x in series[:first_lo] if x == x]
+    idx = [i for lo, hi in runs for i in range(lo, hi + 1)]
+    deg = [series[i] for i in idx if series[i] == series[i]]
+    if not pre or not deg:
+        return empty
+    pre_m = _median(pre)
+    deg_m = _median(deg)
+    cut = tail_factor * pre_m
+    return {
+        "pre": pre_m,
+        "deg": deg_m,
+        "ratio": (deg_m / pre_m if pre_m > 0 else nan),
+        "n_tail": sum(1 for x in deg if x > cut),
+        "n_deg": len(deg),
+        "worst": max(deg),
+        "worst_ratio": (max(deg) / pre_m if pre_m > 0 else nan),
+    }
+
+
 def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_order=False,
                  const_hi=None):
+    """Three stacked panels: tracking error, the singular-value gap, and effort spent.
+
+    WHY THIS FIGURE IS LAID OUT THE WAY IT IS. An earlier version drew the reactive-gate
+    arm as the visual headline, and a reader looking at it concluded the exact OPPOSITE
+    of the finding: the gate's error line DIPS the instant the shaded collapse begins and
+    leaps the instant it ends, so the figure appeared to say the tracker does BETTER when
+    the scene is rank-deficient. The owner read it that way, which means it read that way.
+
+    It is an artifact of a confound, not a result. `AdaOjaBlock.effective_n_refine` sets
+    the gate arm's refinement passes FROM `sv_gap_norm` -- the same quantity that defines
+    "degenerate" -- so that arm's compute steps 1 -> 60 -> 1 exactly at the shaded
+    boundaries (measured: mean 1.0 outside, exactly 60.0 inside, zero variance). Its error
+    curve therefore mixes two simultaneous causes into one line and cannot be read as a
+    measurement of what degeneracy costs.
+
+    What degeneracy costs has to be measured at FIXED effort, and both fixed-effort arms
+    agree that it costs a lot (measured over 69 munich frames):
+
+        1 pass/frame  : 0.537 pre-collapse -> 1.304 collapsed   (2.4x worse)
+        60 passes/frame: 0.037 pre-collapse -> 0.164 collapsed   (4.5x worse)
+
+    and the ground truth itself corroborates it -- the true subspace's frame-to-frame
+    chordal drift rises 0.278 -> 0.817 (2.9x MORE rotation) while the gap is collapsed,
+    with effective rank falling 76.8 -> 46.3. Degeneracy makes the target both lower-rank
+    and faster-moving. So:
+
+      * the two FIXED-EFFORT arms are drawn as solid, full-weight lines -- they are the
+        honest measurement, and their shape (low, rising through the collapse, recovering)
+        is the finding;
+      * the reactive-gate arm is drawn thinner and dotted, and is annotated as bought,
+        with the compute panel directly beneath it carrying the same shading;
+      * the headline callout states the fixed-effort cost FIRST and the gate's compute
+        trade second.
+    """
     frames = range(len(refine["subspace_err"]))
     runs = _degenerate_runs(refine["sv_gap_norm"], threshold)
-    recoveries = _recovered_windows(refine["sv_gap_norm"], threshold)
+    recoveries = _recovered_windows(refine["sv_gap_norm"], threshold,
+                                    include_trailing=constructed_order)
 
+    # figsize 11.4 x 8.7 (was 9.0 x 8.4): a legibility review measured this figure's
+    # bottom notes/legend/stats-box text at 6-10 px once scaled into the deck's
+    # tracking_refine slide box (5.8 x 5.15 in, aspect 1.13) -- below the ~11 px
+    # screen-share floor. The fonts below are raised to compensate. Width goes up more
+    # than height: this box is close to SQUARE, so every extra wrapped LINE divides the
+    # box-fit scale down (it is the binding, height-bound dimension) -- wider lets the
+    # bottom notes wrap to fewer lines and the legend sit in one row instead of two.
     fig, (ax_err, ax_gap, ax_ref) = plt.subplots(
-        3, 1, figsize=(9.0, 8.4), sharex=True,
-        gridspec_kw={"height_ratios": [2.1, 1.35, 1.0], "hspace": 0.16})
+        3, 1, figsize=(10.3, 8.6), sharex=True,
+        gridspec_kw={"height_ratios": [2.1, 1.35, 1.0], "hspace": 0.20})
 
-    ax_err.plot(frames, base["subspace_err"], color=C_BASE, lw=2.0,
-                label=f"fixed effort (gap_response='none', {N_REFINE} pass/frame)")
-    ax_err.plot(frames, refine["subspace_err"], color=C_REFINE, lw=2.0,
-                label=f"reactive gate (gap_response='refine', up to {N_REFINE_HI})")
-    # The arm that keeps the figure honest. Without it a reader concludes the GATE is what
-    # makes tracking good; with it they can see that constant high effort is better
-    # everywhere, and that what the gate actually buys is COMPUTE, not accuracy. See F36.
+    # --- the honest arms: effort held fixed, so the curve measures the SCENE ----------
+    ax_err.plot(frames, base["subspace_err"], color=C_BASE, lw=2.2,
+                label=f"fixed effort — {N_REFINE} pass/frame")
     if const_hi is not None:
-        ax_err.plot(frames, const_hi["subspace_err"], color=C_CONST, lw=1.8, ls="--",
-                    label=f"constant high effort ({N_REFINE_HI} passes EVERY frame)")
+        ax_err.plot(frames, const_hi["subspace_err"], color=C_CONST, lw=2.2,
+                    label=f"fixed effort — {N_REFINE_HI} passes/frame")
+    # --- the confounded arm: its own effort tracks the gap, so it is drawn as secondary
+    ax_err.plot(frames, refine["subspace_err"], color=C_REFINE, lw=1.5, ls=":",
+                label=f"reactive gate — {N_REFINE} to {N_REFINE_HI}, self-selected")
     ax_err.set_ylabel("subspace error", fontsize=12)
     ax_err.set_yscale("log")
-    # The two-arm legend lives BELOW the panels, not inside ax_err. In-axes it sat upper
-    # left, which is exactly where the baseline arm runs while the gap is collapsed
-    # (measured 1.26-1.66 there) -- so the legend hid the divergence the figure exists to
-    # show, and the curve read as missing data rather than as a covered line.
-    ax_err.set_title("Reactive refinement through a subspace collapse and back",
-                     fontsize=14, fontweight="bold")
+    # Headroom ABOVE the data for the stats box, rather than moving the box around the
+    # panel looking for a gap. On a log axis the curves already occupy nearly two
+    # decades, so every in-axes corner is over some arm at some frame; a quarter-decade
+    # of empty space at the top is the only placement that is safe by construction.
+    # No y-headroom hack here any more. Reserving empty plot area for the stats box cost
+    # nearly half the error panel once the box was raised to the 17 pt legibility floor,
+    # which squashed the three curves into the bottom third. The box now lives ABOVE the
+    # axes (see the fig.text near the end of this function), so it competes with nothing.
+    fig.suptitle("Rank degeneracy costs accuracy at low effort, and the tail at high",
+                 fontsize=16, fontweight="bold", y=0.995)
 
     ax_gap.plot(frames, refine["sv_gap_norm"], color=C_GATE, lw=1.8)
     ax_gap.axhline(threshold, color=C_REFINE, ls="--", lw=1.4,
                    label=f"gap_threshold = {threshold}")
     ax_gap.set_ylabel("sv_gap_norm", fontsize=12)
     ax_gap.set_yscale("log")
-    ax_gap.legend(fontsize=10.5, loc="lower left", framealpha=0.95)
+    # Lower RIGHT: the gap curve dips to its minimum in the left half of the collapsed
+    # window, which is exactly where a lower-left legend sat. It is high on the right.
+    ax_gap.legend(fontsize=17, loc="lower right", framealpha=0.95)
 
     if refine["n_refine_used"]:
         ax_ref.step(frames, refine["n_refine_used"], where="mid", color=C_REFINE, lw=1.8)
@@ -252,17 +365,11 @@ def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_or
     for ax in (ax_err, ax_gap, ax_ref):
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=11)
-        # Shade every collapsed stretch on every panel, so the three panels read as one
-        # event -- and so the unshaded window between them reads as the recovery.
         for lo, hi in runs:
             ax.axvspan(lo - 0.5, hi + 0.5, color="#000000", alpha=0.07, lw=0)
         for lo, hi in recoveries:
             ax.axvspan(lo - 0.5, hi + 0.5, color=C_REFINE, alpha=0.10, lw=0)
 
-    # Both state labels live on the gap panel -- that is the panel where "collapsed" and
-    # "recovered" are *defined*, and its upper region is empty because the gap runs low
-    # exactly when it is collapsed. (They were on the error panel and collided with its
-    # legend, which is wide enough to cover the middle of the run.)
     if runs:
         lo, hi = max(runs, key=lambda r: r[1] - r[0])
         ax_gap.text((lo + hi) / 2.0, 0.94, "gap collapsed",
@@ -273,35 +380,55 @@ def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_or
                     transform=ax_gap.get_xaxis_transform(), ha="center", va="top",
                     fontsize=11.5, color=C_REFINE, fontweight="bold")
 
-    # The quotable number belongs ON the figure, so a caption cannot drift from it.
-    stats = summarize(base, refine, threshold)
-    drop = stats.get("degenerate_improvement")
-    if drop is not None and drop == drop:
-        # State the TRADE, not just the win. "N% lower error while collapsed" is true but
-        # compares 1 pass against N_REFINE_HI passes inside the collapsed window -- it
-        # measures the value of the compute, not of reacting to the gap, and the same
-        # number would appear if the gate fired at random. With the constant-effort arm
-        # present the honest claim is the compute saving. See notes F36.
-        if const_hi is not None and const_hi.get("n_refine_used"):
-            used = refine["n_refine_used"]
-            mean_gated = (sum(used) / len(used)) if used else float("nan")
-            msg = (f"gate matches constant effort while collapsed, "
-                   f"for {mean_gated / max(N_REFINE_HI, 1) * 100:.0f}% of its compute")
-        else:
-            msg = f"while collapsed: {drop * 100:.0f}% lower error than fixed 1-pass effort"
-        ax_err.text(0.985, 0.06, msg,
-                    transform=ax_err.transAxes, ha="right", va="bottom", fontsize=11.5,
-                    color=C_REFINE, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.35", facecolor="#FFFFFF",
-                              edgecolor=C_REFINE, linewidth=1.1, alpha=0.95))
+    # The one line on the compute panel that stops the gate arm being misread. It sits on
+    # the panel that CAUSES the dip, directly under the dip.
+    if refine["n_refine_used"] and runs:
+        lo, hi = max(runs, key=lambda r: r[1] - r[0])
+        ax_ref.annotate(f"the gate's dip above is bought here: "
+                        f"{N_REFINE} → {N_REFINE_HI} passes",
+                        xy=((lo + hi) / 2.0, N_REFINE_HI), xytext=(0.5, 0.42),
+                        textcoords="axes fraction", ha="center", va="center",
+                        fontsize=10.5, color=C_REFINE, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor="#FFFFFF",
+                                  edgecolor=C_REFINE, linewidth=1.0, alpha=0.95))
+
+    # --- the quotable numbers, computed from the SAME arrays that were plotted --------
+    lines = []
+    b = _fixed_effort_cost(base["subspace_err"], runs)
+    if b["ratio"] == b["ratio"]:
+        lines.append(f"at {N_REFINE} pass/frame: median error ×{b['ratio']:.1f} while "
+                     f"collapsed ({b['pre']:.2f} → {b['deg']:.2f}), every frame")
+    if const_hi is not None:
+        c = _fixed_effort_cost(const_hi["subspace_err"], runs)
+        if c["ratio"] == c["ratio"]:
+            lines.append(f"at {N_REFINE_HI} passes/frame: median only ×{c['ratio']:.1f} "
+                         f"— but {c['n_tail']} of {c['n_deg']} collapsed frames blow "
+                         f"out, worst ×{c['worst_ratio']:.0f}")
+    if refine["n_refine_used"] and const_hi is not None:
+        used = refine["n_refine_used"]
+        mean_gated = sum(used) / len(used) if used else float("nan")
+        lines.append(f"the gate reaches the {N_REFINE_HI}-pass floor for "
+                     f"{mean_gated / max(N_REFINE_HI, 1) * 100:.0f}% of its compute")
+    if lines:
+        # ABOVE the axes, not inside them. Every in-axes corner is over some arm at some
+        # frame on a log plot spanning two decades, and the one corner that looked free
+        # (upper left) is exactly where the 1-pass arm plateaus during the collapse.
+        fig.text(0.5, 0.955, "\n".join(lines), ha="center", va="top", fontsize=15,
+                 color="#222222",
+                 bbox=dict(boxstyle="round,pad=0.35", facecolor="#FFFFFF",
+                           edgecolor=C_GATE, linewidth=1.1, alpha=0.95))
+        # Make room for it: push the panels down by roughly the box's height.
+        fig.subplots_adjust(top=0.955 - 0.037 * len(lines))
 
     handles, labels = ax_err.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.065),
-               ncol=2, fontsize=10.5, framealpha=0.95)
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.058),
+               ncol=2, fontsize=17, framealpha=0.95)
 
+    # fontsize=17 (was 9.0): same measured legibility floor as the legend/stats box
+    # above. Room given via the taller figsize, not via any change to the note text.
     notes = [_ORACLE_NOTE] + ([_ORDER_NOTE] if constructed_order else [])
-    fig.text(0.5, -0.005 - 0.030 * (len(notes) - 1), "\n".join(notes), ha="center",
-             va="top", fontsize=9.0, color="#555555", fontstyle="italic", wrap=True)
+    fig.text(0.5, -0.012 - 0.038 * (len(notes) - 1), "\n".join(notes), ha="center",
+             va="top", fontsize=17, color="#555555", fontstyle="italic", wrap=True)
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -309,11 +436,16 @@ def build_figure(base, refine, out_path, threshold=GAP_THRESHOLD, constructed_or
     return out_path
 
 
-def summarize(base, refine, threshold=GAP_THRESHOLD):
-    """Numbers to print (and to quote in a caption) rather than eyeball off the figure."""
+def summarize(base, refine, threshold=GAP_THRESHOLD, include_trailing=False):
+    """Numbers to print (and to quote in a caption) rather than eyeball off the figure.
+
+    `include_trailing` is forwarded to `_recovered_windows` and must be passed the same
+    way `build_figure` gets it, or these printed diagnostics describe a different set of
+    recovery windows than the figure shades.
+    """
     gaps = refine["sv_gap_norm"]
     runs = _degenerate_runs(gaps, threshold)
-    recoveries = _recovered_windows(gaps, threshold)
+    recoveries = _recovered_windows(gaps, threshold, include_trailing=include_trailing)
     stats = {
         "n_frames": len(refine["subspace_err"]),
         "degenerate_runs": runs,
@@ -447,11 +579,15 @@ def main(argv=None):
                                          "const_hi": const_hi}, indent=1))
             print(f"cached diagnostics to {cache}")
 
+    # Bound once and shared: the figure and the printed diagnostics must agree about
+    # whether the tail after the final collapse counts as a recovery window.
+    constructed_order = (args.frame_order == "collapse-window")
     out = build_figure(base, refine, args.out,
-                       constructed_order=(args.frame_order == "collapse-window"),
+                       constructed_order=constructed_order,
                        const_hi=const_hi)
     print(f"wrote {out}")
-    for key, value in summarize(base, refine).items():
+    for key, value in summarize(base, refine,
+                                include_trailing=constructed_order).items():
         print(f"  {key}: {value}")
     return 0
 
