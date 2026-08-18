@@ -63,6 +63,7 @@ import matplotlib.pyplot as plt
 from e2e.scenario import munich_radar_scenario
 from e2e.comms.ofdm import OFDMModem, random_bits, qam_demod
 from e2e.comms import channel as ch
+from e2e.comms.constellation_viz import plot_constellation
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
 from e2e.viz import fig_dir
 
@@ -240,11 +241,11 @@ def main(image=None, image_path=None, show=True, seed=0, force_synthetic=False,
 
     out = {"source": source, "results": results, "tx_syms": tx_data_syms, "original": img}
     if show:
-        _make_figure(img, tx_data_syms, results, operating_points, out["source"])
+        _make_figure(img, tx_data_syms, results, operating_points, out["source"], modem.const)
     return out
 
 
-def _make_figure(original, tx_syms, results, operating_points, source):
+def _make_figure(original, tx_syms, results, operating_points, source, const):
     ncols = 1 + len(operating_points)
     fig, axes = plt.subplots(2, ncols, figsize=(3.2 * ncols, 6.6))
 
@@ -253,13 +254,16 @@ def _make_figure(original, tx_syms, results, operating_points, source):
     axes[0, 0].set_title("Original", fontsize=11)
     axes[0, 0].axis("off")
 
-    axes[1, 0].scatter(tx_syms.real, tx_syms.imag, s=3, alpha=0.35, color="black")
-    axes[1, 0].set_title("TX (ideal)", fontsize=11)
-    axes[1, 0].axis("equal")
-    axes[1, 0].grid(True)
+    # tx_syms sit EXACTLY on the ideal lattice (noiseless TX), so coloring by nearest
+    # constellation point (no separate tx_syms= needed -- it decides against itself)
+    # doubles as a color legend for the per-point panels below, which color by the
+    # SAME transmitted-symbol ground truth. mark_ideal=False: every point already
+    # IS its own ideal marker here, so drawing both on top of each other would just
+    # hide one of the two.
+    plot_constellation(axes[1, 0], tx_syms, const, s=25, title="TX (ideal)",
+                       mark_ideal=False)
     axes[1, 0].tick_params(labelsize=8)
 
-    colors = plt.cm.tab10(np.linspace(0, 1, 10))
     for i, point in enumerate(operating_points):
         col = i + 1
         r = results[point["name"]]
@@ -274,10 +278,12 @@ def _make_figure(original, tx_syms, results, operating_points, source):
         # other panel's axis scale and hide the SHAPE distortion that matters.
         rms = float(np.sqrt(np.mean(np.abs(syms) ** 2))) or 1.0
         syms = syms / rms
-        axes[1, col].scatter(syms.real, syms.imag, s=3, alpha=0.35, color=colors[i % 10])
-        axes[1, col].set_title(f"{point['name']} (unit RMS)", fontsize=11)
-        axes[1, col].axis("equal")
-        axes[1, col].grid(True)
+        # Color by tx_syms (ground truth, same order/length, UNNORMALIZED -- the
+        # normalization above only rescales the plotted x/y, not which ideal point
+        # each sample decides toward) so a wrong-colored point in the wrong cluster
+        # is a genuine symbol error, consistent with the "TX (ideal)" legend panel.
+        plot_constellation(axes[1, col], syms, const, tx_syms=tx_syms, s=3,
+                           title=f"{point['name']} (unit RMS)")
         axes[1, col].tick_params(labelsize=8)
 
     fig.suptitle(f"Image through the OFDM comms link (channel: {source})", fontsize=13)

@@ -34,6 +34,7 @@ from e2e.scenario import munich_isac_scenario
 from e2e.comms.ofdm import OFDMModem, qam_demod, random_bits
 from e2e.comms import channel as ch
 from e2e.comms import isac
+from e2e.comms.constellation_viz import plot_constellation
 from e2e.viz import fig_dir, to_db, imshow_ra
 
 
@@ -175,13 +176,13 @@ def main():
     plt.close()
 
     eq_np = eq.reshape(-1).cpu().numpy()
-    plt.figure()
-    plt.scatter(eq_np.real, eq_np.imag, s=5, alpha=0.4)
-    plt.axis("equal"); plt.grid(True)
-    plt.title(f"ISAC comm RX constellation (SNR={snr_db:.0f} dB, EVM={evm_pct:.1f}%)")
+    ref_np = ref.cpu().numpy()   # ground-truth transmitted symbols (see EVM note above)
+    fig, ax = plt.subplots()
+    plot_constellation(ax, eq_np, modem.const, tx_syms=ref_np,
+                       title=f"ISAC comm RX constellation (SNR={snr_db:.0f} dB, EVM={evm_pct:.1f}%)")
     const_path = os.path.join(FIG_DIR, "isac_constellation.png")
-    plt.savefig(const_path, dpi=120, bbox_inches="tight")
-    plt.close()
+    fig.savefig(const_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
     print(f"[isac] wrote {ra_path}")
     print(f"[isac] wrote {const_path}")

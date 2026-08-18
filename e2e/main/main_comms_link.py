@@ -33,6 +33,7 @@ import matplotlib.pyplot as plt
 from e2e.scenario import munich_radar_scenario
 from e2e.comms.ofdm import OFDMModem, random_bits
 from e2e.comms import channel as ch
+from e2e.comms.constellation_viz import plot_constellation
 from e2e.viz import fig_dir
 
 
@@ -146,18 +147,19 @@ def main():
 
     if constellation_snapshot is not None:
         raw, eq = constellation_snapshot
-        plt.figure(figsize=(8, 4))
-        plt.subplot(1, 2, 1)
-        plt.scatter(raw.real, raw.imag, s=4, alpha=0.4)
-        plt.title("RX data (pre-EQ)")
-        plt.axis("equal"); plt.grid(True)
-        plt.subplot(1, 2, 2)
-        plt.scatter(eq.real, eq.imag, s=4, alpha=0.4)
-        plt.title("RX data (post-unbiased-MMSE-EQ, SNR=20dB)")
-        plt.axis("equal"); plt.grid(True)
+        # tx_data (built once above, unaffected by the SNR loop) is the GROUND-TRUTH
+        # transmitted symbol for every one of these points, in the same order -- pass
+        # it so each point is colored by what it actually WAS, not by a nearest-point
+        # decision (which would make errors invisible; see constellation_viz.py).
+        tx_ref = tx_data.reshape(-1).cpu().numpy()
+        fig, (ax_raw, ax_eq) = plt.subplots(1, 2, figsize=(8, 4))
+        plot_constellation(ax_raw, raw, modem.const, tx_syms=tx_ref,
+                           title="RX data (pre-EQ)")
+        plot_constellation(ax_eq, eq, modem.const, tx_syms=tx_ref,
+                           title="RX data (post-unbiased-MMSE-EQ, SNR=20dB)")
         const_path = os.path.join(FIG_DIR, "comms_link_constellation.png")
-        plt.savefig(const_path, dpi=120, bbox_inches="tight")
-        plt.close()
+        fig.savefig(const_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
         print(f"[comms_link] wrote {ber_path}")
         print(f"[comms_link] wrote {const_path}")
 

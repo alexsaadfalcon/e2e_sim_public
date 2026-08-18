@@ -93,6 +93,7 @@ from e2e.scenario import munich_radar_scenario
 from e2e.comms.ofdm import OFDMModem, random_bits
 from e2e.comms import channel as ch
 from e2e.comms import isac
+from e2e.comms.constellation_viz import plot_constellation
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
 from e2e.viz import fig_dir, to_db
 
@@ -395,14 +396,14 @@ def main(backoff_db_list=None, aggressive_backoff_db=None, fft_size=64, cp_len=1
     if show:
         _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
                       occupied_bw_hz, ranges_i, power_i, ranges_n, power_n,
-                      target_range_m, bits_per_symbol)
+                      target_range_m, bits_per_symbol, modem.const, tx_data_ref)
 
     return results
 
 
 def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
                    occupied_bw_hz, ranges_i, power_i, ranges_n, power_n,
-                   target_range_m, bits_per_symbol):
+                   target_range_m, bits_per_symbol, const, tx_data_ref):
     agg_b = results["aggressive_backoff_db"]
 
     # (1) headline: EVM vs backoff
@@ -422,13 +423,15 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
     # (2) constellation at the aggressive backoff
     eq_ideal = agg["eq_ideal"].reshape(-1).cpu().numpy()
     eq_nonideal = agg["eq_nonideal"].reshape(-1).cpu().numpy()
+    # tx_data_ref is the GROUND-TRUTH transmitted symbol for every point (same order
+    # for both arms -- both were driven from the same tx_freq), so each point is
+    # colored by what it actually WAS, not a nearest-point decision.
+    tx_ref = tx_data_ref.reshape(-1).cpu().numpy()
     fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-    axes[0].scatter(eq_ideal.real, eq_ideal.imag, s=5, alpha=0.4)
-    axes[0].set_title(f"ideal TX ({agg_b:.0f} dB IBO)")
-    axes[0].axis("equal"); axes[0].grid(True)
-    axes[1].scatter(eq_nonideal.real, eq_nonideal.imag, s=5, alpha=0.4, color="tab:orange")
-    axes[1].set_title(f"non-ideal TX ({agg_b:.0f} dB IBO)")
-    axes[1].axis("equal"); axes[1].grid(True)
+    plot_constellation(axes[0], eq_ideal, const, tx_syms=tx_ref,
+                       title=f"ideal TX ({agg_b:.0f} dB IBO)")
+    plot_constellation(axes[1], eq_nonideal, const, tx_syms=tx_ref,
+                       title=f"non-ideal TX ({agg_b:.0f} dB IBO)")
     fig.suptitle("RX constellation post-EQ: AM/AM compression + AM/PM rotation")
     const_path = os.path.join(FIG_DIR, "tx_nonideality_constellation.png")
     fig.savefig(const_path, dpi=120, bbox_inches="tight")
