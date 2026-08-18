@@ -89,10 +89,30 @@ from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObje
 _RANGE_M = (6.0, 34.0)
 _SIN_AZ_RANGE = (-0.6, 0.6)
 
-# Sionna's bundled box mesh (`rt_gen._box_mesh_path`) is a 10x10x5 m primitive; these
-# scalings give ~3-6 m clutter boxes (see the clutter-box loop in
-# `build_rt_tier_scenario`).
-_CLUTTER_BOX_SCALING = (0.3, 0.6)
+# Sionna's bundled box mesh (`rt_gen._box_mesh_path`) is a 10x10x5 m primitive, so the
+# scaling factor here IS the size of the clutter, and it is worth stating what size that
+# should be rather than picking a number that merely looks small next to 10 m.
+#
+# It used to be (0.3, 0.6) -- a 3.0-6.0 m square footprint, 1.5-3.0 m tall. The owner
+# looked at the D2/D3 renders and said the boxes were "gigantic compared to the actual
+# objects", and the measurement agrees: against Sionna's own 4.4 x 1.8 x 1.5 m reference
+# car that is 1.4x the LENGTH, 3.3x the WIDTH and about 9x the VOLUME. An object nine
+# times a car is not roadside clutter; it is a shipping container or a small building,
+# and because `build_rt_scene` adds every scenario object to the traced scene alike,
+# D2/D3 frames were ray-tracing 2-8 of them per scene for real -- returns, occlusion and
+# multipath, not render decoration.
+#
+# Real roadside clutter, for calibration: a wheelie bin is ~0.6 x 0.6 x 1.1 m, a
+# dumpster ~1.8 x 1.2 x 1.2 m, a Jersey barrier ~0.6 m wide and 0.8 m tall, a traffic
+# sign a ~0.75 m panel. (0.10, 0.20) puts the box at a 1.0-2.0 m square footprint,
+# 0.5-1.0 m tall -- bin, barrier and crate scale, which is what the surrounding code
+# means by "clutter".
+#
+# This takes effect on the next corpus generation; frames already written are unaffected
+# and carry the old geometry. Note F29: D1 carries NO clutter boxes and shows the same
+# heavy-tailed background, so this is a scene-realism fix and is NOT claimed to be the
+# cause of the corpus's detection ceiling (that is F35).
+_CLUTTER_BOX_SCALING = (0.10, 0.20)
 
 # Clutter-box line-of-sight avoidance (fix for the occlusion bug: a box sampled from the
 # SAME range/angle envelope as the tier's own vehicle/pedestrian targets could -- and, in
@@ -268,7 +288,11 @@ def _stable_seed(tier: str, frame_idx: int, seed: int) -> int:
 _FOOTPRINT_M = {
     "pedestrian": (0.8, 0.6),
     "sphere": (1.0, 1.0),
-    "scatterer": (6.0, 6.0),      # Sionna's box primitive at our clutter scaling
+    # Sionna's box primitive at our clutter scaling: 10 m * max(_CLUTTER_BOX_SCALING).
+    # This MUST track that constant -- it is the footprint the separation check reserves,
+    # and leaving it at the old 6.0 would keep spacing the scene out for objects three
+    # times the size of the ones actually placed.
+    "scatterer": (2.0, 2.0),
 }
 #: Vehicles vary threefold in length, so they are keyed by class rather than lumped.
 VEHICLE_FOOTPRINT_M: Dict[str, Tuple[float, float]] = {
@@ -600,8 +624,8 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, frame_idx: int = 0, 
         dx, dy = spot
         placed.append((dx, dy, _footprint("scatterer")))
         # Sionna's bundled box mesh is a 10x10x5 m primitive (measured from its own
-        # bbox) -- scaling by _CLUTTER_BOX_SCALING gives ~3-6 m "parked container"
-        # sized clutter, not (unscaled) building-sized blocks.
+        # bbox); scaling by _CLUTTER_BOX_SCALING gives a 1.0-2.0 m footprint, 0.5-1.0 m
+        # tall -- bin/barrier/crate scale. See that constant for why it is not larger.
         scaling = float(rng.uniform(*_CLUTTER_BOX_SCALING))
         pos = _ground_pos(dx, dy, ObjectKind.BOX, None, scaling)
         objects.append(SceneObject(
