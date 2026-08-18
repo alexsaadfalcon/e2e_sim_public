@@ -41,19 +41,32 @@ FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 BAND = (28.5e9, 31.5e9)   # the default pipeline FrequencyPlan band
 N_FREQS = 512
 
-# A second shipped interconnect model: a 77 GHz-automotive-band S21(f), resampled (magnitude
-# from the collaborator's HFSS export, phase reconstructed as minimum-phase -- see the CSV's
-# own header) from a design the collaborator calls "Case3". Case3 is NOT a flattering pick:
-# per the collaborator, it is deliberately the WORST-PERFORMING of six HFSS-measured
-# interconnect designs they supplied, chosen specifically so that if the interconnect had any
-# visible cost to the radar product, this is the case that would show it (a conservative
-# validation bound, not a representative or best-case number). The other five designs are the
-# collaborator's private data and are not referenced anywhere in this repository -- not even
-# their numbers -- beyond that qualitative fact.
-CASE3_INTERCONNECT_CSV = (
-    Path(__file__).resolve().parent.parent / "data" / "interconnect" / "tessera_case3_s21_77ghz.csv"
-)
-CASE3_BAND = (76e9, 81e9)   # automotive radar band the Case3 export is used over
+# The 77 GHz-automotive-band interconnect models: S21(f) resampled from the collaborator's
+# HFSS exports, phase reconstructed as minimum-phase (see each CSV's own header).
+#
+# Case3 was long the only one shipped, on the collaborator's statement that it is the
+# WORST-PERFORMING of their six designs -- a conservative validation bound rather than a
+# representative one. With all six now derived, that statement is MEASURED rather than
+# taken on trust: Case3's median in-band insertion loss is -0.541 dB with 0.113 dB of
+# ripple, against -0.249 to -0.291 dB and <=0.030 dB ripple for the other five. It is
+# indeed the worst, by roughly a factor of two in loss and four in ripple.
+_INTERCONNECT_DATA = Path(__file__).resolve().parent.parent / "data" / "interconnect"
+
+
+def case_csv(n):
+    """Path to the derived transfer function for Tessera CaseN (N = 1..6)."""
+    return _INTERCONNECT_DATA / f"tessera_case{int(n)}_s21_77ghz.csv"
+
+
+#: All six of the collaborator's HFSS-measured designs. As of 2026-08-19 the owner
+#: cleared the derived CSVs for this repository, so the "other five are private, not even
+#: their numbers" restriction above no longer holds and the figures show the whole set.
+#: Derived by `notes/tools/derive_interconnect_csv.py`, which re-derives Case3 and checks
+#: it against the file shipped on 2026-08-10 (max deviation 5.0e-07 dB) before it is
+#: trusted on a new case.
+CASE_NUMBERS = (1, 2, 3, 4, 5, 6)
+CASE3_INTERCONNECT_CSV = case_csv(3)
+CASE3_BAND = (76e9, 81e9)   # automotive radar band the Case exports are used over
 
 # Separate from FIG_DIR (ephemeral, e2e/main/figures/): this is committed, README-facing
 # media, so it is a distinct path -- kept as a module global (not a bound default
@@ -79,6 +92,13 @@ ARM_COLORS = {"ideal": "black", "tessera_tsv": "tab:blue",
               "tessera_case3": "tab:red", "legacy_boxcar": "tab:purple"}
 ARM_STYLES = {"ideal": "-", "tessera_tsv": "--", "tessera_case3": ":",
               "legacy_boxcar": "-."}
+
+#: Per-case styling for the all-six figure. Case3 keeps the red it has everywhere else in
+#: this module, so a reader moving between figures does not have to re-learn it; the other
+#: five take distinct hues. Linestyle is a second, redundant cue for compressed video.
+CASE_COLORS = {1: "tab:olive", 2: "tab:orange", 3: "tab:red",
+               4: "tab:green", 5: "tab:brown", 6: "tab:cyan"}
+CASE_STYLES = {1: "--", 2: "-.", 3: ":", 4: "--", 5: "-.", 6: ":"}
 
 
 def main(show=True, band=BAND, n_freqs=N_FREQS):
@@ -182,20 +202,40 @@ def _mainlobe_metrics(mag_db):
     return width, peak_sidelobe
 
 
-def _interconnect_arms():
-    """The 4 arms shared by every multi-arm figure in this module (ideal, the two
-    measured Tessera datasets, and the legacy boxcar placeholder) -- see
-    `range_profile_comparison`'s docstring for what each one is and is not."""
-    return {
+def _interconnect_arms(all_cases=False):
+    """The arms shared by every multi-arm figure in this module.
+
+    Default is the 4-arm set (ideal, the two measured Tessera datasets, and the legacy
+    boxcar placeholder) -- see `range_profile_comparison`'s docstring for what each one is
+    and is not. `all_cases=True` swaps the single Case3 arm for all SIX 77 GHz designs,
+    which is what the before/after figure wants: the interesting question there is how the
+    measured designs differ from EACH OTHER, and one of them cannot answer it.
+    """
+    arms = {
         "ideal": ("ideal (no interconnect)",
                   InterconnectBlock(case='case3')),
         "tessera_tsv": ("Tessera TSV (Ka-band, 28.5-31.5 GHz)",
                          InterconnectBlock(transfer_csv=TESSERA_INTERCONNECT_CSV, band_hz=BAND)),
-        "tessera_case3": ("Tessera Case3 (77 GHz auto, worst of 6 measured)",
-                            InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND)),
-        "legacy_boxcar": ("legacy 11-tap boxcar (placeholder)",
-                           InterconnectBlock()),
     }
+    if all_cases:
+        for n in CASE_NUMBERS:
+            arms[f"tessera_case{n}"] = (
+                f"Tessera Case{n} (77 GHz auto)",
+                InterconnectBlock(transfer_csv=case_csv(n), band_hz=CASE3_BAND))
+    else:
+        arms["tessera_case3"] = (
+            "Tessera Case3 (77 GHz auto, worst of 6 measured)",
+            InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND))
+    arms["legacy_boxcar"] = ("legacy 11-tap boxcar (placeholder)", InterconnectBlock())
+    return arms
+
+
+def _arm_color_style(key):
+    """(color, linestyle) for an arm key, covering the per-case keys too."""
+    if key in ARM_COLORS:
+        return ARM_COLORS[key], ARM_STYLES[key]
+    n = int(key.rsplit("case", 1)[-1])
+    return CASE_COLORS[n], CASE_STYLES[n]
 
 
 def _arm_profiles_and_metrics(arms, n_freqs):
@@ -389,13 +429,19 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
       (bottom) the same data zoomed into the sub-mainlobe skirt, where ideal/TSV/
         Case3 -- indistinguishable up top -- separate by DEPTH (their differing
         in-band ripple sets differing sidelobe floors).
-    Same caveats as `range_profile_comparison` apply and are stated on the figure:
-    TSV and Case3 are different, non-overlapping bands (not a ranking), and Case3 is
-    deliberately the worst of six measured designs (a conservative bound).
+    ALL SIX 77 GHz cases are drawn here, not just Case3. The owner's note was
+    "multiple interconnects shown, with y axis scaled to correctly distinguish them --
+    use Case1-Case6", and the derived CSVs for the other five landed 2026-08-19. This is
+    the figure where that matters: the interesting question is how the measured designs
+    differ from EACH OTHER, and a single case cannot answer it. It also turns the
+    collaborator's "Case3 is the worst of the six" from a statement into something the
+    reader can see -- Case3's skirt sits visibly above the other five.
+
+    Same caveats as `range_profile_comparison` apply and are stated on the figure: TSV is
+    a different, non-overlapping band from the Case set (not a ranking).
     """
-    arms = _interconnect_arms()
+    arms = _interconnect_arms(all_cases=True)
     profiles, metrics = _arm_profiles_and_metrics(arms, n_freqs)
-    colors, styles = ARM_COLORS, ARM_STYLES
     x_lim = 16
 
     if show:
@@ -406,46 +452,58 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
         for key, (label, _) in arms.items():
             bins, mag_db = profiles[key]
             m = metrics[key]
-            leg = (f"{label}\n(-3 dB width {m['width_3db_bins']} bin"
-                   f"{'s' if m['width_3db_bins'] != 1 else ''}, "
-                   f"sidelobe {m['peak_sidelobe_db']:.0f} dB)")
-            ax_top.plot(bins, mag_db, styles[key], color=colors[key], lw=2.4,
-                        marker="o", ms=4, label=leg)
-            ax_bot.plot(bins, mag_db, styles[key], color=colors[key], lw=2.4,
-                        marker="o", ms=4, label=label)
+            color, style = _arm_color_style(key)
+            # Top panel legend is about WIDTH, which is the only thing separating arms
+            # there; the sidelobe number belongs with the bottom panel, where depth is
+            # what separates them. With eight arms, one combined legend per panel is
+            # already at the limit of what fits.
+            leg = (f"{label} (-3 dB width {m['width_3db_bins']} bin"
+                   f"{'s' if m['width_3db_bins'] != 1 else ''})")
+            ax_top.plot(bins, mag_db, style, color=color, lw=2.2,
+                        marker="o", ms=3.5, label=leg)
+            ax_bot.plot(bins, mag_db, style, color=color, lw=2.2, marker="o", ms=3.5,
+                        label=f"{label}  sidelobe {m['peak_sidelobe_db']:.0f} dB")
 
         ax_top.set_xlim(-x_lim, x_lim)
         ax_top.set_ylim(-22, 3)
         ax_top.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
         ax_top.set_title("BEFORE vs. AFTER: mainlobe width\n"
-                          "legacy placeholder smears 1 bin -> 11; every "
-                          "measurement-driven arm stays at native resolution",
+                          "the legacy placeholder smears 1 bin -> 11; all seven "
+                          "measurement-driven arms stay at native resolution",
                           fontsize=fs_title)
         ax_top.grid(True, alpha=0.3)
-        # "lower left", not "lower right": the range profile is symmetric about bin 0 and
-        # the boxcar's 11-bin plateau runs to the LEFT of it, so a right-hand legend covers
-        # the very feature this panel exists to show. The lower-left quadrant is empty.
-        ax_top.legend(loc="lower left", fontsize=fs_annot - 1, ncol=1)
+        # No per-panel legend: with nine arms it filled a third of the axes and sat on the
+        # mainlobe. One shared legend below the figure serves both panels (see below).
         ax_top.tick_params(labelsize=fs_tick)
 
         ax_bot.set_xlim(-x_lim, x_lim)
-        ax_bot.set_ylim(-95, -20)
+        # Down to -100: Cases 4/5/6 bottom out at -92 to -93 dB, so a -95 floor clipped
+        # the three arms that are hardest to tell apart in the first place.
+        ax_bot.set_ylim(-100, -20)
         ax_bot.set_xlabel(f"range bin (native, n_freqs={n_freqs})", fontsize=fs_label)
         ax_bot.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
         ax_bot.set_title("Same data, y-axis broken and zoomed to the skirt\n"
-                          "(the only place ideal/TSV/Case3 separate from each other)",
+                          "the ONLY place the measurement-driven arms separate -- and "
+                          "they order exactly as their in-band ripple does",
                           fontsize=fs_title)
         ax_bot.grid(True, alpha=0.3)
-        ax_bot.legend(loc="upper right", fontsize=fs_annot)
         ax_bot.tick_params(labelsize=fs_tick)
+
+        # ONE shared legend, below the axes. Nine arms cannot go in an in-axes legend
+        # without covering the data they describe -- the bottom panel's legend was sitting
+        # squarely on the mainlobe. The sidelobe number rides in the label because depth is
+        # what this figure is actually comparing.
+        handles, labels = ax_bot.get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.055),
+                   ncol=3, fontsize=fs_annot - 0.5, framealpha=0.95)
 
         fig.suptitle(
             "Interconnect range response: legacy placeholder vs. the "
             "measurement-driven models\n"
-            "TSV (Ka-band) and Case3 (77 GHz, worst of 6 measured designs) are each "
-            "in their OWN band -- not a head-to-head ranking",
+            "All six 77 GHz Tessera designs, plus the Ka-band TSV -- which is a "
+            "DIFFERENT band, so it is not ranked against them",
             fontsize=fs_annot + 1.5, y=1.02)
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0.085, 1, 1))
         out_path = BEFORE_AFTER_FIG_PATH
         os.makedirs(os.path.dirname(str(out_path)), exist_ok=True)
         fig.savefig(str(out_path), bbox_inches="tight")

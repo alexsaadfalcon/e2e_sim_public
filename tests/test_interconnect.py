@@ -187,8 +187,19 @@ def test_before_after_comparison_smoke_runs_without_disk(tmp_path, monkeypatch):
     res2 = mi.before_after_comparison(show=True, n_freqs=64)
     assert (tmp_path / "sub" / "out.png").is_file()
     m = res2["metrics"]
-    assert set(m) == {"ideal", "tessera_tsv", "tessera_case3", "legacy_boxcar"}
+    # ALL SIX 77 GHz cases, not just Case3: the whole point of this figure is how the
+    # measured designs differ from EACH OTHER, and the derived CSVs for the other five
+    # landed 2026-08-19.
+    assert set(m) == ({"ideal", "tessera_tsv", "legacy_boxcar"}
+                      | {f"tessera_case{n}" for n in mi.CASE_NUMBERS})
     assert m["legacy_boxcar"]["width_3db_bins"] > m["ideal"]["width_3db_bins"]
+
+    # Case3 is the WORST of the six, which the project had been asserting on the
+    # collaborator's word. With all six present it is checkable, so check it: the worst
+    # in-band ripple shows up as the highest (least negative) sidelobe floor.
+    sidelobes = {n: m[f"tessera_case{n}"]["peak_sidelobe_db"] for n in mi.CASE_NUMBERS}
+    assert max(sidelobes, key=sidelobes.get) == 3, (
+        f"Case3 should have the worst (highest) sidelobe floor of the six: {sidelobes}")
 
 
 def test_arm_styling_covers_every_arm_with_distinct_colors():
