@@ -223,7 +223,10 @@ def _make_figures(results, range_az, source, snr_db):
                  ha="center", va="bottom", fontsize=11.5)
     plt.ylabel("mean EVM (RMS fraction)", fontsize=13)
     plt.title("Comms head mean EVM per combining mode  (log scale)", fontsize=15)
-    plt.grid(True, axis="y", which="both", alpha=0.3)
+    # Owner 2026-08-19: minor gridlines removed. On a log axis `which="both"` draws
+    # ~8 minor lines per decade, which read as chart junk behind four bars whose
+    # values are already labelled on the bars themselves.
+    plt.grid(True, axis="y", which="major", alpha=0.25)
     plt.xticks(fontsize=13)
     plt.yticks(fontsize=12)
     fig.tight_layout()
