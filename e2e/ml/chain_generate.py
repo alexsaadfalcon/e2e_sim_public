@@ -68,8 +68,14 @@ DEFAULT_INTERCONNECT_CSV = (Path(__file__).resolve().parent.parent
 # --------------------------------------------------------------------------------
 def default_domain_randomizer(
     *, phase_noise_dbc_hz_range: Tuple[float, float] = (-95.0, -75.0),
-    leakage_relative_db_range: Tuple[float, float] = (-10.0, -2.0),
-    clutter_relative_db_range: Tuple[float, float] = (-16.0, -4.0),
+    # Re-derived 2026-08-18 for the ABSOLUTE thermal reference (F35 flip). These are now
+    # dB ABOVE the thermal floor, not fractions of the cube's own peak, so the old
+    # negative ranges would have injected impairments ~60 dB too weak to exist.
+    #   leakage: 30-40 dB TX-RX isolation at P_tx 12 dBm over an -85 dBm floor -> 57-67 dB.
+    #   clutter: a clutter-to-noise spread around the +30 dB nominal (see ClutterParams;
+    #            this one is an assumption, not a datasheet derivation).
+    leakage_relative_db_range: Tuple[float, float] = (57.0, 67.0),
+    clutter_relative_db_range: Tuple[float, float] = (24.0, 36.0),
 ) -> Callable[[int, "torch.Generator"], Dict[str, Any]]:
     """Build the `chain_params` callable `ImpairmentBlock` expects (see its docstring):
     `(frame_index, rng) -> {"phase_noise": {...}, "leakage": {...}, "clutter": {...}}`,

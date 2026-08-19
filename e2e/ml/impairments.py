@@ -99,14 +99,58 @@ def _noise_floor_power(adc: torch.Tensor) -> float:
 #:             the F35 ceiling. Do not use it for new corpora.
 REFERENCE_NOISE = "noise"
 REFERENCE_PEAK = "peak"
-DEFAULT_POWER_REFERENCE = REFERENCE_PEAK   # flipped to "noise" only with the owner's
-                                           # re-derived link budget -- see F35. Changing
-                                           # this default changes every generated corpus.
+#: Absolute k*T*B*F from `e2e.ml.link_budget`, independent of the cube's contents.
+#:
+#: This is the one that actually breaks F35, and the distinction from REFERENCE_NOISE is
+#: worth stating. "noise" MEASURES a floor off the cube (the median range-FFT power); on a
+#: ray-traced frame that median is scene structure -- sidelobes, diffuse multipath -- which
+#: still scales with the scene, so it moves the ceiling rather than removing it (F42).
+#: "thermal" asks the link budget instead and never looks at the cube at all.
+REFERENCE_THERMAL = "thermal"
+#: FLIPPED 2026-08-18, once the link budget existed to make it meaningful.
+#:
+#: Under REFERENCE_PEAK the injected impairments were calibrated against the cube's own
+#: peak -- which the target sets -- so target-to-clutter was exactly invariant to target
+#: strength and no physics improvement could ever move detection (F35). MEASURED on a
+#: fresh corpus with the peak reference still active: in 14 of 15 frames a clutter cell
+#: out-ranked the real target's own CFAR ratio, by a median of 15 dB, every one of them
+#: identifiable by peaking at exactly the zero-Doppler bin `apply_clutter` synthesizes at.
+#:
+#: The dB values on the params classes below are re-derived accordingly -- they are now
+#: levels ABOVE THE THERMAL FLOOR, from the link budget, not fractions of the target.
+DEFAULT_POWER_REFERENCE = REFERENCE_THERMAL
 
 
-def _reference_power(adc: torch.Tensor, reference: str) -> float:
+def _thermal_reference(cfg, *, domain: str) -> float:
+    """Absolute thermal power in the domain an impairment is specified in.
+
+    The two impairments quote their dB against DIFFERENT domains, which is pre-existing
+    and easy to get wrong by 10*log10(n_samples) = 27 dB:
+
+      * `apply_leakage` builds a tone whose RANGE-FFT peak power equals `p_ref * 10^(dB/10)`,
+        so its reference is a range-FFT bin power. White noise of per-sample power N has
+        range-FFT bin power N * n_samples.
+      * `apply_clutter` sums per-scatterer mean powers to `p_ref * 10^(dB/10)` in the TIME
+        domain, so its reference is the per-sample power N itself.
+    """
+    from e2e.ml.link_budget import thermal_noise_power_w
+
+    n = thermal_noise_power_w(cfg)
+    if domain == "range_fft":
+        return n * float(cfg.n_samples)
+    if domain == "time":
+        return n
+    raise ValueError(f"unknown reference domain {domain!r}")
+
+
+def _reference_power(adc: torch.Tensor, reference: str, cfg=None,
+                     *, domain: str = "range_fft") -> float:
     """Dispatch for the two calibration references. Fails loudly on a typo rather than
     silently falling back -- picking the wrong one silently changes the physics."""
+    if reference == REFERENCE_THERMAL:
+        if cfg is None:
+            raise ValueError("the 'thermal' reference needs cfg (it reads the link budget)")
+        return _thermal_reference(cfg, domain=domain)
     if reference == REFERENCE_NOISE:
         return _noise_floor_power(adc)
     if reference == REFERENCE_PEAK:
@@ -353,9 +397,21 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
 class LeakageParams:
     """Direct TX-RX coupling and a short-range bumper/radome reflection."""
 
-    leakage_relative_db: float = -5.0    # near-zero-delay coupling tone, dB rel. `reference`
+    # DERIVED FROM THE LINK BUDGET, not chosen. At P_tx = 12 dBm and a thermal floor of
+    # -85 dBm (see `e2e.ml.link_budget`):
+    #   leakage: 35 dB TX-RX isolation is typical for an integrated MMIC -> -23 dBm at the
+    #            receiver -> +62 dB above the floor. That is enormous, and correctly so:
+    #            direct coupling dwarfs every target. It is survivable only because it sits
+    #            at ~zero range and is range-gated away, which is exactly what the real
+    #            hardware relies on.
+    #   bumper:  the two-way radar equation at 0.2 m with a -10 dBsm radome/bumper return
+    #            gives +34 dB above the floor.
+    # For scale: a 10 dBsm car at 30 m is -33 dB per sample, reaching +12 dB only after
+    # 45 dB of coherent integration. The impairments genuinely are ~100 dB stronger than
+    # the target per sample; separating them is the receiver's job, not the model's.
+    leakage_relative_db: float = 62.0    # dB ABOVE the thermal floor (range-FFT domain)
     bumper_range_m: float = 0.2          # bumper/radome reflection range, m
-    bumper_relative_db: float = -15.0    # bumper tone power, dB rel. `reference`
+    bumper_relative_db: float = 34.0     # dB above the thermal floor
     # "peak" (legacy, the F35 ceiling) or "noise" (dB above the noise floor). The dB
     # values above are calibrated for "peak" and are NOT meaningful under "noise" -- a
     # leakage tone 5 dB BELOW the noise floor is invisible. Switching the reference
@@ -385,7 +441,7 @@ def apply_leakage(adc: torch.Tensor, cfg, params: LeakageParams, *, seed: int) -
     n_rx, n_chirps, n_samples = adc.shape
     device, dtype = adc.device, adc.dtype
 
-    p_ref = _reference_power(adc, params.reference)
+    p_ref = _reference_power(adc, params.reference, cfg, domain='range_fft')
 
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
@@ -416,7 +472,14 @@ class ClutterParams:
     density: float = 0.5           # scatterers per unambiguous range bin
     nu: float = 1.0                # K-distribution texture shape (small -> heavier tail)
     doppler_std_mps: float = 0.05  # per-scatterer radial-velocity std, m/s
-    total_relative_db: float = -10.0  # total clutter power, dB rel. `reference`
+    # Clutter-to-noise ratio, dB above the thermal floor (time domain). +30 dB total
+    # spreads over n_samples range bins, so per-bin clutter lands a few dB above the
+    # noise floor -- strong enough to matter, which is the point, and rejected in DOPPLER
+    # rather than by being weak. That is how a real automotive radar handles road return,
+    # and it only works on a config whose targets do not alias (see benchmark_v1 / F43).
+    # This one is an ASSUMPTION, not a derivation: unlike leakage and bumper there is no
+    # single datasheet number for road clutter. Documented as such.
+    total_relative_db: float = 30.0
     # "peak" (legacy) or "noise". Same caveat as LeakageParams: the dB value above is
     # calibrated for "peak" and must be re-derived as a clutter-to-noise ratio to be
     # meaningful under "noise".
@@ -472,6 +535,8 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
         #   |FFT|^2 is exponential, whose MEDIAN is ln(2) times its mean.
         # Hence sigma^2 = median(|FFT|^2) / (N * ln 2).
         peak_power = _noise_floor_power(adc) / (float(n_samples) * math.log(2.0))
+    elif params.reference == REFERENCE_THERMAL:
+        peak_power = _thermal_reference(cfg, domain="time")
     elif params.reference == REFERENCE_PEAK:
         peak_power = float(torch.max(torch.abs(adc) ** 2).item())
     else:

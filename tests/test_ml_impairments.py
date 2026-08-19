@@ -191,7 +191,15 @@ def test_leakage_bins_and_power(cfg, torch_device):
     assert out.shape == adc.shape
     assert out.dtype == adc.dtype
 
-    p_ref = (a0 * cfg.n_samples) ** 2
+    # Against the reference the params DECLARE, not against the cube. The default
+    # reference is now the absolute thermal floor (F35 flip), so measuring the tone
+    # against the cube's own peak would test a relationship the code no longer asserts --
+    # and would quietly start passing again if someone reverted the flip.
+    from e2e.ml.impairments import REFERENCE_PEAK, _reference_power
+    if params.reference == REFERENCE_PEAK:
+        p_ref = (a0 * cfg.n_samples) ** 2
+    else:
+        p_ref = _reference_power(adc, params.reference, cfg, domain="range_fft")
     diff = out - adc
     x_diff = torch.fft.fft(diff, dim=-1)  # [n_rx, n_chirps, n_samples]
 
@@ -425,5 +433,7 @@ def test_unknown_power_reference_fails_loudly():
     adc = _cube_with_noise_floor_and_target(cfg, 0.0)
     with pytest.raises(ValueError, match="unknown power reference"):
         apply_clutter(adc, cfg, ClutterParams(reference="Noise"), seed=1)
+    # NB "thermal" is a VALID reference since the F35 flip -- it is the default. Use a
+    # genuine typo here instead, or this test silently stops testing anything.
     with pytest.raises(ValueError, match="unknown power reference"):
-        apply_leakage(adc, cfg, LeakageParams(reference="thermal"), seed=1)
+        apply_leakage(adc, cfg, LeakageParams(reference="thermel"), seed=1)
