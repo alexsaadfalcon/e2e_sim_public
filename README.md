@@ -271,9 +271,11 @@ or a link-level abstraction.
 ### Interconnect: placeholder vs. measured
 
 Pass `transfer_csv=` to `InterconnectBlock` and the interconnect stops being a stand-in:
-the block loads a measured |S21|(f) and resamples it onto the scenario's band. Two derived
-datasets ship in `e2e/data/interconnect/`, both from collaborator HFSS/surrogate
-S-parameter data.
+the block loads a measured |S21|(f) and resamples it onto the scenario's band. Seven
+derived datasets ship in `e2e/data/interconnect/` — a Ka-band TSV plus all six 77 GHz
+automotive designs — every one of them from collaborator HFSS/surrogate S-parameter data.
+The figure below deliberately plots only Case3 of the six, so the comparison stays
+readable; `main_interconnect` draws all six in its own figure.
 
 ```bash
 python -m e2e.main.main_interconnect     # writes the gallery figure above plus both figures below

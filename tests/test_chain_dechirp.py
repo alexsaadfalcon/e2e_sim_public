@@ -89,9 +89,12 @@ def test_beat_from_cfr_is_exactly_invertible(torch_device):
     handedness convention, see the module docstring). Both are bijections, so the CFR
     tensor and the dechirped ADC record are ONE measurement in two coordinate systems.
 
-    What the ADC branch genuinely adds is downstream and irreversible: MIMO combining,
-    injected impairments, full-scale clipping, uniform quantization. That is a fidelity
-    gap, not a domain error, and it is covered by the receive-chain tests.
+    What this bridge licenses is a REPRESENTATION choice -- the simulator may carry the
+    sensing branch's pre-converter record in CFR coordinates and stay physically honest --
+    and NOT an architectural fork. The chain's real split is sensing vs communications,
+    set by the waveform, and dechirp belongs on the sensing side of it; an earlier reading
+    of this same measurement as evidence for two "fidelity taps" was retracted on
+    2026-08-19 (see notes/ESTABLISHED_FACTS.md, F37 superseded by F46/F47).
 
     This test is the invariance leg of that argument (RIGOR_STANDARD): construct the
     inverse independently here, and require BIT equality -- `allclose` would let a
