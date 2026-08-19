@@ -348,6 +348,108 @@ def _interpolated_ap(curve: Dict[str, List], n_gt: int) -> float:
     return sum(p for p, hit in zip(curve["precision_interp"], curve["is_tp"]) if hit) / n_gt
 
 
+def false_alarms_at_recall(pr_curve, n_frames: int, *,
+                           target_recall: float = 0.5) -> Dict:
+    """False alarms per frame at the score threshold that first reaches `target_recall`.
+
+    Why this metric rather than AP or "Pd at threshold t"
+    -----------------------------------------------------
+    Both of those let the threshold do the arguing. A detector that fires everywhere
+    reports high recall; one that barely fires reports high precision; and AP compresses
+    the whole trade into a single number that hides WHERE on the curve a detector is
+    usable. Holding every detector at the same recall and counting what it costs is the
+    comparison an operator actually faces, and it cannot be gamed: moving the threshold
+    moves the recall, and the operating point simply re-anchors somewhere else on the
+    same curve.
+
+    Reading the operating point off the curve
+    -----------------------------------------
+    `pr_curve` is `_pr_curve`'s output -- detections ranked by score descending, with
+    `recall` cumulative down that ranking. Recall is non-decreasing, so the FIRST rank
+    reaching `target_recall` is also the one with the fewest false positives, and the
+    score at that rank is the threshold an operator would set.
+
+    That rank is then extended to the END of its equal-score group, because a real
+    threshold at `score[k]` admits every detection scoring exactly `score[k]`, not just
+    the ones the ranking happened to place first. `_rank_detections` orders false
+    positives ahead of true positives within a tie, so the extension can only add true
+    positives: the reported false-alarm count is unchanged and the reported recall is the
+    honest one for that threshold.
+
+    Requires a curve that REACHES the target
+    ----------------------------------------
+    The curve only spans the recall its detections cover, and those detections were
+    decoded at some confidence floor upstream. Decode at a permissive floor (0.01, say)
+    before asking for a low-recall operating point, or the curve will stop short of it.
+    When it does stop short this returns `reached=False` and `fp_per_frame=NaN` rather
+    than the false alarms at whatever recall it did manage -- silently answering a
+    different question than the one asked is exactly the failure this metric exists to
+    avoid. `recall_max` reports how far it got, so the caller can say so.
+
+    Parameters
+    ----------
+    pr_curve
+        `_pr_curve` output, i.e. `evaluate_dataset(...)["pr_curve"]`. `None` (a split
+        with no ground truth) yields an all-NaN result with `reached=False`.
+    n_frames
+        Frames the curve was pooled over -- the denominator. Must be positive.
+    target_recall
+        The recall to hold every detector at. Must be in (0, 1].
+
+    Returns
+    -------
+    dict with
+        ``reached``           did the curve get to `target_recall`
+        ``target_recall``     what was asked for (echoed, so a stored result self-describes)
+        ``recall_achieved``   recall at the chosen operating point (NaN if not reached)
+        ``recall_max``        the most the curve ever reached
+        ``score_threshold``   the score defining that operating point (NaN if not reached)
+        ``fp``, ``tp``        pooled counts at it (None if not reached)
+        ``fp_per_frame``      `fp / n_frames` -- the headline number (NaN if not reached)
+        ``n_frames``          echoed denominator
+    """
+    if n_frames <= 0:
+        raise ValueError(f"n_frames must be positive, got {n_frames}")
+    if not 0.0 < target_recall <= 1.0:
+        raise ValueError(f"target_recall must be in (0, 1], got {target_recall}")
+
+    nan = float("nan")
+    miss = {"reached": False, "target_recall": float(target_recall),
+            "recall_achieved": nan, "recall_max": 0.0, "score_threshold": nan,
+            "fp": None, "tp": None, "fp_per_frame": nan, "n_frames": int(n_frames)}
+
+    if not pr_curve or not pr_curve.get("recall"):
+        return miss
+
+    recall = pr_curve["recall"]
+    is_tp = pr_curve["is_tp"]
+    score = pr_curve["score"]
+    recall_max = float(recall[-1])          # non-decreasing, so the last entry is the max
+
+    k = next((i for i, r in enumerate(recall) if r >= target_recall), None)
+    if k is None:
+        return {**miss, "recall_max": recall_max}
+
+    # Extend through the equal-score group: a threshold at score[k] admits all of it.
+    j = k
+    while j + 1 < len(score) and score[j + 1] == score[k]:
+        j += 1
+
+    tp = sum(1 for hit in is_tp[:j + 1] if hit)
+    fp = (j + 1) - tp
+    return {
+        "reached": True,
+        "target_recall": float(target_recall),
+        "recall_achieved": float(recall[j]),
+        "recall_max": recall_max,
+        "score_threshold": float(score[j]),
+        "fp": int(fp),
+        "tp": int(tp),
+        "fp_per_frame": fp / float(n_frames),
+        "n_frames": int(n_frames),
+    }
+
+
 def _score_detections(
     detections_per_frame: Sequence[Sequence[Detection]],
     target_lists: Sequence[Sequence[Target]],

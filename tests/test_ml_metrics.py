@@ -26,6 +26,7 @@ from e2e.ml.metrics import (
     DEFAULT_CLASSES,
     MatchCriterion,
     evaluate_dataset,
+    false_alarms_at_recall,
     evaluate_frame,
     match_detections,
 )
@@ -721,3 +722,108 @@ def test_matching_uses_the_surface_while_rmse_uses_the_centre():
     assert blind["AR"] == sighted["AR"] == 1.0
     assert blind["range_rmse_m"] == pytest.approx(length / 2.0, abs=1e-6)
     assert sighted["range_rmse_m"] == pytest.approx(0.0, abs=1e-6)
+
+
+# ------------------------------------------------------------------------------------
+# false_alarms_at_recall -- the operating-point comparison
+#
+# Every case here is hand-checkable from the ranked list in its own body; none of them
+# read a number back out of the implementation. The point of the metric is that a
+# threshold cannot game it, so the tests that matter are the ones where a threshold
+# tries to.
+# ------------------------------------------------------------------------------------
+def _curve(scored_flags, n_gt):
+    from e2e.ml.metrics import _pr_curve
+    return _pr_curve(scored_flags, n_gt)
+
+
+def test_fa_at_recall_matches_a_hand_counted_operating_point():
+    # Ranked: TP .9 | FP .8 | TP .7 | TP .6 | FP .5 | TP .4   (n_gt = 5)
+    # Recall reaches 0.6 at the .6 detection, having admitted exactly one false positive.
+    curve = _curve([(0.9, True), (0.8, False), (0.7, True),
+                    (0.6, True), (0.5, False), (0.4, True)], n_gt=5)
+    r = false_alarms_at_recall(curve, n_frames=10, target_recall=0.6)
+    assert r["reached"] is True
+    assert r["tp"] == 3 and r["fp"] == 1
+    assert r["recall_achieved"] == pytest.approx(0.6)
+    assert r["score_threshold"] == pytest.approx(0.6)
+    assert r["fp_per_frame"] == pytest.approx(0.1)
+
+
+def test_fa_at_recall_reports_not_reached_rather_than_a_different_recall():
+    # The curve tops out at 0.8; asking for 1.0 must NOT quietly answer at 0.8.
+    curve = _curve([(0.9, True), (0.8, False), (0.7, True),
+                    (0.6, True), (0.5, False), (0.4, True)], n_gt=5)
+    r = false_alarms_at_recall(curve, n_frames=10, target_recall=1.0)
+    assert r["reached"] is False
+    assert math.isnan(r["fp_per_frame"])
+    assert math.isnan(r["recall_achieved"])
+    assert r["recall_max"] == pytest.approx(0.8)
+
+
+def test_fa_at_recall_takes_the_cheapest_operating_point():
+    # Recall first reaches 0.5 at rank 1, with zero false positives. A later rank also
+    # sits at recall 0.5 but has paid for false positives; the metric must not pick it.
+    curve = _curve([(0.9, True), (0.8, False), (0.7, False)], n_gt=2)
+    r = false_alarms_at_recall(curve, n_frames=4, target_recall=0.5)
+    assert r["fp"] == 0
+    assert r["fp_per_frame"] == pytest.approx(0.0)
+
+
+def test_fa_at_recall_counts_the_whole_equal_score_group():
+    # A saturating detector: four detections all scoring exactly 1.0, two of them false.
+    # A threshold at 1.0 admits ALL four, so the honest false-alarm count is 2 -- not the
+    # 0 a truncation at the first true positive in the ranking would report.
+    curve = _curve([(1.0, True), (1.0, False), (1.0, False), (1.0, True)], n_gt=2)
+    r = false_alarms_at_recall(curve, n_frames=2, target_recall=0.5)
+    assert r["score_threshold"] == pytest.approx(1.0)
+    assert r["fp"] == 2
+    assert r["tp"] == 2
+    assert r["recall_achieved"] == pytest.approx(1.0)
+    assert r["fp_per_frame"] == pytest.approx(1.0)
+
+
+def test_fa_at_recall_is_not_moved_by_rescaling_scores():
+    # THE invariance that makes this a fair comparison: a detector that divides all of
+    # its confidences by ten is the same detector. AP already has this property; so must
+    # this. Only the reported threshold moves.
+    flags = [(0.9, True), (0.8, False), (0.7, True), (0.6, True), (0.5, False)]
+    a = false_alarms_at_recall(_curve(flags, 4), n_frames=5, target_recall=0.75)
+    b = false_alarms_at_recall(_curve([(s / 10.0, h) for s, h in flags], 4),
+                               n_frames=5, target_recall=0.75)
+    assert a["fp"] == b["fp"] and a["tp"] == b["tp"]
+    assert a["fp_per_frame"] == pytest.approx(b["fp_per_frame"])
+    assert b["score_threshold"] == pytest.approx(a["score_threshold"] / 10.0)
+
+
+def test_fa_at_recall_scales_with_the_frame_denominator():
+    curve = _curve([(0.9, True), (0.8, False), (0.7, True)], n_gt=2)
+    ten = false_alarms_at_recall(curve, n_frames=10, target_recall=1.0)
+    forty = false_alarms_at_recall(curve, n_frames=40, target_recall=1.0)
+    assert ten["fp"] == forty["fp"] == 1
+    assert ten["fp_per_frame"] == pytest.approx(4 * forty["fp_per_frame"])
+
+
+def test_fa_at_recall_handles_a_split_with_no_curve():
+    r = false_alarms_at_recall(None, n_frames=3, target_recall=0.5)
+    assert r["reached"] is False and math.isnan(r["fp_per_frame"])
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5])
+def test_fa_at_recall_rejects_a_target_recall_outside_the_unit_interval(bad):
+    curve = _curve([(0.9, True)], n_gt=1)
+    with pytest.raises(ValueError):
+        false_alarms_at_recall(curve, n_frames=1, target_recall=bad)
+
+
+def test_fa_at_recall_rejects_a_nonpositive_frame_count():
+    curve = _curve([(0.9, True)], n_gt=1)
+    with pytest.raises(ValueError):
+        false_alarms_at_recall(curve, n_frames=0, target_recall=0.5)
+
+
+def test_fa_at_recall_on_a_perfect_detector_is_zero():
+    curve = _curve([(0.9, True), (0.8, True), (0.7, True)], n_gt=3)
+    r = false_alarms_at_recall(curve, n_frames=3, target_recall=1.0)
+    assert r["reached"] is True
+    assert r["fp_per_frame"] == pytest.approx(0.0)
