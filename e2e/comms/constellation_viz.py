@@ -233,7 +233,11 @@ def plot_constellation(ax, rx_syms, const, tx_syms=None, s=8, title=None,
     # SNR-sweep snapshots) render near-opaque, while a several-thousand-point
     # run (per-pixel-bit symbols) still shows cluster density instead of
     # saturating to a solid disc; clipped to stay visible either way.
-    alpha = float(np.clip(300.0 / max(n, 1), 0.05, 0.9))
+    # Floor raised 0.05 -> 0.25 and scale 300 -> 500 (owner, 2026-08-19: "dots need
+    # to be darker"). At several thousand points the old floor clipped to 0.05, which
+    # renders almost invisible once the figure is scaled into a slide box. 0.25 still
+    # shows cluster density rather than saturating to a solid disc.
+    alpha = float(np.clip(500.0 / max(n, 1), 0.25, 0.9))
 
     # Ideal markers drawn BENEATH the received cloud (lower zorder) per "the
     # reader sees the reference lattice under the cloud" -- a marker on top
