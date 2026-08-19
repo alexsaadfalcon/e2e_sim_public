@@ -150,6 +150,35 @@ def _checkerboard_colors(const: np.ndarray, palette: np.ndarray = None) -> np.nd
     return palette[tile_idx % len(palette)]
 
 
+def symbol_color_indices(rx_syms, const, tx_syms=None) -> np.ndarray:
+    """Which ideal constellation point each received symbol belongs to.
+
+    Ground truth when `tx_syms` is given (every caller in this repo has it); otherwise
+    decision-directed nearest-neighbour on `rx_syms` itself, which is a genuinely weaker
+    labelling -- a symbol that landed closer to the wrong point gets the wrong colour, so
+    errors are invisible rather than obvious. See the module docstring.
+
+    Split out of `plot_constellation` so the Plotly view in `webapp/pipeline_runner.py`
+    labels symbols by exactly the same rule as the matplotlib figure. Two independent
+    implementations of "which point is this" is how the two views drifted apart in the
+    first place.
+    """
+    rx = _to_numpy_complex(rx_syms).reshape(-1)
+    const_np = _to_numpy_complex(const).reshape(-1)
+    label_src = _to_numpy_complex(tx_syms).reshape(-1) if tx_syms is not None else rx
+    return np.argmin(np.abs(label_src[:, None] - const_np[None, :]), axis=1)
+
+
+def checkerboard_css_colors(const, alpha: float = 0.85):
+    """`_checkerboard_colors` as CSS `rgba(...)` strings, one per constellation point.
+
+    For Plotly, which wants colours as strings rather than an `[M, 4]` float array.
+    """
+    rgba = _checkerboard_colors(_to_numpy_complex(const).reshape(-1))
+    return [f"rgba({int(round(r * 255))},{int(round(g * 255))},"
+            f"{int(round(b * 255))},{alpha:g})" for r, g, b, _a in rgba]
+
+
 def plot_constellation(ax, rx_syms, const, tx_syms=None, s=8, title=None,
                         ideal_marker_kw=None, mark_ideal=True, color_mode="bitrev"):
     """Scatter received QAM symbols on `ax`, colored by the ideal constellation
@@ -188,10 +217,7 @@ def plot_constellation(ax, rx_syms, const, tx_syms=None, s=8, title=None,
     """
     rx = _to_numpy_complex(rx_syms).reshape(-1)
     const_np = _to_numpy_complex(const).reshape(-1)
-    label_src = _to_numpy_complex(tx_syms).reshape(-1) if tx_syms is not None else rx
-
-    d = np.abs(label_src[:, None] - const_np[None, :])
-    idx = np.argmin(d, axis=1)
+    idx = symbol_color_indices(rx, const_np, tx_syms)
     if color_mode == "checkerboard":
         colors = _checkerboard_colors(const_np)
         default_mk = dict(marker="o", facecolors="none", edgecolors="black",

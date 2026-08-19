@@ -763,12 +763,35 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
     if outputs.get("comm_data_eq"):
         data_np = _to_numpy_complex(outputs["comm_data_eq"][-1])
+        # Colour each received symbol by the ideal point it was actually TRANSMITTED as,
+        # using the same rule as the matplotlib figure (e2e.comms.constellation_viz) so
+        # the two views cannot disagree. `comm_tx_data` and `comm_const` are emitted by
+        # ModemBlock and forwarded verbatim by Simulation, so no plumbing is needed --
+        # but both are guarded, because a pipeline without a ModemBlock has neither and
+        # a flat scatter is the honest fallback there.
+        marker = dict(size=4)
+        const = outputs.get("comm_const")
+        tx_data = outputs.get("comm_tx_data")
+        if const is not None and tx_data is not None:
+            try:
+                from e2e.comms.constellation_viz import (checkerboard_css_colors,
+                                                          symbol_color_indices)
+
+                const_last = const[-1] if isinstance(const, list) else const
+                tx_last = tx_data[-1] if isinstance(tx_data, list) else tx_data
+                idx = symbol_color_indices(data_np, const_last, tx_last)
+                palette = checkerboard_css_colors(const_last)
+                marker = dict(size=5, color=[palette[i] for i in idx])
+            except Exception:
+                # A colouring failure must not cost the user the plot itself.
+                marker = dict(size=4)
+
         fig = go.Figure(data=go.Scatter(
-            x=data_np.real, y=data_np.imag, mode="markers",
-            marker=dict(size=4),
+            x=data_np.real, y=data_np.imag, mode="markers", marker=marker,
         ))
         fig.update_layout(
-            title="Comms head constellation (last frame, equalized)",
+            title="Comms head constellation (last frame, equalized) — "
+                  "coloured by transmitted symbol",
             xaxis_title="I",
             yaxis_title="Q",
             margin=dict(l=40, r=20, t=40, b=40),

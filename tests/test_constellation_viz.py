@@ -176,3 +176,83 @@ def test_works_for_all_supported_qam_orders():
         fig, ax = plt.subplots()
         plot_constellation(ax, rx, const)
         plt.close(fig)
+
+
+# ------------------------------------------------------------------------------------
+# The colouring rule shared with the webapp's Plotly view.
+#
+# These exist because the two views HAD drifted: the matplotlib figure coloured every
+# symbol by the point it was transmitted as, and the webapp drew flat markers, for months,
+# with the data it needed already in `outputs`. Extracting the rule is only half a fix --
+# the other half is a test that fails if the two ever diverge again.
+# ------------------------------------------------------------------------------------
+def _np_const(bits):
+    """`qam_constellation` returns a torch tensor; the private colour helpers want numpy."""
+    return qam_constellation(bits).cpu().numpy()
+
+
+def test_symbol_color_indices_uses_ground_truth_over_proximity():
+    """THE point of passing tx_syms: a symbol that landed nearer a DIFFERENT ideal point
+    must still be labelled by what was actually sent. Otherwise a symbol error colours
+    itself correct and becomes invisible -- which is the one thing the plot is for."""
+    from e2e.comms.constellation_viz import symbol_color_indices
+
+    const = np.array([-3 - 3j, -3 + 3j, 3 - 3j, 3 + 3j], dtype=np.complex64)
+    # Sent const[0], but noise pushed it right next to const[2].
+    tx = np.array([const[0]], dtype=np.complex64)
+    rx = np.array([2.9 - 3.0j], dtype=np.complex64)
+
+    assert symbol_color_indices(rx, const, tx)[0] == 0          # ground truth
+    assert symbol_color_indices(rx, const, None)[0] == 2        # decision-directed
+
+
+def test_symbol_color_indices_is_exact_on_noiseless_symbols():
+    from e2e.comms.constellation_viz import symbol_color_indices
+
+    const = _np_const(4)
+    idx_expected = np.arange(len(const))
+    got = symbol_color_indices(const, const, const)
+    assert np.array_equal(got, idx_expected)
+
+
+def test_checkerboard_css_colors_matches_the_matplotlib_palette():
+    """The Plotly strings must BE the matplotlib RGBA, not a lookalike."""
+    from e2e.comms.constellation_viz import _checkerboard_colors, checkerboard_css_colors
+
+    const = _np_const(4)
+    rgba = _checkerboard_colors(const)
+    css = checkerboard_css_colors(const, alpha=0.85)
+    assert len(css) == len(const)
+    for (r, g, b, _a), text in zip(rgba, css):
+        nums = text[text.index("(") + 1:text.index(")")].split(",")
+        assert int(nums[0]) == int(round(r * 255))
+        assert int(nums[1]) == int(round(g * 255))
+        assert int(nums[2]) == int(round(b * 255))
+        assert float(nums[3]) == pytest.approx(0.85)
+
+
+def test_checkerboard_css_colors_are_well_formed_rgba():
+    from e2e.comms.constellation_viz import checkerboard_css_colors
+
+    for text in checkerboard_css_colors(_np_const(6)):
+        assert text.startswith("rgba(") and text.endswith(")")
+        nums = text[5:-1].split(",")
+        assert len(nums) == 4
+        assert all(0 <= int(v) <= 255 for v in nums[:3])
+
+
+def test_adjacent_constellation_points_get_different_colours():
+    """The property the checkerboard exists for, restated on the CSS path: a wrong-
+    coloured dot one cell over has to be visible, so 4- and 8-connected neighbours must
+    never share a hue."""
+    from e2e.comms.constellation_viz import _grid_row_col, checkerboard_css_colors
+
+    const = _np_const(6)
+    row, col, side = _grid_row_col(const)
+    css = checkerboard_css_colors(const)
+    pos = {(int(r), int(c)): i for i, (r, c) in enumerate(zip(row, col))}
+    for (r, c), i in pos.items():
+        for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+            j = pos.get((r + dr, c + dc))
+            if j is not None:
+                assert css[i] != css[j], f"({r},{c}) and ({r+dr},{c+dc}) share a hue"
