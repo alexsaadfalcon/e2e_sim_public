@@ -82,6 +82,12 @@ a dense, fast, tightly-packed multi-target scene.
 | --- | --- | --- | --- | --- | --- | --- |
 | `ti_iwr1443` | TDM | 3×4 (12) | 0.0749 m | 38.37 m | 0.4004 m/s | 12.81 m/s |
 | `radial_like` | DDMA | 12×16 (192) | 0.2000 m | 102.40 m | 0.1012 m/s | 1.06 m/s |
+| `benchmark_v1` | TDM | 4×16 (64) | 0.2000 m | 102.40 m | 0.3028 m/s | 9.69 m/s |
+
+**Use `benchmark_v1` for detection work.** It is the only preset on which the benchmark is
+valid on both axes at once: azimuth resolvable within the match tolerance AND targets that
+do not alias in Doppler. See `notes/ESTABLISHED_FACTS.md` F43 for why the other two are
+not, and the withdrawn-results caveat below.
 
 **`radial_like` is the default preset for detection work**, and the choice is forced by
 geometry rather than taste. The detection label grid
@@ -209,7 +215,33 @@ Note the sweep dataset is smaller than the confirm/baseline dataset below (pilot
 seed 500/300 frames vs. `corpus_v1` D1: seed 2000/1000 frames) — the recipe was picked
 on the pilot set, then confirmed on the full corpus, not re-tuned on it.
 
-### Baseline results (`corpus_v1`, confirmed)
+### Baseline results (`corpus_v1`) — **WITHDRAWN, see the caveat**
+
+> **These numbers are not valid and are kept only so the record is honest.**
+>
+> On 2026-08-18 we measured that BOTH presets these results were produced on are
+> arithmetically incapable of supporting a detection benchmark
+> (`notes/ESTABLISHED_FACTS.md` F43):
+>
+> * `ti_iwr1443` has 12 virtual elements, so its Rayleigh azimuth resolution is
+>   sin(az) = 0.167, while the evaluation's match tolerance is 0.06. **The metric demands
+>   2.8x finer azimuth than the array can physically resolve** — a perfect detector,
+>   localising a target to the diffraction limit, scores as a miss.
+> * `radial_like` resolves azimuth well (192 virtual elements) but its DDMA code-division
+>   over 12 TX shrinks unambiguous velocity to ±1.06 m/s, while scenes draw targets at
+>   0–8 m/s. **Every moving target aliases in Doppler**, which destroys the clutter
+>   discriminant an automotive radar depends on.
+>
+> These cannot be repaired by regenerating: they need a valid configuration.
+> **`benchmark_v1`** (added the same day) is one — 4x16 = 64 virtual elements
+> (Rayleigh 0.031, 1.9x finer than the tolerance) and v_max 9.69 m/s, so neither the
+> azimuth nor the Doppler axis is degenerate.
+>
+> A related finding, F44, is worth reading before re-deriving anything: on a valid config
+> the targets carry the SNR the radar equation demands (median gap −2.4 dB against an
+> independent link-budget prediction), and the low scores traced to the DETECTOR — CFAR
+> guard cells smaller than the target's own extent — not to the data. Re-baselining is
+> tracked and not yet done.
 
 FFTRadNet, `gamma=2`, 40 epochs / batch 8, one run per tier; SSMRadNet, same recipe
 (unswept for this architecture), 12 epochs / batch 2, D1 only — a step-comparable

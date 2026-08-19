@@ -55,6 +55,9 @@ dev = [
     "dash>=2.16.0",
     "plotly>=5.20.0",
     "dash-cytoscape>=1.0.0",
+    # Mirrors requirements-dev.txt: the two documented dev-install paths had drifted,
+    # so `pip install -e ".[dev]"` silently skipped the browser-UI test dependency.
+    "playwright>=1.40",
 ]
 
 [project.urls]
