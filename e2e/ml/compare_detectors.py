@@ -187,18 +187,29 @@ def compare(manifest_path, *, split: str = "test",
             device=None, batch_size: int = 8,
             ssm_chunk_size: Optional[int] = None,
             limit: Optional[int] = None,
-            classical_kwargs: Optional[Dict] = None) -> Dict:
+            classical_kwargs: Optional[Dict] = None,
+            classical_doppler_reduce: Optional[Sequence[str]] = None) -> Dict:
     """Every requested arm, scored on the same split at the same matched recall."""
     if not classical and not checkpoints:
         raise ValueError("nothing to compare: pass --classical and/or --checkpoint")
 
     arms: List[Dict] = []
     if classical:
-        arms.append({"name": "classical CFAR",
-                     **score_classical(manifest_path, split, device=device,
-                                       decode_threshold=decode_threshold,
-                                       target_recall=target_recall, limit=limit,
-                                       **(classical_kwargs or {}))})
+        # One arm per Doppler reduction, so they are scored on IDENTICAL frames. The
+        # reduction changes the noise statistics CA-CFAR's threshold depends on, and a
+        # noise-only test cannot see what it costs on real targets -- see
+        # notes/tools/measure_cfar_calibration.py.
+        for reduce in (classical_doppler_reduce or (None,)):
+            kw = dict(classical_kwargs or {})
+            label = "classical CFAR"
+            if reduce is not None:
+                kw["doppler_reduce"] = reduce
+                label = f"classical CFAR ({reduce})"
+            arms.append({"name": label,
+                         **score_classical(manifest_path, split, device=device,
+                                           decode_threshold=decode_threshold,
+                                           target_recall=target_recall, limit=limit,
+                                           **kw)})
     for name, path in checkpoints:
         arms.append({"name": name,
                      **score_checkpoint(manifest_path, path, split, device=device,
@@ -260,6 +271,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "comes from the checkpoint, so models may be mixed")
     p.add_argument("--classical", action="store_true",
                    help="also score the CFAR baseline (needs raw ADC in the corpus)")
+    p.add_argument("--classical-doppler-reduce", default=None,
+                   metavar="max,sum,cfar_first",
+                   help="comma-separated Doppler reductions to score the classical "
+                        "baseline under, one arm each, on identical frames (see "
+                        "e2e.ml.baseline's DOPPLER_* constants). Default: the shipped one")
     p.add_argument("--recall", type=float, default=DEFAULT_TARGET_RECALL,
                    help=f"recall to hold every arm at (default {DEFAULT_TARGET_RECALL})")
     p.add_argument("--decode-threshold", type=float, default=DEFAULT_DECODE_THRESHOLD,
@@ -281,11 +297,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     device = torch.device(args.device) if args.device else _default_device()
     checkpoints = [parse_checkpoint_arg(spec) for spec in args.checkpoint]
 
+    reductions = ([r.strip() for r in args.classical_doppler_reduce.split(",") if r.strip()]
+                  if args.classical_doppler_reduce else None)
     result = compare(args.manifest, split=args.split, checkpoints=checkpoints,
                      classical=args.classical, target_recall=args.recall,
                      decode_threshold=args.decode_threshold, device=device,
                      batch_size=args.batch_size, ssm_chunk_size=args.ssm_chunk_size,
-                     limit=args.limit)
+                     limit=args.limit, classical_doppler_reduce=reductions)
     print(format_table(result))
 
     if args.out:

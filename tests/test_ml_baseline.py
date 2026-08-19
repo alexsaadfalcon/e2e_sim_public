@@ -251,3 +251,115 @@ def test_score_manifest_targets_are_deduplicated_not_footprint_cells(tmp_path, m
             footprint_cell_count += int((z["labels"][0] > 0.5).sum())
     assert footprint_cell_count == 36
     assert got != footprint_cell_count
+
+
+# ------------------------------------------------------------------------------------
+# Doppler reduction -- the axis added 2026-08-19 after an RF consultant flagged that
+# collapsing Doppler with `max` BEFORE CFAR changes the noise statistics the threshold
+# depends on.
+#
+# The batched-vs-looped tests are the load-bearing ones: the per-Doppler path exists only
+# because `cfar_objectness` and `_to_grid` grew a batch axis, and a batch axis that
+# disagrees with the loop it replaces would corrupt every number quietly.
+# ------------------------------------------------------------------------------------
+def test_batched_cfar_objectness_agrees_with_looping_the_2d_version():
+    """The batch axis must be exactly a loop, not approximately one."""
+    torch.manual_seed(0)
+    cube = torch.rand(5, 24, 32) + 0.05
+    batched = baseline.cfar_objectness(cube)
+    looped = torch.stack([baseline.cfar_objectness(cube[d]) for d in range(cube.shape[0])])
+    assert batched.shape == cube.shape
+    assert torch.equal(batched, looped)
+
+
+def test_unbatched_cfar_objectness_is_unchanged_by_the_batch_axis():
+    """Regression guard: the 2-D entry point must still return 2-D, bit for bit."""
+    torch.manual_seed(1)
+    power = torch.rand(24, 32) + 0.05
+    out = baseline.cfar_objectness(power)
+    assert out.shape == power.shape
+    assert torch.equal(out, baseline.cfar_objectness(power[None])[0])
+
+
+def test_batched_to_grid_agrees_with_looping():
+    torch.manual_seed(2)
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    cube = torch.rand(4, 16, 64)
+    batched = baseline._to_grid(cube, cfg, grid)
+    looped = torch.stack([baseline._to_grid(cube[d], cfg, grid)
+                          for d in range(cube.shape[0])])
+    assert torch.equal(batched, looped)
+
+
+def test_keep_doppler_returns_the_uncollapsed_cube_whose_max_is_the_collapsed_one():
+    """`keep_doppler` must be the SAME computation, just stopped one step earlier."""
+    torch.manual_seed(3)
+    cfg = PRESETS["ti_iwr1443"]
+    adc = torch.complex(torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples),
+                        torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
+    flat = baseline.range_azimuth_power(cfg, adc)
+    cube = baseline.range_azimuth_power(cfg, adc, keep_doppler=True)
+    assert cube.dim() == 3 and cube.shape[:2] == flat.shape
+    assert torch.equal(cube.max(dim=2).values, flat)
+
+
+def test_default_doppler_reduce_is_unchanged():
+    """The 2026-08-19 change must not have moved the shipped detector."""
+    torch.manual_seed(4)
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    adc = torch.complex(torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples),
+                        torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
+    default = baseline.classical_detection_map(cfg, adc, grid)
+    explicit = baseline.classical_detection_map(cfg, adc, grid,
+                                                doppler_reduce=baseline.DOPPLER_MAX)
+    assert torch.equal(default, explicit)
+
+
+@pytest.mark.parametrize("reduce", ["max", "sum", "cfar_first"])
+def test_every_doppler_reduction_produces_the_detector_output_format(reduce):
+    torch.manual_seed(5)
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    adc = torch.complex(torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples),
+                        torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
+    out = baseline.classical_detection_map(cfg, adc, grid, doppler_reduce=reduce)
+    assert out.shape == (3, grid.n_range, grid.n_azimuth)
+    assert torch.isfinite(out).all()
+    assert float(out[0].min()) >= 0.0 and float(out[0].max()) <= 1.0
+
+
+def test_unknown_doppler_reduction_raises_rather_than_silently_defaulting():
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    adc = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64)
+    with pytest.raises(ValueError, match="doppler_reduce"):
+        baseline.classical_detection_map(cfg, adc, grid, doppler_reduce="mean")
+
+
+def test_cfar_first_is_worse_calibrated_than_max_on_pure_noise():
+    """Pins a MEASURED own-goal so it cannot be quietly reintroduced as an improvement.
+
+    "CFAR each Doppler slice, then take the max of the objectness" sounds like the
+    physically correct fix -- detect first, collapse second -- and it is not: the max over
+    K slices is an UNCORRECTED multiple-hypothesis test, so with K tries per cell
+    something crosses threshold almost every time. MEASURED on benchmark_v1 (K=64), false
+    alarms per frame on noise-only input barely move with threshold: 1427 at 0.05 and
+    1417 at 0.3, against 822 -> 0.0 for `max`.
+
+    Here the effect is reproduced on a small config, where the assertion that matters is
+    the ORDERING (cfar_first strictly worse), not the absolute counts.
+    """
+    torch.manual_seed(6)
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    # Pure complex Gaussian: every detection below is a false alarm by construction.
+    adc = torch.complex(torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples),
+                        torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples)) / (2 ** 0.5)
+
+    def fa(reduce, thr):
+        obj = baseline.classical_detection_map(cfg, adc, grid, doppler_reduce=reduce)[0]
+        return int((obj > thr).sum())
+
+    assert fa("cfar_first", 0.3) > fa("max", 0.3)

@@ -109,6 +109,27 @@ CFAR_MAX_DB = 20.0
 # CA-CFAR window, in label-grid cells: a (2*train+2*guard+1)^2 outer square minus a
 # (2*guard+1)^2 guard square. Guard cells keep a target's own energy out of the noise
 # estimate it is being tested against.
+#: How the Doppler axis is collapsed before detection. This is a STATISTICS choice, not
+#: a taste one, because CA-CFAR's threshold means what it means only when the cell under
+#: test and its training cells share a distribution.
+#:
+#: `DOPPLER_MAX` (the shipped default) -- max over K Doppler bins. Square-law noise power
+#:   is exponential; the MAXIMUM of K exponentials is not. Its upper tail is Gumbel-like
+#:   and far heavier, so a fixed dB threshold buys a false-alarm rate nothing in the CFAR
+#:   design predicts. It is, however, the most SENSITIVE reduction for a point target,
+#:   costing only ~ln(K) against the noise floor.
+#: `DOPPLER_SUM` -- non-coherent integration. Erlang(K), whose coefficient of variation is
+#:   1/sqrt(K), so the noise ratio concentrates and the threshold behaves. Pays for it by
+#:   diluting a single-bin target across K bins.
+#: `DOPPLER_CFAR_FIRST` -- CFAR each Doppler slice, then take the max of the OBJECTNESS.
+#:   Detect first, collapse second. Every CFAR sees exponential cells, so the threshold is
+#:   calibrated, AND a target that lives in one Doppler bin is tested against that bin's
+#:   own noise rather than against K bins of it. Costs K CFAR passes.
+DOPPLER_MAX = "max"
+DOPPLER_SUM = "sum"
+DOPPLER_CFAR_FIRST = "cfar_first"
+_DOPPLER_REDUCTIONS = (DOPPLER_MAX, DOPPLER_SUM, DOPPLER_CFAR_FIRST)
+
 CFAR_GUARD = 2
 CFAR_TRAIN = 6
 
@@ -140,8 +161,12 @@ def resolution_report(cfg, grid: LabelGrid, criterion: Optional[MatchCriterion] 
 
 def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = None,
                         angle_window: bool = True,
-                        doppler_notch_bins: int = 0) -> torch.Tensor:
+                        doppler_notch_bins: int = 0,
+                        keep_doppler: bool = False) -> torch.Tensor:
     """Raw ADC `[n_rx, n_chirps, n_samples]` -> real power `[n_angle, n_range]`.
+
+    `keep_doppler=True` returns the uncollapsed `[n_angle, n_range, n_doppler]` cube
+    instead, for callers that want to detect before collapsing (see `DOPPLER_CFAR_FIRST`).
 
     Steps 1-3 of the module docstring. `n_angle_fft` defaults to the virtual-channel
     count, i.e. no zero-padding: an interpolated angle axis would place peaks between
@@ -199,17 +224,24 @@ def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = 
         power = power.clone()
         power[:, :, max(0, c - doppler_notch_bins):c + doppler_notch_bins + 1] = 0.0
 
+    if keep_doppler:
+        return power                                                       # [n_fft, R, D]
     return power.max(dim=2).values                                         # [n_fft, R]
 
 
 def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
     """Resample `[n_angle, n_range_fine]` power onto `[grid.n_range, grid.n_azimuth]`.
 
+    Accepts an optional leading Doppler axis (`[D, n_angle, n_range_fine]` ->
+    `[D, grid.n_range, grid.n_azimuth]`), so a per-Doppler detector can resample the whole
+    cube in one call and keep the resampling identical to the collapsed path's.
+
     Nearest-neighbour on both axes. The angle axis of an `n_fft`-point FFT (fftshifted)
     maps to `sin(az) = 2k/n_fft` for `k` in `[-n_fft/2, n_fft/2)`; the fine range axis is
     `i * cfg.range_resolution_m`.
     """
-    n_angle, n_range_fine = power.shape
+    batched = power.dim() == 3
+    n_angle, n_range_fine = power.shape[-2:]
     dev = power.device
 
     sin_src = 2.0 * (torch.arange(n_angle, device=dev, dtype=torch.float32) - n_angle // 2) / n_angle
@@ -219,6 +251,9 @@ def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
     r_dst = (torch.arange(grid.n_range, device=dev, dtype=torch.float32) + 0.5) * grid.range_bin_m
     ri = (r_dst / float(cfg.range_resolution_m)).long().clamp_(0, n_range_fine - 1)
 
+    if batched:
+        # [D, n_angle, n_range_fine] -> [D, n_range, n_azimuth]
+        return power[:, ai][:, :, ri].transpose(1, 2).contiguous()
     return power[ai][:, ri].T.contiguous()          # [n_range, n_azimuth]
 
 
@@ -226,12 +261,17 @@ def cfar_objectness(power: torch.Tensor, *, guard: int = CFAR_GUARD, train: int 
                     min_db: float = CFAR_MIN_DB, max_db: float = CFAR_MAX_DB) -> torch.Tensor:
     """`[n_range, n_azimuth]` power -> CA-CFAR objectness in `[0, 1]`.
 
+    Also accepts a batched `[D, n_range, n_azimuth]` and returns the same shape, so each
+    Doppler slice can be tested against ITS OWN noise annulus rather than against a
+    Doppler-collapsed one (see `DOPPLER_CFAR_FIRST`).
+
     The noise estimate under each cell is the mean over an annulus: a
     `(2*(guard+train)+1)^2` outer square minus its `(2*guard+1)^2` guard core. Both means
     come from `avg_pool2d` with `count_include_pad=False`, so cells at the map edge average
     only over real neighbours instead of being biased toward zero by padding.
     """
-    x = power[None, None]
+    squeezed = power.dim() == 2
+    x = power[None, None] if squeezed else power[:, None]   # -> [B, 1, H, W]
     outer_k = 2 * (guard + train) + 1
     guard_k = 2 * guard + 1
     outer_sum = F.avg_pool2d(x, outer_k, stride=1, padding=guard + train,
@@ -241,9 +281,9 @@ def cfar_objectness(power: torch.Tensor, *, guard: int = CFAR_GUARD, train: int 
     n_train = outer_k ** 2 - guard_k ** 2
     noise = ((outer_sum - guard_sum) / n_train).clamp_min(torch.finfo(power.dtype).tiny)
 
-    ratio_db = 10.0 * torch.log10((power[None, None] / noise).clamp_min(1e-12))
-    obj = (ratio_db - min_db) / (max_db - min_db)
-    return obj.clamp_(0.0, 1.0)[0, 0]
+    ratio_db = 10.0 * torch.log10((x / noise).clamp_min(1e-12))
+    obj = ((ratio_db - min_db) / (max_db - min_db)).clamp_(0.0, 1.0)
+    return obj[0, 0] if squeezed else obj[:, 0]
 
 
 def group_peaks(obj: torch.Tensor, *, radius: int = 1) -> torch.Tensor:
@@ -270,6 +310,10 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
                             **kwargs) -> torch.Tensor:
     """Raw ADC -> a `[3, n_range, n_azimuth]` map in the detector's own output format.
 
+    `doppler_reduce` selects how the Doppler axis is collapsed; see `DOPPLER_MAX` /
+    `DOPPLER_SUM` / `DOPPLER_CFAR_FIRST` above for what each does to the noise statistics
+    the CFAR threshold depends on. The default is unchanged.
+
     Channel 0 is the CFAR objectness; the two regression channels are zero, so a decoded
     detection sits at its cell centre. That is the honest classical behaviour -- there is
     no sub-cell refinement without an interpolation stage this baseline deliberately omits.
@@ -281,13 +325,28 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
     offset -- ~2.2 m for a car. Undoing that would take an extent estimator, not a
     threshold. See `e2e.ml.labels`.
     """
+    doppler_reduce = kwargs.pop("doppler_reduce", DOPPLER_MAX)
+    if doppler_reduce not in _DOPPLER_REDUCTIONS:
+        raise ValueError(f"doppler_reduce must be one of {_DOPPLER_REDUCTIONS}, "
+                         f"got {doppler_reduce!r}")
+
     power = range_azimuth_power(
         cfg, adc,
         n_angle_fft=kwargs.pop("n_angle_fft", None),
         angle_window=kwargs.pop("angle_window", True),
         doppler_notch_bins=kwargs.pop("doppler_notch_bins", 0),
+        keep_doppler=doppler_reduce != DOPPLER_MAX,
     )
-    obj = cfar_objectness(_to_grid(power, cfg, grid), **kwargs)
+
+    if doppler_reduce == DOPPLER_MAX:
+        obj = cfar_objectness(_to_grid(power, cfg, grid), **kwargs)
+    elif doppler_reduce == DOPPLER_SUM:
+        obj = cfar_objectness(_to_grid(power.sum(dim=2), cfg, grid), **kwargs)
+    else:
+        # Detect first, collapse second: CFAR every Doppler slice against its own noise
+        # annulus, then keep each cell's best evidence across Doppler.
+        cube = _to_grid(power.permute(2, 0, 1).contiguous(), cfg, grid)   # [D, R, A]
+        obj = cfar_objectness(cube, **kwargs).max(dim=0).values
     if peak_grouping:
         obj = group_peaks(obj, radius=group_radius)
     out = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32, device=obj.device)
