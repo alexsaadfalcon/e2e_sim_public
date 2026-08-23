@@ -287,6 +287,125 @@ def test_clutter_deterministic(cfg, torch_device):
     assert torch.allclose(out1, out2, atol=1e-6)
 
 
+# --------------------------------------------------------------- clutter temporal persistence
+#
+# notes/PHYSICS_JUSTIFICATION_AUDIT.md entry 10: the clutter FIELD (scatterer positions/
+# velocities/gains) must be drawn ONCE per seed (frame-independent) and evolve only via a
+# deterministic per-scatterer Doppler phase advance keyed to `frame_idx` -- not redrawn
+# i.i.d. every frame the way `apply_clutter` used to (old seed was `seed + frame_idx`).
+
+def test_clutter_frame0_matches_pre_persistence_behaviour(cfg, torch_device):
+    """Bit-identity pin for `frame_idx=0`.
+
+    Rather than keep dead code around, this reimplements -- FROZEN, inert, local to the
+    test -- exactly the pre-fix `apply_clutter` body (which had no `frame_idx` and no
+    frame-advance step; its seed at frame 0 was `seed + 0 == seed`, i.e. the same `seed`
+    passed here). `apply_clutter(..., frame_idx=0)` skips the new frame-advance step
+    entirely (see its `if frame_idx:` guard), so the two must match bit-for-bit -- this
+    is what makes single-frame corpus generation (frame_idx always 0) unchanged.
+    """
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=51)
+    params = ClutterParams(density=1.0, nu=0.5, doppler_std_mps=0.2, total_relative_db=-5.0)
+
+    def _legacy_apply_clutter(adc, cfg, params, *, seed):
+        from e2e.ml.impairments import C_MPS, _thermal_reference
+        n_rx, n_chirps, n_samples = adc.shape
+        device, dtype = adc.device, adc.dtype
+        n_scat = max(1, int(round(float(params.density) * n_samples)))
+        gen = torch.Generator(device=device)
+        gen.manual_seed(int(seed))
+        ranges = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * float(cfg.max_range_m)
+        f_beat = float(cfg.ramp_slope_hzps) * 2.0 * ranges / C_MPS
+        vel = torch.randn(n_scat, generator=gen, device=device, dtype=torch.float64) * float(params.doppler_std_mps)
+        f_dop = 2.0 * vel / float(cfg.wavelength_m)
+        gain = _k_distributed_gain(n_scat, n_rx, float(params.nu), generator=gen, device=device)
+        assert params.reference == "thermal"  # default; the branch this replica implements
+        peak_power = _thermal_reference(cfg, domain="time")
+        target_total = peak_power * (10.0 ** (float(params.total_relative_db) / 10.0))
+        mean_power = target_total / n_scat
+        gain = gain * math.sqrt(mean_power)
+        n = torch.arange(n_samples, device=device, dtype=torch.float64)
+        c = torch.arange(n_chirps, device=device, dtype=torch.float64)
+        fast_phase = 2.0 * math.pi * torch.outer(f_beat, n) / float(cfg.fs_hz)
+        slow_phase = 2.0 * math.pi * torch.outer(f_dop, c) * float(cfg.chirp_period_s)
+        fast = torch.exp(1j * fast_phase).to(gain.dtype)
+        slow = torch.exp(1j * slow_phase).to(gain.dtype)
+        clutter = torch.einsum("sr,sc,sn->rcn", gain, slow, fast)
+        return adc + clutter.to(dtype)
+
+    out_new = apply_clutter(adc, cfg, params, seed=777, frame_idx=0)
+    out_legacy = _legacy_apply_clutter(adc, cfg, params, seed=777)
+    assert torch.equal(out_new, out_legacy)
+
+
+def test_clutter_persists_across_frames_and_still_evolves(torch_device):
+    """Persistence (b) and evolution (c) together.
+
+    Bound derivation for (b): each scatterer's frame-to-frame phase advance is
+    `delta_s = 2*pi*f_dop_s*T_frame`, `f_dop_s = 2*v_s/lambda`, `T_frame =
+    1/frame_rate_hz` (`apply_clutter`'s "TEMPORAL BEHAVIOUR"). `v_s ~
+    N(0, doppler_std_mps^2)`, so `delta_s ~ N(0, sigma_delta^2)` with
+    `sigma_delta = 2*pi*(2*doppler_std_mps/lambda)*(1/frame_rate_hz)`. The clutter
+    return is a sum, over many independently-phased scatterers, of unit-magnitude
+    phasors that each rotate by `delta_s` from frame 0 to frame 1; summed over (rx,
+    chirp, range) samples the cross terms between DIFFERENT scatterers average toward
+    zero (their fast/slow-time phases are independent), leaving the same-scatterer
+    ("diagonal") term to dominate the frame0-frame1 cross-correlation, whose expected
+    value is the Gaussian characteristic function `E[exp(-j*delta_s)] =
+    exp(-sigma_delta^2/2)`. Picking `doppler_std_mps`/`frame_rate_hz` so
+    `sigma_delta << 1 rad` pins that bound near 1; the test asserts a conservative 0.9x
+    of it, comfortably above the ~0 correlation the old i.i.d.-redraw-every-frame
+    behaviour produced (see PHYSICS_JUSTIFICATION_AUDIT.md entry 10) yet well short of
+    the theoretical bound, leaving slack for the diagonal-dominance approximation.
+    """
+    cfg = RadarConfig(
+        name="persist_cfg", f0_hz=77e9, bandwidth_hz=500e6, n_tx=1, n_rx=4,
+        n_chirps=32, n_samples=64, fs_hz=10e6, chirp_period_s=20e-6, mimo="single",
+        frame_rate_hz=2000.0,
+    )
+    assert not cfg.validate()
+    params = ClutterParams(density=1.0, nu=1.0, doppler_std_mps=0.01, total_relative_db=0.0)
+
+    sigma_dop = 2.0 * params.doppler_std_mps / cfg.wavelength_m
+    t_frame = 1.0 / cfg.frame_rate_hz
+    sigma_delta = 2.0 * math.pi * sigma_dop * t_frame
+    expected_corr = math.exp(-0.5 * sigma_delta ** 2)
+    assert expected_corr > 0.999  # sanity: confirms the chosen regime is near-lossless
+
+    # A constant (zero) input cube fed as both frame 0 and frame 1: the "clutter-only
+    # contribution" is then exactly `out - adc`, with no floating-point cancellation.
+    adc = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64, device=torch_device)
+    seed = 4242
+    out0 = apply_clutter(adc, cfg, params, seed=seed, frame_idx=0)
+    out1 = apply_clutter(adc, cfg, params, seed=seed, frame_idx=1)
+
+    c0, c1 = out0 - adc, out1 - adc
+    num = torch.sum(c0 * torch.conj(c1))
+    den = torch.sqrt(torch.sum(torch.abs(c0) ** 2) * torch.sum(torch.abs(c1) ** 2))
+    corr = torch.abs(num / den).item()
+    assert corr > 0.9 * expected_corr, (
+        f"frame-to-frame clutter correlation {corr:.4f} is far below the "
+        f"{expected_corr:.4f} a persistent field implies -- looks i.i.d. redrawn")
+
+    # (c) Evolution is real: frame 1 must NOT equal frame 0 -- the phase advance is
+    # nonzero for scatterers with nonzero drawn velocity.
+    assert not torch.equal(out0, out1)
+
+
+def test_clutter_multiframe_determinism(cfg, torch_device):
+    """(d) Same (seed, frame_idx) sequence -> bit-identical; different seed -> differs."""
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=61)
+    params = ClutterParams()
+
+    seq_a = [apply_clutter(adc, cfg, params, seed=100, frame_idx=i) for i in range(3)]
+    seq_b = [apply_clutter(adc, cfg, params, seed=100, frame_idx=i) for i in range(3)]
+    for a, b in zip(seq_a, seq_b):
+        assert torch.equal(a, b)
+
+    seq_c = [apply_clutter(adc, cfg, params, seed=101, frame_idx=i) for i in range(3)]
+    assert any(not torch.equal(a, c) for a, c in zip(seq_a, seq_c))
+
+
 # --------------------------------------------------------------------------- chain
 
 def test_apply_all_defaults_and_skip(cfg, torch_device):
@@ -309,6 +428,38 @@ def test_apply_all_deterministic(cfg, torch_device):
     out1 = apply_all(adc, cfg, seed=99)
     out2 = apply_all(adc, cfg, seed=99)
     assert torch.allclose(out1, out2, atol=1e-6)
+
+
+def test_apply_all_clutter_seed_is_frame_independent_others_are_not(cfg, torch_device):
+    """`apply_all`'s `seed` is the BASE seed: clutter keys off it directly (same field
+    every frame), while phase_noise/leakage key off `seed + frame_idx` (fresh draw
+    every frame) -- see `apply_all`'s docstring and PHYSICS_JUSTIFICATION_AUDIT.md
+    entry 10."""
+    from e2e.ml.impairments import stage_seed
+
+    silent = torch.zeros(4, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64, device=torch_device)
+
+    # Isolate clutter alone: with leakage/phase_noise skipped, apply_all's output on a
+    # silent cube IS the clutter field, directly comparable to a raw apply_clutter call.
+    out_frame0 = apply_all(silent, cfg, {"leakage": None, "phase_noise": None}, seed=5, frame_idx=0)
+    out_frame3 = apply_all(silent, cfg, {"leakage": None, "phase_noise": None}, seed=5, frame_idx=3)
+    direct_frame0 = apply_clutter(silent, cfg, ClutterParams(), seed=stage_seed(5, "clutter"), frame_idx=0)
+    direct_frame3 = apply_clutter(silent, cfg, ClutterParams(), seed=stage_seed(5, "clutter"), frame_idx=3)
+    assert torch.equal(out_frame0, direct_frame0)
+    assert torch.equal(out_frame3, direct_frame3)
+    # Same field (same base seed), evolved -- not independently redrawn.
+    assert not torch.equal(out_frame0, out_frame3)
+
+    # Phase noise, by contrast, must use seed + frame_idx (a fresh draw every frame) --
+    # needs a NON-zero cube, since phase noise multiplies existing signal and a silent
+    # cube stays silent regardless of the phase applied to it.
+    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=71)
+    out_pn_frame0 = apply_all(adc, cfg, {"leakage": None, "clutter": None}, seed=5, frame_idx=0)
+    out_pn_frame3 = apply_all(adc, cfg, {"leakage": None, "clutter": None}, seed=5, frame_idx=3)
+    direct_pn_frame0 = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=stage_seed(5, "phase_noise"))
+    direct_pn_frame3 = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=stage_seed(8, "phase_noise"))
+    assert torch.allclose(out_pn_frame0, direct_pn_frame0, atol=1e-6)
+    assert torch.allclose(out_pn_frame3, direct_pn_frame3, atol=1e-6)
 
 
 def test_clutter_passes_through_the_oscillator_phase_noise(cfg, torch_device):

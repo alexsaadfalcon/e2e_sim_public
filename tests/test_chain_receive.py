@@ -72,11 +72,16 @@ def test_impairment_block_changes_cube_and_records_params(small_adc):
     assert not torch.equal(out["adc"], adc)
 
     params = out["impairment_params"]
-    assert set(params) == {"phase_noise", "leakage", "clutter", "seed"}
+    # "base_seed"/"frame_idx" are new fields (PHYSICS_JUSTIFICATION_AUDIT.md entry 10):
+    # the clutter field is now drawn from `base_seed` alone and evolved by `frame_idx`,
+    # so provenance must record both, not just the legacy per-frame "seed".
+    assert set(params) == {"phase_noise", "leakage", "clutter", "seed", "base_seed", "frame_idx"}
     assert isinstance(params["phase_noise"], PhaseNoiseParams)
     assert isinstance(params["leakage"], LeakageParams)
     assert isinstance(params["clutter"], ClutterParams)
     assert params["seed"] == 0
+    assert params["base_seed"] == 0
+    assert params["frame_idx"] == 0
 
 
 def test_impairment_block_seed_determinism(small_adc):
@@ -110,6 +115,53 @@ def test_impairment_block_sampler_varies_and_records_per_frame(small_adc):
         assert isinstance(out["impairment_params"]["phase_noise"], PhaseNoiseParams)
 
     assert len(set(seen_leakage_db)) == 3  # all three frames sampled distinct params
+
+
+def test_impairment_block_clutter_field_persists_frame_to_frame(small_adc):
+    """PHYSICS_JUSTIFICATION_AUDIT.md entry 10: the clutter field must be drawn once
+    (from the block's base `seed`) and evolve, not be i.i.d. redrawn every frame the
+    way `ImpairmentBlock` used to (old per-frame seed was `seed + frame_idx`, feeding
+    every impairment stage including clutter). Isolate clutter by disabling the other
+    two stages and feeding the SAME (silent) cube on frames 0 and 1: the clutter-only
+    contribution must correlate strongly frame to frame."""
+    silent = torch.zeros(_CFG.n_rx, _CFG.n_chirps, _CFG.n_samples, dtype=torch.complex64)
+    block = ImpairmentBlock(
+        _CFG, chain_params={"leakage": None, "phase_noise": None,
+                            "clutter": ClutterParams(doppler_std_mps=0.0002)},
+        seed=17,
+    )
+    out0 = block.apply({"adc": silent.clone()})["adc"]
+    out1 = block.apply({"adc": silent.clone()})["adc"]
+
+    assert not torch.equal(out0, out1)  # the field still evolves frame to frame
+
+    num = torch.sum(out0 * torch.conj(out1))
+    den = torch.sqrt(torch.sum(torch.abs(out0) ** 2) * torch.sum(torch.abs(out1) ** 2))
+    corr = torch.abs(num / den).item()
+    # doppler_std_mps=0.0002 m/s at 77 GHz / frame_rate_hz=10 (_CFG default) gives a
+    # phase drift per frame of sigma_delta = 2*pi*(2*0.0002/lambda_m)*(1/10) ~= 0.065 rad
+    # (see test_ml_impairments.py's persistence test for the same derivation), so the
+    # field should stay highly correlated -- the old i.i.d.-redraw-every-frame behaviour
+    # gave ~0 correlation here.
+    assert corr > 0.9
+
+
+def test_impairment_block_multiframe_determinism(small_adc):
+    """(d) Two blocks with the same seed reproduce a multi-frame sequence bit-
+    identically; a different seed diverges somewhere in the sequence."""
+    adc = small_adc()
+
+    def _run(seed, n=3):
+        block = ImpairmentBlock(_CFG, seed=seed)
+        return [block.apply({"adc": adc.clone()})["adc"] for _ in range(n)]
+
+    seq_a = _run(seed=5)
+    seq_b = _run(seed=5)
+    for a, b in zip(seq_a, seq_b):
+        assert torch.equal(a, b)
+
+    seq_c = _run(seed=6)
+    assert any(not torch.equal(a, c) for a, c in zip(seq_a, seq_c))
 
 
 # --------------------------------------------------------------------------- QuantizerBlock

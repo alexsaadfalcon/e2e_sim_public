@@ -486,7 +486,8 @@ class ClutterParams:
     reference: str = DEFAULT_POWER_REFERENCE
 
 
-def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -> torch.Tensor:
+def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
+                  frame_idx: int = 0) -> torch.Tensor:
     """Add heavy-tailed diffuse ground clutter.
 
     `density * n_samples` scatterers are scattered uniformly over the unambiguous
@@ -499,6 +500,29 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
     (`max(|adc|^2)`) -- unlike `apply_leakage`'s coherent single-bin taps, clutter is a
     sum of many uncorrelated returns, so a time-domain (not range-FFT) statistic is the
     simpler well-defined reference.
+
+    TEMPORAL BEHAVIOUR: `seed` draws the clutter FIELD -- scatterer positions,
+    velocities, K-distribution texture and speckle gains -- and, on its own, is
+    independent of `frame_idx`: the road and barriers a real scene's clutter comes
+    from stay put, so the caller is expected to hand the SAME `seed` across every
+    frame of a scenario (see `ImpairmentBlock`/`apply_all`, which use a base seed for
+    this stage rather than the per-frame seed the other two stages get). `frame_idx`
+    is what actually evolves the return frame to frame: each scatterer's own drawn
+    radial velocity gives it a Doppler `f_dop = 2*v/lambda`, and by frame `frame_idx`
+    (at `cfg.frame_rate_hz` frames/s) it has picked up a deterministic extra phase
+    `2*pi*f_dop*(frame_idx/frame_rate_hz)` -- the physical model of internal motion
+    within an otherwise-static scene. `frame_idx=0` adds zero extra phase, so it
+    reproduces exactly the single-frame (pre-persistence) behaviour bit-for-bit.
+
+    TWO STATED APPROXIMATIONS of the persistence model. (a) A scatterer's drawn
+    velocity advances its PHASE but never its RANGE -- `f_beat` stays frozen at the
+    drawn positions for the life of the field. At the default `doppler_std_mps`
+    (0.05 m/s) the range walk is negligible over any realistic frame count, but push
+    `frames_per_scene` very high and the inconsistency grows. (b) Persistence holds
+    only if the CALLER keeps the field-defining parameters fixed across frames:
+    varying `density` or `nu` per frame (no shipped randomizer does) changes the draw
+    count / texture shape and silently produces a NEW field each frame while still
+    looking deterministic. Vary only power-level parameters per frame.
 
     HISTORICAL NOTE, because the original choice was deliberate and is worth preserving:
     this docstring used to end "despite the 'clutter-to-noise ratio' phrasing in the
@@ -546,6 +570,16 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int) -
     target_total = peak_power * (10.0 ** (float(params.total_relative_db) / 10.0))
     mean_power = target_total / n_scat
     gain = gain * math.sqrt(mean_power)
+
+    if frame_idx:
+        # Deterministic phase advance from the scatterer's OWN drawn velocity -- the
+        # only thing that is allowed to change the field frame to frame (see docstring
+        # "TEMPORAL BEHAVIOUR"). `frame_idx=0` skips this entirely so frame 0 is exactly
+        # the single-draw field, bit-for-bit.
+        t_frame = float(frame_idx) / float(cfg.frame_rate_hz)
+        frame_phase = 2.0 * math.pi * f_dop * t_frame  # [n_scat]
+        frame_phasor = torch.exp(1j * frame_phase).to(gain.dtype)
+        gain = gain * frame_phasor.unsqueeze(1)  # broadcast over rx
 
     n = torch.arange(n_samples, device=device, dtype=torch.float64)
     c = torch.arange(n_chirps, device=device, dtype=torch.float64)
@@ -598,7 +632,7 @@ def stage_seed(seed: int, stage: str) -> int:
 
 
 def apply_all(adc: torch.Tensor, cfg, chain_params: Optional[Dict[str, Any]] = None, *,
-              seed: int = 0) -> torch.Tensor:
+              seed: int = 0, frame_idx: int = 0) -> torch.Tensor:
     """Apply leakage, then clutter, then phase noise -- see `_STAGES` for why.
 
     Stage order is leakage -> clutter -> phase noise, and that order is physical rather
@@ -612,13 +646,27 @@ def apply_all(adc: torch.Tensor, cfg, chain_params: Optional[Dict[str, Any]] = N
     Each stage gets a distinct, deterministic sub-seed keyed to its NAME (see
     `stage_seed`) so the three never share a realization and a reordering of the chain
     does not change any of them.
+
+    `seed` is the BASE (frame-independent) seed; `frame_idx` is threaded through
+    separately (0-based, default 0). Phase noise and leakage are genuinely new draws
+    every frame (a noisy oscillator/coupling has no reason to repeat), so those two
+    still key off the per-frame seed `seed + frame_idx`, exactly as before `frame_idx`
+    existed as an argument. Clutter is the one exception: it is a persistent SCENE, not
+    a fresh draw, so it keys off `seed` alone -- the same field every frame -- and
+    `frame_idx` reaches `apply_clutter` directly to evolve that field deterministically
+    (see its docstring). At `frame_idx=0` both paths agree (`seed + 0 == seed`), so
+    this is a bit-for-bit no-op for single-frame use.
     """
     chain_params = dict(chain_params) if chain_params else {}
     out = adc
+    frame_seed = seed + frame_idx  # per-frame seed; phase_noise/leakage only
     for name, cls, fn in _STAGES:
         if name in chain_params and chain_params[name] is None:
             continue
         val = chain_params.get(name, cls())
         p = val if isinstance(val, cls) else cls(**val)
-        out = fn(out, cfg, p, seed=stage_seed(seed, name))
+        if name == "clutter":
+            out = fn(out, cfg, p, seed=stage_seed(seed, name), frame_idx=frame_idx)
+        else:
+            out = fn(out, cfg, p, seed=stage_seed(frame_seed, name))
     return out

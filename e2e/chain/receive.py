@@ -84,14 +84,25 @@ class ImpairmentBlock:
     PROVENANCE: whichever form produced this frame's params, the resolved, concrete
     per-stage dataclass instances (defaults filled in, not the possibly-partial
     input) are recorded into `state['impairment_params']` -- `{"phase_noise": ...,
-    "leakage": ..., "clutter": ..., "seed": <int actually passed to apply_all>}` --
-    so a corpus sample can always say exactly what was done to it, even when a stage
-    ran with its defaults or was skipped (value `None`).
+    "leakage": ..., "clutter": ..., "seed": <legacy per-frame seed, phase_noise/
+    leakage only>, "base_seed": <the seed the persistent clutter field was drawn
+    from>, "frame_idx": <this frame's 0-based index>}` -- so a corpus sample can
+    always say exactly what was done to it, even when a stage ran with its defaults
+    or was skipped (value `None`).
 
-    Determinism: frame `i`'s actual seed is `seed + i` (distinct from any other
-    frame's, and from the per-stage sub-seeds `apply_all` derives from it); two
+    Determinism: frame `i`'s legacy per-frame seed is `seed + i` (distinct from any
+    other frame's, and from the per-stage sub-seeds `apply_all` derives from it); two
     `ImpairmentBlock`s built with the same `seed` reproduce bit-identically, a
     different `seed` does not.
+
+    CLUTTER IS THE EXCEPTION to "new draw every frame": real ground clutter is a
+    persistent scene (the road/barriers do not get redrawn each frame), so its FIELD
+    (scatterer positions/velocities/gains) is drawn once from the block's base `seed`
+    -- not `seed + frame_idx` -- and only evolves via a deterministic per-scatterer
+    Doppler phase advance keyed to `frame_idx` (see `e2e.ml.impairments.apply_clutter`).
+    Phase noise and leakage are unaffected: they still redraw every frame from
+    `seed + frame_idx`, because a noisy oscillator/coupling genuinely is a new draw.
+    See notes/PHYSICS_JUSTIFICATION_AUDIT.md entry 10.
     """
 
     frame_capabilities = _RX_TIME
@@ -108,17 +119,22 @@ class ImpairmentBlock:
 
     def apply(self, state):
         adc = state["adc"]
-        frame_seed = self.seed + self._frame_idx
+        frame_idx = self._frame_idx
+        frame_seed = self.seed + frame_idx  # legacy per-frame seed: phase_noise/leakage only
         raw_params = self.chain_params
         if callable(raw_params):
             gen = torch.Generator(device=adc.device)
             gen.manual_seed(frame_seed)
-            raw_params = raw_params(self._frame_idx, gen)
+            raw_params = raw_params(frame_idx, gen)
         resolved = _resolve_impairment_params(raw_params)
-        out = apply_all(adc, self.cfg, resolved, seed=frame_seed)
+        # seed=self.seed (BASE, not frame_seed): the clutter stage draws its field once
+        # from this and evolves it via frame_idx instead of redrawing (see class docstring).
+        out = apply_all(adc, self.cfg, resolved, seed=self.seed, frame_idx=frame_idx)
         self._frame_idx += 1
         provenance = dict(resolved)
         provenance["seed"] = frame_seed
+        provenance["base_seed"] = self.seed
+        provenance["frame_idx"] = frame_idx
         return {"adc": out, "impairment_params": provenance}
 
 
