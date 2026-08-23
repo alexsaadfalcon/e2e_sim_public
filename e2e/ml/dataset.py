@@ -120,6 +120,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -362,6 +363,23 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     if frames_per_scene < 1:
         raise ValueError(f"frames_per_scene must be >= 1, got {frames_per_scene}")
     cfg = PRESETS[cfg_name]
+
+    # Answerability check (release-plan A3). This is the analytic FALLBACK, used by
+    # plumbing tests and quick experiments on deliberately tiny configs, so an
+    # unanswerable pair WARNS here instead of refusing the way the real corpus path
+    # (`e2e.ml.chain_generate.generate_chain_corpus`) does. The warning is the tripwire:
+    # a corpus generated under it must never back a detection benchmark (F43).
+    from e2e.ml.radar_config import answerability_problems
+    spec = DIFFICULTY_TIERS[tier]
+    top_speed = max(spec.vehicle_speed_mps[1], spec.pedestrian_speed_mps[1])
+    problems = answerability_problems(cfg, top_speed_mps=top_speed)
+    if problems:
+        warnings.warn(
+            f"({cfg_name}, {tier}) cannot support a detection benchmark (F43): "
+            + "; ".join(problems)
+            + ". Generating anyway -- this is the analytic fallback path -- but do not "
+              "benchmark detection on this corpus.",
+            stacklevel=2)
 
     grid = LabelGrid.for_config(cfg, range_stride=range_stride, n_azimuth=n_azimuth)
 

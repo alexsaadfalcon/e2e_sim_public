@@ -291,3 +291,64 @@ def test_tdm_config_runs_the_whole_chain_and_produces_a_radar_cube(tmp_path, tor
     # One virtual array of n_rx*n_tx elements; Doppler axis is the per-transmit count.
     assert cube.shape == (_TDM_CFG.n_rx * _TDM_CFG.n_tx, _TDM_CFG.n_samples,
                           _TDM_CFG.n_chirps_per_tx)
+
+
+# ---- answerability guard (release-plan A3, F43) --------------------------------
+
+def test_generate_chain_corpus_refuses_unanswerable_pair(tmp_path):
+    """(radial_like, D2) is F43's Doppler-aliasing pair; the corpus path must refuse
+    it BEFORE touching Sionna or writing anything."""
+    with pytest.raises(ValueError, match="cannot support a detection benchmark"):
+        chain_generate.generate_chain_corpus("radial_like", "D2", 1, out_dir=tmp_path)
+    assert not any(tmp_path.iterdir()), "guard must fire before anything is written"
+
+
+def test_generate_chain_corpus_error_names_the_override():
+    with pytest.raises(ValueError, match="allow_unanswerable"):
+        chain_generate.generate_chain_corpus("radial_like", "D2", 1, out_dir="unused")
+
+
+def test_cli_parses_allow_unanswerable_flag():
+    args = chain_generate.build_arg_parser().parse_args(
+        ["--config", "radial_like", "--tier", "D2", "--n", "1", "--allow-unanswerable"])
+    assert args.allow_unanswerable is True
+
+
+def test_answerability_default_tolerance_reads_match_criterion():
+    """The guard's default azimuth tolerance is MatchCriterion's -- one source of
+    truth, not a second hardcoded 0.06 (lives here rather than in
+    test_ml_radar_config because MatchCriterion needs torch)."""
+    from e2e.ml.metrics import MatchCriterion
+    from e2e.ml.radar_config import PRESETS, answerability_problems
+    cfg = PRESETS["ti_iwr1443"]
+    assert answerability_problems(cfg, top_speed_mps=5.0) == \
+        answerability_problems(cfg, top_speed_mps=5.0,
+                               max_sin_az_err=MatchCriterion().max_sin_az_err)
+
+
+def test_generate_dataset_warns_but_generates_on_unanswerable_pair(
+        tmp_path, torch_device, monkeypatch):
+    """The analytic FALLBACK path warns instead of refusing (plumbing tests and tiny
+    configs depend on it) -- but the warning must fire."""
+    from e2e.ml import dataset as ml_dataset
+    from e2e.ml.radar_config import PRESETS
+
+    tiny = dataclasses.replace(_CFG, name="test_answerability_tiny")
+    assert tiny.n_virtual == 4  # Rayleigh 0.5 >> 0.06: azimuth-unanswerable
+    monkeypatch.setitem(PRESETS, tiny.name, tiny)
+    with pytest.warns(UserWarning, match="cannot support a detection benchmark"):
+        manifest = ml_dataset.generate_dataset(
+            tiny.name, "D0", 1, out_dir=tmp_path, seed=0, device=torch_device)
+    assert manifest.is_file()
+
+
+def test_cli_reaches_rt_tier_d4(capsys):
+    """`main()` must validate --tier against RT_DIFFICULTY_TIERS (D0-D4), not the
+    analytic scenes.DIFFICULTY_TIERS (D0-D3): checking the wrong dict made the D4
+    Munich city tier unreachable from the CLI (found in the 2026-08-23 A3 review)."""
+    rc = chain_generate.main(["--config", "benchmark_v1", "--tier", "D4",
+                              "--n", "1", "--dry-run"])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "unknown --tier" not in out.err
+    assert "tier:         D4" in out.out

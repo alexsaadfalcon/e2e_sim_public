@@ -192,3 +192,48 @@ def test_radial_like_matches_paper_resolutions():
     assert cfg.range_resolution_m == pytest.approx(0.2, rel=0.05)
     assert cfg.max_range_m == pytest.approx(103.0, rel=0.05)
     assert cfg.velocity_resolution_mps == pytest.approx(0.1, rel=0.05)
+
+
+# ---- answerability guard (release-plan A3, F43) --------------------------------
+# Explicit max_sin_az_err throughout: the default is read lazily from
+# e2e.ml.metrics.MatchCriterion, which imports torch -- and this file stays
+# torch-free. The default-tolerance coupling is tested in test_ml_chain_generate.
+
+def test_answerability_benchmark_v1_is_answerable():
+    from e2e.ml.radar_config import BENCHMARK_V1, answerability_problems
+    assert answerability_problems(BENCHMARK_V1, top_speed_mps=8.0,
+                                  max_sin_az_err=0.06) == []
+
+
+def test_answerability_radial_like_aliases_in_doppler():
+    from e2e.ml.radar_config import answerability_problems
+    problems = answerability_problems(RADIAL_LIKE, top_speed_mps=8.0,
+                                      max_sin_az_err=0.06)
+    # Azimuth is fine (192 virtual elements); Doppler is the F43 failure.
+    assert len(problems) == 1
+    assert "alias in Doppler" in problems[0]
+
+
+def test_answerability_ti_iwr1443_azimuth_unanswerable():
+    from e2e.ml.radar_config import answerability_problems
+    # 12 virtual elements -> Rayleigh 0.1667; keep speeds under its 12.8 m/s v_max
+    # so only the azimuth failure fires.
+    problems = answerability_problems(TI_IWR1443, top_speed_mps=5.0,
+                                      max_sin_az_err=0.06)
+    assert len(problems) == 1
+    assert "Rayleigh" in problems[0]
+
+
+def test_answerability_both_failures_reported():
+    from e2e.ml.radar_config import answerability_problems
+    problems = answerability_problems(RADIAL_LIKE, top_speed_mps=8.0,
+                                      max_sin_az_err=0.005)  # finer than 2/192
+    assert len(problems) == 2
+
+
+def test_answerability_boundary_is_inclusive():
+    from e2e.ml.radar_config import answerability_problems
+    from e2e.ml.radar_config import BENCHMARK_V1 as cfg
+    # Exactly at v_max and exactly at the Rayleigh limit both pass (>=, not >).
+    assert answerability_problems(cfg, top_speed_mps=cfg.max_velocity_mps,
+                                  max_sin_az_err=2.0 / cfg.n_virtual) == []

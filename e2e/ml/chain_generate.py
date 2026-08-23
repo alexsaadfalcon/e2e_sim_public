@@ -239,6 +239,7 @@ def generate_chain_corpus(
     coherent_targets: bool = True, antenna_pattern: Optional[str] = None,
     ground_scattering_coefficient: Optional[float] = None,
     samples_per_src: Optional[int] = None,
+    allow_unanswerable: bool = False,
 ) -> Path:
     """Generate a radar-ML corpus by RUNNING THE COMPOSED CHAIN, one `Simulation` per
     scene (real ray tracing -- needs Sionna; see `build_chain_simulation`).
@@ -285,6 +286,22 @@ def generate_chain_corpus(
     if frames_per_scene < 1:
         raise ValueError(f"frames_per_scene must be >= 1, got {frames_per_scene}")
     cfg = PRESETS[cfg_name]
+
+    # Answerability guard (release-plan A3): refuse to generate a corpus on which the
+    # detection benchmark is arithmetically incapable of being answered -- F43 made this
+    # class of invalid corpus a discovered fact; this guard makes it an impossible state.
+    # `allow_unanswerable=True` is the deliberate escape hatch (ablations, regression
+    # reproductions); the resulting corpus must never back a detection benchmark.
+    from e2e.ml.radar_config import answerability_problems
+    problems = answerability_problems(
+        cfg, top_speed_mps=RT_DIFFICULTY_TIERS[tier].speed_mps[1])
+    if problems and not allow_unanswerable:
+        raise ValueError(
+            f"({cfg_name}, {tier}) cannot support a detection benchmark:\n  - "
+            + "\n  - ".join(problems)
+            + "\nPass allow_unanswerable=True (CLI: --allow-unanswerable) only for a "
+              "corpus that will never back a benchmark (see F43 / radar_config."
+              "answerability_problems)")
 
     grid = LabelGrid.for_config(cfg, range_stride=range_stride, n_azimuth=n_azimuth)
     randomize = randomizer if randomizer is not None else default_domain_randomizer()
@@ -347,7 +364,8 @@ def build_arg_parser():
                     "Needs Sionna RT.",
     )
     p.add_argument("--config", required=True, help="radar config preset name (see e2e.ml.radar_config.PRESETS)")
-    p.add_argument("--tier", required=True, help="difficulty tier (see e2e.ml.scenes.DIFFICULTY_TIERS)")
+    p.add_argument("--tier", required=True,
+                   help="RT difficulty tier (see e2e.ml.rt_scenes.RT_DIFFICULTY_TIERS)")
     p.add_argument("--n", type=int, required=True, help="number of scenes to generate")
     p.add_argument("--seed", type=int, default=0, help="base RNG seed (scene i uses seed + i)")
     p.add_argument("--out", default=None, help="output root directory (default: e2e/ml/datasets)")
@@ -382,6 +400,11 @@ def build_arg_parser():
                    help="Sionna PathSolver Monte-Carlo ray budget (default: Sionna's own "
                         "1e6). The dominant cost knob when the ground scatters diffusely: "
                         "1e5 cut the path count 10x with the target metric unchanged")
+    p.add_argument("--allow-unanswerable", action="store_true",
+                   help="override the answerability guard (F43): generate even though "
+                        "the (config, tier) pair cannot support a detection benchmark "
+                        "(targets alias in Doppler, or the azimuth tolerance outresolves "
+                        "the array). For ablations/regressions only")
     p.add_argument("--dry-run", action="store_true",
                    help="print the generation plan without ray-tracing/writing anything")
     return p
@@ -399,10 +422,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     cfg = PRESETS[args.config]
 
-    from e2e.ml.scenes import DIFFICULTY_TIERS
+    # RT_DIFFICULTY_TIERS, not scenes.DIFFICULTY_TIERS: this CLI drives the RAY-TRACED
+    # corpus path, whose tier set (D0-D4, incl. the Munich city tier) is what
+    # `generate_chain_corpus` itself validates against. Checking the analytic dict here
+    # (the pre-2026-08-23 bug) made D4 unreachable from the CLI.
+    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
 
-    if args.tier not in DIFFICULTY_TIERS:
-        print(f"unknown --tier {args.tier!r}; choices: {sorted(DIFFICULTY_TIERS)}", file=sys.stderr)
+    if args.tier not in RT_DIFFICULTY_TIERS:
+        print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
         return 2
 
     if args.dry_run:
@@ -424,6 +451,18 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"   ground S: "
               f"{DEFAULT_GROUND_SCATTERING_COEFFICIENT if args.ground_scattering is None else args.ground_scattering}"
               f"   samples_per_src: {args.samples_per_src or 'sionna default'}")
+        from e2e.ml.radar_config import answerability_problems
+        spec = RT_DIFFICULTY_TIERS.get(args.tier)
+        if spec is not None:
+            problems = answerability_problems(cfg, top_speed_mps=spec.speed_mps[1])
+            if problems:
+                print("answerable:   NO -- the real run will REFUSE without "
+                      "--allow-unanswerable:")
+                for prob in problems:
+                    print(f"                - {prob}")
+            else:
+                print("answerable:   yes (Doppler unaliased, azimuth tolerance within "
+                      "the Rayleigh limit)")
         out_root = Path(args.out) if args.out is not None else DATASETS_DIR
         print(f"out:          {out_root / f'{args.config}_{args.tier}'}  (NOT written -- dry-run)")
         print("this path ray-traces with Sionna RT -- see report/chain_integration_design.html")
@@ -439,6 +478,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ground_scattering_coefficient=args.ground_scattering,
         samples_per_src=args.samples_per_src,
         use_transmit_chain=not args.no_transmit_chain,
+        allow_unanswerable=args.allow_unanswerable,
     )
     print(f"wrote {manifest_path}")
     return 0

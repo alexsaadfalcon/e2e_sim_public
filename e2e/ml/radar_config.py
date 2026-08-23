@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Speed of light, m/s.
 C_MPS = 299_792_458.0
@@ -218,6 +218,52 @@ class RadarConfig:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RadarConfig":
         return cls(**d)
+
+
+def answerability_problems(cfg: "RadarConfig", *, top_speed_mps: float,
+                           max_sin_az_err: Optional[float] = None) -> List[str]:
+    """Can a detection benchmark on `cfg` be ANSWERED, for scenes drawing speeds up to
+    `top_speed_mps`? Returns human-readable problems (empty == answerable), in the same
+    style as `RadarConfig.validate`.
+
+    Both failure modes are F43, measured on shipped presets before this guard existed
+    (see `BENCHMARK_V1`'s comment block): every detection number this project produced
+    before 2026-08-18 sat on a config that failed one of them.
+
+    * **Doppler**: a target's worst-case radial speed is its speed magnitude (even a
+      sampler that clamps the radial component at frame 0 cannot hold the clamp over a
+      multi-frame track -- the line of sight rotates). If `top_speed_mps` exceeds
+      `cfg.max_velocity_mps`, targets alias in Doppler, landing anywhere on the axis
+      including zero -- which destroys the zero-Doppler clutter discriminant. The
+      check sits at the PHYSICAL ambiguity limit; samplers wanting margin against
+      edge smearing should keep their own headroom (the analytic sampler clamps at
+      0.8 * v_max -- `e2e.ml.scenes._RADIAL_VELOCITY_FRAC`), and all shipped
+      (preset, tier) pairs that pass this guard do so with >15% headroom anyway.
+    * **Azimuth**: if the scoring tolerance `max_sin_az_err` is finer than the array's
+      Rayleigh limit `2 / n_virtual`, the metric demands better localization than the
+      aperture physically resolves -- a perfect detector scores as a miss. The default
+      tolerance is read from `e2e.ml.metrics.MatchCriterion` at call time (one source
+      of truth, imported lazily to keep this module dependency-light).
+    """
+    if max_sin_az_err is None:
+        from e2e.ml.metrics import MatchCriterion
+        max_sin_az_err = MatchCriterion().max_sin_az_err
+    problems: List[str] = []
+    if float(top_speed_mps) > cfg.max_velocity_mps:
+        problems.append(
+            f"scene speeds up to {float(top_speed_mps):.2f} m/s exceed the unambiguous "
+            f"v_max of +-{cfg.max_velocity_mps:.2f} m/s ({cfg.mimo} over "
+            f"{cfg.n_tx} TX): targets will alias in Doppler (F43)"
+        )
+    rayleigh = 2.0 / float(cfg.n_virtual)
+    if float(max_sin_az_err) < rayleigh:
+        problems.append(
+            f"match tolerance max_sin_az_err={float(max_sin_az_err):.4f} is finer than "
+            f"the array's Rayleigh limit 2/n_virtual={rayleigh:.4f} "
+            f"({cfg.n_virtual} virtual elements): the azimuth question is "
+            f"unanswerable (F43)"
+        )
+    return problems
 
 
 # --------------------------------------------------------------------------------
