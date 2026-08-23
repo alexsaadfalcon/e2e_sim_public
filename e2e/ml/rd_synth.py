@@ -52,9 +52,10 @@ Scope / explicitly out of scope
   SURFACE along the line of sight rather than at its geometric centre whenever the
   scatterer knows its own size (`Scatterer.extent_m`; see `_scattering_point`). A real
   extended target is a distribution of scatterers, not a point -- this only fixes WHERE
-  the single stand-in sits, which is the same choice `rt_signal_chain.coherent_target_cfr`
-  makes and the same place `e2e.ml.labels` marks. Scatterers with no declared extent are
-  unaffected.
+  the single stand-in sits (the same placement `rt_signal_chain.coherent_target_cfr`
+  uses for its PRIMARY centre, and the same place `e2e.ml.labels` marks -- note the RT
+  hybrid defaults to FIVE centres per object since v1.1, so the two tiers are no longer
+  dimensionally equivalent). Scatterers with no declared extent are unaffected.
 
 All tensors are torch complex64 on the shared `device` (cuda if available).
 """

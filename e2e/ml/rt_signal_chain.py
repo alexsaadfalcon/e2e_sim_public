@@ -534,7 +534,7 @@ def mimo_combine(cfg, beat: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------
-# HYBRID RT: coherent specular return per object  (PROTOTYPE, opt-in, 2026-08-17)
+# HYBRID RT: coherent multi-centre return per object  (default on; v1.1 = 5 centres)
 # --------------------------------------------------------------------------------
 # WHY THIS EXISTS -- the defect it repairs, measured on the D0 single-sphere scene:
 #
@@ -561,9 +561,11 @@ def mimo_combine(cfg, beat: np.ndarray) -> np.ndarray:
 #   A radar detects targets by COHERENT integration; speckle earns none of it.
 #
 # WHAT THIS ADDS: the coherent half of the return that Sionna structurally cannot find.
-# Each object contributes ONE deterministic point scatterer at its monostatic specular
-# point (the nearest point of its bounding ellipsoid along the radar line of sight),
-# with RCS `(1 - S^2) * sigma_object` -- the energy-conserving complement of the diffuse
+# Each object contributes `n_centers` deterministic scattering centres (v1.1 default 5:
+# the traced phase centre / specular point plus the bbox's four vertical-edge midpoints
+# -- see `coherent_target_cfr`'s docstring and physics audit entry 4 for the measured
+# case; `n_centers=1` is the pre-v1.1 point model), splitting an RCS of
+# `(1 - S^2) * sigma_object` -- the energy-conserving complement of the diffuse
 # lobe Sionna already computes, using the RCS the scenario layer already carries
 # (`Scatterer.rcs_dbsm` / `scatterers.DEFAULT_RCS_DBSM`). Ray tracing keeps doing
 # everything it is good at: geometry, occlusion, ground bounce, multipath, per-object
@@ -635,6 +637,27 @@ def _specular_point(centre: np.ndarray, half: np.ndarray, radar_pos: np.ndarray)
     has the object's placed orientation baked in.
     """
     return nearest_surface_point(centre, half, radar_pos)
+
+
+def _bbox_edge_centers(centre: np.ndarray, half: np.ndarray) -> np.ndarray:
+    """The 4 vertical-edge midpoints of an axis-aligned bbox: `(cx +- hx, cy +- hy, cz)`.
+
+    "Vertical" = along world z (the scene's up axis, same convention as
+    `_object_bbox`'s world-space AABB); "mid-height" = the box's own centre z. These
+    are the secondary scattering centres of the multi-centre target model (see
+    `coherent_target_cfr`): the corners of a vehicle body are where the strongest
+    persistent scattering centres of real automotive targets measure (wheel wells,
+    body corners), and the bbox's vertical edges are their cheapest deterministic
+    stand-in.
+    """
+    cx, cy, cz = centre
+    hx, hy, _ = half
+    return np.array([
+        [cx + hx, cy + hy, cz],
+        [cx + hx, cy - hy, cz],
+        [cx - hx, cy + hy, cz],
+        [cx - hx, cy - hy, cz],
+    ], dtype=np.float64)
 
 
 def _rt_phase_centres(paths, rt_scene) -> dict:
@@ -741,11 +764,26 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
                         scattering_coefficient: float = None,
                         range_migration: bool = True,
                         rcs_scale_db: float = 0.0,
-                        paths=None, apply_doppler: bool = True) -> np.ndarray:
-    """Deterministic point-scatterer CFR for every object, in Sionna's CFR convention.
+                        paths=None, apply_doppler: bool = True,
+                        n_centers: int = 5) -> np.ndarray:
+    """Deterministic multi-scattering-centre CFR for every object, in Sionna's CFR
+    convention.
 
     Returns `[n_rx_ant, n_tx_ant, n_chirps, n_samples]` complex64, directly addable to
     `cfr_from_paths`' output. See the section banner for the physics and the caveats.
+
+    `n_centers` (default 5, the v1.1 model -- owner decision 2026-08-23) sets how many
+    deterministic scattering centres carry each object's coherent return: the primary
+    point (the RT phase centre when a solve is supplied, else the bbox specular point)
+    plus the bbox's four vertical-edge midpoints (`_bbox_edge_centers`), each carrying
+    an equal `sigma / n_pts` share. Only 1 and 5 are valid -- the two measured members
+    of the model family. An object with no resolvable bbox falls back to its single
+    primary point. WHY: one centre
+    collapses target extent to ~1 cell where real automotive returns measure ~6 (F44
+    -- the exact mismatch behind CFAR self-masking), and the 2026-08-20 spike measured
+    the 5-centre model monotonically better on every coherence-sensitive axis (phase
+    RMS -13%, peak-to-background +2.2 dB, extent restored; physics audit entry 4).
+    `n_centers=1` reproduces the pre-v1.1 single-centre model.
 
     `scattering_coefficient` is the material's `S`; the coherent term carries
     `(1 - S^2)` of the object's RCS so coherent + diffuse conserve energy. Pass the same
@@ -756,6 +794,14 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     advanced, and consumes velocity purely as that displacement (its solves use
     `num_time_steps=1`, where Sionna's own Doppler factor is likewise 1). Leaving the
     factor in would double-count the motion.
+
+    IMPLEMENTATION NOTE (the vectorization): per object, the phase separates as
+    `exp(-2j pi (f_c + f_b) tau)` (a per-centre [rx, tx, freq] factor) times
+    `exp(2j pi f_d (1 + f_b/f_c) t)` (a per-centre [chirp, freq] factor -- the
+    `f_b/f_c` term IS range migration, algebraically identical to the
+    `tau - (f_d/f_c) t` form), contracted over centres in one einsum. This does the
+    big [rx, tx, chirp, freq] materialization once per OBJECT instead of once per
+    centre, so 5 centres cost roughly what 1 did.
     """
     from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
     from e2e.ml.scatterers import frame_scatterers, radar_pose
@@ -781,6 +827,14 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     out = np.zeros((int(cfg.n_rx), int(cfg.n_tx), n_chirps, freqs.size), dtype=np.complex128)
     centres = _rt_phase_centres(paths, rt_scene) if paths is not None else {}
 
+    if int(n_centers) not in (1, 5):
+        # Only the two MEASURED members of the model family exist: the pre-v1.1 point
+        # model and the 5-centre model the spike validated (audit entry 4). 2-4 would
+        # take a non-symmetric prefix of the edge set (biased toward the +x corners)
+        # and >5 would silently cap -- both are footguns, not options (review finding
+        # 2026-08-23). Design a symmetric scheme before widening this.
+        raise ValueError(f"n_centers must be 1 or 5, got {n_centers!r}")
+
     for obj, sc in zip(scenario.objects, scats):
         so = rt_scene.objects.get(obj.name)
         rt_p, visible = centres.get(obj.name, (None, True))
@@ -788,46 +842,64 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
             continue          # ray tracer found no path to it -- occluded, stay silent
         bb = _object_bbox(so) if so is not None else None
         if rt_p is not None:
-            p = np.asarray(rt_p, dtype=np.float64)
+            p0 = np.asarray(rt_p, dtype=np.float64)
         elif bb is not None:
             centre, half = bb
-            p = _specular_point(centre, half, radar_pos)
+            p0 = _specular_point(centre, half, radar_pos)
         else:
             continue
         sigma = coh_frac * 10.0 ** ((float(sc.rcs_dbsm) + float(rcs_scale_db)) / 10.0)
         if sigma <= 0.0:
             continue
-        d_t = np.linalg.norm(tx_pos - p[None, :], axis=1)            # [n_tx]
-        d_r = np.linalg.norm(rx_pos - p[None, :], axis=1)            # [n_rx]
-        tau = (d_r[:, None] + d_t[None, :]) / _C_LIGHT               # [n_rx, n_tx]
-        # Sionna's own per-path amplitude convention (VERIFIED against its `paths.a`:
-        # |a|^2 = sigma lambda^2 / ((4 pi)^3 R_t^2 R_r^2) reproduces the traced sphere's
-        # measured effective RCS), times the element field gain applied below.
-        los = p - radar_pos
-        los = los / max(float(np.linalg.norm(los)), 1e-12)
+
+        # The centre set: primary point + bbox vertical edges, equal power split (see
+        # docstring). No bbox -> the primary point alone, whatever n_centers says.
+        # (A primary point coinciding EXACTLY with an edge midpoint would double-count
+        # that centre's sigma share; geometrically prevented for the ellipsoid specular
+        # point and physically implausible for a traced mesh vertex -- accepted.)
+        if bb is not None and int(n_centers) > 1:
+            centre, half = bb
+            pts = np.vstack([p0[None, :], _bbox_edge_centers(centre, half)])[:int(n_centers)]
+        else:
+            pts = p0[None, :]
+        n_pts = pts.shape[0]
+        sigma_i = sigma / float(n_pts)
+
+        d_t = np.linalg.norm(tx_pos[None, :, :] - pts[:, None, :], axis=2)   # [P, n_tx]
+        d_r = np.linalg.norm(rx_pos[None, :, :] - pts[:, None, :], axis=2)   # [P, n_rx]
+        tau = (d_r[:, :, None] + d_t[:, None, :]) / _C_LIGHT                 # [P, rx, tx]
+
+        los = pts - radar_pos[None, :]                                       # [P, 3]
+        los = los / np.maximum(np.linalg.norm(los, axis=1, keepdims=True), 1e-12)
         # ELEMENT GAIN. The traced diffuse return gets this from Sionna inside the solve;
         # this analytic term has to apply it explicitly or the two halves of the same
         # target are radiated through different antennas (F32). Squared because it applies
         # once on transmit and once on receive -- TX and RX arrays are co-located and share
-        # a boresight, so one evaluation serves both.
-        g_elem = _element_field_amplitude(getattr(rt_scene, "antenna_pattern", "iso"),
-                                          pose.boresight, los)
-        amp = (g_elem * g_elem * math.sqrt(sigma) * lam
-               / ((4.0 * math.pi) ** 1.5 * d_r[:, None] * d_t[None, :]))
+        # a boresight, so one evaluation serves both. Evaluated per centre (each has its
+        # own direction).
+        g_elem = np.array([_element_field_amplitude(
+            getattr(rt_scene, "antenna_pattern", "iso"), pose.boresight, los[i])
+            for i in range(n_pts)], dtype=np.float64)                        # [P]
+        # Sionna's own per-path amplitude convention (VERIFIED against its `paths.a`:
+        # |a|^2 = sigma lambda^2 / ((4 pi)^3 R_t^2 R_r^2) reproduces the traced sphere's
+        # measured effective RCS).
+        amp = (g_elem[:, None, None] ** 2 * math.sqrt(sigma_i) * lam
+               / ((4.0 * math.pi) ** 1.5 * d_r[:, :, None] * d_t[:, None, :]))  # [P, rx, tx]
         # Physical Doppler: f_D = -2 v_r / lambda, v_r receding-positive (see the module
-        # docstring's sign discussion -- the chain's conjugation turns this into
-        # rd_synth's chirp-to-chirp progression).
-        v_r = float(np.dot(np.asarray(sc.velocity, dtype=np.float64), los))
-        f_d = (-2.0 * v_r / lam) if apply_doppler else 0.0
+        # docstring's sign discussion), per centre via its own LOS.
+        v_r = los @ np.asarray(sc.velocity, dtype=np.float64)                # [P]
+        f_d = (-2.0 * v_r / lam) if apply_doppler else np.zeros(n_pts)
 
-        tau_b = tau[:, :, None, None]                                # [rx, tx, 1, 1]
-        t_b = t[None, None, :, None]
-        f_b = freqs[None, None, None, :]
-        tau_bb = tau_b - (f_d / f_c) * t_b if range_migration else tau_b
-        phase = (np.exp(-2j * np.pi * f_c * tau_b)
-                 * np.exp(2j * np.pi * f_d * t_b)
-                 * np.exp(-2j * np.pi * f_b * tau_bb))
-        out += amp[:, :, None, None] * phase
+        # Separable phase (see docstring's implementation note):
+        #   A[p, rx, tx, f] = amp * exp(-2j pi (f_c + f_b) tau)
+        #   B[p, c, f]      = exp( 2j pi f_d (1 + f_b/f_c) t)   [migration folded in]
+        a_fac = amp[:, :, :, None] * np.exp(
+            -2j * np.pi * (f_c + freqs)[None, None, None, :] * tau[:, :, :, None])
+        f_eff = (f_d[:, None, None] * (1.0 + freqs[None, None, :] / f_c)
+                 if range_migration else
+                 f_d[:, None, None] * np.ones((1, 1, freqs.size)))
+        b_fac = np.exp(2j * np.pi * f_eff * t[None, :, None])                # [P, c, f]
+        out += np.einsum("prtf,pcf->rtcf", a_fac, b_fac)
 
     return np.ascontiguousarray(out.astype(np.complex64))
 

@@ -137,7 +137,10 @@ def test_coherent_term_is_a_clean_aperture_phase_ramp():
     scn = _scenario(position=(12.0, 3.0, 1.5))
     p = np.array([12.0, 3.0, 1.5])
     scene, paths = _stub_rt_scene(_CFG, p)
-    h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths)
+    # n_centers=1: this is the PER-CENTRE cleanliness oracle. The v1.1 default (5) is a
+    # superposition of ramps from slightly different azimuths -- deliberately not a
+    # single clean ramp; its properties are pinned by the multi-centre tests below.
+    h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)
 
     from e2e.chain.dechirp import beat_from_cfr
 
@@ -171,10 +174,12 @@ def test_coherent_term_range_and_rcs_follow_the_radar_equation():
     scn_far = _scenario(position=(20.0, 0.0, 1.5))
     sc_n, pa_n = _stub_rt_scene(_CFG, (10.0, 0.0, 1.5))
     sc_f, pa_f = _stub_rt_scene(_CFG, (20.0, 0.0, 1.5))
+    # n_centers=1: the amplitude-convention oracle wants ONE path at a known range;
+    # the multi-centre composition is tested separately below.
     p_near = float(np.sum(np.abs(rsc.coherent_target_cfr(
-        _CFG, sc_n, scn_near, frame_idx=0, paths=pa_n)) ** 2))
+        _CFG, sc_n, scn_near, frame_idx=0, paths=pa_n, n_centers=1)) ** 2))
     p_far = float(np.sum(np.abs(rsc.coherent_target_cfr(
-        _CFG, sc_f, scn_far, frame_idx=0, paths=pa_f)) ** 2))
+        _CFG, sc_f, scn_far, frame_idx=0, paths=pa_f, n_centers=1)) ** 2))
     # R^-4 two-way: doubling the range costs 12 dB. Ranges are radar-to-surface, so use
     # the actual geometry rather than the nominal 10/20 m.
     r_n = np.linalg.norm(np.array([10.0, 0.0, 1.5]) - np.array([0.0, 0.0, 1.5]))
@@ -186,7 +191,7 @@ def test_coherent_term_range_and_rcs_follow_the_radar_equation():
     scn_hot = _scenario(position=(10.0, 0.0, 1.5), rcs_dbsm=20.0)
     sc_h, pa_h = _stub_rt_scene(_CFG, (10.0, 0.0, 1.5))
     p_hot = float(np.sum(np.abs(rsc.coherent_target_cfr(
-        _CFG, sc_h, scn_hot, frame_idx=0, paths=pa_h)) ** 2))
+        _CFG, sc_h, scn_hot, frame_idx=0, paths=pa_h, n_centers=1)) ** 2))
     assert 10 * math.log10(p_hot / p_near) == pytest.approx(10.0, abs=0.05)
 
 
@@ -208,7 +213,9 @@ def test_coherent_term_doppler_matches_the_analytic_point_target(speed):
 
     scn = _scenario(position=(12.0, 0.0, 1.5), velocity=(speed, 0.0, 0.0))
     scene, paths = _stub_rt_scene(_CFG, (12.0, 0.0, 1.5))
-    h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths)
+    # n_centers=1: rd_synth's oracle is a single point with one LOS; each of the five
+    # default centres has its own LOS and hence its own slightly different f_d.
+    h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)
     beat = beat_from_cfr(torch.from_numpy(h)).numpy()
     got = np.angle(beat[0, 0, 1:, 0] * np.conj(beat[0, 0, :-1, 0]))
 
@@ -529,3 +536,142 @@ def test_fix_restores_aperture_coherence_on_a_real_traced_target():
     assert ph_new < 0.3, f"fixed arm should be coherent, got {ph_new:.3f} rad"
     assert db_new > db_old + 10.0, (db_old, db_new)
     assert db_new > 15.0, db_new
+
+
+# --------------------------------------------------------------------------------
+# The multi-centre model (v1.1 default n_centers=5) -- no Sionna
+# --------------------------------------------------------------------------------
+def test_n_centers_one_matches_the_pre_v11_implementation():
+    """Refactor regression: the separable-einsum rewrite at `n_centers=1` must
+    reproduce the pre-v1.1 broadcast implementation (frozen, inert, local to this
+    test -- the A1-test pattern) to float tolerance. The two are algebraically
+    identical; only the association order differs."""
+    scn = _scenario(position=(12.0, 3.0, 1.5), velocity=(3.0, 1.0, 0.0))
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))
+
+    def _legacy(cfg, rt_scene, scenario, *, frame_idx, paths):
+        from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
+        from e2e.ml.scatterers import frame_scatterers, radar_pose
+        coh_frac = max(0.0, 1.0 - float(DEFAULT_SCATTERING_COEFFICIENT) ** 2)
+        n_chirps = int(cfg.n_chirps)
+        freqs = rsc.beat_frequencies(cfg)
+        f_c = float(cfg.f0_hz) + float(cfg.bandwidth_hz) / 2.0
+        lam = _C / f_c
+        pose = radar_pose(scenario, frame_idx)
+        scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))
+        radar_pos = np.asarray(pose.position, dtype=np.float64)
+        tx_pos = rsc._array_element_positions(radar_pos, pose.boresight, int(cfg.n_tx),
+                                              0.5 * int(cfg.n_rx), lam)
+        rx_pos = rsc._array_element_positions(radar_pos, pose.boresight, int(cfg.n_rx), 0.5, lam)
+        t = np.arange(n_chirps, dtype=np.float64) * float(cfg.chirp_period_s)
+        out = np.zeros((int(cfg.n_rx), int(cfg.n_tx), n_chirps, freqs.size), dtype=np.complex128)
+        centres = rsc._rt_phase_centres(paths, rt_scene)
+        for obj, sc in zip(scenario.objects, scats):
+            rt_p, visible = centres.get(obj.name, (None, True))
+            if not visible or rt_p is None:
+                continue
+            p = np.asarray(rt_p, dtype=np.float64)
+            sigma = coh_frac * 10.0 ** (float(sc.rcs_dbsm) / 10.0)
+            d_t = np.linalg.norm(tx_pos - p[None, :], axis=1)
+            d_r = np.linalg.norm(rx_pos - p[None, :], axis=1)
+            tau = (d_r[:, None] + d_t[None, :]) / _C
+            los = p - radar_pos
+            los = los / max(float(np.linalg.norm(los)), 1e-12)
+            g = rsc._element_field_amplitude(getattr(rt_scene, "antenna_pattern", "iso"),
+                                             pose.boresight, los)
+            amp = (g * g * math.sqrt(sigma) * lam
+                   / ((4.0 * math.pi) ** 1.5 * d_r[:, None] * d_t[None, :]))
+            v_r = float(np.dot(np.asarray(sc.velocity, dtype=np.float64), los))
+            f_d = -2.0 * v_r / lam
+            tau_b = tau[:, :, None, None]
+            t_b = t[None, None, :, None]
+            f_b = freqs[None, None, None, :]
+            tau_bb = tau_b - (f_d / f_c) * t_b
+            phase = (np.exp(-2j * np.pi * f_c * tau_b)
+                     * np.exp(2j * np.pi * f_d * t_b)
+                     * np.exp(-2j * np.pi * f_b * tau_bb))
+            out += amp[:, :, None, None] * phase
+        return np.ascontiguousarray(out.astype(np.complex64))
+
+    new = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)
+    old = _legacy(_CFG, scene, scn, frame_idx=0, paths=paths)
+    assert np.allclose(new, old, rtol=1e-5, atol=1e-10 * float(np.abs(old).max()))
+
+
+def test_multi_center_conserves_total_energy_within_a_db():
+    """Five centres at sigma/5 each must carry about the same TOTAL energy as one at
+    sigma: the centres sit metres apart, so their cross terms average out over the
+    frequency axis and the powers add. Not exact -- each centre has its own range --
+    hence a dB-scale tolerance, not an equality."""
+    scn = _scenario(position=(12.0, 3.0, 1.5))
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5), half=(1.0, 1.0, 0.5))
+    p1 = float(np.sum(np.abs(rsc.coherent_target_cfr(
+        _CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)) ** 2))
+    p5 = float(np.sum(np.abs(rsc.coherent_target_cfr(
+        _CFG, scene, scn, frame_idx=0, paths=paths, n_centers=5)) ** 2))
+    assert abs(10 * math.log10(p5 / p1)) < 1.5
+
+
+def test_multi_center_widens_azimuth_extent():
+    """The spike's headline (audit entry 4): one centre collapses target extent to ~1
+    cell where real returns measure ~6 (F44). A truck-sized bbox's 5 centres span
+    enough cross-range that the -6 dB azimuth extent must widen vs the point model."""
+    from e2e.chain.dechirp import beat_from_cfr
+
+    def _extent(n_centers):
+        scn = _scenario(position=(12.0, 0.0, 1.5))
+        scene, paths = _stub_rt_scene(_CFG, (12.0, 0.0, 1.5), half=(2.5, 2.5, 0.8))
+        h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths,
+                                    n_centers=n_centers)
+        beat = beat_from_cfr(torch.from_numpy(h)).numpy()
+        v = np.transpose(beat, (1, 0, 2, 3)).reshape(-1, h.shape[2], h.shape[3])[:, 0, 0]
+        spec = np.abs(np.fft.fftshift(np.fft.fft(v, n=256))) ** 2
+        return int(np.sum(spec >= spec.max() * 10 ** (-6 / 10)))
+
+    e1, e5 = _extent(1), _extent(5)
+    assert e5 > e1, (e1, e5)
+
+
+def test_multi_center_falls_back_to_one_point_without_a_bbox():
+    """An object with no resolvable bbox has nowhere deterministic to put extra
+    centres: n_centers=5 must equal n_centers=1 exactly."""
+    scn = _scenario(position=(12.0, 3.0, 1.5))
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))
+    scene.objects["t"].mi_mesh = types.SimpleNamespace(
+        bbox=lambda: (_ for _ in ()).throw(RuntimeError("no bbox")))
+    h5 = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=5)
+    h1 = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)
+    assert np.array_equal(h5, h1)
+    assert np.abs(h5).max() > 0.0
+
+
+def test_n_centers_zero_raises():
+    scn = _scenario()
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 0.5))
+    with pytest.raises(ValueError, match="n_centers"):
+        rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=0)
+
+
+def test_element_gain_enters_amplitude_squared(monkeypatch):
+    """The element gain applies once on TX and once on RX (F32), so CFR amplitude
+    carries g^2 and power g^4. Review finding 2026-08-23: every stub in this file
+    resolves to the isotropic pattern (g=1), so a dropped/doubled square was invisible
+    to CI -- this pins it with a monkeypatched non-unity gain."""
+    scn = _scenario(position=(12.0, 3.0, 1.5))
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))
+    p_iso = float(np.sum(np.abs(rsc.coherent_target_cfr(
+        _CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)) ** 2))
+    monkeypatch.setattr(rsc, "_element_field_amplitude", lambda *a, **k: 2.0)
+    p_gain = float(np.sum(np.abs(rsc.coherent_target_cfr(
+        _CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)) ** 2))
+    # amplitude x g^2 = x4 -> power x16 = +12.04 dB, exactly.
+    assert 10 * math.log10(p_gain / p_iso) == pytest.approx(12.04, abs=0.01)
+
+
+def test_n_centers_other_than_1_or_5_raises():
+    scn = _scenario()
+    scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 0.5))
+    for bad in (0, 2, 3, 4, 6, 10):
+        with pytest.raises(ValueError, match="n_centers"):
+            rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths,
+                                    n_centers=bad)
