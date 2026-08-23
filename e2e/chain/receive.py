@@ -8,10 +8,14 @@ Each block below follows the same `apply(state) -> dict of state updates` protoc
 `Simulation._check_frame_contract` raises a named `FrameContractError` if one of these
 runs before the chain has actually crossed into RX time (e.g. no DechirpBlock inserted).
 
-Three blocks:
+Four blocks:
 
 - `ImpairmentBlock`  -- wraps `e2e.ml.impairments.apply_all` (phase noise, TX/RX
   leakage, clutter). Serial stage: rewrites `adc`.
+- `IFHighPassBlock`  -- the IF-chain high-pass every FMCW receiver puts between the
+  mixer and the ADC. Serial stage: rewrites `adc`. Sits AFTER `ImpairmentBlock`
+  (the close-in tones it exists to suppress must already be present) and BEFORE
+  `QuantizerBlock` (protecting the converter's dynamic range is its job).
 - `QuantizerBlock`   -- ADC digitization (full-scale clip + uniform quantization).
   Serial stage: rewrites `adc`.
 - `RadarCubeBlock`   -- range-Doppler product via `e2e.ml.transforms.adc_to_rd`.
@@ -25,6 +29,7 @@ import torch
 from e2e import frames
 from e2e.frames import FrameCapabilities
 from e2e.ml.impairments import apply_all, ClutterParams, LeakageParams, PhaseNoiseParams
+from e2e.ml.radar_config import C_MPS
 from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
 
 
@@ -136,6 +141,91 @@ class ImpairmentBlock:
         provenance["base_seed"] = self.seed
         provenance["frame_idx"] = frame_idx
         return {"adc": out, "impairment_params": provenance}
+
+
+class IFHighPassBlock:
+    """The IF high-pass filter between the FMCW mixer and the ADC. Serial stage:
+    rewrites `adc`.
+
+    WHY IT EXISTS (standard automotive receiver practice, and the audit's entry-9
+    omission): after dechirp, beat frequency is proportional to range
+    (`f_b = 2 * S * R / c`), so the strongest returns a monostatic radar sees -- the
+    TX-RX leakage at ~0 m and the bumper/radome reflection tens of cm out -- sit at
+    the very bottom of the IF band, tens of dB above every real target. Receivers
+    high-pass the IF precisely to suppress them BEFORE digitization; without the
+    filter those tones (a) set the ADC's full scale, wasting converter bits on a
+    signal nobody wants (this chain's `QuantizerBlock` AGCs off the frame peak, so
+    the coupling is modeled), and (b) lay their range sidelobes across the whole
+    profile. This block is the filter.
+
+    MODEL: an order-`order` Butterworth high-pass MAGNITUDE response applied on the
+    fast-time DFT grid: bin `k` (of `n_samples`) carries beat frequency
+    `f_k = k * fs / n_samples` (the positive-exponent beat convention -- see
+    `e2e.ml.rd_synth`'s derivation -- occupies the full `[0, fs)` span, which is also
+    how `RadarConfig.max_range_m` is defined), and is scaled by
+    `|H(f_k)| = (f_k/fc)^order / sqrt(1 + (f_k/fc)^(2*order))`, so `H(0) = 0` exactly
+    and the response is monotonic in range. TWO STATED APPROXIMATIONS: (a) the
+    filter's PHASE response is omitted (zero-phase magnitude weighting) -- for the
+    magnitude products this chain feeds (range/range-azimuth/range-Doppler maps) a
+    smooth per-bin phase is invisible, and modelling group delay would only shift
+    the profile; (b) the filter is applied to the sampled record rather than the
+    continuous IF, so its response is exact on bin centres and interpolated by the
+    DFT in between -- fine for a corner far below `fs`.
+
+    CORNER: `corner_range_m` (default 1.0 m) states the corner where a spec sheet
+    states it implicitly -- as the range below which returns are suppressed -- and is
+    converted per config via `fc = 2 * S * corner_range_m / c`, so the SAME setting
+    means the same thing on every preset regardless of slope. Pass `corner_hz` to
+    override with an explicit IF frequency (then `corner_range_m` is ignored). At the
+    defaults (order 2, 1.0 m): the 0 m leakage tone is nulled exactly, a 0.2 m bumper
+    return takes ~28 dB of attenuation, and a target at 2 m is within ~0.3 dB of
+    untouched. Those dB figures depend only on RANGE ratios, so they hold on every
+    preset -- what varies with the preset is how many range BINS the suppressed
+    region spans (corner range over range resolution).
+
+    Reports, per frame: `if_hpf_corner_hz` (the resolved corner) and `if_hpf_order`.
+    """
+
+    frame_capabilities = _RX_TIME
+
+    def __init__(self, cfg, *, corner_range_m=1.0, corner_hz=None, order=2):
+        if corner_hz is None:
+            if float(corner_range_m) <= 0.0:
+                raise ValueError(f"corner_range_m must be > 0, got {corner_range_m!r}")
+            corner_hz = 2.0 * float(cfg.ramp_slope_hzps) * float(corner_range_m) / C_MPS
+        if float(corner_hz) <= 0.0:
+            raise ValueError(f"corner_hz must be > 0, got {corner_hz!r}")
+        if int(order) < 1:
+            raise ValueError(f"order must be >= 1, got {order!r}")
+        self.cfg = cfg
+        self.corner_hz = float(corner_hz)
+        self.order = int(order)
+
+    def response(self, n_samples, device=None):
+        """|H| on the `n_samples`-point fast-time DFT grid, float32 `[n_samples]`.
+
+        Computed as `1 / sqrt(1 + (fc/f)^(2*order))` (with `|H|(0) = 0` set
+        explicitly), NOT the algebraically equal `(f/fc)^n / sqrt(1 + (f/fc)^(2n))`:
+        the latter overflows to `inf/inf = nan` at high-frequency bins for a steep
+        `order`, and one nan bin poisons the ENTIRE output frame through the `ifft`
+        (found in review). In this form the worst case is `(fc/f)^(2n) -> inf` at a
+        deep-stopband bin, and `1/sqrt(1+inf) = 0.0` -- the correct limit.
+        """
+        f = torch.arange(int(n_samples), dtype=torch.float64, device=device) \
+            * (float(self.cfg.fs_hz) / float(n_samples))
+        h = torch.zeros_like(f)
+        inv_2n = (self.corner_hz / f[1:]) ** (2 * self.order)
+        h[1:] = 1.0 / torch.sqrt(1.0 + inv_2n)
+        return h.to(torch.float32)
+
+    def apply(self, state):
+        adc = state["adc"]
+        n_samples = adc.shape[-1]
+        h = self.response(n_samples, device=adc.device).to(adc.dtype)
+        spec = torch.fft.fft(adc, dim=-1)
+        out = torch.fft.ifft(spec * h, dim=-1).to(adc.dtype)
+        return {"adc": out, "if_hpf_corner_hz": self.corner_hz,
+                "if_hpf_order": self.order}
 
 
 class QuantizerBlock:

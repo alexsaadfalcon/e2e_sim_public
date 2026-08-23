@@ -352,3 +352,41 @@ def test_cli_reaches_rt_tier_d4(capsys):
     assert rc == 0, out.err
     assert "unknown --tier" not in out.err
     assert "tier:         D4" in out.out
+
+
+def test_if_hpf_in_default_composition_between_impairments_and_quantizer(tmp_path, fake_env):
+    from e2e.chain.receive import IFHighPassBlock
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+    )
+    stage_types = [type(s) for s in sim.serial_stages]
+    assert IFHighPassBlock in stage_types
+    assert (stage_types.index(ImpairmentBlock)
+            < stage_types.index(IFHighPassBlock)
+            < stage_types.index(QuantizerBlock))
+
+
+def test_if_hpf_is_gated_off(tmp_path, fake_env):
+    from e2e.chain.receive import IFHighPassBlock
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+        use_if_hpf=False,
+    )
+    assert IFHighPassBlock not in [type(s) for s in sim.serial_stages]
+
+
+def test_if_hpf_provenance_reaches_written_sample_meta(tmp_path, fake_env):
+    """The block's docstring promises per-frame corner/order provenance; that promise
+    must hold END TO END -- in the persisted .npz meta, not just the in-memory state
+    (review found SinkBlock's meta allowlist silently dropped it)."""
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+        if_hpf_kwargs={"corner_range_m": 3.3, "order": 4},
+    )
+    sim.run(n_steps=1)
+    files = sorted(tmp_path.glob("sample_frame_*.npz"))
+    with np.load(files[0]) as data:
+        meta = json.loads(str(data["meta"].item()))
+    assert meta["if_hpf_order"] == 4
+    expected_hz = 2.0 * _CFG.ramp_slope_hzps * 3.3 / 299_792_458.0
+    assert meta["if_hpf_corner_hz"] == pytest.approx(expected_hz)

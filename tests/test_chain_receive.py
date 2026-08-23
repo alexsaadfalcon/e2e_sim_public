@@ -292,3 +292,100 @@ def test_default_full_scale_survives_physically_small_ray_traced_amplitudes():
     assert auto["quant_snr_db"] > 50.0
     assert auto["adc_full_scale"] < 1e-5  # scaled to the frame, not to 1.0
     assert auto["clipped_fraction"] == 0.0  # headroom means the peak does not clip
+
+
+# --------------------------------------------------------------------------- IFHighPassBlock
+
+def _tone(bin_idx, amp=1.0, device="cpu"):
+    """[1, 1, n_samples] complex64 beat tone at fast-time DFT bin `bin_idx`."""
+    n = torch.arange(_CFG.n_samples, dtype=torch.float64, device=device)
+    sig = amp * torch.exp(2j * torch.pi * bin_idx * n / _CFG.n_samples)
+    return sig.to(torch.complex64).view(1, 1, -1)
+
+
+def test_if_hpf_declares_rx_time_domain():
+    from e2e.chain.receive import IFHighPassBlock
+    assert IFHighPassBlock(_CFG).frame_capabilities.domain == frames.DOMAIN_RX_TIME
+
+
+def test_if_hpf_nulls_dc_exactly_and_matches_butterworth_oracle(torch_device):
+    """Oracle: a pure tone at bin k comes out scaled by the hand-computed Butterworth
+    magnitude |H| = (f/fc)^n / sqrt(1 + (f/fc)^(2n)) at f = k*fs/N; the DC (range-0
+    leakage) tone is nulled EXACTLY because H(0) = 0."""
+    import math
+    from e2e.chain.receive import IFHighPassBlock
+    blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
+
+    out_dc = blk.apply({"adc": _tone(0, device=torch_device)})["adc"]
+    assert torch.allclose(out_dc, torch.zeros_like(out_dc), atol=1e-6)
+
+    for k in (1, 3, 8):
+        f = k * _CFG.fs_hz / _CFG.n_samples
+        ratio = (f / blk.corner_hz) ** blk.order
+        expected = ratio / math.sqrt(1.0 + ratio ** 2)
+        out = blk.apply({"adc": _tone(k, device=torch_device)})["adc"]
+        measured = float(out.abs().max().item())
+        assert measured == pytest.approx(expected, rel=1e-4), f"bin {k}"
+
+
+def test_if_hpf_response_is_monotonic_and_transparent_at_far_range():
+    from e2e.chain.receive import IFHighPassBlock
+    blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
+    h = blk.response(_CFG.n_samples)
+    assert torch.all(h[1:] >= h[:-1])
+    # The last bin sits at ~max_range; the filter must be transparent there (<0.1 dB).
+    assert float(h[-1].item()) > 10 ** (-0.1 / 20)
+
+
+def test_if_hpf_corner_range_conversion_and_explicit_override():
+    from e2e.chain.receive import IFHighPassBlock
+    from e2e.ml.radar_config import C_MPS
+    blk = IFHighPassBlock(_CFG, corner_range_m=2.0)
+    assert blk.corner_hz == pytest.approx(2.0 * _CFG.ramp_slope_hzps * 2.0 / C_MPS)
+    assert IFHighPassBlock(_CFG, corner_hz=123e3).corner_hz == 123e3
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"corner_range_m": 0.0}, {"corner_range_m": -1.0},
+    {"corner_hz": 0.0}, {"corner_hz": -5.0}, {"order": 0},
+])
+def test_if_hpf_invalid_params_raise(kwargs):
+    from e2e.chain.receive import IFHighPassBlock
+    with pytest.raises(ValueError):
+        IFHighPassBlock(_CFG, **kwargs)
+
+
+def test_if_hpf_reports_provenance(small_adc):
+    from e2e.chain.receive import IFHighPassBlock
+    blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
+    out = blk.apply({"adc": small_adc()})
+    assert out["if_hpf_corner_hz"] == pytest.approx(blk.corner_hz)
+    assert out["if_hpf_order"] == 2
+
+
+def test_if_hpf_protects_quantizer_dynamic_range(torch_device):
+    """The coupling A2 exists for: a range-0 leakage tone 60 dB above a far target
+    sets QuantizerBlock's AGC full scale; the high-pass removes it so full scale is
+    set by the target instead (drop of ~the full 60 dB)."""
+    from e2e.chain.receive import IFHighPassBlock
+    adc = _tone(0, amp=1.0, device=torch_device) + _tone(10, amp=1e-3, device=torch_device)
+    quant = QuantizerBlock(bits=12)
+    fs_without = quant._resolve_full_scale(adc)
+    filtered = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2).apply({"adc": adc})["adc"]
+    fs_with = quant._resolve_full_scale(filtered)
+    assert fs_without / fs_with > 10 ** (40 / 20), \
+        "high-pass should drop the AGC full scale by tens of dB"
+
+
+def test_if_hpf_steep_order_never_nans(torch_device):
+    """Regression (found in review): the naive Butterworth form overflows to
+    inf/inf = nan at high bins for a steep order, and one nan bin poisons the whole
+    frame through the ifft. The stable form's worst case is a clean 0.0."""
+    from e2e.chain.receive import IFHighPassBlock
+    blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=100)
+    h = blk.response(512)
+    assert not torch.isnan(h).any()
+    assert torch.all(h[1:] >= h[:-1])  # still monotonic
+    out = blk.apply({"adc": torch.ones(1, 1, 512, dtype=torch.complex64,
+                                       device=torch_device)})["adc"]
+    assert not torch.isnan(out.real).any() and not torch.isnan(out.imag).any()

@@ -49,7 +49,8 @@ import torch
 
 from e2e.blocks import CircuitStage, InterconnectBlock, InterconnectStage, RFFEBlock
 from e2e.chain.dechirp import DechirpBlock
-from e2e.chain.receive import ImpairmentBlock, QuantizerBlock, RadarCubeBlock
+from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
+                               RadarCubeBlock)
 from e2e.environment.blocks import RTEnvironmentBlock
 from e2e.ml.blocks import SinkBlock
 from e2e.ml.dataset import DATASETS_DIR
@@ -116,6 +117,7 @@ def build_chain_simulation(
     ground_scattering_coefficient: Optional[float] = None,
     samples_per_src: Optional[int] = None,
     use_link_budget: bool = True,
+    use_if_hpf: bool = True, if_hpf_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
 
@@ -211,6 +213,14 @@ def build_chain_simulation(
     serial_stages.append(
         ImpairmentBlock(cfg, impairment_chain_params, seed=impairment_seed)
     )
+    # The IF high-pass sits AFTER the impairments (the close-in leakage/bumper tones it
+    # exists to suppress must be present) and BEFORE the quantizer (protecting the ADC's
+    # dynamic range is its purpose: QuantizerBlock AGCs full scale off the frame peak,
+    # which without this filter is the leakage tone, not a target). ON by default --
+    # every real FMCW receiver has one, and its absence biased every detection number
+    # pessimistically (physics audit entry 9; release-plan A2).
+    if use_if_hpf:
+        serial_stages.append(IFHighPassBlock(cfg, **(if_hpf_kwargs or {})))
     serial_stages.append(QuantizerBlock(bits=quant_bits))
 
     downstream_blocks = [RadarCubeBlock(cfg), SinkBlock(out_dir, tag=tag)]
@@ -240,6 +250,7 @@ def generate_chain_corpus(
     ground_scattering_coefficient: Optional[float] = None,
     samples_per_src: Optional[int] = None,
     allow_unanswerable: bool = False,
+    use_if_hpf: bool = True, if_hpf_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Generate a radar-ML corpus by RUNNING THE COMPOSED CHAIN, one `Simulation` per
     scene (real ray tracing -- needs Sionna; see `build_chain_simulation`).
@@ -339,6 +350,7 @@ def generate_chain_corpus(
             coherent_targets=coherent_targets, antenna_pattern=antenna_pattern,
             ground_scattering_coefficient=ground_scattering_coefficient,
             samples_per_src=samples_per_src,
+            use_if_hpf=use_if_hpf, if_hpf_kwargs=if_hpf_kwargs,
         )
         sim.run(n_steps=frames_per_scene)
 
@@ -400,6 +412,14 @@ def build_arg_parser():
                    help="Sionna PathSolver Monte-Carlo ray budget (default: Sionna's own "
                         "1e6). The dominant cost knob when the ground scatters diffusely: "
                         "1e5 cut the path count 10x with the target metric unchanged")
+    p.add_argument("--no-if-hpf", action="store_true",
+                   help="disable the IF high-pass between mixer and ADC (on by "
+                        "default -- every real FMCW receiver has one; without it the "
+                        "TX-RX leakage tone sets the ADC full scale). Reproduces "
+                        "pre-A2 corpora")
+    p.add_argument("--if-hpf-corner-range", type=float, default=None,
+                   help="IF high-pass corner expressed as a RANGE in metres "
+                        "(default 1.0; see IFHighPassBlock)")
     p.add_argument("--allow-unanswerable", action="store_true",
                    help="override the answerability guard (F43): generate even though "
                         "the (config, tier) pair cannot support a detection benchmark "
@@ -441,7 +461,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"= {total_frames} frames")
         print(f"rffe:         {'off' if args.no_rffe else 'on'}   "
               f"interconnect: {'off' if args.no_interconnect else 'on'}   "
-              f"tx chain: {'off' if args.no_transmit_chain else 'ON (see --no-transmit-chain)'}")
+              f"tx chain: {'off' if args.no_transmit_chain else 'ON (see --no-transmit-chain)'}   "
+              f"if hpf: {'OFF (pre-A2)' if args.no_if_hpf else 'on'}")
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
         from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
                                            DEFAULT_GROUND_SCATTERING_COEFFICIENT)
@@ -479,6 +500,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         samples_per_src=args.samples_per_src,
         use_transmit_chain=not args.no_transmit_chain,
         allow_unanswerable=args.allow_unanswerable,
+        use_if_hpf=not args.no_if_hpf,
+        if_hpf_kwargs=(None if args.if_hpf_corner_range is None
+                       else {"corner_range_m": args.if_hpf_corner_range}),
     )
     print(f"wrote {manifest_path}")
     return 0

@@ -90,7 +90,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # documented allowlist rather than dumping the whole state dict: most state
 # entries (U, PRX, another block's product tensor) are either large arrays or
 # meaningless replayed out of the frame that produced them.
-_EXTRA_META_KEYS = ("impairment_params", "targets", "meta")
+_EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
+                    # IFHighPassBlock's per-frame provenance (release-plan A2): a corpus
+                    # generated with a non-default corner must say so on disk, or its
+                    # frames aren't reproducible from the artifact alone. (Review noted
+                    # quant_snr_db/clipped_fraction/link_budget share this gap -- widening
+                    # the allowlist to those is the C7 reproducibility sweep, not A2.)
+                    "if_hpf_corner_hz", "if_hpf_order")
 
 
 def _json_default(obj):
