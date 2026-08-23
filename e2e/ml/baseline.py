@@ -113,14 +113,17 @@ CFAR_MAX_DB = 20.0
 #: a taste one, because CA-CFAR's threshold means what it means only when the cell under
 #: test and its training cells share a distribution.
 #:
-#: `DOPPLER_MAX` (the shipped default) -- max over K Doppler bins. Square-law noise power
+#: `DOPPLER_MAX` (the pre-v1.1 default) -- max over K Doppler bins. Square-law noise power
 #:   is exponential; the MAXIMUM of K exponentials is not. Its upper tail is Gumbel-like
 #:   and far heavier, so a fixed dB threshold buys a false-alarm rate nothing in the CFAR
 #:   design predicts. It is, however, the most SENSITIVE reduction for a point target,
 #:   costing only ~ln(K) against the noise floor.
-#: `DOPPLER_SUM` -- non-coherent integration. Erlang(K), whose coefficient of variation is
-#:   1/sqrt(K), so the noise ratio concentrates and the threshold behaves. Pays for it by
-#:   diluting a single-bin target across K bins.
+#: `DOPPLER_SUM` (the shipped default since v1.1) -- non-coherent integration. Erlang(K),
+#:   whose coefficient of variation is 1/sqrt(K), so the noise ratio concentrates and the
+#:   threshold behaves. Pays for it by diluting a single-bin target across K bins.
+#:   MEASURED better than `max` at matched recall on both corpora it was tried on
+#:   (F48, F50: e.g. classical FA/frame 154.0 -> 119.8 on the radial test split);
+#:   default flipped for v1.1 (owner-approved, release-plan A4).
 #: `DOPPLER_CFAR_FIRST` -- CFAR each Doppler slice, then take the max of the OBJECTNESS.
 #:   Detect first, collapse second. Every CFAR sees exponential cells, so the threshold is
 #:   calibrated, AND a target that lives in one Doppler bin is tested against that bin's
@@ -236,11 +239,21 @@ def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
     `[D, grid.n_range, grid.n_azimuth]`), so a per-Doppler detector can resample the whole
     cube in one call and keep the resampling identical to the collapsed path's.
 
-    Nearest-neighbour on both axes. The angle axis of an `n_fft`-point FFT (fftshifted)
-    maps to `sin(az) = 2k/n_fft` for `k` in `[-n_fft/2, n_fft/2)`; the fine range axis is
-    `i * cfg.range_resolution_m`.
+    Angle axis: nearest-neighbour (an upsample -- the FFT's `n_fft` bins map to
+    `sin(az) = 2k/n_fft`, `k` in `[-n_fft/2, n_fft/2)`; no information is discarded).
+
+    Range axis: PEAK-POOL -- each grid cell takes the MAX over every fine bin whose
+    range falls inside it. This axis is a DOWNSAMPLE (typically 4 fine bins per cell),
+    and the pre-2026-08-23 nearest-neighbour point-sample here was a measured defect:
+    cell centres sampled only fine bins `stride*i + stride//2`, so a point target whose
+    energy sat in any of the other `stride-1` fine bins per cell was simply INVISIBLE
+    to the detector -- 3 of 4 possible target positions at the default stride (found
+    when the A4 default flip exposed it; the old `max` Doppler collapse had masked it
+    by riding a range-sidelobe skirt 0.8 dB above the floor). Peak-pooling is the
+    "does ANY covered bin hold a target" semantics a detection cell means. The mild
+    max-of-`stride`-exponentials tail this gives noise cells applies identically to
+    the cell under test and its training annulus, so the CFAR ratio stays honest.
     """
-    batched = power.dim() == 3
     n_angle, n_range_fine = power.shape[-2:]
     dev = power.device
 
@@ -248,13 +261,14 @@ def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
     sin_dst = (torch.arange(grid.n_azimuth, device=dev, dtype=torch.float32) + 0.5) * grid.az_bin - 1.0
     ai = torch.bucketize(sin_dst, sin_src).clamp_(0, n_angle - 1)
 
-    r_dst = (torch.arange(grid.n_range, device=dev, dtype=torch.float32) + 0.5) * grid.range_bin_m
-    ri = (r_dst / float(cfg.range_resolution_m)).long().clamp_(0, n_range_fine - 1)
+    r_fine = (torch.arange(n_range_fine, device=dev, dtype=torch.float32) + 0.5) \
+        * float(cfg.range_resolution_m)
+    cell = (r_fine / grid.range_bin_m).long().clamp_(0, grid.n_range - 1)
 
-    if batched:
-        # [D, n_angle, n_range_fine] -> [D, n_range, n_azimuth]
-        return power[:, ai][:, :, ri].transpose(1, 2).contiguous()
-    return power[ai][:, ri].T.contiguous()          # [n_range, n_azimuth]
+    a = power[..., ai, :]                            # [..., n_azimuth, n_range_fine]
+    out = torch.zeros(a.shape[:-1] + (grid.n_range,), dtype=power.dtype, device=dev)
+    out.scatter_reduce_(-1, cell.expand(a.shape), a, reduce="amax", include_self=False)
+    return out.transpose(-1, -2).contiguous()        # [..., n_range, n_azimuth]
 
 
 def cfar_objectness(power: torch.Tensor, *, guard: int = CFAR_GUARD, train: int = CFAR_TRAIN,
@@ -312,7 +326,9 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
 
     `doppler_reduce` selects how the Doppler axis is collapsed; see `DOPPLER_MAX` /
     `DOPPLER_SUM` / `DOPPLER_CFAR_FIRST` above for what each does to the noise statistics
-    the CFAR threshold depends on. The default is unchanged.
+    the CFAR threshold depends on. The default is `DOPPLER_SUM` since v1.1 (measured
+    better at matched recall on both corpora tried, F48/F50); pass
+    `doppler_reduce=DOPPLER_MAX` to reproduce pre-v1.1 numbers.
 
     Channel 0 is the CFAR objectness; the two regression channels are zero, so a decoded
     detection sits at its cell centre. That is the honest classical behaviour -- there is
@@ -325,7 +341,7 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
     offset -- ~2.2 m for a car. Undoing that would take an extent estimator, not a
     threshold. See `e2e.ml.labels`.
     """
-    doppler_reduce = kwargs.pop("doppler_reduce", DOPPLER_MAX)
+    doppler_reduce = kwargs.pop("doppler_reduce", DOPPLER_SUM)
     if doppler_reduce not in _DOPPLER_REDUCTIONS:
         raise ValueError(f"doppler_reduce must be one of {_DOPPLER_REDUCTIONS}, "
                          f"got {doppler_reduce!r}")

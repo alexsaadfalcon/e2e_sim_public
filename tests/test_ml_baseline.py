@@ -304,17 +304,23 @@ def test_keep_doppler_returns_the_uncollapsed_cube_whose_max_is_the_collapsed_on
     assert torch.equal(cube.max(dim=2).values, flat)
 
 
-def test_default_doppler_reduce_is_unchanged():
-    """The 2026-08-19 change must not have moved the shipped detector."""
+def test_default_doppler_reduce_is_sum():
+    """v1.1 default flip (release-plan A4): `sum` measured better than `max` at
+    matched recall on both corpora tried (F48, F50), owner-approved. The default must
+    be exactly DOPPLER_SUM -- and must DIFFER from the pre-v1.1 `max` on generic data,
+    so a silent revert cannot pass."""
     torch.manual_seed(4)
     cfg = PRESETS["ti_iwr1443"]
     grid = LabelGrid.for_config(cfg)
     adc = torch.complex(torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples),
                         torch.randn(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
     default = baseline.classical_detection_map(cfg, adc, grid)
-    explicit = baseline.classical_detection_map(cfg, adc, grid,
-                                                doppler_reduce=baseline.DOPPLER_MAX)
-    assert torch.equal(default, explicit)
+    explicit_sum = baseline.classical_detection_map(cfg, adc, grid,
+                                                    doppler_reduce=baseline.DOPPLER_SUM)
+    explicit_max = baseline.classical_detection_map(cfg, adc, grid,
+                                                    doppler_reduce=baseline.DOPPLER_MAX)
+    assert torch.equal(default, explicit_sum)
+    assert not torch.equal(default, explicit_max)
 
 
 @pytest.mark.parametrize("reduce", ["max", "sum", "cfar_first"])
@@ -363,3 +369,23 @@ def test_cfar_first_is_worse_calibrated_than_max_on_pure_noise():
         return int((obj > thr).sum())
 
     assert fa("cfar_first", 0.3) > fa("max", 0.3)
+
+
+@pytest.mark.parametrize("offset_bins", [0, 1, 2, 3])
+def test_classical_map_localizes_a_point_target_at_every_fine_bin_offset(offset_bins, torch_device):
+    """Regression for the _to_grid decimation defect (found 2026-08-23 when the A4
+    default flip exposed it): nearest-neighbour range decimation sampled only fine
+    bins stride*i + stride//2, so a point target in any OTHER fine bin of its cell
+    was invisible to the detector. Peak-pooling must localize it at every offset."""
+    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.ml.scatterers import RadarPose, Scatterer
+
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    range_m = (160 + offset_bins) * float(cfg.range_resolution_m)
+    target = Scatterer(position=(range_m, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                       rcs_dbsm=20.0, object_class="vehicle")
+    adc = synthesize_adc(cfg, [target], RadarPose(), snr_db=40.0, seed=0)
+    out = classical_detection_map(cfg, adc, grid)
+    peak_range_bin = int(torch.argmax(out[0].max(dim=1).values))
+    assert abs(peak_range_bin * grid.range_bin_m - range_m) <= 2.0 * grid.range_bin_m
