@@ -13,7 +13,15 @@ match this project's ULA handedness convention (see rt_gen's "Element ordering /
 handedness" section); TDM/DDMA MIMO combining then collapses the TX axis. That
 derivation was validated against re-traced ground truth -- the conjugate, the ``f_c =
 f0 + B/2`` chirp-centre choice baked into the frequency grid the caller samples at, and
-the antenna-index reversal must not drift. This module is now the ONE implementation of
+the antenna-index reversal must not drift.
+
+The identity presumes a perfectly LINEAR ramp: only under a constant slope does fast
+time sweep the frequency axis uniformly, making "sample the CFR on the ramp's grid"
+and "dechirped beat signal" the same object. Real synthesizers have chirp
+nonlinearity (residual deviation of the instantaneous frequency from the ideal ramp),
+which would smear this one-to-one mapping; it is a stated approximation of the whole
+sensing chain (see ``e2e.ml.rd_synth``'s scope list), not something this block could
+patch locally. This module is now the ONE implementation of
 the beat-mapping and MIMO-combine steps; ``e2e.ml.rt_gen`` builds the raw CFR (the
 Sionna-specific half: chunked ``Paths.cfr`` calls) and delegates the rest here so the
 math exists in exactly one place. See ``tests/test_chain_dechirp.py`` for the

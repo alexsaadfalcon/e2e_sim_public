@@ -25,6 +25,14 @@ convention throughout: increasing range -> increasing beat phase.
 
 Scope / explicitly out of scope
 -------------------------------
+* Perfectly LINEAR chirp: the ramp slope S is a constant, so a delay tau maps to one
+  clean beat tone f_b = S tau. A real PLL/VCO synthesizer has chirp nonlinearity --
+  the instantaneous frequency deviates from the ideal ramp -- which smears the beat
+  tone, degrading range resolution and raising the close-in sidelobe floor by an
+  amount set by the synthesizer's residual frequency error. This is a deliberate,
+  stated approximation everywhere in this package (same premise in
+  `e2e.chain.dechirp`'s CFR->beat identity and `e2e.ml.rt_gen`); modelling it is
+  future work, not an oversight (physics audit entry 7 / release plan A9).
 * Far-field (plane-wave) array response: the per-element path-length difference is
   linearised as d sin(theta). Valid for R >> aperture^2 / lambda, which holds for
   the automotive-scale geometries this package targets.

@@ -36,6 +36,14 @@ class RandomWidebandSignal:
         return signal
 
 class FMCWSignal:
+    """Ideal linear-FMCW chirp: constant slope k = bw / chirp_duration.
+
+    The linearity is an APPROXIMATION shared by the whole sensing chain (see
+    `e2e.ml.rd_synth`'s scope list): a real PLL/VCO sweep deviates from the ideal
+    ramp (chirp nonlinearity), smearing the dechirped beat tone and raising the
+    close-in sidelobe floor. Deliberately not modelled in v1.1.
+    """
+
     def __init__(self, metadata: dict):
         self.metadata = metadata
     
