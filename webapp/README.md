@@ -1,7 +1,7 @@
 # Web UI — Array Processing End-to-End Simulator
 
 A Dash + Plotly + dash-cytoscape web interface for the simulator. It replaces the
-old Tkinter GUI (`e2e/main/main_sionna_interactive.py`) and adds a scenario editor.
+old Tkinter GUI (removed in v1.1; see the v1.0 tag for the original) and adds a scenario editor.
 
 ## Run
 
