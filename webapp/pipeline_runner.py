@@ -201,8 +201,9 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         if rt_preset_name not in PRESETS:
             raise PipelineError(f"Unknown radar preset '{rt_preset_name}'")
         try:
+            _scenario_for_view = REFERENCE_SCENARIOS[rt_scenario_name]()
             environment_block = RTEnvironmentBlock(
-                REFERENCE_SCENARIOS[rt_scenario_name](),
+                _scenario_for_view,
                 PRESETS[rt_preset_name],
                 base_scene=_p(state, "rt_environment", "base_scene"),
                 max_depth=int(_p(state, "rt_environment", "max_depth")),
@@ -634,6 +635,124 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
     return fig
 
 
+#: Plan-view styling per object class. Kept here rather than derived from the mesh so a
+#: scenario with no assets (the dry-run path) still renders a readable diagram.
+_TOPDOWN_STYLE = {
+    "vehicle":    dict(color="#2E5A9C", symbol="square",        size=15),
+    "pedestrian": dict(color="#B9701A", symbol="circle",        size=10),
+    "clutter":    dict(color="#6A1B9A", symbol="diamond",       size=11),
+    "scatterer":  dict(color="#57657A", symbol="circle-open",   size=10),
+}
+
+
+def scenario_topdown_figure(scenario) -> "go.Figure":
+    """Plan view (x, y) of a `e2e.scenario.Scenario`: nodes, boresight, objects.
+
+    Answers "what is actually in the scene" before any signal-domain plot is read. A
+    stripe in sin(azimuth) is only interpretable next to the geometry that produced it.
+
+    Robust to partial scenarios by design: every field it reads is optional in
+    `Scenario`, and a scenario with no objects still renders the radar and its boresight
+    rather than raising. This runs in the UI, where a figure that throws costs the user
+    the whole Results tab.
+    """
+    fig = go.Figure()
+
+    objs = list(getattr(scenario, "objects", None) or [])
+    by_class = {}
+    for o in objs:
+        by_class.setdefault(getattr(o, "object_class", "scatterer") or "scatterer",
+                            []).append(o)
+
+    for cls, items in sorted(by_class.items()):
+        style = _TOPDOWN_STYLE.get(cls, _TOPDOWN_STYLE["scatterer"])
+        xs = [float(o.position[0]) for o in items]
+        ys = [float(o.position[1]) for o in items]
+        names = [getattr(o, "name", "") for o in items]
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="markers", name=f"{cls} ({len(items)})",
+            text=names, hovertemplate="%{text}<br>x=%{x:.1f} m  y=%{y:.1f} m<extra></extra>",
+            marker=dict(color=style["color"], symbol=style["symbol"], size=style["size"],
+                        line=dict(width=1, color="#2B2B2B")),
+        ))
+
+    for node in (getattr(scenario, "nodes", None) or []):
+        nx, ny = float(node.position[0]), float(node.position[1])
+        fig.add_trace(go.Scatter(
+            x=[nx], y=[ny], mode="markers+text", name=getattr(node, "name", "node"),
+            text=[getattr(node, "name", "node")], textposition="bottom center",
+            marker=dict(color="#2E7D4F", symbol="triangle-up", size=18,
+                        line=dict(width=1.5, color="#2B2B2B")),
+        ))
+        # Boresight, so azimuth on every other plot has a physical reference here.
+        look = getattr(node, "look_at", None)
+        if look is not None:
+            fig.add_trace(go.Scatter(
+                x=[nx, float(look[0])], y=[ny, float(look[1])], mode="lines",
+                name=f"{getattr(node, 'name', 'node')} boresight",
+                line=dict(color="#2E7D4F", width=2, dash="dash"),
+                hoverinfo="skip", showlegend=False,
+            ))
+
+    fig.update_layout(
+        title="Scenario, plan view (x–y). Radar ▲, boresight dashed.",
+        xaxis_title="x (m)", yaxis_title="y (m)",
+        margin=dict(l=40, r=20, t=40, b=40), height=420,
+    )
+    # Equal aspect: a plan view with distorted axes misleads about angle, which is the
+    # one thing this figure exists to make readable.
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+    return fig
+
+
+def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap"):
+    """Attach a frame slider + play control to `fig`, leaving its initial view alone.
+
+    `per_frame` is the already-converted data for each frame, in frame order, matching
+    whatever `key` the target trace uses ("z" for a heatmap, "y" for a line). The
+    figure's existing trace 0 keeps the LAST frame's data, and the slider starts parked
+    on that same index, so the default rendering is byte-for-byte what it was before
+    animation existed.
+
+    Returns `fig` unchanged when there are fewer than two frames -- a slider over one
+    frame is noise.
+    """
+    n = len(per_frame)
+    if n < 2:
+        return fig
+
+    # `type` is REQUIRED: without it Plotly infers Scatter for the frame's trace and
+    # rejects "z" as an invalid property.
+    fig.frames = [go.Frame(name=str(i), data=[{"type": trace_type, key: d}],
+                           traces=[trace_idx])
+                  for i, d in enumerate(per_frame)]
+    steps = [dict(method="animate", label=str(i + 1),
+                  args=[[str(i)], dict(mode="immediate",
+                                       frame=dict(duration=0, redraw=True),
+                                       transition=dict(duration=0))])
+             for i in range(n)]
+    fig.update_layout(
+        sliders=[dict(active=n - 1, x=0.08, len=0.9, y=-0.02,
+                      currentvalue=dict(prefix="frame ", font=dict(size=12)),
+                      pad=dict(t=30, b=4), steps=steps)],
+        updatemenus=[dict(type="buttons", showactive=False, direction="left",
+                          x=0.0, y=-0.02, xanchor="left", yanchor="top",
+                          pad=dict(t=30, r=6),
+                          buttons=[dict(label="▶", method="animate",
+                                        args=[None, dict(mode="immediate",
+                                                         fromcurrent=True,
+                                                         frame=dict(duration=350,
+                                                                    redraw=True),
+                                                         transition=dict(duration=0))]),
+                                   dict(label="❚❚", method="animate",
+                                        args=[[None], dict(mode="immediate",
+                                                           frame=dict(duration=0,
+                                                                      redraw=True))])])],
+        margin=dict(l=40, r=20, t=40, b=70),
+    )
+    return fig
+
+
 def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     """Build a dict of named Plotly figures from a simulation outputs dict."""
     figs: Dict[str, go.Figure] = {}
@@ -650,11 +769,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         u = _sin_angle_axis(bins)
         # Coherent 2D aperture FFT, non-coherent (power) integration over range --
         # a target shows up regardless of its range, not just one at range 0.
-        figs["fft"] = _heatmap(
-            _to_numpy_abs_db(outputs["fft"][-1]),
-            "Azimuth-Elevation power (non-coherent over range)",
-            x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
-        )
+        figs["fft"] = _add_frame_animation(
+            _heatmap(
+                _to_numpy_abs_db(outputs["fft"][-1]),
+                "Azimuth-Elevation power (non-coherent over range)",
+                x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
+            ),
+            [_to_numpy_abs_db(f) for f in outputs["fft"]])
 
     for key, title, aperture_label in [
         ("range_az", "Range-Azimuth power (non-coherent over elevation)", "azimuth sin(θ)"),
@@ -674,10 +795,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
-            figs[key] = _heatmap(
-                _to_numpy_abs_db(outputs[key][-1]), title,
-                x=x, y=y, xlabel=aperture_label, ylabel=ylabel,
-            )
+            figs[key] = _add_frame_animation(
+                _heatmap(
+                    _to_numpy_abs_db(outputs[key][-1]), title,
+                    x=x, y=y, xlabel=aperture_label, ylabel=ylabel,
+                ),
+                [_to_numpy_abs_db(f) for f in outputs[key]])
 
     if outputs.get("range_profile_agg"):
         prof = outputs["range_profile_agg"][-1]
