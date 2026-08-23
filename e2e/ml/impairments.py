@@ -198,22 +198,67 @@ def _sample_gamma(n: int, shape: float, *, generator: torch.Generator,
     return out
 
 
-def _k_distributed_gain(n_scat: int, n_rx: int, nu: float, *, generator: torch.Generator,
+def _k_distributed_gain(n_scat: int, nu: float, *, generator: torch.Generator,
                          device: torch.device) -> torch.Tensor:
-    """K-distributed complex gain `[n_scat, n_rx]`: sqrt(gamma texture) * CN(0,1) speckle.
+    """K-distributed complex gain `[n_scat]`: sqrt(gamma texture) * CN(0,1) speckle.
 
     Texture ~ Gamma(shape=nu, scale=1/nu) (mean 1, variance 1/nu -- small `nu` means a
     heavier-tailed, more variable RCS, the classic K-distribution clutter model).
-    Speckle is drawn independently per (scatterer, rx) -- diffuse clutter decorrelates
-    spatially across the array -- but texture is shared across rx: a scatterer's RCS
-    fluctuation is a property of the patch of ground, not of which antenna looks at it.
-    `E[|gain|^2] = 1`.
+    ONE speckle draw per scatterer -- the scatterer is a coherent patch return whose
+    structure across the ARRAY is its steering vector, applied by the caller. (Until
+    2026-08-23 speckle was drawn independently per (scatterer, rx) on a
+    "decorrelates spatially" argument; that removed all angular structure from the
+    clutter and is what let the MIMO demux misassign it -- F52. Aperture
+    decorrelation is a property of a patch WIDER than the array resolution, which a
+    point-scatterer clutter model does not represent; if that fidelity is ever
+    wanted it should come from more, narrower scatterers, not from spatially white
+    gains.) `E[|gain|^2] = 1`.
     """
     tex = _sample_gamma(n_scat, nu, generator=generator, device=device) / float(nu)
-    real = torch.randn((n_scat, n_rx), generator=generator, device=device, dtype=torch.float64)
-    imag = torch.randn((n_scat, n_rx), generator=generator, device=device, dtype=torch.float64)
+    real = torch.randn((n_scat,), generator=generator, device=device, dtype=torch.float64)
+    imag = torch.randn((n_scat,), generator=generator, device=device, dtype=torch.float64)
     speckle = (real + 1j * imag) * math.sqrt(0.5)  # E[|speckle|^2] = 1
-    return torch.sqrt(tex).unsqueeze(1).to(speckle.dtype) * speckle
+    return torch.sqrt(tex).to(speckle.dtype) * speckle
+
+
+def _mimo_tx_factor(cfg, sin_az: torch.Tensor, n_chirps: int) -> torch.Tensor:
+    """Per-scatterer per-chirp TX factor `[n_scat, n_chirps]` for a return arriving
+    from direction `sin_az` on the POST-MIMO-combine ADC cube.
+
+    Mirrors `e2e.ml.rd_synth.synthesize_adc`'s tx_factor EXACTLY (same conventions the
+    demux inverts -- see `e2e.ml.transforms.ddma_demux` / `tdm_deinterleave`):
+
+    * `"ddma"`: every TX fires on every chirp, TX `t` at `t * n_rx * lambda/2`
+      carrying the code `2*pi*t*c/n_tx`:
+      `sum_t exp(j*(pi*n_rx*t*sin_az + 2*pi*t*c/n_tx))`.
+    * `"tdm"` / `"single"`: chirp `c` is fired by TX `c % n_tx` alone, so only that
+      TX's spatial phase appears: `exp(j*pi*n_rx*(c % n_tx)*sin_az)`.
+
+    Every ADDITIVE return the chain injects after the dechirp/combine must carry this
+    structure -- the same TX waveforms that illuminate targets illuminate leakage
+    paths and clutter patches. Injecting without it is F52: the demux, whose whole
+    job is inverting this code, misassigns codeless energy across the virtual array
+    (period-`n_rx` replication under TDM, TX-0-sub-band confinement under DDMA),
+    which rendered as the coherent azimuth stripes/comb that invalidated the
+    detection figure.
+
+    `E[|factor|^2]` per chirp is `n_tx` for DDMA (a coherent sum of `n_tx` unit
+    phasors) and exactly 1 for TDM/single -- callers calibrating injected POWER must
+    divide by `cfg.n_tx` for DDMA (see `apply_clutter`/`apply_leakage`).
+    """
+    device = sin_az.device
+    mimo = str(cfg.mimo).lower()
+    n_tx = int(cfg.n_tx)
+    n_rx = int(cfg.n_rx)
+    c_idx = torch.arange(n_chirps, dtype=torch.float64, device=device)
+    if mimo == "ddma":
+        tx_idx = torch.arange(n_tx, dtype=torch.float64, device=device)
+        ph = (math.pi * n_rx * tx_idx[None, :, None] * sin_az[:, None, None]
+              + 2.0 * math.pi * tx_idx[None, :, None] * c_idx[None, None, :] / n_tx)
+        return torch.polar(torch.ones_like(ph), ph).sum(dim=1)          # [n_scat, C]
+    tx_of_chirp = c_idx % max(n_tx, 1)
+    ph = math.pi * n_rx * tx_of_chirp[None, :] * sin_az[:, None]        # [n_scat, C]
+    return torch.polar(torch.ones_like(ph), ph)
 
 
 # --------------------------------------------------------------------------------
@@ -422,17 +467,29 @@ class LeakageParams:
 def apply_leakage(adc: torch.Tensor, cfg, params: LeakageParams, *, seed: int) -> torch.Tensor:
     """Add a near-zero-delay TX-RX leakage tone plus a short-range bumper reflection.
 
-    Both are modeled as static (chirp-independent) tones, each placed at the nearest
-    fast-time DFT bin for its range (`_range_to_bin`, rounded -- both are strong,
-    coherent, essentially-fixed-delay returns; snapping to the bin removes spectral
-    leakage that would otherwise depend on `n_samples`/`fs` in a way not implied by
-    the physical description). Amplitude is per-RX random-phase (`per-RX random
-    phase` in the spec) but has the SAME magnitude on every antenna and every chirp --
-    a monostatic coupling/short-range reflection has no meaningful per-chirp Doppler
-    or, at this fidelity, per-antenna gain variation.
+    Both are modeled as static tones, each placed at the nearest fast-time DFT bin for
+    its range (`_range_to_bin`, rounded -- both are strong, coherent,
+    essentially-fixed-delay returns; snapping to the bin removes spectral leakage that
+    would otherwise depend on `n_samples`/`fs` in a way not implied by the physical
+    description).
+
+    STRUCTURE (since 2026-08-23 / F52): the coupling is per-(TX, RX) PAIR -- each of
+    the `n_tx * n_rx` paths gets its own random phase, same magnitude (at this
+    fidelity a coupling path has no per-pair gain variation worth modelling), and TX
+    `t`'s contribution carries TX `t`'s own MIMO signature: the DDMA code
+    `2*pi*t*c/n_tx` on every chirp, or (TDM/single) presence only on the chirps TX `t`
+    actually fires. That per-chirp structure is what the downstream demux inverts; the
+    pre-2026-08-23 model (one random phase per RX, constant over chirps, no TX
+    identity) parked all leakage energy in TX-0's Doppler sub-band, where phase noise
+    smeared it into the full-height sin(az) stripes of F52. Note the code phase here
+    is the TX's DDMA/TDM signature WITHOUT a spatial `sin(az)` steering term --
+    coupling is an internal path, not a far-field arrival, so its per-pair phase is
+    simply random.
 
     Power is calibrated against `params.reference`, measured on the INPUT before this
-    function adds anything. Under the legacy `"peak"` reference,
+    function adds anything, and states the summed-over-TX per-RX tone power (DDMA's
+    incoherent per-pair sum is divided back out, so the dB number means the same
+    thing on every MIMO scheme). Under the legacy `"peak"` reference,
     `leakage_relative_db=-5` places the tone 5 dB below the strongest existing return --
     which ties the injected impairment to the target and is the F35 ceiling. Under
     `"noise"` the same field reads as dB above the noise floor, the way a link budget
@@ -440,22 +497,39 @@ def apply_leakage(adc: torch.Tensor, cfg, params: LeakageParams, *, seed: int) -
     """
     n_rx, n_chirps, n_samples = adc.shape
     device, dtype = adc.device, adc.dtype
+    n_tx = max(int(cfg.n_tx), 1)
+    mimo = str(cfg.mimo).lower()
 
     p_ref = _reference_power(adc, params.reference, cfg, domain='range_fft')
 
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
-    phases = torch.rand((2, n_rx), generator=gen, device=device, dtype=torch.float32) * (2.0 * math.pi)
+    phases = torch.rand((2, n_tx, n_rx), generator=gen, device=device,
+                        dtype=torch.float32) * (2.0 * math.pi)
 
-    n = torch.arange(n_samples, device=device, dtype=torch.float32)
+    n = torch.arange(n_samples, device=device, dtype=torch.float64)
+    c_idx = torch.arange(n_chirps, device=device, dtype=torch.float64)
 
-    def _tap(range_m: float, rel_db: float, phase_rx: torch.Tensor) -> torch.Tensor:
+    def _tap(range_m: float, rel_db: float, phase_pair: torch.Tensor) -> torch.Tensor:
+        # DDMA sums n_tx random-phase unit taps per chirp (E[power] = n_tx); TDM has
+        # exactly one active tap per chirp. Normalize so `rel_db` is the per-RX tone
+        # power either way.
         amp = math.sqrt(p_ref * (10.0 ** (float(rel_db) / 10.0))) / n_samples
+        if mimo == "ddma":
+            amp = amp / math.sqrt(n_tx)
         k = int(round(_range_to_bin(range_m, cfg))) % n_samples
         tone = amp * torch.exp(1j * (2.0 * math.pi * k * n / n_samples))  # [n_samples]
-        tone = tone.to(dtype).view(1, 1, n_samples)
-        per_rx = torch.exp(1j * phase_rx.to(torch.float32)).to(dtype).view(n_rx, 1, 1)
-        return tone * per_rx  # [n_rx, 1, n_samples], broadcasts over chirps unchanged
+        pair = torch.polar(torch.ones_like(phase_pair),
+                           phase_pair).to(torch.complex128)               # [n_tx, n_rx]
+        if mimo == "ddma":
+            code = torch.exp(2j * math.pi * torch.arange(n_tx, device=device,
+                                                         dtype=torch.float64)[:, None]
+                             * c_idx[None, :] / n_tx)                     # [n_tx, C]
+            rc = torch.einsum("tr,tc->rc", pair, code.to(torch.complex128))
+        else:
+            tx_of_chirp = (c_idx.long() % n_tx)                           # [C]
+            rc = pair[tx_of_chirp, :].T.contiguous()                      # [n_rx, C]
+        return (rc[:, :, None] * tone[None, None, :]).to(dtype)
 
     out = adc + _tap(0.0, params.leakage_relative_db, phases[0])
     out = out + _tap(params.bumper_range_m, params.bumper_relative_db, phases[1])
@@ -491,18 +565,25 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
     """Add heavy-tailed diffuse ground clutter.
 
     `density * n_samples` scatterers are scattered uniformly over the unambiguous
-    range window `[0, max_range_m)`, each with a small random radial velocity
-    (`N(0, doppler_std_mps^2)`, i.e. clutter sits near Doppler bin 0) and a
-    K-distributed complex gain (`_k_distributed_gain`: gamma "texture" times complex
-    Gaussian "speckle" -- small `nu` gives a heavy-tailed amplitude distribution, the
-    standard sea/ground-clutter model). Total injected power is calibrated to
-    `total_relative_db` dB relative to the INPUT cube's time-domain peak power
-    (`max(|adc|^2)`) -- unlike `apply_leakage`'s coherent single-bin taps, clutter is a
-    sum of many uncorrelated returns, so a time-domain (not range-FFT) statistic is the
-    simpler well-defined reference.
+    range window `[0, max_range_m)` AND uniformly in direction cosine
+    `sin(az) ~ U[-1, 1)` (since 2026-08-23 / F52 -- isotropic diffuse return, a stated
+    approximation; a directive element pattern would taper it). Each has a small
+    random radial velocity (`N(0, doppler_std_mps^2)`, i.e. clutter sits near Doppler
+    bin 0) and a per-scatterer K-distributed complex gain (`_k_distributed_gain`:
+    gamma "texture" times complex Gaussian "speckle" -- small `nu` gives a heavy-tailed
+    amplitude distribution, the standard sea/ground-clutter model). Across the ARRAY a
+    scatterer contributes its steering vector at its azimuth plus the per-chirp MIMO
+    TX code (`_mimo_tx_factor`) -- clutter is illuminated by the same coded waveforms
+    as targets, and the demux downstream inverts exactly that structure. The
+    pre-2026-08-23 model injected i.i.d. per-RX gains with no steering and no code;
+    the demux misassigned that energy across the virtual array (F52: a perfectly
+    coherent period-`n_rx` azimuth comb under TDM, a 1/n_tx aperture confinement
+    under DDMA). Total injected power is calibrated to `total_relative_db` dB
+    relative to the reference (per-RX; DDMA's coherent code gain of `n_tx` is divided
+    back out so the number means the same thing on every MIMO scheme).
 
     TEMPORAL BEHAVIOUR: `seed` draws the clutter FIELD -- scatterer positions,
-    velocities, K-distribution texture and speckle gains -- and, on its own, is
+    velocities, azimuths, K-distribution texture and speckle gains -- and, on its own, is
     independent of `frame_idx`: the road and barriers a real scene's clutter comes
     from stay put, so the caller is expected to hand the SAME `seed` across every
     frame of a scenario (see `ImpairmentBlock`/`apply_all`, which use a base seed for
@@ -511,8 +592,11 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
     radial velocity gives it a Doppler `f_dop = 2*v/lambda`, and by frame `frame_idx`
     (at `cfg.frame_rate_hz` frames/s) it has picked up a deterministic extra phase
     `2*pi*f_dop*(frame_idx/frame_rate_hz)` -- the physical model of internal motion
-    within an otherwise-static scene. `frame_idx=0` adds zero extra phase, so it
-    reproduces exactly the single-frame (pre-persistence) behaviour bit-for-bit.
+    within an otherwise-static scene. `frame_idx=0` adds zero extra phase: frame 0 IS
+    the single-draw field. (Until the 2026-08-23 array-structure fix this was also
+    bit-identical to the historical pre-persistence output; the F52 fix deliberately
+    changed the field's realization, so that historical pin no longer holds -- the
+    frame_idx mechanics are unchanged.)
 
     TWO STATED APPROXIMATIONS of the persistence model. (a) A scatterer's drawn
     velocity advances its PHASE but never its RANGE -- `f_beat` stays frozen at the
@@ -541,13 +625,25 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
 
+    # DRAW ORDER IS A PUBLIC CONTRACT: positions -> velocities -> azimuths -> texture ->
+    # speckle, all from this one generator. Stored corpora reproduce their clutter field
+    # from (seed, these draws); tests replay the order to recover what was drawn
+    # (`tests/test_ml_impairments.py::_replay_clutter_draws`). Inserting or reordering a
+    # draw silently changes every seeded field ever generated -- if you must add one,
+    # append it AFTER the existing draws and update the replay helper.
     ranges = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * float(cfg.max_range_m)
     f_beat = float(cfg.ramp_slope_hzps) * 2.0 * ranges / C_MPS  # [n_scat]
 
     vel = torch.randn(n_scat, generator=gen, device=device, dtype=torch.float64) * float(params.doppler_std_mps)
     f_dop = 2.0 * vel / float(cfg.wavelength_m)  # [n_scat], near zero
 
-    gain = _k_distributed_gain(n_scat, n_rx, float(params.nu), generator=gen, device=device)  # [n_scat, n_rx]
+    # Each patch sits at a real direction: sin(az) ~ U[-1, 1) (a stated approximation --
+    # isotropic diffuse ground return over the unambiguous span; a directive antenna
+    # pattern would taper this, and is deliberately not modelled here). The steering
+    # vector + TX code this implies across the virtual array is the WHOLE fix of F52.
+    sin_az = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * 2.0 - 1.0
+
+    gain = _k_distributed_gain(n_scat, float(params.nu), generator=gen, device=device)  # [n_scat]
 
     if params.reference == REFERENCE_NOISE:
         # NOT the time-domain median. A target is a TONE in the beat signal, so it is
@@ -568,7 +664,11 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
             f"unknown power reference {params.reference!r}; expected "
             f"{REFERENCE_NOISE!r} or {REFERENCE_PEAK!r} (see ESTABLISHED_FACTS F35)")
     target_total = peak_power * (10.0 ** (float(params.total_relative_db) / 10.0))
-    mean_power = target_total / n_scat
+    # DDMA's coherent TX code carries E[|tx_factor|^2] = n_tx per chirp (see
+    # `_mimo_tx_factor`); divide it back out so `total_relative_db` keeps meaning the
+    # same injected per-RX power on every MIMO scheme.
+    tx_power = float(cfg.n_tx) if str(cfg.mimo).lower() == "ddma" else 1.0
+    mean_power = target_total / (n_scat * tx_power)
     gain = gain * math.sqrt(mean_power)
 
     if frame_idx:
@@ -579,7 +679,7 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
         t_frame = float(frame_idx) / float(cfg.frame_rate_hz)
         frame_phase = 2.0 * math.pi * f_dop * t_frame  # [n_scat]
         frame_phasor = torch.exp(1j * frame_phase).to(gain.dtype)
-        gain = gain * frame_phasor.unsqueeze(1)  # broadcast over rx
+        gain = gain * frame_phasor
 
     n = torch.arange(n_samples, device=device, dtype=torch.float64)
     c = torch.arange(n_chirps, device=device, dtype=torch.float64)
@@ -588,7 +688,15 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
     fast = torch.exp(1j * fast_phase).to(gain.dtype)
     slow = torch.exp(1j * slow_phase).to(gain.dtype)
 
-    clutter = torch.einsum("sr,sc,sn->rcn", gain, slow, fast)  # [n_rx, n_chirps, n_samples]
+    # Array structure (the F52 fix): per-RX steering at the patch's azimuth, and the
+    # per-chirp MIMO TX factor the demux exists to invert -- RX r at r*lambda/2, so the
+    # phase is pi * r * sin_az (`rd_synth.synthesize_adc`'s exact convention).
+    rx_idx = torch.arange(n_rx, device=device, dtype=torch.float64)
+    e_rx = torch.polar(torch.ones((n_scat, n_rx), dtype=torch.float64, device=device),
+                       math.pi * rx_idx[None, :] * sin_az[:, None])
+    slow_tx = slow * _mimo_tx_factor(cfg, sin_az, n_chirps)
+
+    clutter = torch.einsum("s,sr,sc,sn->rcn", gain, e_rx, slow_tx, fast)
     return adc + clutter.to(dtype)
 
 

@@ -230,7 +230,7 @@ def test_clutter_kurtosis_decreases_with_nu(torch_device):
 
     def _excess_kurtosis(nu):
         gen.manual_seed(1234)
-        gain = _k_distributed_gain(n, 1, nu, generator=gen, device=torch_device)
+        gain = _k_distributed_gain(n, nu, generator=gen, device=torch_device)
         amp = torch.abs(gain).flatten().to(torch.float64)
         mu = amp.mean()
         m2 = ((amp - mu) ** 2).mean()
@@ -294,48 +294,140 @@ def test_clutter_deterministic(cfg, torch_device):
 # deterministic per-scatterer Doppler phase advance keyed to `frame_idx` -- not redrawn
 # i.i.d. every frame the way `apply_clutter` used to (old seed was `seed + frame_idx`).
 
-def test_clutter_frame0_matches_pre_persistence_behaviour(cfg, torch_device):
-    """Bit-identity pin for `frame_idx=0`.
+# RETIRED 2026-08-23: `test_clutter_frame0_matches_pre_persistence_behaviour`, the
+# bit-identity pin against a frozen pre-A1 reimplementation. Its job was proving the A1
+# persistence change altered nothing at frame 0. The F52 array-structure fix (steering +
+# MIMO code -- see the tests below) deliberately changed the field's realization, so the
+# historical pin no longer holds and is not supposed to. Frame-0 determinism itself is
+# still pinned by `test_clutter_deterministic` / `test_clutter_multiframe_determinism`.
 
-    Rather than keep dead code around, this reimplements -- FROZEN, inert, local to the
-    test -- exactly the pre-fix `apply_clutter` body (which had no `frame_idx` and no
-    frame-advance step; its seed at frame 0 was `seed + 0 == seed`, i.e. the same `seed`
-    passed here). `apply_clutter(..., frame_idx=0)` skips the new frame-advance step
-    entirely (see its `if frame_idx:` guard), so the two must match bit-for-bit -- this
-    is what makes single-frame corpus generation (frame_idx always 0) unchanged.
-    """
-    adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=51)
-    params = ClutterParams(density=1.0, nu=0.5, doppler_std_mps=0.2, total_relative_db=-5.0)
 
-    def _legacy_apply_clutter(adc, cfg, params, *, seed):
-        from e2e.ml.impairments import C_MPS, _thermal_reference
-        n_rx, n_chirps, n_samples = adc.shape
-        device, dtype = adc.device, adc.dtype
-        n_scat = max(1, int(round(float(params.density) * n_samples)))
-        gen = torch.Generator(device=device)
-        gen.manual_seed(int(seed))
-        ranges = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * float(cfg.max_range_m)
-        f_beat = float(cfg.ramp_slope_hzps) * 2.0 * ranges / C_MPS
-        vel = torch.randn(n_scat, generator=gen, device=device, dtype=torch.float64) * float(params.doppler_std_mps)
-        f_dop = 2.0 * vel / float(cfg.wavelength_m)
-        gain = _k_distributed_gain(n_scat, n_rx, float(params.nu), generator=gen, device=device)
-        assert params.reference == "thermal"  # default; the branch this replica implements
-        peak_power = _thermal_reference(cfg, domain="time")
-        target_total = peak_power * (10.0 ** (float(params.total_relative_db) / 10.0))
-        mean_power = target_total / n_scat
-        gain = gain * math.sqrt(mean_power)
-        n = torch.arange(n_samples, device=device, dtype=torch.float64)
-        c = torch.arange(n_chirps, device=device, dtype=torch.float64)
-        fast_phase = 2.0 * math.pi * torch.outer(f_beat, n) / float(cfg.fs_hz)
-        slow_phase = 2.0 * math.pi * torch.outer(f_dop, c) * float(cfg.chirp_period_s)
-        fast = torch.exp(1j * fast_phase).to(gain.dtype)
-        slow = torch.exp(1j * slow_phase).to(gain.dtype)
-        clutter = torch.einsum("sr,sc,sn->rcn", gain, slow, fast)
-        return adc + clutter.to(dtype)
+def _replay_clutter_draws(cfg, params, seed, device):
+    """Replay `apply_clutter`'s field draws to recover what it drew -- positions,
+    velocities, azimuths -- for oracle tests. This IS a pin of the draw-order contract
+    (positions -> velocities -> azimuths -> texture -> speckle): reordering the draws
+    inside `apply_clutter` breaks persistence semantics for stored corpora, and this
+    helper makes that break loud here."""
+    n_scat = max(1, int(round(float(params.density) * cfg.n_samples)))
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed))
+    ranges = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * float(cfg.max_range_m)
+    vel = torch.randn(n_scat, generator=gen, device=device, dtype=torch.float64) * float(params.doppler_std_mps)
+    sin_az = torch.rand(n_scat, generator=gen, device=device, dtype=torch.float64) * 2.0 - 1.0
+    return ranges, vel, sin_az
 
-    out_new = apply_clutter(adc, cfg, params, seed=777, frame_idx=0)
-    out_legacy = _legacy_apply_clutter(adc, cfg, params, seed=777)
-    assert torch.equal(out_new, out_legacy)
+
+def _one_scatterer_params():
+    # density such that max(1, round(density * n_samples)) == 1 for any n_samples used
+    # here -> exactly ONE clutter scatterer, so its azimuth is recoverable.
+    return ClutterParams(density=1e-6, nu=50.0, doppler_std_mps=0.0, total_relative_db=0.0)
+
+
+def test_clutter_azimuth_recovered_through_tdm_deinterleave(torch_device):
+    """F52 oracle (TDM): a single clutter scatterer, processed exactly the way the
+    detection path processes clutter (deinterleave -> per-TX virtual array -> angle
+    FFT), must localize at the azimuth `apply_clutter` drew for it. The pre-F52 model
+    (i.i.d. per-RX gains, no code) put a period-n_rx comb here instead."""
+    from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+    import dataclasses as _dc
+
+    cfg = RadarConfig(name="f52_tdm", f0_hz=77e9, bandwidth_hz=500e6, n_tx=4, n_rx=4,
+                      n_chirps=64, n_samples=128, fs_hz=10e6, chirp_period_s=20e-6,
+                      mimo="tdm")
+    assert not cfg.validate()
+    params = _one_scatterer_params()
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
+                         device=torch_device)
+    seed = 314
+    clutter = apply_clutter(silent, cfg, params, seed=seed) - silent
+    _, _, sin_az = _replay_clutter_draws(cfg, params, seed, torch_device)
+
+    sub_cfg = _dc.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
+    rd = adc_to_rd(sub_cfg, tdm_deinterleave(cfg, clutter))   # [n_virtual, R, D]
+    snap = rd.reshape(cfg.n_virtual, -1)
+    n_fft = 256
+    spec = torch.fft.fftshift(torch.fft.fft(snap, n=n_fft, dim=0), dim=0)
+    peak_bin = int(torch.argmax((spec.abs() ** 2).sum(dim=1)))
+    sin_est = 2.0 * (peak_bin - n_fft // 2) / n_fft
+    rayleigh = 2.0 / cfg.n_virtual
+    assert abs(sin_est - float(sin_az[0])) <= rayleigh, \
+        f"clutter localized at sin(az)={sin_est:.3f}, drawn {float(sin_az[0]):.3f}"
+
+
+def test_clutter_azimuth_recovered_through_ddma_demux(torch_device):
+    """F52 oracle (DDMA): same single-scatterer recovery through `ddma_demux` -- the
+    code must place the scatterer's replicas so the demux reassembles the full
+    n_tx*n_rx virtual aperture at the drawn azimuth (pre-F52: all energy was confined
+    to TX-0's sub-band, a 1/n_tx aperture)."""
+    from e2e.ml.transforms import adc_to_rd, ddma_demux
+
+    cfg = RadarConfig(name="f52_ddma", f0_hz=77e9, bandwidth_hz=500e6, n_tx=3, n_rx=4,
+                      n_chirps=63, n_samples=128, fs_hz=10e6, chirp_period_s=20e-6,
+                      mimo="ddma")
+    assert not cfg.validate()
+    params = _one_scatterer_params()
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
+                         device=torch_device)
+    seed = 2718
+    clutter = apply_clutter(silent, cfg, params, seed=seed) - silent
+    _, _, sin_az = _replay_clutter_draws(cfg, params, seed, torch_device)
+
+    virt = ddma_demux(cfg, adc_to_rd(cfg, clutter))           # [n_tx*n_rx, R, D_sub]
+    # Full aperture reassembled: no TX group may be starved of the scatterer's energy.
+    per_group = (virt.abs() ** 2).reshape(cfg.n_tx, cfg.n_rx, -1).sum(dim=(1, 2))
+    assert float(per_group.min() / per_group.max()) > 0.5, \
+        "energy confined to a subset of TX slots -- code missing (pre-F52 behaviour)"
+
+    snap = virt.reshape(cfg.n_virtual, -1)
+    n_fft = 256
+    spec = torch.fft.fftshift(torch.fft.fft(snap, n=n_fft, dim=0), dim=0)
+    peak_bin = int(torch.argmax((spec.abs() ** 2).sum(dim=1)))
+    sin_est = 2.0 * (peak_bin - n_fft // 2) / n_fft
+    rayleigh = 2.0 / cfg.n_virtual
+    assert abs(sin_est - float(sin_az[0])) <= rayleigh, \
+        f"clutter localized at sin(az)={sin_est:.3f}, drawn {float(sin_az[0]):.3f}"
+
+
+def test_leakage_tdm_slots_carry_independent_patterns(torch_device):
+    """F52 (leakage, TDM): TX t's coupling taps appear only on TX t's chirps, with
+    per-(TX, RX) phases -- so the deinterleaved TX slots hold DIFFERENT per-RX
+    patterns. The pre-F52 model was chirp-constant, which made every slot identical
+    (the exact period-n_rx replication of the comb artifact)."""
+    cfg = RadarConfig(name="f52_leak_tdm", f0_hz=77e9, bandwidth_hz=500e6, n_tx=2,
+                      n_rx=8, n_chirps=64, n_samples=128, fs_hz=10e6,
+                      chirp_period_s=20e-6, mimo="tdm")
+    assert not cfg.validate()
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
+                         device=torch_device)
+    leak = apply_leakage(silent, cfg, LeakageParams(), seed=99) - silent
+    # Per-chirp leakage pattern at the DC (leakage) fast-time bin:
+    dc = torch.fft.fft(leak, dim=-1)[:, :, 0]                 # [n_rx, n_chirps]
+    slot0, slot1 = dc[:, 0::2], dc[:, 1::2]
+    # Within a slot the tap is constant across that TX's chirps...
+    assert torch.allclose(slot0, slot0[:, :1].expand_as(slot0), atol=1e-4 * dc.abs().max().item())
+    assert torch.allclose(slot1, slot1[:, :1].expand_as(slot1), atol=1e-4 * dc.abs().max().item())
+    # ...but the two TX slots must NOT be the same pattern (pre-F52 they were equal).
+    assert not torch.allclose(slot0[:, 0], slot1[:, 0],
+                              atol=1e-3 * dc.abs().max().item())
+
+
+def test_leakage_power_calibration_holds_under_ddma(torch_device):
+    """The dB knob keeps its meaning under the code: DDMA's per-chirp sum of n_tx
+    random-phase taps averages to the SAME per-RX tone power the single-TX model
+    injected (the 1/sqrt(n_tx) normalization)."""
+    cfg = RadarConfig(name="f52_leak_ddma", f0_hz=77e9, bandwidth_hz=500e6, n_tx=4,
+                      n_rx=8, n_chirps=64, n_samples=128, fs_hz=10e6,
+                      chirp_period_s=20e-6, mimo="ddma")
+    assert not cfg.validate()
+    from e2e.ml.impairments import _reference_power
+    params = LeakageParams(bumper_relative_db=-300.0)  # isolate the 0 m tone
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
+                         device=torch_device)
+    leak = apply_leakage(silent, cfg, params, seed=5) - silent
+    p_ref = _reference_power(silent, params.reference, cfg, domain="range_fft")
+    power = (torch.fft.fft(leak, dim=-1)[:, :, 0].abs() ** 2).mean().item()
+    observed_db = 10.0 * math.log10(power / p_ref)
+    assert abs(observed_db - params.leakage_relative_db) < 1.5
 
 
 def test_clutter_persists_across_frames_and_still_evolves(torch_device):
@@ -588,3 +680,25 @@ def test_unknown_power_reference_fails_loudly():
     # genuine typo here instead, or this test silently stops testing anything.
     with pytest.raises(ValueError, match="unknown power reference"):
         apply_leakage(adc, cfg, LeakageParams(reference="thermel"), seed=1)
+
+
+def test_clutter_power_calibration_holds_under_ddma(torch_device):
+    """`total_relative_db` keeps its per-RX meaning under the DDMA code (the
+    `tx_power = n_tx` divisor): E[|tx_factor|^2] = n_tx is exact only in expectation
+    over many scatterers/chirps, so this uses a dense field and a tolerance. Review
+    finding 2026-08-23: without this, removing the divisor would ship silently --
+    the leakage analogue was tested, the clutter one was not."""
+    cfg = RadarConfig(name="f52_clutpow_ddma", f0_hz=77e9, bandwidth_hz=500e6, n_tx=3,
+                      n_rx=4, n_chirps=63, n_samples=128, fs_hz=10e6,
+                      chirp_period_s=20e-6, mimo="ddma")
+    assert not cfg.validate()
+    from e2e.ml.impairments import _thermal_reference
+    params = ClutterParams(density=8.0, nu=50.0, total_relative_db=10.0)
+    silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
+                         device=torch_device)
+    clutter = apply_clutter(silent, cfg, params, seed=7) - silent
+    target_total = _thermal_reference(cfg, domain="time") * 10.0 ** (params.total_relative_db / 10.0)
+    # Injected TOTAL time-domain power per (rx, chirp, sample) grid, relative to target:
+    observed = (clutter.abs() ** 2).mean().item()
+    observed_db = 10.0 * math.log10(observed / target_total)
+    assert abs(observed_db) < 1.5, f"clutter power off calibration by {observed_db:.2f} dB"
