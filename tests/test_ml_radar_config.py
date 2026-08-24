@@ -205,6 +205,22 @@ def test_answerability_benchmark_v1_is_answerable():
                                   max_sin_az_err=0.06) == []
 
 
+def test_ddma_wide_v1_is_the_answerable_radial_replacement():
+    """Release-plan B1's 'radial replacement' (scoping review 2026-08-24): DDMA with
+    the aperture on the RX side -- v_max depends only on (n_tx, chirp_period_s), so
+    4 x 48 keeps radial_like's full 192-element virtual aperture while reusing
+    benchmark_v1's proven chirp timing for a 21% v_max margin over the 8 m/s scene
+    ceiling."""
+    from e2e.ml.radar_config import DDMA_WIDE_V1, answerability_problems
+    cfg = DDMA_WIDE_V1
+    assert cfg.n_virtual == 192                    # radial_like aperture parity
+    assert cfg.max_velocity_mps == pytest.approx(9.69, rel=0.01)
+    assert cfg.range_resolution_m == pytest.approx(0.2, rel=0.05)
+    assert cfg.n_chirps % cfg.n_tx == 0            # ddma_demux requirement
+    assert cfg.n_samples / cfg.fs_hz < cfg.chirp_period_s  # sweep fits the period
+    assert answerability_problems(cfg, top_speed_mps=8.0, max_sin_az_err=0.06) == []
+
+
 def test_answerability_radial_like_aliases_in_doppler():
     from e2e.ml.radar_config import answerability_problems
     problems = answerability_problems(RADIAL_LIKE, top_speed_mps=8.0,

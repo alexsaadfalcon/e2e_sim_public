@@ -405,8 +405,44 @@ BENCHMARK_V1 = RadarConfig(
     mimo="tdm",
 )
 
+# --------------------------------------------------------------------------------
+# DDMA_WIDE_V1 -- the ANSWERABLE replacement for radial_like (v1.1 / release-plan B1).
+# --------------------------------------------------------------------------------
+# radial_like's defect is a design choice, not a DDMA limit: v_max = lambda/(4*n_tx*T_c)
+# depends only on n_tx and the chirp period -- NEVER on n_rx -- and radial_like put its
+# whole 192-element virtual aperture on the TX multiplier (12 TX), which is exactly the
+# factor that taxes the unambiguous Doppler span (+-1.06 m/s against 0-8 m/s scenes).
+# This preset puts the aperture on the RX side instead:
+#
+#   same virtual aperture : 4 x 48 = 192 virtual -> Rayleigh 2/192 = 0.0104, 5.8x finer
+#                           than the 0.06 match tolerance, and a clean 1:1 match to the
+#                           label grid's 192 azimuth bins, exactly like radial_like.
+#   unaliased Doppler     : benchmark_v1's EXACT chirp timing (T_c = 25 us) at n_tx = 4
+#                           gives v_max = 9.69 m/s -- 21% over the scene sampler's 8 m/s.
+#   physically feasible   : identical RF numbers to benchmark_v1 (sweep 20.48 us inside
+#                           the 25 us period, slope 36.6 MHz/us); only the RX channel
+#                           count grows.
+#
+# TWO STATED TRADES vs radial_like (scoping review, 2026-08-24): (a) 48 RX channels is
+# a bigger stretch from single-chip automotive hardware than radial_like's 12x16 (which
+# mirrors a real device) -- this is a simulation-side showcase config, stated as such;
+# (b) velocity RESOLUTION is coarser (0.30 m/s vs 0.10 m/s: the CPI is 6.4 ms vs
+# 19.2 ms) -- the span is what answerability needs, the fine bins are what is given up.
+DDMA_WIDE_V1 = RadarConfig(
+    name="ddma_wide_v1",
+    f0_hz=77e9,
+    bandwidth_hz=749.5e6,
+    n_tx=4,
+    n_rx=48,
+    n_chirps=256,
+    n_samples=512,
+    fs_hz=25e6,
+    chirp_period_s=25e-6,
+    mimo="ddma",
+)
+
 PRESETS = {"ti_iwr1443": TI_IWR1443, "radial_like": RADIAL_LIKE,
-           "benchmark_v1": BENCHMARK_V1}
+           "benchmark_v1": BENCHMARK_V1, "ddma_wide_v1": DDMA_WIDE_V1}
 
 
 if __name__ == "__main__":

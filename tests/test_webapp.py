@@ -1223,7 +1223,11 @@ def test_registry_dechirp_preset_and_mimo_params():
     from webapp.pipeline_registry import BLOCKS_BY_ID
 
     params = {p.key: p for p in BLOCKS_BY_ID["dechirp"].params}
-    assert params["preset"].choices == ["ti_iwr1443", "radial_like"]
+    # Every choice must be a real PRESETS entry (the registry list is hand-maintained;
+    # 2026-08-24 it gained benchmark_v1 + ddma_wide_v1, the two answerable presets).
+    from e2e.ml.radar_config import PRESETS
+    assert set(params["preset"].choices) <= set(PRESETS)
+    assert {"radial_like", "benchmark_v1", "ddma_wide_v1"} <= set(params["preset"].choices)
     # radial_like (12 TX x 16 RX = 192 virtual) is the default: the detection label grid's
     # 192 azimuth bins are only physically answerable at that array size (2026-08-10).
     assert params["preset"].default == "radial_like"
