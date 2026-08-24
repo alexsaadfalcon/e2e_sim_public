@@ -418,9 +418,16 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
         # Standard PSD-to-DFT-coefficient-variance synthesis: E[|Y[f]|^2] = S(f)*N/dt.
         scale = torch.sqrt(s_shaped_fast * n_samples * float(cfg.fs_hz) / 2.0)
         yfreq = (real + 1j * imag) * scale
-        yfreq[:, 0] = yfreq[:, 0].real  # rfft DC bin of a real signal must be real
+        # rfft DC bin of a real signal must be real (and the Nyquist bin, if it
+        # exists). Zeroing the imag VIEW in place, not `x = x.real` self-assignment:
+        # the latter reads a real view of the same complex storage it writes, which
+        # torch's overlap checker rejects on some backends/layouts ("some elements of
+        # the input tensor and the written-to tensor refer to a single memory
+        # location" -- hit in a webapp end-to-end review probe, 2026-08-24). Same
+        # values bit-for-bit, no overlapping read-write.
+        yfreq[:, 0].imag.zero_()
         if n_samples % 2 == 0:
-            yfreq[:, -1] = yfreq[:, -1].real  # ...and the Nyquist bin, if it exists
+            yfreq[:, -1].imag.zero_()
         dphi_b = torch.fft.irfft(yfreq, n=n_samples, dim=-1)  # [n_chirps, n_samples], real
 
         phasor_b = torch.exp(1j * dphi_b.to(torch.float32)).to(dtype)  # [n_chirps, n_samples]
@@ -567,14 +574,22 @@ class ClutterParams:
     density: float = 0.5           # scatterers per unambiguous range bin
     nu: float = 1.0                # K-distribution texture shape (small -> heavier tail)
     doppler_std_mps: float = 0.05  # per-scatterer radial-velocity std, m/s
-    # Clutter-to-noise ratio, dB above the thermal floor (time domain). +30 dB total
-    # spreads over n_samples range bins, so per-bin clutter lands a few dB above the
-    # noise floor -- strong enough to matter, which is the point, and rejected in DOPPLER
-    # rather than by being weak. That is how a real automotive radar handles road return,
-    # and it only works on a config whose targets do not alias (see benchmark_v1 / F43).
-    # This one is an ASSUMPTION, not a derivation: unlike leakage and bumper there is no
-    # single datasheet number for road clutter. Documented as such.
-    total_relative_db: float = 30.0
+    # Clutter-to-noise ratio, dB above the thermal floor (time domain, TOTAL across the
+    # whole field). RE-ANCHORED 2026-08-24 (release-plan A15): the old +30 dB default
+    # was tuned against the pre-F52 model, whose azimuth-white per-RX gains threw away
+    # the array's coherence gain. The steered model (A11) focuses each scatterer into
+    # its own azimuth cell, adding ~10*log10(n_virtual) ~= 18-23 dB to per-cell
+    # brightness at the SAME total power -- measured (notes/tools/
+    # a15_clutter_anchor_probe.py): at +30 total the MEDIAN discrete presented ~54 dB
+    # of cell CNR, ~24 dB above a 10 dBsm car at 30 m. +10 dB total restores the
+    # pre-A11 effective per-cell regime (median cell CNR ~34 dB, p90 ~42: discretes
+    # that rival and sometimes beat targets -- strong enough to matter, and rejected
+    # in DOPPLER rather than by being weak, which is how a real automotive radar
+    # handles road return and only works on a config whose targets do not alias, see
+    # benchmark_v1 / F43). Still an ASSUMPTION, not a derivation: there is no single
+    # datasheet number for road clutter; a measured re-derivation against real road-
+    # clutter discrete statistics remains open.
+    total_relative_db: float = 10.0
     # "peak" (legacy) or "noise". Same caveat as LeakageParams: the dB value above is
     # calibrated for "peak" and must be re-derived as a clutter-to-noise ratio to be
     # meaningful under "noise".
