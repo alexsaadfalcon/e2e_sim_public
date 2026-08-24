@@ -813,8 +813,10 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     carrying an equal `sigma / n_pts` share. Only 1 and 5 are valid -- the two
     measured members of the family. An object with no resolvable extent falls back to
     its single primary point. WHY: one centre
-    collapses target extent to ~1 cell where real automotive returns measure ~6 (F44
-    -- the exact mismatch behind CFAR self-masking), and the 2026-08-20 spike measured
+    collapses target extent to ~1 cell where the corpus's own returns measure ~6
+    azimuth cells (F44 -- measured on the SIMULATOR'S corpus for CFAR guard sizing,
+    not a real-automotive figure; citation corrected 2026-08-24. The mismatch behind
+    CFAR self-masking), and the 2026-08-20 spike measured
     the 5-centre model monotonically better on every coherence-sensitive axis (phase
     RMS -13%, peak-to-background +2.2 dB, extent restored; physics audit entry 4).
     `n_centers=1` reproduces the pre-v1.1 single-centre model.
@@ -823,12 +825,20 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     `(1 - S^2)` of the object's RCS so coherent + diffuse conserve energy. Pass the same
     value `build_rt_scene` was given (defaults to `rt_scene_build`'s default).
 
-    TWO STATED APPROXIMATIONS of the multi-centre split (batch review, 2026-08-23):
+    THREE STATED APPROXIMATIONS of the multi-centre split (batch reviews, 2026-08-23
+    and -24):
     (a) energy conservation across the centres is IN EXPECTATION, not per frame -- the
     centres sit at different ranges/phases, so any one frame's coherent sum can sit a
     couple of dB off `sigma`; (b) the equal `sigma / n_pts` split ignores specular
     dominance -- on a real vehicle the near corner/specular flash typically carries
-    far more than its equal share, so per-aspect RCS dynamics are understated.
+    far more than its equal share, so per-aspect RCS dynamics are understated;
+    (c) the far-side cull is BINARY while the split is equal, so the kept-corner set
+    (and with it the centre spread) switches discretely across silhouette
+    transitions -- a hair off exact end-on keeps 3 corners spanning the body length
+    where exact end-on keeps 2 spanning ~nothing. Measure-zero under random scene
+    draws, so no corpus impact, but the exact-broadside branch is a degenerate
+    state, not a physical broadside model; the refinement (grade each corner by
+    max(0, face_normal . LOS) over its adjacent faces) is a post-v1.1 follow-up.
 
     `apply_doppler=False` drops the per-object `exp(j2pi f_D t)` factor. `rt_retrace_reference`
     needs that: it re-solves the geometry once per chirp with each object physically

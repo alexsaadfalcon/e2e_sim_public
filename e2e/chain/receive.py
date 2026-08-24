@@ -159,7 +159,7 @@ class IFHighPassBlock:
     the coupling is modeled), and (b) lay their range sidelobes across the whole
     profile. This block is the filter.
 
-    MODEL: an order-`order` analog Butterworth high-pass, applied as a CAUSAL LINEAR
+    MODEL: an order-`order` analog Butterworth high-pass, applied as a LINEAR
     convolution along fast time. The complex analog response `H(j*2*pi*f)`
     (`|H| = 1/sqrt(1 + (fc/f)^(2*order))`, `H(0) = 0` exactly) is evaluated on a
     zero-padded DFT grid over the full `[0, fs)` beat span (the positive-exponent
@@ -181,36 +181,43 @@ class IFHighPassBlock:
     its true (continuous, off-bin) frequency. Linear convolution reproduces that;
     the decisive skirt-suppression oracle lives in tests/test_chain_receive.py.
 
-    BAND-EDGE TAPER (the anti-alias filter): the one-sided convention above puts
-    `H(0) = 0` and `H(fs-) ~ 1` at the two ends of one periodic spectrum -- a
-    discontinuity at the wrap, which would give the discrete kernel slowly decaying
-    `1/n` Gibbs tails in BOTH time directions and let every record edge bleed junk
-    across the whole window. Real receivers do not have this problem because the IF
-    chain also BAND-LIMITS before the ADC (the anti-alias low-pass), rolling the
-    response off at the top of the IF band. That filter is modelled here as a
-    raised-cosine taper from `_BAND_EDGE_START * fs` down to zero at
-    `_BAND_EDGE_STOP * fs`, which simultaneously (a) is physical and (b) makes the
-    kernel's spectrum continuous at the wrap, so its tails decay fast and edge
-    artifacts stay local. Consequence: ranges above `_BAND_EDGE_START * max_range`
-    (the top ~8%) are attenuated -- returns that close to the unambiguous limit are
-    band-edge-marginal in real hardware too.
+    BAND-EDGE TAPER: the one-sided convention above puts `H(0) = 0` and
+    `H(fs-) ~ 1` at the two ends of one periodic spectrum -- a discontinuity at the
+    wrap, which would give the discrete kernel slowly decaying `1/n` Gibbs tails in
+    BOTH time directions and let every record edge bleed junk across the whole
+    window. The raised-cosine taper from `_BAND_EDGE_START * fs` to zero at
+    `_BAND_EDGE_STOP * fs` exists to make the kernel's periodic spectrum continuous
+    at that wrap, so its tails decay fast and edge artifacts stay local. It
+    RESEMBLES the band-edge roll-off a real IF chain's band-limiting gives, but do
+    not over-read that (batch physics review, 2026-08-24): this block runs after
+    the modelled ADC, and 0.92/0.98 trace to kernel-locality engineering, not a
+    receiver spec. REAL COST: ranges above `_BAND_EDGE_START * max_range` are
+    attenuated and ranges past `~0.98 * max_range` are NULLED -- every shipped
+    scene generator stays below `0.85 * max_range`, but nothing enforces that here;
+    a scene reaching past ~92% of the unambiguous range loses those returns
+    silently.
 
-    SETTLING: a causal filter with no pre-history sees every component switch on at
-    sample 0 and rings at its own corner frequency. The real receiver's filter is
-    settled long before the sampled window (the beat tones exist from sweep start),
-    so the record is extended with `n_samples` of edge replication on BOTH sides
-    (`x[0]` / `x[-1]` held constant) before filtering and the extensions discarded:
-    the DC leakage tone -- the strongest signal in the chain at +62 dB -- is thereby
-    continued EXACTLY into its pre-history and nulled with no turn-on transient.
-    TWO STATED APPROXIMATIONS: (a) nonzero-frequency components are only
-    approximately continued by the constant extensions, leaving a small settling
-    residual in the first ~`fs/(2*pi*fc)` samples of the record (close-in ranges,
-    decaying at the filter's own 40 dB/dec) -- physical settling, orders below the
-    old model's unsuppressed skirts; (b) the impulse response is realized by
-    sampling the analog frequency response on a `>= 4*n_samples` grid, so residual
-    time-aliasing/edge coupling sits at the kernel's fast-decaying tail level
-    (measured -74 to -85 dB of the driving tone across the window at the shipped
-    `n_samples=512`; the DC null itself measures -79 dB).
+    SETTLING / CAUSALITY, stated honestly (corrected by the same review): the
+    Butterworth factor carries its causal analog phase, but the taper is
+    ZERO-PHASE, so the realized kernel is NOT strictly causal -- ~1.4% of its
+    energy sits in negative time (|h[-1]| ~ -24 dB of peak), which is also why the
+    record is extended with `n_samples` of edge replication on BOTH sides (`x[0]` /
+    `x[-1]` held constant) before filtering, extensions discarded. The constant
+    hold continues the DC leakage tone -- the strongest signal in the chain at
+    +62 dB -- EXACTLY, so it is nulled with no turn-on transient (measured -79 dB
+    at N=512). THE REAL RESIDUAL MECHANISM for everything else: a constant hold is
+    a STEP against any nonzero-frequency component, so each return picks up
+    record-edge bursts whose spectral footprint spans the whole range profile --
+    measured, an on-bin PASSBAND tone (which the old per-bin weighting passed with
+    exactly zero error) acquires a 25-50 m mean skirt of ~-62 dB relative to its
+    own peak. This is an intra-profile dynamic-range ceiling of roughly -62 dB per
+    return: invisible in every shipped regime (corpus targets sit +16..30 dB over
+    the floor, so their bursts land >=30 dB UNDER it, and leakage/bumper sit
+    near-DC where the hold is near-exact), but LATENT for a future very-strong
+    off-DC return. The physically right extension is periodic/tone continuation of
+    the beat record rather than a constant hold -- filed as release-plan A19, not
+    shipped here. Kernel time-aliasing itself (the `>= 4*n_samples` grid) sits at
+    -74 to -85 dB and is not the dominant term.
 
     CORNER: `corner_range_m` (default 1.0 m) states the corner where a spec sheet
     states it implicitly -- as the range below which returns are suppressed -- and is

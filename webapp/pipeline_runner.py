@@ -367,6 +367,19 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             )
 
         if _enabled(state, "impairment"):
+            # No-impossible-states guard (batch physics review 2026-08-24): the
+            # impairment severities are ABSOLUTE dB above the k*T*B*F thermal floor
+            # (impairments.DEFAULT_POWER_REFERENCE) -- without the link-budget stage
+            # the cube has no absolute scale, so the injected leakage/clutter land at
+            # physically meaningless levels and nothing reports a problem. Refuse
+            # loudly instead of running the silently-wrong chain.
+            if not _enabled(state, "thermal_noise"):
+                raise PipelineError(
+                    "ADC Impairments needs the Link Budget / Thermal Floor block: its "
+                    "severities are calibrated in dB above the thermal floor that "
+                    "block establishes. Enable 'Link Budget / Thermal Floor' too (the "
+                    "corpus generator always runs both together)."
+                )
             try:
                 from e2e.chain.receive import ImpairmentBlock
             except ImportError as e:

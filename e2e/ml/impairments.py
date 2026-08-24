@@ -336,6 +336,19 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
       fast-time residual regardless of its exact delay. Range correlation is
       preserved only at the band's granularity -- coarser than the true continuum,
       finer as `n_range_bands` grows (at proportionally higher synthesis cost).
+      The LOG spacing moves that granularity where it matters: exact at tau = 0,
+      but FAR ranges got coarser than under the old uniform scheme (batch physics
+      review 2026-08-24: the top log band spans gates [~0.46N, N), ~+-3 dB of
+      residual-power granularity where uniform banding gave ~+-0.3 dB there) --
+      the right trade against the tau=0 catastrophe it fixed (F54), stated so
+      nobody reads "log banding" as strictly finer everywhere.
+    * Per-band residual DRAWS are statistically INDEPENDENT (pre-existing, stated
+      2026-08-24): physically every range sees the SAME oscillator realization,
+      weighted per-tau by the correlation factor, so band residuals should be
+      deterministically related, not independent draws. Invisible to single-tone
+      oracles; matters in principle whenever returns at two ranges coexist.
+      Post-v1.1 follow-up: draw ONE base realization per chirp and shape it
+      per band.
     * STEP A draws an INDEPENDENT fast-time realization per chirp -- physically the
       same oscillator's phase is continuous across chirps, but the low-frequency
       (chirp-to-chirp-observable) part of that continuity is exactly what STEP B
@@ -575,20 +588,24 @@ class ClutterParams:
     nu: float = 1.0                # K-distribution texture shape (small -> heavier tail)
     doppler_std_mps: float = 0.05  # per-scatterer radial-velocity std, m/s
     # Clutter-to-noise ratio, dB above the thermal floor (time domain, TOTAL across the
-    # whole field). RE-ANCHORED 2026-08-24 (release-plan A15): the old +30 dB default
-    # was tuned against the pre-F52 model, whose azimuth-white per-RX gains threw away
-    # the array's coherence gain. The steered model (A11) focuses each scatterer into
-    # its own azimuth cell, adding ~10*log10(n_virtual) ~= 18-23 dB to per-cell
-    # brightness at the SAME total power -- measured (notes/tools/
-    # a15_clutter_anchor_probe.py): at +30 total the MEDIAN discrete presented ~54 dB
-    # of cell CNR, ~24 dB above a 10 dBsm car at 30 m. +10 dB total restores the
-    # pre-A11 effective per-cell regime (median cell CNR ~34 dB, p90 ~42: discretes
-    # that rival and sometimes beat targets -- strong enough to matter, and rejected
-    # in DOPPLER rather than by being weak, which is how a real automotive radar
-    # handles road return and only works on a config whose targets do not alias, see
-    # benchmark_v1 / F43). Still an ASSUMPTION, not a derivation: there is no single
-    # datasheet number for road clutter; a measured re-derivation against real road-
-    # clutter discrete statistics remains open.
+    # whole field). RE-ANCHORED 2026-08-24 (release-plan A15; justification CORRECTED
+    # same day by the batch physics review -- the first version claimed the steered
+    # model adds "~10*log10(n_virtual) dB per cell at the same total" and that +10
+    # "restores the pre-A11 regime": BOTH refuted. Measured map-wide, at a FIXED knob
+    # the steered model leaves the upper-percentile cell statistic roughly level with
+    # the old azimuth-white model (p99 within ~1 dB) and only lengthens the extreme
+    # tail; and "restore the old regime" is not a definable target, because the old
+    # model's energy sat at F52-artifact coordinates. See the ledger's retraction
+    # table.) What actually anchors this number is the PHYSICAL statement alone:
+    # road-clutter discretes present roughly 10-30 dB of per-resolved-cell CNR with a
+    # heavy tail that occasionally rivals vehicles. +10 dB total sits at the HOT edge
+    # of that band -- measured (notes/tools/a15_clutter_anchor_probe.py): median
+    # drawn-cell CNR ~34 dB, p90 ~42 -- chosen so clutter still MATTERS and is
+    # rejected in DOPPLER rather than by being weak (which only works on a config
+    # whose targets do not alias, see benchmark_v1 / F43). This is a difficulty
+    # ASSUMPTION, not a derivation -- there is no datasheet number for road clutter;
+    # the corpus randomizer spans the plausible band around it, and a measured
+    # re-derivation against real road-clutter statistics remains open.
     total_relative_db: float = 10.0
     # "peak" (legacy) or "noise". Same caveat as LeakageParams: the dB value above is
     # calibrated for "peak" and must be re-derived as a clutter-to-noise ratio to be

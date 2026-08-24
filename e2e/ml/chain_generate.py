@@ -74,13 +74,15 @@ def default_domain_randomizer(
     # negative ranges would have injected impairments ~60 dB too weak to exist.
     #   leakage: 30-40 dB TX-RX isolation at P_tx 12 dBm over an -85 dBm floor -> 57-67 dB.
     #   clutter: a clutter-to-noise spread around the +10 dB nominal (re-anchored
-    #            2026-08-24, plan A15 -- the old 24-36 dB range was tuned against the
-    #            pre-F52 azimuth-white model and, under the steered model's
-    #            ~10*log10(n_virtual) per-cell coherence gain, made the MEDIAN discrete
-    #            ~24 dB brighter than a car; see ClutterParams.total_relative_db.
-    #            Still an assumption, not a datasheet derivation).
+    #            2026-08-24, plan A15; see ClutterParams.total_relative_db for the
+    #            corrected justification -- the level is a difficulty ASSUMPTION
+    #            anchored on road-discrete cell CNR of ~10-30 dB with a heavy tail,
+    #            +10 at the hot edge). The range is deliberately WIDE (0-18 dB,
+    #            median drawn-cell CNR ~24-42 across it): the anchor itself is
+    #            uncertain, so the corpus randomizes across the plausible band
+    #            rather than pretending one number is known.
     leakage_relative_db_range: Tuple[float, float] = (57.0, 67.0),
-    clutter_relative_db_range: Tuple[float, float] = (4.0, 16.0),
+    clutter_relative_db_range: Tuple[float, float] = (0.0, 18.0),
 ) -> Callable[[int, "torch.Generator"], Dict[str, Any]]:
     """Build the `chain_params` callable `ImpairmentBlock` expects (see its docstring):
     `(frame_index, rng) -> {"phase_noise": {...}, "leakage": {...}, "clutter": {...}}`,

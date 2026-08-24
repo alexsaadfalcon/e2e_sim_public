@@ -384,6 +384,27 @@ def test_if_hpf_suppresses_off_bin_tone_skirt_at_far_range(torch_device):
         f"far-range skirt only suppressed {suppression_db:.1f} dB (want ~{expected_db:.1f})"
 
 
+def test_if_hpf_passband_edge_burst_ceiling(torch_device):
+    """The block's honest cost (batch physics review 2026-08-24): the constant-hold
+    record extension is a STEP against any nonzero-frequency component, so even a
+    PASSBAND tone -- which the old per-bin weighting passed with exactly zero error
+    -- picks up record-edge bursts spanning the range profile. Pin the measured
+    ceiling (~-62 dB mean 25-50 m skirt re the tone's own peak) at -55 dB so a
+    regression that worsens it trips loudly; the docstring's latency analysis
+    (invisible at shipped target SNRs) depends on this level."""
+    from e2e.chain.receive import IFHighPassBlock
+    cfg = RadarConfig(name="burst_cfg", f0_hz=77e9, bandwidth_hz=749.5e6, n_tx=1,
+                      n_rx=1, n_chirps=1, n_samples=512, fs_hz=10e6,
+                      chirp_period_s=76e-6, mimo="single")
+    blk = IFHighPassBlock(cfg, corner_range_m=1.0, order=2)
+    n = torch.arange(512, dtype=torch.float64, device=torch_device)
+    tone = torch.exp(2j * torch.pi * 25 * n / 512).to(torch.complex64).view(1, 1, -1)
+    prof = torch.fft.fft(blk.apply({"adc": tone})["adc"], dim=-1).abs().flatten() ** 2
+    res_m = cfg.range_resolution_m
+    skirt_db = 10 * torch.log10(prof[int(25 / res_m):int(50 / res_m)].mean() / prof[25])
+    assert float(skirt_db) < -55.0, f"passband edge-burst skirt {float(skirt_db):.1f} dB"
+
+
 def test_if_hpf_response_is_monotonic_and_transparent_at_far_range():
     from e2e.chain.receive import IFHighPassBlock
     blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
