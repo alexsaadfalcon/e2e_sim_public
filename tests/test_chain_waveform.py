@@ -36,7 +36,7 @@ def test_waveform_n_t_derived_from_chirp_duration_and_sample_rate():
 
 
 def test_waveform_picks_up_s_pars_device(torch_device):
-    wf = WaveformBlock(kind="narrowband", n_t=8)
+    wf = WaveformBlock(kind="fmcw", n_t=8)
     state = {"s_pars": torch.zeros(4, 1, 1, 8, dtype=torch.complex64, device=torch_device)}
     out = wf.apply(state)
     assert out["tx_wave"].device.type == torch_device.type
@@ -45,6 +45,13 @@ def test_waveform_picks_up_s_pars_device(torch_device):
 def test_waveform_unknown_kind_raises():
     with pytest.raises(ValueError):
         WaveformBlock(kind="not-a-real-waveform")
+
+
+def test_waveform_narrowband_removed_with_history(torch_device):
+    """C2: the all-ones 'narrowband' placeholder is deleted; asking for it must fail
+    with the history, not a generic unknown-kind message."""
+    with pytest.raises(ValueError, match="placeholder"):
+        WaveformBlock(kind="narrowband")
 
 
 # --------------------------------------------------------------------------- TxPABlock

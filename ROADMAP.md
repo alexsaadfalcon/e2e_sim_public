@@ -101,8 +101,11 @@ contract **self-describing and general** so blocks compose freely and the geomet
 
 - **Live / interactive generation mode** (streaming `step()`-driven generation; hooks
   already exist).
-- **Wire the `signal_generator` waveforms** (Narrowband / Wideband / FMCW) into the
-  pipeline as a transmit-source stage.
+- **Wire the `signal_generator` waveforms into the pipeline. ✅ DONE 2026-08**:
+  `WaveformBlock` (transmit-source stage in `e2e/chain/waveform.py`) drives the
+  Wideband / FMCW classes, now folded into that module (the standalone
+  `e2e/signal_generator/` package is gone; the all-ones "Narrowband" placeholder
+  was deleted rather than wired).
 - **GPU-accelerated / batched runtime** (vectorize the RFFE; batch frames).
 - **More scenes and full array-size parameterization** end to end.
 - **Model validation** against measured or reference data.

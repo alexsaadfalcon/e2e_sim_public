@@ -243,7 +243,7 @@ BLOCKS: List[BlockSpec] = [
         category="source",
         params=[
             ParamSpec("kind", "Waveform kind", "choice", "fmcw",
-                      choices=["fmcw", "narrowband", "wideband"],
+                      choices=["fmcw", "wideband"],
                       help="Shape of the synthesized transmitted signal."),
             ParamSpec("bw", "Bandwidth (Hz)", "number", 1e9, step=1e7,
                       help="Swept bandwidth of the transmitted waveform."),

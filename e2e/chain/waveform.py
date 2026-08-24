@@ -9,10 +9,9 @@ and (on the RX side, built elsewhere in this package) a dechirped receive wavefo
 comes back in time. This module builds the three TX-side blocks:
 
 * `WaveformBlock` -- a SOURCE: synthesizes the transmitted complex envelope into
-  `tx_wave`. Wraps the existing `e2e.signal_generator.signals` classes
-  (`NarrowbandSignal` / `RandomWidebandSignal` / `FMCWSignal`) rather than
-  reimplementing their math; see "Wrapping signal_generator" below for the two rough
-  edges found doing that.
+  `tx_wave` from one of the waveform classes defined below
+  (`RandomWidebandSignal` / `FMCWSignal`); see "Waveform classes" below for their
+  history and two stated rough edges.
 * `TxPABlock` -- applies `TxPA.apply()`'s memoryless AM/AM + AM/PM envelope
   nonlinearity to `tx_wave`, elementwise, in place in the time domain. This is the
   entire reason a TX time domain exists in the chain: the PA acts on the
@@ -57,21 +56,23 @@ transmitter -- `X(f) == 1` and no ripple), `apply()` returns a dict WITHOUT an
 `s_pars` key at all, so the caller's existing tensor passes through untouched --
 bit-for-bit, not just numerically close (no FFT is even evaluated on that path).
 
-Wrapping signal_generator
---------------------------
-`e2e.signal_generator.signals`'s three classes were written standalone (never
-wired into the pipeline) and are reused as-is -- their chirp/noise math is not
-reimplemented here. Two rough edges, worked around at this module's boundary rather
-than by editing that file (out of scope for this change):
-* All three classes hardcode `carrier = 1.0` (the up-conversion multiply is present
-  in a comment but disabled), so the accepted `fc` metadata key currently has no
+Waveform classes (folded in from e2e/signal_generator, release-plan C2)
+------------------------------------------------------------------------
+`RandomWidebandSignal` and `FMCWSignal` below began life as the standalone
+`e2e/signal_generator/signals.py` (pre-pipeline); that package is deleted and the
+two real waveforms now live with their only consumer. Their math is unchanged
+(bit-compat with every recorded `tx_wave`). The third class, `NarrowbandSignal`,
+was an all-ones placeholder -- `torch.ones_like(t)` times a disabled carrier -- and
+is DELETED rather than moved: a block that emits ones models nothing, and keeping
+it invited "narrowband" runs that were silently flat. Two stated rough edges, kept
+as-is for bit-compat:
+* Both classes hardcode `carrier = 1.0` (the up-conversion multiply is present in a
+  comment but disabled), so the accepted `fc` metadata key currently has no
   numerical effect -- `WaveformBlock`'s `fc` parameter is threaded through for
   metadata completeness/future use, not because it changes today's output.
 * `RandomWidebandSignal.generate` builds its `torch.randn`/`fftfreq` tensors with no
-  `device=` (so they land on CPU regardless of the input `t`'s device). `WaveformBlock`
-  moves the class's output onto the target device itself after calling `generate`, so
-  `tx_wave` is still correctly placed -- this module works around the gap rather than
-  editing signal_generator.
+  `device=` (so they land on CPU regardless of the input `t`'s device).
+  `WaveformBlock` moves the output onto the target device itself after `generate`.
 """
 
 import torch
@@ -80,15 +81,64 @@ from e2e import frames
 from e2e.blocks import device
 from e2e.circuit.tx_pa import TxPA
 from e2e.frames import FrameCapabilities
-from e2e.signal_generator.signals import (
-    FMCWSignal,
-    NarrowbandSignal,
-    RandomWidebandSignal,
-)
+
+
+class RandomWidebandSignal:
+    """Bandlimited complex noise waveform (folded in from signal_generator -- see the
+    module docstring's "Waveform classes" section for provenance and rough edges)."""
+
+    def __init__(self, metadata: dict):
+        self.metadata = metadata
+
+    def generate(self, t):
+        sample_rate = 1 / (t[1] - t[0])
+        n_samples = t.shape[0]
+        f = torch.fft.fftfreq(n_samples, 1 / sample_rate)
+        bw = self.metadata['bw']
+
+        # randn bandlimited signal
+        signal = torch.randn(t.shape)
+        signal[(f < -bw / 2) | (f > bw / 2)] = 0
+        # modulate up to fc
+        signal = torch.fft.ifft(signal)
+        # carrier = torch.exp(2j * torch.pi * fc * t)
+        carrier = 1.0  # no modulation, keep baseband
+        signal = signal * carrier
+
+        return signal
+
+
+class FMCWSignal:
+    """Ideal linear-FMCW chirp: constant slope k = bw / chirp_duration.
+
+    The linearity is an APPROXIMATION shared by the whole sensing chain (see
+    `e2e.ml.rd_synth`'s scope list): a real PLL/VCO sweep deviates from the ideal
+    ramp (chirp nonlinearity), smearing the dechirped beat tone and raising the
+    close-in sidelobe floor. Deliberately not modelled in v1.1.
+    """
+
+    def __init__(self, metadata: dict):
+        self.metadata = metadata
+
+    def generate(self, t):
+        bw = self.metadata['bw']
+        chirp_duration = self.metadata['chirp_duration']
+
+        # compute chirp constant
+        k = bw / chirp_duration
+
+        # compute baseband chirp
+        signal = torch.exp(2j * torch.pi * (k * t ** 2 / 2))
+        signal *= torch.exp(-2j * torch.pi * bw / 2 * t)
+        # modulate up to fc
+        # carrier = torch.exp(2j * torch.pi * fc * t)
+        carrier = 1.0  # no modulation, keep baseband
+        signal = signal * carrier
+
+        return signal
 
 
 _WAVEFORM_CLASSES = {
-    "narrowband": NarrowbandSignal,
     "wideband": RandomWidebandSignal,
     "fmcw": FMCWSignal,
 }
@@ -97,12 +147,12 @@ _WAVEFORM_CLASSES = {
 class WaveformBlock:
     """SOURCE: synthesizes the transmitted complex envelope `tx_wave`.
 
-    `kind` selects one of the existing `e2e.signal_generator.signals` classes
-    ('narrowband' / 'wideband' / 'fmcw'); `fc`/`bw`/`sample_rate`/`chirp_duration`
-    feed that class's `metadata` dict verbatim (see the module docstring's note on
-    `fc` currently being inert upstream). `n_t` sizes the time axis directly
-    (defaults to `round(chirp_duration * sample_rate)`, mirroring the sample count
-    `signal_generator.signals`'s own `__main__` demo derives). The single generated
+    `kind` selects one of the waveform classes above ('wideband' / 'fmcw' --
+    'narrowband' was an all-ones placeholder, deleted in the C2 fold-in; asking for
+    it raises with this history); `fc`/`bw`/`sample_rate`/`chirp_duration` feed the
+    class's `metadata` dict verbatim (see the module docstring's note on `fc`
+    currently being inert). `n_t` sizes the time axis directly (defaults to
+    `round(chirp_duration * sample_rate)`). The single generated
     1-D waveform is broadcast across `n_tx` TX elements and `n_chirp` chirps -- this
     package's pipeline is currently single-TX/single-chirp (see `e2e/frames.py`), so
     the defaults are `n_tx=n_chirp=1`.
@@ -122,6 +172,12 @@ class WaveformBlock:
 
     def __init__(self, kind="fmcw", fc=0.0, bw=1e9, sample_rate=3e9,
                  chirp_duration=1e-6, n_t=None, n_tx=1, n_chirp=1):
+        if kind == "narrowband":
+            raise ValueError(
+                "waveform kind 'narrowband' was removed (release-plan C2): it was an "
+                "all-ones placeholder (constant baseband, disabled carrier) that "
+                "modelled nothing. Use 'fmcw' or 'wideband'."
+            )
         if kind not in _WAVEFORM_CLASSES:
             raise ValueError(
                 f"unknown waveform kind {kind!r}; expected one of "
@@ -150,7 +206,7 @@ class WaveformBlock:
         wave = self._signal.generate(t)
         # Moves the result onto `dev` regardless of what device `generate()` actually
         # computed on (see the module docstring's RandomWidebandSignal note) and
-        # normalizes dtype (NarrowbandSignal's constant-carrier path is real-valued).
+        # normalizes dtype.
         wave = wave.to(device=dev, dtype=torch.complex64)
         tx_wave = wave.view(1, 1, -1).expand(self.n_tx, self.n_chirp, self.n_t).clone()
         return {"tx_wave": tx_wave}
