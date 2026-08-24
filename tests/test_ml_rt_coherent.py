@@ -604,6 +604,9 @@ def test_multi_center_conserves_total_energy_within_a_db():
     frequency axis and the powers add. Not exact -- each centre has its own range --
     hence a dB-scale tolerance, not an equality."""
     scn = _scenario(position=(12.0, 3.0, 1.5))
+    # The premise needs the centres METRES apart (else cross terms stay partially
+    # coherent over the frequency axis); give the body a van-sized footprint.
+    scn.objects[0].extent_m = (4.0, 4.0, 1.5)
     scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5), half=(1.0, 1.0, 0.5))
     p1 = float(np.sum(np.abs(rsc.coherent_target_cfr(
         _CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)) ** 2))
@@ -620,6 +623,10 @@ def test_multi_center_widens_azimuth_extent():
 
     def _extent(n_centers):
         scn = _scenario(position=(12.0, 0.0, 1.5))
+        # Truck-sized body via the explicit extent override `e2e.ml.geometry.
+        # object_extent_m` honours (the corners come from the scatterer layer's
+        # body-frame extent since A13, not from the stub mesh's world AABB).
+        scn.objects[0].extent_m = (5.0, 5.0, 1.6)
         scene, paths = _stub_rt_scene(_CFG, (12.0, 0.0, 1.5), half=(2.5, 2.5, 0.8))
         h = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths,
                                     n_centers=n_centers)
@@ -632,17 +639,76 @@ def test_multi_center_widens_azimuth_extent():
     assert e5 > e1, (e1, e5)
 
 
-def test_multi_center_falls_back_to_one_point_without_a_bbox():
-    """An object with no resolvable bbox has nowhere deterministic to put extra
-    centres: n_centers=5 must equal n_centers=1 exactly."""
+def test_multi_center_falls_back_to_one_point_without_extent(monkeypatch):
+    """An object with no resolvable extent is a POINT target (the same convention
+    `e2e.ml.labels` uses): there is nowhere deterministic to put extra centres, so
+    n_centers=5 must equal n_centers=1 exactly."""
+    import e2e.ml.scatterers as scatterers_mod
+    monkeypatch.setattr(scatterers_mod, "object_extent_m", lambda obj: None)
     scn = _scenario(position=(12.0, 3.0, 1.5))
     scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))
-    scene.objects["t"].mi_mesh = types.SimpleNamespace(
-        bbox=lambda: (_ for _ in ()).throw(RuntimeError("no bbox")))
     h5 = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=5)
     h1 = rsc.coherent_target_cfr(_CFG, scene, scn, frame_idx=0, paths=paths, n_centers=1)
     assert np.array_equal(h5, h1)
     assert np.abs(h5).max() > 0.0
+
+
+def test_visible_corner_centers_sit_on_the_yawed_body():
+    """A13 oracle: corners must map back EXACTLY to (+-L/2, +-W/2) in the object's
+    own frame under any yaw -- the pre-2026-08-24 world-AABB corners sat up to ~3 m
+    off-body at oblique yaw because an axis-aligned box inflates around a rotated
+    body."""
+    centre = np.array([20.0, 5.0, 1.0])
+    extent = (5.0, 2.0, 1.5)
+    yaw = math.radians(37.0)
+    radar = np.array([0.0, 0.0, 1.5])
+    pts = rsc._visible_corner_centers(centre, extent, yaw, radar)
+    assert pts.shape[0] >= 2
+    c, s = math.cos(yaw), math.sin(yaw)
+    for p in pts:
+        d = p - centre
+        bx = c * d[0] + s * d[1]          # rotate back by -yaw
+        by = -s * d[0] + c * d[1]
+        assert abs(abs(bx) - 2.5) < 1e-9 and abs(abs(by) - 1.0) < 1e-9, p
+        assert p[2] == centre[2]
+
+
+def test_visible_corner_centers_dedupe_degenerate_extent():
+    """A zero-width extent override collapses a corner pair to one point; the pair
+    must be deduplicated so it does not carry double its sigma share (review
+    finding 2026-08-24)."""
+    pts = rsc._visible_corner_centers(np.array([20.0, 5.0, 1.0]), (5.0, 0.0, 1.5),
+                                      math.radians(37.0), np.array([0.0, 0.0, 1.5]))
+    assert pts.shape[0] == len({tuple(p) for p in pts})
+
+
+def test_visible_corner_centers_far_side_cull():
+    """A13 oracle: exact broadside keeps exactly the 2 near-face corners (the far
+    face's corners are shadowed by the body); a generic oblique aspect keeps 3."""
+    centre = np.array([20.0, 0.0, 1.0])
+    extent = (5.0, 2.0, 1.5)
+    radar = np.array([0.0, 0.0, 1.5])
+
+    # yaw=90 deg: body +x (length) points along world +y -> the radar stares at the
+    # broadside face; visible corners are the two with body-frame y = +W/2 toward it.
+    pts = rsc._visible_corner_centers(centre, extent, math.pi / 2, radar)
+    assert pts.shape[0] == 2
+    assert all(p[0] < centre[0] for p in pts)     # both on the radar side
+
+    # Oblique 37 deg: two faces visible -> shared corner + 2 silhouette corners.
+    pts = rsc._visible_corner_centers(centre, extent, math.radians(37.0), radar)
+    assert pts.shape[0] == 3
+    # And every kept corner is strictly nearer the radar than the culled one.
+    all4 = {(sx, sy) for sx in (1.0, -1.0) for sy in (1.0, -1.0)}
+    c, s = math.cos(math.radians(37.0)), math.sin(math.radians(37.0))
+    kept = {(round(np.sign(c * (p - centre)[0] + s * (p - centre)[1]) or 1.0),
+             round(np.sign(-s * (p - centre)[0] + c * (p - centre)[1]) or 1.0))
+            for p in pts}
+    (culled,) = all4 - kept
+    culled_w = centre[:2] + np.array([c * culled[0] * 2.5 - s * culled[1] * 1.0,
+                                      s * culled[0] * 2.5 + c * culled[1] * 1.0])
+    assert all(np.linalg.norm(p[:2] - radar[:2]) < np.linalg.norm(culled_w - radar[:2])
+               for p in pts)
 
 
 def test_n_centers_zero_raises():

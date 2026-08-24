@@ -639,25 +639,55 @@ def _specular_point(centre: np.ndarray, half: np.ndarray, radar_pos: np.ndarray)
     return nearest_surface_point(centre, half, radar_pos)
 
 
-def _bbox_edge_centers(centre: np.ndarray, half: np.ndarray) -> np.ndarray:
-    """The 4 vertical-edge midpoints of an axis-aligned bbox: `(cx +- hx, cy +- hy, cz)`.
+def _visible_corner_centers(position, extent_m, yaw_rad: float,
+                            radar_pos: np.ndarray) -> np.ndarray:
+    """Vertical-edge midpoints of the object's own (yawed, body-frame) footprint that
+    FACE the radar, `[n_visible, 3]` at the object's mid-height.
 
-    "Vertical" = along world z (the scene's up axis, same convention as
-    `_object_bbox`'s world-space AABB); "mid-height" = the box's own centre z. These
-    are the secondary scattering centres of the multi-centre target model (see
+    These are the secondary scattering centres of the multi-centre target model (see
     `coherent_target_cfr`): the corners of a vehicle body are where the strongest
     persistent scattering centres of real automotive targets measure (wheel wells,
-    body corners), and the bbox's vertical edges are their cheapest deterministic
-    stand-in.
+    body corners). Corners live at `(+-L/2, +-W/2, 0)` in the object's OWN frame
+    (local +x = length, per `e2e.ml.geometry`), rotated by `yaw_rad` about world +z
+    around `position` (the geometric centre) -- NOT the world-AABB corners the
+    pre-2026-08-24 model used, which sat up to ~3 m off-body at oblique yaw because
+    an axis-aligned box inflates around a rotated body, with 2 of its 4 corners
+    landing BEHIND the target (batch-review finding A13).
+
+    FAR-SIDE CULL: a corner is kept iff at least one of its two adjacent vertical
+    faces has an outward normal with a positive component toward the radar -- the
+    fully shadowed corner(s) of a convex body do not backscatter monostatically.
+    Generic aspect keeps 3 corners; exact broadside/end-on keeps 2; an empty result
+    happens only in the degenerate no-direction case (the radar's horizontal
+    position exactly on the centre), where the caller carries the primary point
+    alone. Coincident corners -- possible only through an explicit degenerate
+    `extent_m` override with a zero length or width, which collapses a corner pair
+    -- are deduplicated so a collapsed pair does not silently carry double its
+    sigma share (review finding 2026-08-24).
     """
-    cx, cy, cz = centre
-    hx, hy, _ = half
-    return np.array([
-        [cx + hx, cy + hy, cz],
-        [cx + hx, cy - hy, cz],
-        [cx - hx, cy + hy, cz],
-        [cx - hx, cy - hy, cz],
-    ], dtype=np.float64)
+    cx, cy, cz = (float(v) for v in position)
+    hl, hw = 0.5 * float(extent_m[0]), 0.5 * float(extent_m[1])
+    c, s = math.cos(float(yaw_rad)), math.sin(float(yaw_rad))
+    # Radar LOS in the body frame (rotate the world offset by -yaw), normalized so
+    # the visibility comparison below has a scale-free epsilon: at EXACT broadside
+    # the along-body component is analytically zero but floats leave ~1e-16 of it,
+    # which without the epsilon would resurrect a shadowed far corner.
+    ux_w, uy_w = float(radar_pos[0]) - cx, float(radar_pos[1]) - cy
+    norm = math.hypot(ux_w, uy_w)
+    if norm <= 0.0:
+        return np.zeros((0, 3), dtype=np.float64)   # radar above the centre: degenerate
+    ux, uy = (c * ux_w + s * uy_w) / norm, (-s * ux_w + c * uy_w) / norm
+    pts = []
+    for sx in (1.0, -1.0):
+        for sy in (1.0, -1.0):
+            if not (sx * ux > 1e-9 or sy * uy > 1e-9):
+                continue                       # both adjacent faces look away
+            bx, by = sx * hl, sy * hw
+            pts.append([cx + c * bx - s * by, cy + s * bx + c * by, cz])
+    arr = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
+    # Exact duplicates only arise from a zero half-extent (see docstring); order is
+    # irrelevant downstream (equal power split), so np.unique's sort is harmless.
+    return np.unique(arr, axis=0) if arr.size else arr
 
 
 def _rt_phase_centres(paths, rt_scene) -> dict:
@@ -772,13 +802,17 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     Returns `[n_rx_ant, n_tx_ant, n_chirps, n_samples]` complex64, directly addable to
     `cfr_from_paths`' output. See the section banner for the physics and the caveats.
 
-    `n_centers` (default 5, the v1.1 model -- owner decision 2026-08-23) sets how many
-    deterministic scattering centres carry each object's coherent return: the primary
-    point (the RT phase centre when a solve is supplied, else the bbox specular point)
-    plus the bbox's four vertical-edge midpoints (`_bbox_edge_centers`), each carrying
-    an equal `sigma / n_pts` share. Only 1 and 5 are valid -- the two measured members
-    of the model family. An object with no resolvable bbox falls back to its single
-    primary point. WHY: one centre
+    `n_centers` (default 5, the v1.1 model -- owner decision 2026-08-23) selects the
+    model family member: `1` = the single primary point (the RT phase centre when a
+    solve is supplied, else the yaw-aware body-frame surface point, else the bbox
+    specular point); `5` = the FULL multi-centre model -- the primary point plus the
+    VISIBLE vertical-edge midpoints of the object's own yawed footprint
+    (`_visible_corner_centers`: body-frame corners from the scatterer's
+    `extent_m`/`yaw_rad`, far side culled -- so generically 3-4 points total, not a
+    literal five; the name is the family label, kept for provenance stability), each
+    carrying an equal `sigma / n_pts` share. Only 1 and 5 are valid -- the two
+    measured members of the family. An object with no resolvable extent falls back to
+    its single primary point. WHY: one centre
     collapses target extent to ~1 cell where real automotive returns measure ~6 (F44
     -- the exact mismatch behind CFAR self-masking), and the 2026-08-20 spike measured
     the 5-centre model monotonically better on every coherence-sensitive axis (phase
@@ -788,6 +822,13 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     `scattering_coefficient` is the material's `S`; the coherent term carries
     `(1 - S^2)` of the object's RCS so coherent + diffuse conserve energy. Pass the same
     value `build_rt_scene` was given (defaults to `rt_scene_build`'s default).
+
+    TWO STATED APPROXIMATIONS of the multi-centre split (batch review, 2026-08-23):
+    (a) energy conservation across the centres is IN EXPECTATION, not per frame -- the
+    centres sit at different ranges/phases, so any one frame's coherent sum can sit a
+    couple of dB off `sigma`; (b) the equal `sigma / n_pts` split ignores specular
+    dominance -- on a real vehicle the near corner/specular flash typically carries
+    far more than its equal share, so per-aspect RCS dynamics are understated.
 
     `apply_doppler=False` drops the per-object `exp(j2pi f_D t)` factor. `rt_retrace_reference`
     needs that: it re-solves the geometry once per chirp with each object physically
@@ -840,10 +881,17 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
         rt_p, visible = centres.get(obj.name, (None, True))
         if not visible:
             continue          # ray tracer found no path to it -- occluded, stay silent
-        bb = _object_bbox(so) if so is not None else None
+        extent = getattr(sc, "extent_m", None)
+        yaw = float(getattr(sc, "yaw_rad", 0.0))
+        sc_pos = np.asarray(sc.position, dtype=np.float64)
         if rt_p is not None:
             p0 = np.asarray(rt_p, dtype=np.float64)
-        elif bb is not None:
+        elif extent is not None:
+            # Yaw-aware body-frame surface point -- the SAME geometry `e2e.ml.labels.
+            # target_geometry` puts the label on, so energy and label cannot drift.
+            p0 = nearest_surface_point(sc_pos, 0.5 * np.asarray(extent, dtype=np.float64),
+                                       radar_pos, yaw_rad=yaw)
+        elif (bb := _object_bbox(so) if so is not None else None) is not None:
             centre, half = bb
             p0 = _specular_point(centre, half, radar_pos)
         else:
@@ -852,14 +900,18 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
         if sigma <= 0.0:
             continue
 
-        # The centre set: primary point + bbox vertical edges, equal power split (see
-        # docstring). No bbox -> the primary point alone, whatever n_centers says.
-        # (A primary point coinciding EXACTLY with an edge midpoint would double-count
-        # that centre's sigma share; geometrically prevented for the ellipsoid specular
-        # point and physically implausible for a traced mesh vertex -- accepted.)
-        if bb is not None and int(n_centers) > 1:
-            centre, half = bb
-            pts = np.vstack([p0[None, :], _bbox_edge_centers(centre, half)])[:int(n_centers)]
+        # The centre set: primary point + the VISIBLE body-frame footprint corners
+        # (`_visible_corner_centers` -- yaw-aware, far side culled; A13), equal power
+        # split (see docstring). No resolvable extent -> the primary point alone,
+        # whatever n_centers says: a point target has nowhere deterministic to put
+        # extra centres. (A primary point coinciding EXACTLY with a corner would
+        # double-count that centre's sigma share; geometrically prevented for the
+        # ellipsoid surface point and physically implausible for a traced mesh
+        # vertex -- accepted.)
+        if extent is not None and int(n_centers) > 1:
+            corners = _visible_corner_centers(sc_pos, extent, yaw, radar_pos)
+            pts = (np.vstack([p0[None, :], corners]) if corners.size
+                   else p0[None, :])
         else:
             pts = p0[None, :]
         n_pts = pts.shape[0]
