@@ -158,6 +158,37 @@ def test_phase_noise_range_axis_correlation(cfg, torch_device):
     assert _skirt(k_far) > 10.0 * _skirt(k_near)
 
 
+def test_phase_noise_zero_delay_gate_is_exactly_cancelled(cfg, torch_device):
+    """THE range-correlation limit case (2026-08-24 adversarial-review finding): a
+    tau = 0 return (the direct TX-RX leakage tone at range-FFT bin 0) sees the SAME
+    oscillator on both mixer ports, so its phase-noise residual cancels IDENTICALLY --
+    the module's own chain comment calls this out as why direct coupling stays
+    coherent in hardware. The old UNIFORM range banding broke exactly this: gate 0
+    shared a band with gates [1, 64) and was handed their band-mean delay (~42 ns,
+    a ~6 m return's residual), which smeared the +62 dB leakage tone into full-height
+    azimuth bands in the leakage+phase attribution figures. Log-spaced banding
+    isolates gate 0, so a pure bin-0 tone must pass through BIT-NEAR-UNCHANGED while
+    a far tone (same call, same seed) still picks up its skirts."""
+    n_rx = 4
+    a0 = 5.0
+    dc = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, 0, a0, torch_device)
+    out_dc = apply_phase_noise(dc, cfg, PhaseNoiseParams(), seed=321)
+    assert torch.allclose(out_dc, dc, atol=1e-5 * a0), \
+        "tau = 0 gate picked up a phase-noise residual that physically cancels"
+
+    # Gate 0's dedicated band exists at EVERY fidelity setting -- the cheapest mode
+    # (n_range_bands=1) is two bands, not one, exactly as the docstring now states.
+    out_dc_1 = apply_phase_noise(dc, cfg, PhaseNoiseParams(n_range_bands=1), seed=321)
+    assert torch.allclose(out_dc_1, dc, atol=1e-5 * a0), \
+        "n_range_bands=1 must still isolate the tau = 0 gate"
+
+    k_far = int(round(_range_to_bin(30.0, cfg))) % cfg.n_samples
+    far = _tone_cube(n_rx, cfg.n_chirps, cfg.n_samples, k_far, a0, torch_device)
+    out_far = apply_phase_noise(far, cfg, PhaseNoiseParams(), seed=321)
+    assert _skirt_power(out_far, k_far) > 1e4 * max(_skirt_power(far, k_far), 1e-30), \
+        "the far gate must still see phase noise -- the fix must not disable STEP A"
+
+
 def test_phase_noise_energy_conserved(cfg, torch_device):
     adc = _rand_cube(4, cfg.n_chirps, cfg.n_samples, torch_device, seed=2)
     out = apply_phase_noise(adc, cfg, PhaseNoiseParams(), seed=5)

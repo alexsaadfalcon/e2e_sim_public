@@ -293,9 +293,16 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
     STEP A -- within-chirp (fast-time) residual, range-segmented.
     A single time-domain multiply cannot give every range gate its own delay `tau(k)`
     (all gates coexist at every fast-time sample). Compromise adopted here: split the
-    `n_samples` range gates into `params.n_range_bands` contiguous bands and give each
-    band ONE fast-time residual keyed to its band-mean delay `tau_b`. For band `b`
-    covering gates `[k_lo, k_hi)`:
+    `n_samples` range gates into ~`params.n_range_bands` LOG-spaced contiguous bands
+    (edges `round(n_samples^(b/n_bands))`, with gate 0 always a band of its own so the
+    `tau = 0` direct-leakage gate keeps its EXACT residual cancellation -- uniform
+    bands used to hand it the band-mean delay of a ~6 m return, which painted
+    full-height azimuth bands across the leakage+phase attribution figures; found by
+    the 2026-08-24 adversarial review) and give each band ONE fast-time residual keyed
+    to its band-mean delay `tau_b`. Log spacing bounds the within-band `tau` ratio at
+    `~n_samples^(1/n_bands)`, i.e. a few dB of residual-variance granularity, because
+    the residual variance goes as `tau^2` while `tau` spans three decades. For band
+    `b` covering gates `[k_lo, k_hi)`:
       1. mask the fast-time DFT to just that band's gates and IFFT -> the band's own
          time-domain contribution `y_b[n]` (bands are disjoint in frequency, so this
          is an exact decomposition: `sum_b y_b == adc`, Parseval-orthogonal);
@@ -308,8 +315,10 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
          whereas STEP B's chirp-rate axis (kHz-scale) is itself an approximation --
          see STEP B's note below;
       3. multiply `y_b` by `exp(j dphi_b)` (broadcast over rx) and re-sum the bands.
-    With `n_range_bands=1` this degenerates to the simplest version: one reference
-    delay (the whole window's mean tau) applied uniformly to the entire cube.
+    Gate 0's dedicated band exists at EVERY setting (the edge set always seeds
+    `{0, 1, n_samples}`), so `n_range_bands=1` gives the cheapest mode that is still
+    physically honest at tau = 0: the untouched DC gate plus ONE reference delay (the
+    remaining window's mean tau) for everything else -- two bands, not one.
 
     STEP B -- per-gate, chirp-to-chirp residual (unchanged from the original model).
     Per-gate delay: FFT bin `k` of one chirp's fast-time samples corresponds to beat
@@ -379,8 +388,20 @@ def apply_phase_noise(adc: torch.Tensor, cfg, params: PhaseNoiseParams, *,
     x = torch.fft.fft(adc, dim=-1)  # range-gate domain, per chirp: [n_rx, n_chirps, n_samples]
     y_time = torch.zeros_like(adc)  # accumulates STEP A's band-recombined, time-domain output
 
-    band_edges = [round(b * n_samples / n_bands) for b in range(n_bands + 1)]
-    for b in range(n_bands):
+    # LOG-spaced band edges, gate 0 always isolated (2026-08-24, batch-review finding):
+    # the residual variance goes as tau^2 and tau spans [0, n_samples/bandwidth] --
+    # three decades -- so UNIFORM bands made band 0's representative delay a pure
+    # artifact: gates [0, 64) shared tau_b = 42 ns, handing the tau = 0 direct-leakage
+    # tone (whose residual physically cancels EXACTLY -- the range-correlation effect
+    # this whole model exists for) the phase noise of a ~6 m return, which painted
+    # full-height azimuth bands across the leakage+phase figures. Log spacing bounds
+    # the within-band tau ratio at ~n_samples^(1/n_bands) (a few dB of variance
+    # granularity) at unchanged cost, and the dedicated [0, 1) band gives the DC gate
+    # its exact zero residual.
+    edges = {0, 1, n_samples}
+    edges.update(int(round(n_samples ** (b / n_bands))) for b in range(1, n_bands))
+    band_edges = sorted(edges)
+    for b in range(len(band_edges) - 1):
         k_lo, k_hi = band_edges[b], band_edges[b + 1]
         if k_hi <= k_lo:
             continue
