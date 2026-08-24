@@ -93,10 +93,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # IFHighPassBlock's per-frame provenance (release-plan A2): a corpus
                     # generated with a non-default corner must say so on disk, or its
-                    # frames aren't reproducible from the artifact alone. (Review noted
-                    # quant_snr_db/clipped_fraction/link_budget share this gap -- widening
-                    # the allowlist to those is the C7 reproducibility sweep, not A2.)
+                    # frames aren't reproducible from the artifact alone.
                     "if_hpf_corner_hz", "if_hpf_order",
+                    # C7 reproducibility sweep (2026-08-24): the remaining per-frame
+                    # provenance the chain already computes but used to drop --
+                    # ThermalNoiseBlock's link budget (the floor every impairment dB
+                    # is relative to) and the quantizer's measured SNR/clip fraction.
+                    # (adc_full_scale is deliberately NOT here: storage's int16 codec
+                    # already records it in codec_meta, exactly.)
+                    "link_budget", "quant_snr_db", "clipped_fraction",
                     # Scene/asset provenance (F51 + F31, landed for B1): the full
                     # Scenario dict plus a per-object asset summary, emitted by
                     # RTEnvironmentBlock.get_state_updates -- what makes a frame's

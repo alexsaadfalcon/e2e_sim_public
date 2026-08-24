@@ -459,3 +459,10 @@ def test_if_hpf_provenance_reaches_written_sample_meta(tmp_path, fake_env):
     assert meta["if_hpf_order"] == 4
     expected_hz = 2.0 * _CFG.ramp_slope_hzps * 3.3 / 299_792_458.0
     assert meta["if_hpf_corner_hz"] == pytest.approx(expected_hz)
+
+    # C7 reproducibility sweep: the quantizer's measured numbers and the link budget
+    # (the floor every impairment dB on this frame is relative to) must persist too.
+    assert isinstance(meta["quant_snr_db"], float)
+    assert 0.0 <= meta["clipped_fraction"] <= 1.0
+    assert meta["link_budget"]["thermal_noise_w"] > 0.0
+    assert "noise_figure_db" in meta["link_budget"]
