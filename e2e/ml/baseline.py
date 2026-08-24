@@ -250,9 +250,24 @@ def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
     to the detector -- 3 of 4 possible target positions at the default stride (found
     when the A4 default flip exposed it; the old `max` Doppler collapse had masked it
     by riding a range-sidelobe skirt 0.8 dB above the floor). Peak-pooling is the
-    "does ANY covered bin hold a target" semantics a detection cell means. The mild
-    max-of-`stride`-exponentials tail this gives noise cells applies identically to
-    the cell under test and its training annulus, so the CFAR ratio stays honest.
+    "does ANY covered bin hold a target" semantics a detection cell means.
+
+    WHAT PEAK-POOLING COSTS, stated precisely (batch review 2026-08-23; magnitude
+    CORRECTED 2026-08-24 after two independent Monte Carlos refuted the review's
+    "~2000x increase" figure -- reproduce: notes/tools/a14_pfa_mc.py): pooling makes
+    every noise cell a max of `stride` exponentials -- INCLUDING the training
+    annulus's cells, whose pooled mean rises by more than the cell-under-test's
+    ordering advantage, so at a FIXED threshold the measured false-alarm rate
+    actually DROPS (~20x at objectness 0.3 with the shipped CFAR geometry). Either
+    way the operative point stands: absolute Pfa-at-threshold numbers from before
+    and after this change are NOT comparable. What survives: the max applies
+    identically to the cell under test and to its training annulus, and every
+    shipped COMPARISON is scored at matched recall (the scorer re-thresholds per
+    arm), so relative detector rankings stand.
+    Also note the angle axis's nearest-neighbour UPSAMPLE replicates each FFT bin
+    into ~3 grid columns at the default sizes, so grid-cell counts overstate the
+    number of independent azimuth samples by that factor (variance estimates on the
+    grid must divide by it).
     """
     n_angle, n_range_fine = power.shape[-2:]
     dev = power.device
