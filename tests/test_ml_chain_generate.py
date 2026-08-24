@@ -354,6 +354,34 @@ def test_cli_reaches_rt_tier_d4(capsys):
     assert "tier:         D4" in out.out
 
 
+def test_cli_transmit_chain_defaults_off_and_local_assets_flag_exists(capsys):
+    """Regression (found 2026-08-24 preparing the B1 launch): the CLI passed
+    `use_transmit_chain=not --no-transmit-chain`, i.e. ON by default -- silently
+    re-enabling the ModulateBlock convention clash that `generate_chain_corpus`'s
+    own default was flipped to avoid (targets sink to -1.6 dB median). The bare CLI
+    must now say the TX chain is off, `--transmit-chain` must opt in, the old
+    `--no-transmit-chain` must still parse (recorded command lines), and
+    `--no-local-assets` must exist (F21/F51: public-figure-safe corpora)."""
+    rc = chain_generate.main(["--config", "benchmark_v1", "--tier", "D2",
+                              "--n", "1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tx chain: off" in out
+
+    rc = chain_generate.main(["--config", "benchmark_v1", "--tier", "D2", "--n", "1",
+                              "--dry-run", "--transmit-chain"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tx chain: ON" in out
+
+    rc = chain_generate.main(["--config", "benchmark_v1", "--tier", "D2", "--n", "1",
+                              "--dry-run", "--no-transmit-chain", "--no-local-assets"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "tx chain: off" in out
+    assert "local assets: OFF" in out
+
+
 def test_if_hpf_in_default_composition_between_impairments_and_quantizer(tmp_path, fake_env):
     from e2e.chain.receive import IFHighPassBlock
     sim = chain_generate.build_chain_simulation(

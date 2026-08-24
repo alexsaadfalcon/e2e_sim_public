@@ -399,13 +399,26 @@ def build_arg_parser():
                    help="antenna ELEMENT pattern (iso|tr38901|dipole|hw_dipole); default "
                         "is rt_scene_build.DEFAULT_ANTENNA_PATTERN (directive). 'iso' "
                         "reproduces the pre-2026-08-17 nadir-ground-bounce behaviour")
+    # DEFAULT FLIPPED 2026-08-24 to match generate_chain_corpus's own v1.1 default:
+    # the CLI used to pass use_transmit_chain=True unless --no-transmit-chain was
+    # given, silently re-enabling the ModulateBlock convention clash the function
+    # default was flipped to avoid (targets sink to -1.6 dB median vs +7.4 dB; see
+    # generate_chain_corpus's docstring). Caught while preparing the B1 launch
+    # command -- a corpus generated through the bare CLI would have been broken.
+    p.add_argument("--transmit-chain", action="store_true",
+                   help="OPT IN to the TX tributary (waveform -> PA -> modulate). "
+                        "OFF by default: MEASURED 2026-08-17, leaving it on costs ~9 dB "
+                        "of target-to-background and erases the target-physics fix "
+                        "entirely (suspected convention clash in ModulateBlock -- see "
+                        "generate_chain_corpus's docstring). Do not enable for corpora")
     p.add_argument("--no-transmit-chain", action="store_true",
-                   help="disable the TX tributary (waveform -> PA -> modulate). "
-                        "MEASURED 2026-08-17: leaving it ON costs ~9 dB of "
-                        "target-to-background and erases the target-physics fix "
-                        "entirely (D1 median target-vs-p99 +7.5 dB off vs -1.6 dB on) -- "
-                        "suspected convention clash in ModulateBlock, see e2e/ml/README "
-                        "or the 2026-08-17 investigation. Pass this until that is settled")
+                   help="deprecated no-op (the TX tributary is now off by default; "
+                        "kept so recorded pre-2026-08-24 command lines still run)")
+    p.add_argument("--no-local-assets", action="store_true",
+                   help="place only Sionna-bundled meshes (use_local_assets=False). "
+                        "REQUIRED for corpora that may back public figures: the local "
+                        "mesh pool's licences are unestablished (F21/F51), and frames "
+                        "now record their asset provenance either way")
     p.add_argument("--ground-scattering", type=float, default=None,
                    help="ground-plane scattering coefficient for the flat base scene "
                         "(default: rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT). "
@@ -465,8 +478,9 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"= {total_frames} frames")
         print(f"rffe:         {'off' if args.no_rffe else 'on'}   "
               f"interconnect: {'off' if args.no_interconnect else 'on'}   "
-              f"tx chain: {'off' if args.no_transmit_chain else 'ON (see --no-transmit-chain)'}   "
+              f"tx chain: {'ON (broken for corpora -- see --transmit-chain help)' if args.transmit_chain else 'off'}   "
               f"if hpf: {'OFF (pre-A2)' if args.no_if_hpf else 'on'}")
+        print(f"local assets: {'OFF (Sionna-bundled only; public-figure safe)' if args.no_local_assets else 'ON (licence-unestablished pool -- see F21/F51)'}")
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
         from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
                                            DEFAULT_GROUND_SCATTERING_COEFFICIENT)
@@ -502,7 +516,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         antenna_pattern=args.antenna_pattern,
         ground_scattering_coefficient=args.ground_scattering,
         samples_per_src=args.samples_per_src,
-        use_transmit_chain=not args.no_transmit_chain,
+        use_transmit_chain=args.transmit_chain,
+        use_local_assets=not args.no_local_assets,
         allow_unanswerable=args.allow_unanswerable,
         use_if_hpf=not args.no_if_hpf,
         if_hpf_kwargs=(None if args.if_hpf_corner_range is None
