@@ -381,8 +381,21 @@ def test_clutter_azimuth_recovered_through_tdm_deinterleave(torch_device):
     peak_bin = int(torch.argmax((spec.abs() ** 2).sum(dim=1)))
     sin_est = 2.0 * (peak_bin - n_fft // 2) / n_fft
     rayleigh = 2.0 / cfg.n_virtual
-    assert abs(sin_est - float(sin_az[0])) <= rayleigh, \
+    # CIRCULAR distance (C4 root-cause, 2026-08-25): sin(az) is a 2-periodic axis --
+    # +1 and -1 are the same end-fire direction, and a draw within ~rayleigh/2 of +1
+    # correctly localizes at the bin that DECODES to -1.0. The old linear abs() scored
+    # that correct answer as error ~2.0: a latent ~0.2%-of-seeds flake, device-
+    # dependent because CPU and CUDA generators draw different sin_az from one seed.
+    d = _wrap_sin_az(sin_est - float(sin_az[0]))
+    assert abs(d) <= rayleigh, \
         f"clutter localized at sin(az)={sin_est:.3f}, drawn {float(sin_az[0]):.3f}"
+
+
+def _wrap_sin_az(d: float) -> float:
+    """Project a sin(az) difference onto the fundamental period (-1, 1] -- the
+    direction-cosine axis of a half-wavelength array is 2-periodic (see the
+    circular-distance comment in the TDM azimuth-recovery oracle)."""
+    return d - 2.0 * round(d / 2.0)
 
 
 def test_clutter_azimuth_recovered_through_ddma_demux(torch_device):
@@ -415,7 +428,9 @@ def test_clutter_azimuth_recovered_through_ddma_demux(torch_device):
     peak_bin = int(torch.argmax((spec.abs() ** 2).sum(dim=1)))
     sin_est = 2.0 * (peak_bin - n_fft // 2) / n_fft
     rayleigh = 2.0 / cfg.n_virtual
-    assert abs(sin_est - float(sin_az[0])) <= rayleigh, \
+    # Circular distance -- same C4 wrap-around fix as the TDM oracle above.
+    d = _wrap_sin_az(sin_est - float(sin_az[0]))
+    assert abs(d) <= rayleigh, \
         f"clutter localized at sin(az)={sin_est:.3f}, drawn {float(sin_az[0]):.3f}"
 
 
