@@ -147,12 +147,70 @@ def test_compare_scores_the_classical_arm_and_self_describes(tmp_path):
     res = compare_detectors.compare(manifest, split="val", classical=True,
                                     target_recall=0.5, decode_threshold=0.01,
                                     device="cpu")
+    # This corpus has NO train split, so the (default-on) null arm cannot fit its
+    # box -- it must be a RECORDED skip, never a silent one or a crash.
     assert [a["name"] for a in res["arms"]] == ["classical CFAR"]
+    assert "no targets" in res["null_skipped"]
     # The result carries the question it answered, so a stored JSON needs no context.
     assert res["target_recall"] == 0.5
     assert res["decode_threshold"] == 0.01
     assert res["split"] == "val"
     assert res["arms"][0]["operating_point"]["n_frames"] == 4
+
+
+def test_null_arm_is_data_blind_boxed_and_deterministic(tmp_path):
+    """B4 (from the B2 adversarial review): the chance floor every AP table needs.
+    The null arm must (a) fit its box on the TRAIN split only, (b) score without
+    touching the RF, (c) confine detections to the box, (d) reproduce exactly."""
+    cfg = PRESETS["ti_iwr1443"]
+    manifest = _tiny_corpus_with_train(tmp_path, cfg)
+
+    a = compare_detectors.score_null(manifest, "val", decode_threshold=0.01,
+                                     target_recall=0.5)
+    b = compare_detectors.score_null(manifest, "val", decode_threshold=0.01,
+                                     target_recall=0.5)
+    assert a["AP"] == b["AP"] and a["n_detections"] == b["n_detections"]
+    assert a["null_box"]["fit_split"] == "train"
+    r_lo, r_hi = a["null_box"]["range_bins"]
+    assert 0 <= r_lo < r_hi  # a real, nonempty box
+    # And the default-on integration: a compare() on this corpus carries the arm.
+    res = compare_detectors.compare(manifest, split="val", classical=True,
+                                    target_recall=0.5, decode_threshold=0.01,
+                                    device="cpu")
+    assert [x["name"] for x in res["arms"]] == ["classical CFAR",
+                                                "null (random-in-GT-box)"]
+    assert "null_skipped" not in res
+
+
+def _tiny_corpus_with_train(tmp_path, cfg):
+    """`_tiny_corpus`, but with 2 of the 4 frames in the train split so the null
+    arm has targets to fit its box on."""
+    from e2e.ml import dataset as ml_dataset
+    from e2e.ml import storage
+    from e2e.ml.labels import encode_detection_labels
+    from e2e.ml.scatterers import RadarPose, Scatterer
+
+    grid = LabelGrid.for_config(cfg)
+    pose = RadarPose()
+    d = tmp_path / "tiny_compare_corpus_train"
+    d.mkdir()
+    rng = np.random.default_rng(0)
+    sequences = []
+    for i in range(4):
+        r = (25 + 10 * i + 0.5) * grid.range_bin_m
+        sc = [Scatterer(position=(r, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                        rcs_dbsm=20.0, object_class="vehicle")]
+        labels = encode_detection_labels(grid, sc, pose, classes=("vehicle",))
+        codes = rng.integers(-1000, 1000, size=(cfg.n_rx, cfg.n_chirps, cfg.n_samples))
+        fname = f"frame_{i:05d}.npz"
+        storage.write_sample_npz(
+            d / fname, {"adc": codes.astype(np.complex64),
+                        "labels": labels.cpu().numpy()},
+            {"targets": [(r, 0.0, "vehicle")]}, payload_key="adc",
+            full_scale=float(2 ** 15))
+        sequences.append([fname])
+    return ml_dataset.write_manifest(d, cfg, "test_tier", sequences, grid=grid,
+                                     splits=(0.5, 0.5, 0.0))
 
 
 def test_compare_gives_every_arm_the_same_frames(tmp_path, monkeypatch):

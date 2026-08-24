@@ -155,6 +155,67 @@ def score_classical(manifest_path, split: str, *, device=None,
                       decode_threshold=decode_threshold, target_recall=target_recall)
 
 
+def score_null(manifest_path, split: str, *,
+               decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
+               target_recall: float = DEFAULT_TARGET_RECALL,
+               seed: int = 0, limit: Optional[int] = None) -> Dict:
+    """The DATA-BLIND chance baseline (B4, from the 2026-08-25 B2 adversarial
+    review): uniform random scores inside the TRAIN-split ground-truth bounding box
+    (range x sin_az), exactly zero outside, never looking at the RF. Fitted on the
+    train split only -- no test leakage -- and deterministic from `seed`.
+
+    WHY IT IS A PERMANENT ARM: on this project's corpora, ground truth occupies a
+    small fraction of the evaluated map (~16% on benchmark_v1/D2), so an AP quoted
+    alone is uninterpretable -- the first B2 comparison shipped a trained model whose
+    AP was BELOW this null. Never print an AP table without the chance floor in it.
+    """
+    import numpy as np
+
+    from e2e.ml.dataset import RadarFrameDataset
+    from e2e.ml.labels import LabelGrid
+
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    g = manifest["grid"]
+    grid = LabelGrid(n_range=int(g["n_range"]), n_azimuth=int(g["n_azimuth"]),
+                     max_range_m=float(g["max_range_m"]))
+
+    # The box, from TRAIN targets only (centre range, sin_az -- elements 0 and 1 of
+    # the target tuples; see e2e.ml.labels.targets_in_grid).
+    train_ds = RadarFrameDataset(manifest_path, split="train")
+    ranges, sins = [], []
+    for i in range(len(train_ds)):
+        for t in train_ds.targets(i):
+            ranges.append(float(t[0]))
+            sins.append(float(t[1]))
+    if not ranges:
+        raise ValueError("null baseline: the train split holds no targets to fit a box")
+    r_lo = max(0, int(min(ranges) / grid.range_bin_m))
+    r_hi = min(grid.n_range, int(max(ranges) / grid.range_bin_m) + 1)
+    a_lo = max(0, int((min(sins) + 1.0) / grid.az_bin))
+    a_hi = min(grid.n_azimuth, int((max(sins) + 1.0) / grid.az_bin) + 1)
+
+    eval_ds = RadarFrameDataset(manifest_path, split=split)
+    n = len(eval_ds) if limit is None else min(limit, len(eval_ds))
+    pred_maps, target_lists = [], []
+    for i in range(n):
+        rng = np.random.default_rng(int(seed) + i)
+        # [3, R, A], the detector output format every arm shares: channel 0 = score,
+        # regression channels zero (cell-centre decode -- same honest convention as
+        # the classical baseline, see classical_detection_map's docstring).
+        m = np.zeros((3, grid.n_range, grid.n_azimuth), dtype=np.float32)
+        m[0, r_lo:r_hi, a_lo:a_hi] = rng.random((r_hi - r_lo, a_hi - a_lo),
+                                                dtype=np.float32)
+        pred_maps.append(torch.from_numpy(m))
+        target_lists.append(eval_ds.targets(i))
+
+    res = _score_arm(pred_maps, target_lists, grid, n_frames=n,
+                     decode_threshold=decode_threshold, target_recall=target_recall)
+    res["null_box"] = {"range_bins": [r_lo, r_hi], "az_bins": [a_lo, a_hi],
+                       "fit_split": "train", "seed": int(seed)}
+    return res
+
+
 def score_checkpoint(manifest_path, checkpoint_path, split: str, *, device=None,
                      decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                      target_recall: float = DEFAULT_TARGET_RECALL,
@@ -194,8 +255,14 @@ def compare(manifest_path, *, split: str = "test",
             ssm_chunk_size: Optional[int] = None,
             limit: Optional[int] = None,
             classical_kwargs: Optional[Dict] = None,
-            classical_doppler_reduce: Optional[Sequence[str]] = None) -> Dict:
-    """Every requested arm, scored on the same split at the same matched recall."""
+            classical_doppler_reduce: Optional[Sequence[str]] = None,
+            null_baseline: bool = True) -> Dict:
+    """Every requested arm, scored on the same split at the same matched recall.
+
+    `null_baseline` (default True -- see `score_null`) appends the data-blind
+    chance arm to every comparison; disable only for a run whose output feeds a
+    caller that adds its own floor.
+    """
     if not classical and not checkpoints:
         raise ValueError("nothing to compare: pass --classical and/or --checkpoint")
 
@@ -224,8 +291,21 @@ def compare(manifest_path, *, split: str = "test",
                                         batch_size=batch_size,
                                         ssm_chunk_size=ssm_chunk_size,
                                         limit=limit)})
+    null_skipped = None
+    if null_baseline:
+        try:
+            arms.append({"name": "null (random-in-GT-box)",
+                         **score_null(manifest_path, split,
+                                      decode_threshold=decode_threshold,
+                                      target_recall=target_recall, limit=limit)})
+        except ValueError as e:
+            # A corpus with no train targets cannot fit the box (e.g. a val-only
+            # test corpus). Degrade to a RECORDED skip, never a silent one: the
+            # stored JSON must say its chance floor is missing and why.
+            null_skipped = str(e)
 
     return {
+        **({"null_skipped": null_skipped} if null_skipped else {}),
         "manifest": str(manifest_path),
         "split": split,
         "target_recall": target_recall,
@@ -294,6 +374,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None,
                    help="score only the first N frames of the split, in EVERY arm (for "
                         "smoke runs). Arms must share frames for FA/frame to compare")
+    p.add_argument("--no-null", action="store_true",
+                   help="omit the data-blind random-in-GT-box chance arm (on by "
+                        "default -- see score_null: never print an AP table without "
+                        "its chance floor)")
     p.add_argument("--out", default=None, help="write the full result dict as JSON here")
     return p
 
@@ -309,7 +393,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      classical=args.classical, target_recall=args.recall,
                      decode_threshold=args.decode_threshold, device=device,
                      batch_size=args.batch_size, ssm_chunk_size=args.ssm_chunk_size,
-                     limit=args.limit, classical_doppler_reduce=reductions)
+                     limit=args.limit, classical_doppler_reduce=reductions,
+                     null_baseline=not args.no_null)
     print(format_table(result))
 
     if args.out:
