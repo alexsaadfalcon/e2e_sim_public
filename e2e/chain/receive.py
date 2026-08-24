@@ -23,6 +23,7 @@ Four blocks:
 """
 
 import dataclasses
+import math
 
 import torch
 
@@ -158,19 +159,58 @@ class IFHighPassBlock:
     the coupling is modeled), and (b) lay their range sidelobes across the whole
     profile. This block is the filter.
 
-    MODEL: an order-`order` Butterworth high-pass MAGNITUDE response applied on the
-    fast-time DFT grid: bin `k` (of `n_samples`) carries beat frequency
-    `f_k = k * fs / n_samples` (the positive-exponent beat convention -- see
-    `e2e.ml.rd_synth`'s derivation -- occupies the full `[0, fs)` span, which is also
-    how `RadarConfig.max_range_m` is defined), and is scaled by
-    `|H(f_k)| = (f_k/fc)^order / sqrt(1 + (f_k/fc)^(2*order))`, so `H(0) = 0` exactly
-    and the response is monotonic in range. TWO STATED APPROXIMATIONS: (a) the
-    filter's PHASE response is omitted (zero-phase magnitude weighting) -- for the
-    magnitude products this chain feeds (range/range-azimuth/range-Doppler maps) a
-    smooth per-bin phase is invisible, and modelling group delay would only shift
-    the profile; (b) the filter is applied to the sampled record rather than the
-    continuous IF, so its response is exact on bin centres and interpolated by the
-    DFT in between -- fine for a corner far below `fs`.
+    MODEL: an order-`order` analog Butterworth high-pass, applied as a CAUSAL LINEAR
+    convolution along fast time. The complex analog response `H(j*2*pi*f)`
+    (`|H| = 1/sqrt(1 + (fc/f)^(2*order))`, `H(0) = 0` exactly) is evaluated on a
+    zero-padded DFT grid over the full `[0, fs)` beat span (the positive-exponent
+    beat convention -- see `e2e.ml.rd_synth`'s derivation -- is one-sided, so the
+    kernel is deliberately NOT conjugate-symmetric: bins near `fs` are far RANGES
+    here, not negative frequencies, and must pass), and the record is filtered by
+    zero-padded FFT multiplication -- i.e. genuine linear convolution with the
+    filter's causal impulse response, NOT a per-bin weighting of the record's own
+    `n_samples`-point DFT.
+
+    WHY LINEAR AND NOT A BIN WEIGHTING (release-plan A12, found in batch review):
+    a per-bin `|H(f_k)|` weighting on the `n_samples` grid is a CIRCULAR
+    convolution -- it filters the record's periodic extension, whose wrap-around
+    seam re-injects an off-bin tone's full spectral-leakage skirt at every range.
+    Measured: a 0.25 m off-bin tone's 25-50 m skirt changed by -0.0 dB through the
+    old weighting. In hardware the filter acts on the continuous tone BEFORE the
+    ADC's finite record truncates it, so the tone -- and therefore the truncation
+    skirt the range FFT later draws from it -- is attenuated by `|H(f_tone)|` at
+    its true (continuous, off-bin) frequency. Linear convolution reproduces that;
+    the decisive skirt-suppression oracle lives in tests/test_chain_receive.py.
+
+    BAND-EDGE TAPER (the anti-alias filter): the one-sided convention above puts
+    `H(0) = 0` and `H(fs-) ~ 1` at the two ends of one periodic spectrum -- a
+    discontinuity at the wrap, which would give the discrete kernel slowly decaying
+    `1/n` Gibbs tails in BOTH time directions and let every record edge bleed junk
+    across the whole window. Real receivers do not have this problem because the IF
+    chain also BAND-LIMITS before the ADC (the anti-alias low-pass), rolling the
+    response off at the top of the IF band. That filter is modelled here as a
+    raised-cosine taper from `_BAND_EDGE_START * fs` down to zero at
+    `_BAND_EDGE_STOP * fs`, which simultaneously (a) is physical and (b) makes the
+    kernel's spectrum continuous at the wrap, so its tails decay fast and edge
+    artifacts stay local. Consequence: ranges above `_BAND_EDGE_START * max_range`
+    (the top ~8%) are attenuated -- returns that close to the unambiguous limit are
+    band-edge-marginal in real hardware too.
+
+    SETTLING: a causal filter with no pre-history sees every component switch on at
+    sample 0 and rings at its own corner frequency. The real receiver's filter is
+    settled long before the sampled window (the beat tones exist from sweep start),
+    so the record is extended with `n_samples` of edge replication on BOTH sides
+    (`x[0]` / `x[-1]` held constant) before filtering and the extensions discarded:
+    the DC leakage tone -- the strongest signal in the chain at +62 dB -- is thereby
+    continued EXACTLY into its pre-history and nulled with no turn-on transient.
+    TWO STATED APPROXIMATIONS: (a) nonzero-frequency components are only
+    approximately continued by the constant extensions, leaving a small settling
+    residual in the first ~`fs/(2*pi*fc)` samples of the record (close-in ranges,
+    decaying at the filter's own 40 dB/dec) -- physical settling, orders below the
+    old model's unsuppressed skirts; (b) the impulse response is realized by
+    sampling the analog frequency response on a `>= 4*n_samples` grid, so residual
+    time-aliasing/edge coupling sits at the kernel's fast-decaying tail level
+    (measured -74 to -85 dB of the driving tone across the window at the shipped
+    `n_samples=512`; the DC null itself measures -79 dB).
 
     CORNER: `corner_range_m` (default 1.0 m) states the corner where a spec sheet
     states it implicitly -- as the range below which returns are suppressed -- and is
@@ -188,6 +228,13 @@ class IFHighPassBlock:
 
     frame_capabilities = _RX_TIME
 
+    #: Anti-alias band-edge taper (see the class docstring): the response is unity up
+    #: to `_BAND_EDGE_START * fs`, rolls off raised-cosine, and is exactly zero from
+    #: `_BAND_EDGE_STOP * fs` -- which also makes the kernel's periodic spectrum
+    #: continuous at the 0/fs wrap.
+    _BAND_EDGE_START = 0.92
+    _BAND_EDGE_STOP = 0.98
+
     def __init__(self, cfg, *, corner_range_m=1.0, corner_hz=None, order=2):
         if corner_hz is None:
             if float(corner_range_m) <= 0.0:
@@ -201,29 +248,69 @@ class IFHighPassBlock:
         self.corner_hz = float(corner_hz)
         self.order = int(order)
 
+    def analog_response(self, f):
+        """Complex analog Butterworth high-pass `H(j*2*pi*f)` at frequencies `f`
+        (float64 tensor, Hz; entries at exactly 0 get `H = 0`). complex128, same shape.
+
+        Built factor-wise from the low-pass prototype poles
+        `p_k = exp(j*pi*(2k + order + 1) / (2*order))` through the LP->HP mapping
+        `s -> omega_c / s`, i.e. `H(j*2*pi*f) = prod_k (-p_k) / (a - p_k)` with
+        `a = -j * fc / f`. Factor-wise (running product of bounded quotients) rather
+        than as `(f/fc)^n / ...` powers: the power form overflows to `inf/inf = nan`
+        at steep orders, and one nan bin poisons the entire output frame through the
+        `ifft` (found in review of the original bin-weighting block; the regression
+        test survives this rewrite). Each factor's worst case is `|a| -> inf` at
+        `f -> 0`, where the quotient underflows to a clean 0.0.
+        """
+        h = torch.zeros(f.shape, dtype=torch.complex128, device=f.device)
+        nz = f != 0.0
+        a = -1j * (self.corner_hz / f[nz])
+        acc = torch.ones_like(a)
+        n = self.order
+        for k in range(n):
+            ang = math.pi * (2 * k + n + 1) / (2 * n)
+            pole = complex(math.cos(ang), math.sin(ang))
+            acc = acc * (-pole) / (a - pole)
+        h[nz] = acc
+        return h
+
+    def _band_edge_taper(self, f):
+        """Raised-cosine anti-alias taper (float64, same shape as `f`): 1 below
+        `_BAND_EDGE_START * fs`, 0 from `_BAND_EDGE_STOP * fs` -- see the class
+        docstring's BAND-EDGE TAPER section."""
+        fs = float(self.cfg.fs_hz)
+        f0, f1 = self._BAND_EDGE_START * fs, self._BAND_EDGE_STOP * fs
+        t = ((f - f0) / (f1 - f0)).clamp(0.0, 1.0)
+        return 0.5 * (1.0 + torch.cos(math.pi * t))
+
     def response(self, n_samples, device=None):
         """|H| on the `n_samples`-point fast-time DFT grid, float32 `[n_samples]`.
 
-        Computed as `1 / sqrt(1 + (fc/f)^(2*order))` (with `|H|(0) = 0` set
-        explicitly), NOT the algebraically equal `(f/fc)^n / sqrt(1 + (f/fc)^(2n))`:
-        the latter overflows to `inf/inf = nan` at high-frequency bins for a steep
-        `order`, and one nan bin poisons the ENTIRE output frame through the `ifft`
-        (found in review). In this form the worst case is `(fc/f)^(2n) -> inf` at a
-        deep-stopband bin, and `1/sqrt(1+inf) = 0.0` -- the correct limit.
+        Reporting/inspection view of the full response `apply` filters with
+        (Butterworth high-pass x anti-alias band-edge taper; `apply` itself works on
+        a finer, zero-padded grid -- see the class docstring).
         """
         f = torch.arange(int(n_samples), dtype=torch.float64, device=device) \
             * (float(self.cfg.fs_hz) / float(n_samples))
-        h = torch.zeros_like(f)
-        inv_2n = (self.corner_hz / f[1:]) ** (2 * self.order)
-        h[1:] = 1.0 / torch.sqrt(1.0 + inv_2n)
-        return h.to(torch.float32)
+        return (self.analog_response(f).abs() * self._band_edge_taper(f)).to(torch.float32)
 
     def apply(self, state):
         adc = state["adc"]
         n_samples = adc.shape[-1]
-        h = self.response(n_samples, device=adc.device).to(adc.dtype)
-        spec = torch.fft.fft(adc, dim=-1)
-        out = torch.fft.ifft(spec * h, dim=-1).to(adc.dtype)
+        # Edge-replicated settling prefix AND suffix (see the class docstring's
+        # SETTLING note), then zero-pad to >= 4*n_samples so the FFT product is a
+        # LINEAR convolution with the causal impulse response; the band-edge taper
+        # keeps that kernel's tails fast-decaying, so both record edges and the
+        # circular wrap stay out of the kept window.
+        edge_shape = (*adc.shape[:-1], n_samples)
+        padded = torch.cat([adc[..., :1].expand(edge_shape), adc,
+                            adc[..., -1:].expand(edge_shape)], dim=-1)
+        m = 1 << max(4 * n_samples - 1, 1).bit_length()  # next pow2 >= 4*n_samples
+        f = torch.arange(m, dtype=torch.float64, device=adc.device) \
+            * (float(self.cfg.fs_hz) / float(m))
+        h = (self.analog_response(f) * self._band_edge_taper(f)).to(adc.dtype)
+        spec = torch.fft.fft(padded, n=m, dim=-1)
+        out = torch.fft.ifft(spec * h, dim=-1)[..., n_samples:2 * n_samples].to(adc.dtype)
         return {"adc": out, "if_hpf_corner_hz": self.corner_hz,
                 "if_hpf_order": self.order}
 

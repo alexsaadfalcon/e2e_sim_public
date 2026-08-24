@@ -308,33 +308,95 @@ def test_if_hpf_declares_rx_time_domain():
     assert IFHighPassBlock(_CFG).frame_capabilities.domain == frames.DOMAIN_RX_TIME
 
 
-def test_if_hpf_nulls_dc_exactly_and_matches_butterworth_oracle(torch_device):
+def test_if_hpf_nulls_dc_and_matches_butterworth_oracle(torch_device):
     """Oracle: a pure tone at bin k comes out scaled by the hand-computed Butterworth
     magnitude |H| = (f/fc)^n / sqrt(1 + (f/fc)^(2n)) at f = k*fs/N; the DC (range-0
-    leakage) tone is nulled EXACTLY because H(0) = 0."""
+    leakage) tone is nulled (its edge-replicated pre-history is exact, so the only
+    residual is the prefix's own start transient, settled to below complex64 noise).
+
+    The filter is CAUSAL now (A12), so a tone's steady-state amplitude -- not its
+    max over the record, which can catch the first samples' settling residual -- is
+    what the analog magnitude predicts; measured as the median |out| over the last
+    half of the record.
+
+    The whole oracle runs on a REALISTIC 512-sample fast-time axis, not this file's
+    deliberately tiny 16-sample _CFG: settling spans ~fs/(2*pi*fc) ~ 23 samples and
+    record-edge splatter shrinks with record length (DC null measured -79 dB at
+    N=512 -- putting the +62 dB leakage tone 17 dB under the thermal floor -- vs
+    only -40 dB at N=16, where the record is transient end to end)."""
     import math
     from e2e.chain.receive import IFHighPassBlock
-    blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
+    cfg = RadarConfig(name="oracle_cfg", f0_hz=77e9, bandwidth_hz=749.5e6, n_tx=1,
+                      n_rx=1, n_chirps=1, n_samples=512, fs_hz=10e6,
+                      chirp_period_s=76e-6, mimo="single")
+    blk = IFHighPassBlock(cfg, corner_range_m=1.0, order=2)
 
-    out_dc = blk.apply({"adc": _tone(0, device=torch_device)})["adc"]
-    assert torch.allclose(out_dc, torch.zeros_like(out_dc), atol=1e-6)
+    dc = torch.ones(1, 1, 512, dtype=torch.complex64, device=torch_device)
+    out_dc = blk.apply({"adc": dc})["adc"]
+    assert float(out_dc.abs().max().item()) < 2e-4  # < -74 dB re the tone
 
-    for k in (1, 3, 8):
-        f = k * _CFG.fs_hz / _CFG.n_samples
+    n = torch.arange(cfg.n_samples, dtype=torch.float64, device=torch_device)
+    # f/fc = 0.2, 1.0, 5.0: deep stopband, the corner itself, and the passband.
+    for k in (1, 5, 25):
+        f = k * cfg.fs_hz / cfg.n_samples
         ratio = (f / blk.corner_hz) ** blk.order
         expected = ratio / math.sqrt(1.0 + ratio ** 2)
-        out = blk.apply({"adc": _tone(k, device=torch_device)})["adc"]
-        measured = float(out.abs().max().item())
-        assert measured == pytest.approx(expected, rel=1e-4), f"bin {k}"
+        tone = torch.exp(2j * torch.pi * k * n / cfg.n_samples).to(torch.complex64).view(1, 1, -1)
+        out = blk.apply({"adc": tone})["adc"]
+        measured = float(out.abs()[..., cfg.n_samples // 2:].median().item())
+        # rel 2e-2: the deep-stopband tone (bin 1, |H| = -28 dB) sits close enough to
+        # the residual edge-splatter floor (~-65 dB) that its median carries ~1.4%.
+        assert measured == pytest.approx(expected, rel=2e-2), f"bin {k}"
+
+
+def test_if_hpf_suppresses_off_bin_tone_skirt_at_far_range(torch_device):
+    """THE A12 oracle: the old per-bin |H(f_k)| weighting was a circular convolution,
+    so an OFF-bin close-in tone kept its full spectral-leakage skirt at far range
+    (measured -0.0 dB over 25-50 m). A real (linear-convolution) filter attenuates
+    the tone at its true continuous frequency, so the skirt the range FFT draws from
+    it drops by ~|H(f_tone)| everywhere. radial_like-shaped fast-time axis: 0.2 m
+    bins, tone at 0.25 m (1.25 bins -- off-bin), corner 1.0 m, order 2 ->
+    |H| = -24.1 dB."""
+    import math
+    from e2e.chain.receive import IFHighPassBlock
+    cfg = RadarConfig(name="a12_cfg", f0_hz=77e9, bandwidth_hz=749.5e6, n_tx=1,
+                      n_rx=1, n_chirps=1, n_samples=512, fs_hz=10e6,
+                      chirp_period_s=76e-6, mimo="single")
+    blk = IFHighPassBlock(cfg, corner_range_m=1.0, order=2)
+
+    res_m = cfg.range_resolution_m
+    f_tone = 2.0 * cfg.ramp_slope_hzps * 0.25 / 299_792_458.0
+    n = torch.arange(cfg.n_samples, dtype=torch.float64, device=torch_device)
+    tone = torch.exp(2j * torch.pi * f_tone * n / cfg.fs_hz).to(torch.complex64)
+    tone = tone.view(1, 1, -1)
+
+    filtered = blk.apply({"adc": tone})["adc"]
+    lo, hi = int(25.0 / res_m), int(50.0 / res_m)
+    skirt_before = torch.fft.fft(tone, dim=-1).abs()[..., lo:hi].square().mean()
+    skirt_after = torch.fft.fft(filtered, dim=-1).abs()[..., lo:hi].square().mean()
+    suppression_db = 10.0 * math.log10(float(skirt_before / skirt_after))
+
+    ratio = (f_tone / blk.corner_hz) ** blk.order
+    expected_db = -20.0 * math.log10(ratio / math.sqrt(1.0 + ratio ** 2))
+    # The tone drops by |H(f_tone)| = 24.1 dB; the far skirt must track it to within
+    # a few dB (settling residual, skirt-shape change). The old defect was 0.0 dB.
+    assert suppression_db > expected_db - 6.0, \
+        f"far-range skirt only suppressed {suppression_db:.1f} dB (want ~{expected_db:.1f})"
 
 
 def test_if_hpf_response_is_monotonic_and_transparent_at_far_range():
     from e2e.chain.receive import IFHighPassBlock
     blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=2)
-    h = blk.response(_CFG.n_samples)
-    assert torch.all(h[1:] >= h[:-1])
-    # The last bin sits at ~max_range; the filter must be transparent there (<0.1 dB).
-    assert float(h[-1].item()) > 10 ** (-0.1 / 20)
+    n = 512  # fine grid so the band-edge indices below are well resolved
+    h = blk.response(n)
+    edge_start = int(blk._BAND_EDGE_START * n)
+    # Monotonic through the high-pass region, up to the anti-alias band edge.
+    assert torch.all(h[1:edge_start] >= h[:edge_start - 1])
+    # Transparent (<0.1 dB) through 90% of the band -- i.e. up to ~0.9*max_range.
+    assert float(h[int(0.9 * n)].item()) > 10 ** (-0.1 / 20)
+    # The anti-alias band edge takes the response exactly to zero at the top (this is
+    # also what keeps the kernel's periodic spectrum continuous at the 0/fs wrap).
+    assert float(h[-1].item()) == 0.0
 
 
 def test_if_hpf_corner_range_conversion_and_explicit_override():
@@ -385,7 +447,10 @@ def test_if_hpf_steep_order_never_nans(torch_device):
     blk = IFHighPassBlock(_CFG, corner_range_m=1.0, order=100)
     h = blk.response(512)
     assert not torch.isnan(h).any()
-    assert torch.all(h[1:] >= h[:-1])  # still monotonic
+    # Monotonic (to within the 100-factor product's float64 rounding) up to the
+    # anti-alias band edge, where the taper rolls the response back down.
+    edge_start = int(blk._BAND_EDGE_START * 512)
+    assert torch.all(h[1:edge_start] >= h[:edge_start - 1] - 1e-9)
     out = blk.apply({"adc": torch.ones(1, 1, 512, dtype=torch.complex64,
                                        device=torch_device)})["adc"]
     assert not torch.isnan(out.real).any() and not torch.isnan(out.imag).any()
