@@ -139,15 +139,44 @@ class RTEnvironmentBlock:
         # provenance" above. Stays None for "flat"/"free".
         self.last_material_report = None
 
+    def _provenance_meta(self):
+        """Scene/asset provenance for the CURRENT scenario (F51 + F31): the full
+        `Scenario` dict plus a flat per-object asset summary, so a written frame's
+        licence status (WHICH mesh produced this return -- F21's gate) and scene
+        content are auditable from the artifact alone. Deliberately Sionna-free
+        (built from the scenario, not the solve), so it is testable -- and correct --
+        without a ray tracer. `antenna_pattern`/`ground_scattering_coefficient` are
+        recorded RAW (None = the rt_gen/rt_scene_build default at generation time);
+        resolving them here would import the Sionna-adjacent module tree.
+        """
+        return {
+            "scene": self.scenario.to_dict(),
+            "base_scene": self.base_scene,
+            "assets": [
+                {"name": o.name,
+                 "kind": getattr(o.kind, "value", str(o.kind)),
+                 "object_class": o.object_class,
+                 "asset": o.asset,
+                 "scaling": o.scaling}
+                for o in self.scenario.objects],
+            "coherent_targets": self.coherent_targets,
+            "antenna_pattern": self.antenna_pattern,
+            "ground_scattering_coefficient": self.ground_scattering_coefficient,
+            "material_report": self.last_material_report,
+        }
+
     def get_state_updates(self):
         """Per-frame state `Simulation` seeds the chain with, alongside the frame.
 
         Returns the ground truth for the frame `get_S_pars()` just produced, so labels
-        travel WITH their frame down the chain. Empty before the first `get_S_pars()`.
+        travel WITH their frame down the chain -- plus the scene/asset provenance
+        (`scene_provenance`, on `SinkBlock`'s meta allowlist; F51 + F31). Empty before
+        the first `get_S_pars()`.
         """
         if self.last_labels is None:
             return {}
-        return {"labels": self.last_labels, "targets": self.last_targets}
+        return {"labels": self.last_labels, "targets": self.last_targets,
+                "scene_provenance": self._provenance_meta()}
 
     def reset(self):
         self.frame_counter = 0

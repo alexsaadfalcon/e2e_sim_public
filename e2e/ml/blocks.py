@@ -96,7 +96,13 @@ _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # frames aren't reproducible from the artifact alone. (Review noted
                     # quant_snr_db/clipped_fraction/link_budget share this gap -- widening
                     # the allowlist to those is the C7 reproducibility sweep, not A2.)
-                    "if_hpf_corner_hz", "if_hpf_order")
+                    "if_hpf_corner_hz", "if_hpf_order",
+                    # Scene/asset provenance (F51 + F31, landed for B1): the full
+                    # Scenario dict plus a per-object asset summary, emitted by
+                    # RTEnvironmentBlock.get_state_updates -- what makes a frame's
+                    # licence status (which mesh?) and scene content auditable from
+                    # the artifact alone.
+                    "scene_provenance")
 
 
 def _json_default(obj):

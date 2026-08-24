@@ -375,6 +375,47 @@ def test_if_hpf_is_gated_off(tmp_path, fake_env):
     assert IFHighPassBlock not in [type(s) for s in sim.serial_stages]
 
 
+def test_scene_provenance_reaches_written_sample_meta(tmp_path):
+    """F51 + F31 (B1 prerequisite): `RTEnvironmentBlock.get_state_updates` emits the
+    scenario dict + a per-object asset summary as `scene_provenance`, and `SinkBlock`
+    persists it -- so which MESH produced a frame's returns (F21's licence gate) and
+    what the scene contained are auditable from the artifact alone. The provenance is
+    deliberately Sionna-free (built from the scenario, not the solve), which is what
+    makes this test runnable in CI."""
+    from e2e.environment.blocks import RTEnvironmentBlock
+    from e2e.ml.blocks import SinkBlock
+    from e2e.scenario import (ArrayConfig, Motion, Node, NodeRole, ObjectKind,
+                              Scenario, SceneObject)
+
+    scn = Scenario(
+        name="prov", base_scene="flat", num_frames=1,
+        nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 1.5),
+                    look_at=(1.0, 0.0, 1.5), array=ArrayConfig(num_rows=1, num_cols=1))],
+        objects=[SceneObject(name="car", kind=ObjectKind.MESH, position=(12.0, 0.0, 1.0),
+                             asset="meshes/car_04.ply", object_class="vehicle",
+                             motion=Motion())],
+    )
+    env = RTEnvironmentBlock(scn, _CFG)
+    assert env.get_state_updates() == {}  # nothing before the first frame
+
+    env.last_labels = torch.zeros(1)  # gate get_state_updates without a Sionna solve
+    env.last_targets = []
+    prov = env.get_state_updates()["scene_provenance"]
+    assert prov["assets"] == [{"name": "car", "kind": "mesh",
+                               "object_class": "vehicle",
+                               "asset": "meshes/car_04.ply", "scaling": 1.0}]
+    assert prov["scene"]["objects"][0]["asset"] == "meshes/car_04.ply"
+    assert prov["base_scene"] == "flat"
+
+    sink = SinkBlock(tmp_path, tag="prov")
+    sink.apply({"adc": torch.zeros(2, 2, 8, dtype=torch.complex64),
+                "scene_provenance": prov})
+    with np.load(tmp_path / "prov_frame_00000.npz") as data:
+        meta = json.loads(str(data["meta"].item()))
+    assert meta["scene_provenance"]["assets"][0]["asset"] == "meshes/car_04.ply"
+    assert meta["scene_provenance"]["scene"]["name"] == "prov"
+
+
 def test_if_hpf_provenance_reaches_written_sample_meta(tmp_path, fake_env):
     """The block's docstring promises per-frame corner/order provenance; that promise
     must hold END TO END -- in the persisted .npz meta, not just the in-memory state
