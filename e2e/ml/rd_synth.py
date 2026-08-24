@@ -13,6 +13,22 @@ ray tracing. It exists so the ML package can generate large, perfectly labelled
 range-Doppler datasets in milliseconds; the Sionna path in `e2e/environment/`
 remains the high-fidelity (but slow, offline) alternative.
 
+ORACLE ROLE (release-plan C6): beyond generating data, this module is the package's
+CONVENTION CANON -- the one place the beat sign, per-element steering phase
+(`pi * r * sin_az`, RX `r` at `r * lambda/2`; TX `t` at `t * n_rx * lambda/2`), and
+the per-chirp MIMO factors (DDMA code `2*pi*t*c/n_tx` on every chirp; TDM gating
+`c % n_tx`) are DEFINED. Everything else mirrors it sign-for-sign and is tested
+against it, never the other way around: `e2e.ml.transforms.ddma_demux` /
+`tdm_deinterleave` invert exactly these factors; `e2e.ml.impairments._mimo_tx_factor`
+reproduces them so injected returns survive the demux (F52 -- the defect WAS a module
+inventing its own array convention instead of mirroring this one); and
+`e2e.ml.rt_signal_chain.coherent_target_cfr`'s single-centre output is checked
+against this model's single-point synthesis by the RT-chain oracle tests
+(`tests/test_ml_rt_coherent.py`). If a convention here ever changes, every mirror above changes
+with it in the same commit, or the demux silently misassigns energy -- that is the
+failure class F52 documents. Closed-form single-tone outputs of this module are also
+what the test suite uses as ground truth for the receive chain's oracles.
+
 Model summary (all equations are repeated at the point of use below)
 --------------------------------------------------------------------
 Transmitted ramp     s_t(t) = exp(j2pi (f0 t + S t^2 / 2)),  S = ramp slope [Hz/s]
