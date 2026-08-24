@@ -308,6 +308,22 @@ BLOCKS: List[BlockSpec] = [
                "entry point of the ADC-cube chain below."),
     ),
     BlockSpec(
+        id="thermal_noise",
+        label="Link Budget / Thermal Floor",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("seed", "Random seed", "int", 0, step=1,
+                      help="Seeds the per-frame noise draw (deterministic reruns)."),
+        ],
+        blurb=("Puts the cube on an absolute power scale (transmit power) and adds "
+               "the physical k*T*B*F thermal noise floor. Enable together with ADC "
+               "Impairments: their severities are specified in dB relative to this "
+               "floor, and without it they are calibrated against nothing (the "
+               "corpus generator always runs this stage)."),
+    ),
+    BlockSpec(
         id="impairment",
         label="ADC Impairments",
         toggleable=True,
@@ -320,6 +336,25 @@ BLOCKS: List[BlockSpec] = [
         blurb=("Adds realistic receiver imperfections to the digitized signal: "
                "oscillator phase noise, TX/RX antenna leakage, and ground "
                "clutter, all with default physical severities."),
+    ),
+    BlockSpec(
+        id="if_hpf",
+        label="IF High-Pass",
+        toggleable=True,
+        enabled_default=False,
+        category="stage",
+        params=[
+            ParamSpec("corner_range_m", "Corner range (m)", "number", 1.0, step=0.1,
+                      help="Range below which returns are suppressed (the corner "
+                           "frequency, stated the way a spec sheet states it)."),
+            ParamSpec("order", "Filter order", "int", 2, step=1),
+        ],
+        blurb=("The IF-chain high-pass every FMCW receiver puts between the mixer "
+               "and the ADC: suppresses the huge range-0 leakage and bumper tones "
+               "before digitization. Enable together with ADC Impairments + "
+               "Quantizer -- without it the leakage tone sets the ADC full scale "
+               "and the chain reproduces pre-A2 physics (the corpus generator "
+               "always runs this stage)."),
     ),
     BlockSpec(
         id="quantizer",
@@ -406,8 +441,10 @@ EDGES: List[tuple] = [
     ("rt_environment", "rffe", "alt"),
     ("modulate", "rffe"),
     ("interconnect", "dechirp", "alt"),
-    ("dechirp", "impairment"),
-    ("impairment", "quantizer"),
+    ("dechirp", "thermal_noise"),
+    ("thermal_noise", "impairment"),
+    ("impairment", "if_hpf"),
+    ("if_hpf", "quantizer"),
     ("quantizer", "radar_cube"),
     ("quantizer", "detector"),
     ("quantizer", "sink"),

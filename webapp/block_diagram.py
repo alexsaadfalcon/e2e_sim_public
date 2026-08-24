@@ -57,12 +57,17 @@ _POSITIONS = {
     # compound box plus its padding reached y~568 while grp_adc's box started at ~532 --
     # the two REGION boxes overlapped even though no two NODES did, which is exactly the
     # gap the old node-only overlap test could not see.
+    # (2026-08-24, D6 parity) the chain now shows every corpus-generator stage:
+    # dechirp -> thermal_noise -> impairment -> if_hpf -> quantizer -> products.
+    # x pitch 170: node boxes are 160 wide, so anything tighter overlaps.
     "dechirp": (600, 740),
-    "impairment": (800, 740),
-    "quantizer": (1000, 740),
-    "radar_cube": (1240, 700),
-    "detector": (1240, 780),
-    "sink": (1240, 860),
+    "thermal_noise": (770, 740),
+    "impairment": (940, 740),
+    "if_hpf": (1110, 740),
+    "quantizer": (1280, 740),
+    "radar_cube": (1460, 700),
+    "detector": (1460, 780),
+    "sink": (1460, 860),
 }
 
 # Compound region groups (Cytoscape native `data.parent`; see build_elements).
@@ -84,7 +89,8 @@ _GROUPS: Dict[str, Dict[str, Any]] = {
         "label": "Frequency-domain products",
     },
     "grp_adc": {
-        "members": ["dechirp", "impairment", "quantizer", "radar_cube",
+        "members": ["dechirp", "thermal_noise", "impairment", "if_hpf",
+                    "quantizer", "radar_cube",
                     "detector", "sink"],
         "label": "ADC-cube chain - mutually exclusive with the products above",
     },

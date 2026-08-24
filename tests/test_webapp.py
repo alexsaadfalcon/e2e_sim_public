@@ -1186,7 +1186,8 @@ def test_figures_from_outputs_ber_without_array_gain_omits_it_from_title():
 
 _ADC_CHAIN_BLOCK_IDS = {
     "rt_environment", "waveform", "tx_pa", "modulate", "dechirp",
-    "impairment", "quantizer", "radar_cube", "detector", "sink",
+    "thermal_noise", "impairment", "if_hpf", "quantizer",
+    "radar_cube", "detector", "sink",
 }
 
 
@@ -1207,7 +1208,8 @@ def test_registry_adc_chain_blocks_default_off_and_categorized():
     expected_category = {
         "rt_environment": "source", "waveform": "source",
         "tx_pa": "stage", "modulate": "stage", "dechirp": "stage",
-        "impairment": "stage", "quantizer": "stage",
+        "thermal_noise": "stage", "impairment": "stage",
+        "if_hpf": "stage", "quantizer": "stage",
         "radar_cube": "product", "detector": "product", "sink": "product",
     }
     for block_id, category in expected_category.items():
@@ -1250,7 +1252,11 @@ def test_build_elements_includes_adc_chain_nodes():
     # spot-check the two new domain bridges are wired into the diagram
     assert ("tx_pa", "modulate") in edges
     assert ("interconnect", "dechirp") in edges
-    assert ("dechirp", "impairment") in edges
+    # D6 parity: the diagram shows every corpus-generator stage in its real order.
+    assert ("dechirp", "thermal_noise") in edges
+    assert ("thermal_noise", "impairment") in edges
+    assert ("impairment", "if_hpf") in edges
+    assert ("if_hpf", "quantizer") in edges
 
 
 def test_param_editor_runs_for_adc_chain_blocks():

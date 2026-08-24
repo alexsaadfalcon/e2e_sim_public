@@ -351,6 +351,21 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             serial_stages_override.append(InterconnectStage(interconnect_block))
         serial_stages_override.append(DechirpBlock(adc_cfg))
 
+        # Stage order mirrors e2e.ml.chain_generate.build_chain_simulation exactly:
+        # Dechirp -> ThermalNoise -> Impairment -> IFHighPass -> Quantizer (D6 parity;
+        # each stage's position is load-bearing -- see the corpus builder's comments).
+        if _enabled(state, "thermal_noise"):
+            try:
+                from e2e.ml.link_budget import ThermalNoiseBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the link-budget stage (e2e.ml.link_budget). "
+                    "Underlying error: " + str(e)
+                )
+            serial_stages_override.append(
+                ThermalNoiseBlock(adc_cfg, seed=int(_p(state, "thermal_noise", "seed")))
+            )
+
         if _enabled(state, "impairment"):
             try:
                 from e2e.chain.receive import ImpairmentBlock
@@ -362,6 +377,20 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             serial_stages_override.append(
                 ImpairmentBlock(adc_cfg, seed=int(_p(state, "impairment", "seed")))
             )
+
+        if _enabled(state, "if_hpf"):
+            try:
+                from e2e.chain.receive import IFHighPassBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the IF high-pass stage (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            serial_stages_override.append(IFHighPassBlock(
+                adc_cfg,
+                corner_range_m=float(_p(state, "if_hpf", "corner_range_m")),
+                order=int(_p(state, "if_hpf", "order")),
+            ))
 
         if _enabled(state, "quantizer"):
             try:
