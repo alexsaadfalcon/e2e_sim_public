@@ -455,6 +455,12 @@ def test_scene_provenance_reaches_written_sample_meta(tmp_path):
                                "asset": "meshes/car_04.ply", "scaling": 1.0}]
     assert prov["scene"]["objects"][0]["asset"] == "meshes/car_04.ply"
     assert prov["base_scene"] == "flat"
+    # B2 review: the scenario dict's declarative frequency/array fields are DEFAULTS
+    # the RT build overrides -- effective_radar must record what was actually used.
+    eff = prov["effective_radar"]
+    assert eff["f0_hz"] == _CFG.f0_hz and eff["n_tx"] == _CFG.n_tx
+    assert eff["n_rx"] == _CFG.n_rx and eff["config_name"] == _CFG.name
+    assert eff["f_center_hz"] == _CFG.f0_hz + _CFG.bandwidth_hz / 2.0
 
     sink = SinkBlock(tmp_path, tag="prov")
     sink.apply({"adc": torch.zeros(2, 2, 8, dtype=torch.complex64),

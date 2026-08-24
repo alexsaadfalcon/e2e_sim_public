@@ -207,7 +207,16 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
     assert checkpoint["model_name"] == "fftradnet"
     assert checkpoint["manifest"] == str(tiny_manifest_path)
     assert set(checkpoint) == {"model_state", "model_name", "manifest", "history",
-                               "input_format"}
+                               "input_format", "train_config", "best_epoch",
+                               "best_val_AP"}
+    # Training provenance (B2 review 2026-08-25): a checkpoint must record its own
+    # hyperparameters and WHICH epoch it is, or the run is reproducible only from
+    # shell history.
+    tc = checkpoint["train_config"]
+    assert tc["epochs"] == 2 and tc["batch_size"] == 2 and tc["seed"] == 0
+    assert tc["accum_steps"] == 1
+    assert checkpoint["best_epoch"] in (1, 2)
+    assert checkpoint["best_val_AP"] == max(history["val_AP"])
 
     metrics = train_mod.evaluate(tiny_manifest_path, best_pt, split="test")
     assert math.isfinite(metrics["AP"])

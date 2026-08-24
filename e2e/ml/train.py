@@ -443,7 +443,22 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
 
     torch.save(
         {"model_state": best_state, "model_name": model_name, "input_format": input_format,
-         "manifest": str(manifest_path), "history": history},
+         "manifest": str(manifest_path), "history": history,
+         # Full training provenance (B2 review, 2026-08-25: a checkpoint that does not
+         # record its own hyperparameters -- epochs, batch size, accumulation, lr --
+         # is reproducible only from shell history, which is nothing). `best_epoch`
+         # names WHICH epoch the saved weights come from; without it, a truncated run
+         # whose best == last is indistinguishable from a converged one.
+         "train_config": {
+             "epochs": int(epochs), "batch_size": int(batch_size), "lr": float(lr),
+             "seed": int(seed), "reg_weight": float(reg_weight), "gamma": float(gamma),
+             "cls_normalize": cls_normalize, "amp": str(amp),
+             "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
+         },
+         "best_epoch": (int(history["epoch"][int(max(range(len(history["val_AP"])),
+                                                     key=history["val_AP"].__getitem__))])
+                        if history.get("val_AP") else None),
+         "best_val_AP": (max(history["val_AP"]) if history.get("val_AP") else None)},
         out_dir / "best.pt",
     )
     with open(out_dir / "history.json", "w") as f:

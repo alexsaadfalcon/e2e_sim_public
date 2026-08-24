@@ -104,6 +104,12 @@ def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
         "n_detections": metrics["n_detections"],
         "decode_threshold": decode_threshold,
         "operating_point": op,
+        # The FULL curve, kept (B2 review, 2026-08-25): metrics.py's own docstring
+        # promises the curve is stored so numbers can be audited or re-plotted
+        # without re-running the model, and this harness was dropping exactly that --
+        # answering an operating-point question (e.g. where the arms cross) then
+        # required a full GPU re-run.
+        "pr_curve": metrics["pr_curve"],
     }
 
 

@@ -151,6 +151,20 @@ class RTEnvironmentBlock:
         """
         return {
             "scene": self.scenario.to_dict(),
+            # THE SCENARIO DICT LIES ABOUT RF (B2 review, 2026-08-25): its declarative
+            # `frequency`/`array` fields carry `e2e.scenario` DEFAULTS (30 GHz plan,
+            # 1x1 iso array) that this RT pipeline OVERRIDES with `cfg` at build time
+            # (`rt_scene_build` sets f_center = f0 + B/2 and a real n_tx x n_rx
+            # PlanarArray). `effective_radar` records what was actually used; an
+            # auditor must prefer it over `scene["frequency"]`/`scene["nodes"][...]
+            # ["array"]` for anything RF.
+            "effective_radar": {
+                "f0_hz": float(self.cfg.f0_hz),
+                "bandwidth_hz": float(self.cfg.bandwidth_hz),
+                "f_center_hz": float(self.cfg.f0_hz) + float(self.cfg.bandwidth_hz) / 2.0,
+                "n_tx": int(self.cfg.n_tx), "n_rx": int(self.cfg.n_rx),
+                "mimo": str(self.cfg.mimo), "config_name": str(self.cfg.name),
+            },
             "base_scene": self.base_scene,
             "assets": [
                 {"name": o.name,
