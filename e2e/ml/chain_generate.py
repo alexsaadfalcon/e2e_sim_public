@@ -239,6 +239,22 @@ def build_chain_simulation(
     )
 
 
+def _corpus_identity_tag(dataset_dir: Path) -> str:
+    """The scene-identity salt for a corpus at `dataset_dir`: its last TWO path
+    components (`parent/name`), machine-stable (never an absolute path).
+
+    Two components, not just the leaf (B1 corpus review finding, 2026-08-25): the
+    leaf alone is `f"{cfg_name}_{tier}"`, so two corpora under different `--out`
+    roots sharing (config, tier, seed) salted identically and drew BIT-IDENTICAL
+    scenes -- a 2-frame smoke run collided with the real corpus's train split
+    exactly that way, undeclared by the overlap gate's allowlist. NOTE: this
+    derivation change alters the drawn scenes of any corpus regenerated at the same
+    (config, tier, seed) relative to pre-2026-08-25 runs -- deliberate; the
+    manifest's `corpus_tag` records which salt a corpus actually used.
+    """
+    return f"{dataset_dir.parent.name}/{dataset_dir.name}"
+
+
 # --------------------------------------------------------------------------------
 # Corpus generation entry point
 # --------------------------------------------------------------------------------
@@ -326,6 +342,7 @@ def generate_chain_corpus(
     out_root = Path(out_dir) if out_dir is not None else DATASETS_DIR
     dataset_dir = out_root / f"{cfg_name}_{tier}"
     dataset_dir.mkdir(parents=True, exist_ok=True)
+    corpus_tag = _corpus_identity_tag(dataset_dir)
 
     sequences: List[List[str]] = []
     for i in range(n_scenes):
@@ -338,7 +355,7 @@ def generate_chain_corpus(
         # dt. Omitting it inflated every velocity by frame_rate_hz (0-8 m/s tier ->
         # 0-80 m/s at the solver, past the unambiguous-velocity limit). Fixed 2026-08-16.
         scenario = build_rt_tier_scenario(
-            tier, corpus_tag=dataset_dir.name, frame_idx=i, seed=seed,
+            tier, corpus_tag=corpus_tag, frame_idx=i, seed=seed,
             num_frames=frames_per_scene,
             dt=1.0 / float(cfg.frame_rate_hz),
             use_local_assets=use_local_assets,
@@ -365,7 +382,7 @@ def generate_chain_corpus(
 
     return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
                           snr_db=None, frames_per_scene=frames_per_scene, splits=splits,
-                          label_classes=label_classes or (), corpus_tag=dataset_dir.name)
+                          label_classes=label_classes or (), corpus_tag=corpus_tag)
 
 
 # --------------------------------------------------------------------------------

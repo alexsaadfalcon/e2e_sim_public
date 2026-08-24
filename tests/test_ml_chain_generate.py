@@ -403,6 +403,27 @@ def test_if_hpf_is_gated_off(tmp_path, fake_env):
     assert IFHighPassBlock not in [type(s) for s in sim.serial_stages]
 
 
+def test_corpus_identity_tag_distinct_across_out_roots(tmp_path):
+    """B1 corpus review finding (2026-08-25): the scene-identity salt was the leaf
+    directory name alone, so corpora under different --out roots sharing
+    (config, tier, seed) drew bit-identical scenes -- a smoke run collided with the
+    real corpus's train split. The salt must differ across out roots, stay
+    machine-stable (no absolute path), and feed a DIFFERENT scene draw."""
+    from e2e.ml.chain_generate import _corpus_identity_tag
+    from e2e.ml.rt_scenes import build_rt_tier_scenario
+
+    a = _corpus_identity_tag(tmp_path / "b1_smoke" / "benchmark_v1_D2")
+    b = _corpus_identity_tag(tmp_path / "b1_bench_v1" / "benchmark_v1_D2")
+    assert a != b
+    assert str(tmp_path) not in a and str(tmp_path) not in b  # machine-stable
+
+    scn_a = build_rt_tier_scenario("D2", corpus_tag=a, frame_idx=0, seed=7,
+                                   num_frames=1)
+    scn_b = build_rt_tier_scenario("D2", corpus_tag=b, frame_idx=0, seed=7,
+                                   num_frames=1)
+    assert [o.position for o in scn_a.objects] != [o.position for o in scn_b.objects]
+
+
 def test_scene_provenance_reaches_written_sample_meta(tmp_path):
     """F51 + F31 (B1 prerequisite): `RTEnvironmentBlock.get_state_updates` emits the
     scenario dict + a per-object asset summary as `scene_provenance`, and `SinkBlock`

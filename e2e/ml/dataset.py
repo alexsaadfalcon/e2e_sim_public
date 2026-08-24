@@ -170,14 +170,11 @@ def _stable_scene_seed(corpus_tag: str, scene_index: int, seed: int) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
-def _generator_git_commit() -> str:
-    """Short SHA of HEAD at call time, or `"unknown"` if git/the repo is unavailable.
+def _read_git_commit() -> str:
+    """Short SHA of HEAD right now, or `"unknown"` if git/the repo is unavailable.
 
     Provenance-only: a long corpus-generation run must never crash over this, so any
     failure (git not installed, not a repo, detached weirdness, etc.) is swallowed.
-    This is what makes "same seed, different code" detectable after the fact instead
-    of silently producing near-duplicate scenes across generation runs -- see
-    `write_manifest`'s `generator_git_commit` field.
     """
     try:
         out = subprocess.run(
@@ -191,6 +188,25 @@ def _generator_git_commit() -> str:
     except Exception:
         pass
     return "unknown"
+
+
+#: HEAD captured ONCE at import time -- i.e. (as close as observable to) the code that
+#: is actually IN MEMORY doing the generating. The first B1 corpus (2026-08-25) shipped
+#: FALSE provenance because the old implementation shelled out at manifest-WRITE time:
+#: commits landed in the working tree while the multi-hour background run was still
+#: going, so the manifest named a commit whose changes (new meta keys) were provably
+#: absent from every frame (caught by the corpus adversarial review). Import-time
+#: capture cannot see a mid-run `git commit` either -- nothing can, from inside -- but
+#: it reports the state the process STARTED from, which is what a regeneration needs.
+#: The residual hazard (editing the working tree during a live run changes lazily
+#: imported modules) is a process rule, not detectable here: never commit or edit the
+#: repo while a generation job is running.
+_GENERATOR_GIT_COMMIT_AT_IMPORT = _read_git_commit()
+
+
+def _generator_git_commit() -> str:
+    """The provenance SHA recorded in manifests: HEAD as of process/module start."""
+    return _GENERATOR_GIT_COMMIT_AT_IMPORT
 
 
 # --------------------------------------------------------------------------------
