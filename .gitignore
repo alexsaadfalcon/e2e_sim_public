@@ -40,3 +40,11 @@ CLAUDE.md
 
 # Private orchestration notes (its own git repo, never public)
 notes/
+
+# Training runs: checkpoints (.pt, multi-MB each) and their history. Data, not source --
+# same policy as e2e/ml/datasets/ above. Added 2026-08-25 after a cold-read of the
+# handoff found runs/ was untracked only by luck: it was listed as never-commit in the
+# standing rules while nothing enforced it, so one `git add e2e/` would have staged
+# checkpoint binaries into a push-pending public history.
+e2e/ml/runs/
+*.pt
