@@ -56,7 +56,7 @@ import dataclasses
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -377,14 +377,50 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     return out_path
 
 
+#: Stamped on every comparison figure. The numbers a viewer would otherwise assume:
+#: "false alarms" here include deliberately-unlabelled clutter objects a correct
+#: detector SHOULD fire on, and the map is overwhelmingly ground-truth-free by
+#: construction -- so a dot count is not a false-alarm rate (B2 review, 2026-08-25).
+_PROTOCOL_FOOTER = ("FA counts include deliberately-unlabelled clutter (~2.9/frame); "
+                    "the map is ~83% GT-free by construction -- dot counts are not a "
+                    "false-alarm rate and are not comparable across benchmarks")
+
+
+def operating_points_from_compare(compare_json_path) -> Dict[str, float]:
+    """`{arm name: score threshold}` at the matched-recall operating point, read from a
+    `compare_detectors` result JSON.
+
+    This is what makes a three-panel overlay honest: each arm's scores live on its own
+    scale, so drawing all three at one threshold shows whichever arm happens to be
+    calibrated near it and buries the others. On the 2026-08-26 corpus the arms' own
+    operating points were 0.657 (classical) against ~0.25 (both learned) -- a uniform
+    0.25 inverted the ranking the score table reports, which is the defect this
+    function exists to remove (B4, `notes/B4_FIGURE_PROTOCOL.md`).
+    """
+    payload = json.loads(Path(compare_json_path).read_text())
+    points: Dict[str, float] = {}
+    for arm in payload.get("arms", []):
+        op = arm.get("operating_point") or {}
+        if op.get("score_threshold") is not None:
+            points[str(arm["name"])] = float(op["score_threshold"])
+    return points
+
+
 def render_comparison_figure(manifest_path, fftradnet_checkpoint, ssmradnet_checkpoint,
                              split: str, frame_idx: int, out_path, *, threshold: float = 0.5,
+                             thresholds: Optional[Mapping[str, float]] = None,
                              device=None, ssm_chunk_size=None, n_angle_fft=None,
                              dpi: int = 120, azimuth_window: Optional[str] = "hann",
                              db_span: float = _DEFAULT_DB_SPAN) -> Path:
     """Three side-by-side panels on the IDENTICAL frame: classical CFAR | FFTRadNet |
-    SSMRadNet -- same background RA map, same ground truth, same `threshold`, so the
-    three approaches are visually comparable on identical data.
+    SSMRadNet -- same background RA map, same ground truth, so the three approaches
+    are visually comparable on identical data.
+
+    `thresholds` maps panel title -> score threshold (get it from
+    `operating_points_from_compare`), giving each arm its OWN operating point; the
+    protocol used is stamped on the figure either way, so a uniform-threshold picture
+    can never travel without saying that it is one. Prefer per-arm points for anything
+    shipped: see `operating_points_from_compare`.
 
     `azimuth_window`/`db_span` control the display backdrop only; the range axis is
     cropped to a little past the farthest target/detection across ALL THREE panels
@@ -399,23 +435,37 @@ def render_comparison_figure(manifest_path, fftradnet_checkpoint, ssmradnet_chec
     ra_db, sin_az_axis, range_axis_m, _cfg = frame_background_ra(
         manifest_path, split, frame_idx, n_angle_fft=n_angle_fft, azimuth_window=azimuth_window)
 
-    cfar_fd = decode_classical_frame(manifest_path, split, frame_idx, threshold=threshold,
-                                     device=device)
+    titles = ("classical CFAR", "FFTRadNet", "SSMRadNet")
+    thr = {t: float(threshold) for t in titles}
+    if thresholds:
+        for name, value in thresholds.items():
+            # tolerate the compare JSON's fuller arm names ("classical CFAR", "fftradnet")
+            for t in titles:
+                if name.lower().replace(" ", "") in t.lower().replace(" ", "") or \
+                        t.lower().replace(" ", "") in name.lower().replace(" ", ""):
+                    thr[t] = float(value)
+
+    cfar_fd = decode_classical_frame(manifest_path, split, frame_idx,
+                                     threshold=thr["classical CFAR"], device=device)
     fft_fd = decode_model_frame(manifest_path, fftradnet_checkpoint, split, frame_idx,
-                                threshold=threshold, device=device)
+                                threshold=thr["FFTRadNet"], device=device)
     ssm_fd = decode_model_frame(manifest_path, ssmradnet_checkpoint, split, frame_idx,
-                                threshold=threshold, device=device, ssm_chunk_size=ssm_chunk_size)
+                                threshold=thr["SSMRadNet"], device=device,
+                                ssm_chunk_size=ssm_chunk_size)
 
     fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.5), dpi=dpi, sharey=True)
     full_max_range_m = cfar_fd.grid.max_range_m
     crop_m = max(_crop_range_m(fd.targets, fd.detections, full_max_range_m)
                 for fd in (cfar_fd, fft_fd, ssm_fd))
-    for ax, title, fd in zip(axes, ("classical CFAR", "FFTRadNet", "SSMRadNet"),
-                             (cfar_fd, fft_fd, ssm_fd)):
+    for ax, title, fd in zip(axes, titles, (cfar_fd, fft_fd, ssm_fd)):
         plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
-                              threshold=threshold, title=title, max_range_m=crop_m,
+                              threshold=thr[title], title=title, max_range_m=crop_m,
                               full_max_range_m=full_max_range_m, vmin=-float(db_span))
-    subtitle = f"{split} frame {frame_idx}  --  identical input, three detectors"
+    protocol = ("per-arm operating points" if len(set(thr.values())) > 1
+                else f"UNIFORM threshold {threshold:.2f} for all arms -- NOT "
+                     "operating-point matched")
+    subtitle = (f"{split} frame {frame_idx}  --  identical input, three detectors  "
+                f"[{protocol}]\n{_PROTOCOL_FOOTER}")
     if azimuth_window is not None:
         subtitle += (f"\nbackdrop display-tapered ({azimuth_window!r}) for legibility -- "
                     "classical CFAR thresholded on its own unwindowed power map, so its "

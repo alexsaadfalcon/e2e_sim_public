@@ -807,3 +807,34 @@ def test_cli_frame_and_select_are_mutually_exclusive(tiny_manifest_path, fftradn
         capture_output=True, text=True,
     )
     assert proc.returncode != 0
+
+
+# --------------------------------------------------------------------------------
+# B4 figure protocol: per-arm operating points + mandatory on-image disclosure
+# --------------------------------------------------------------------------------
+def test_operating_points_from_compare_reads_each_arm_threshold(tmp_path):
+    """The per-arm thresholds a comparison figure must use come from the compare JSON's
+    own operating points -- not from a guess, and not from one shared number."""
+    payload = {"arms": [
+        {"name": "classical CFAR", "operating_point": {"score_threshold": 0.657}},
+        {"name": "fftradnet", "operating_point": {"score_threshold": 0.252}},
+        {"name": "ssmradnet", "operating_point": {"score_threshold": 0.267}},
+        {"name": "no-op arm", "operating_point": {"reached": False}},
+    ]}
+    path = tmp_path / "compare.json"
+    path.write_text(json.dumps(payload))
+
+    points = detect_viz.operating_points_from_compare(path)
+
+    assert points == {"classical CFAR": 0.657, "fftradnet": 0.252, "ssmradnet": 0.267}
+    assert "no-op arm" not in points  # an arm that never reached the recall has no point
+
+
+def test_protocol_footer_states_what_the_dot_counts_are_not():
+    """Every comparison figure carries the caveat, because PNGs travel without the
+    row that explains them (B2 review): 'false alarms' include unlabelled clutter and
+    the map is mostly GT-free, so a dot count is not a false-alarm rate."""
+    footer = detect_viz._PROTOCOL_FOOTER.lower()
+    assert "clutter" in footer
+    assert "gt-free" in footer or "gt free" in footer
+    assert "not a" in footer and "false-alarm rate" in footer
