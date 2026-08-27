@@ -363,7 +363,7 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
 format, smoke-test results, and model attribution/licensing notes.
 
-`python -m e2e.ml.render_scene` renders a sampled scene to an animated GIF with three
+`python -m e2e.render_scene` renders a sampled scene to an animated GIF with three
 panels: the bird's-eye view, an **ideal front end** (receiver noise disabled, so the
 only content is the scene's own targets, auxiliary scatterers, and clutter), and the
 **non-ideal front end** (the same frame through the noisy receiver) -- e.g. a busy D2

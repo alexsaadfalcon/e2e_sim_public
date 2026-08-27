@@ -6,9 +6,10 @@
 `e2e.scenario.Scenario` scenes — vehicles, pedestrians, and static clutter drawn at one
 of four difficulty tiers (D0–D3) — and synthesizes the corresponding raw-ADC / range-Doppler
 tensors analytically. No Sionna ray tracing and no GPU are required to generate a
-dataset: the point-scatterer model (`scatterers.py`) and the FMCW beat-signal synthesizer
-(`rd_synth.py`) are closed-form, so `python -m e2e.ml.dataset` runs on a plain CPU machine
-in the same spirit as the scenario runner's `--dry-run` mode.
+dataset: the point-scatterer model (`e2e/environment/scatterers.py`) and the FMCW
+beat-signal synthesizer (`e2e/chain/rd_synth.py`) are closed-form, so
+`python -m e2e.ml.dataset` runs on a plain CPU machine in the same spirit as the scenario
+runner's `--dry-run` mode.
 
 On top of the dataset layer sit two ported detection models — `FFTRadNet` (from
 valeoai/RADIal) and `SSMRadNet` (a Mamba-style selective-state-space detector, from
@@ -17,12 +18,19 @@ train/eval CLI (`e2e.ml.train`). Both models consume the exact same `[2*C, R, D]
 range-Doppler input and predict the same `[3, n_range, n_azimuth]` detection map, so they
 are interchangeable on any dataset this package produces.
 
-This package is a sibling of `e2e/comms/`: self-contained, torch-free at the geometry/scene
-layer (`radar_config.py`, `scatterers.py`, `scenes.py` import no torch), with heavy tensor
-work confined to `rd_synth.py`/`transforms.py`/`labels.py`/`models/`/`train.py`. It does not
-touch the runtime S-parameter pipeline (`e2e/blocks.py`, `e2e/simulation.py`) or its `.pkl`
-frame format — it is a separate track for training perception models on synthetic radar
-scenes, not a consumer of ray-traced frames.
+This package is a sibling of `e2e/comms/`, and is the consumer, not the owner, of the core
+radar/RT modules it builds on: `e2e.radar_config` (dependency-free radar timing, sibling of
+`e2e/scenario.py`), `e2e.environment.{geometry,scatterers}` (torch-free scene geometry —
+`e2e/environment/` also owns the Sionna RT sextet: `assets`, `rt_scene_build`,
+`rt_signal_chain`, `rt_doppler_study`, `rt_gen`, `rt_scenes`), and
+`e2e.chain.{rd_synth,transforms,impairments,link_budget}` (the heavy-tensor signal model,
+alongside `e2e/chain/receive.py`). This package's own remaining torch-free layer is
+`scenes.py` (scenario/scene sampling); heavy tensor work stays local to `labels.py`/
+`models/`/`train.py`. It does not touch the runtime S-parameter pipeline (`e2e/blocks.py`,
+`e2e/simulation.py`) or its `.pkl` frame format — it is a separate track for training
+perception models on synthetic radar scenes, not a consumer of ray-traced frames.
+(The old `e2e.ml.<module>` import paths for everything above still work — they are
+deprecated shims kept through v1.1 — but new code should import the paths above directly.)
 
 ## Quickstart
 
@@ -76,7 +84,7 @@ to 80% of the radar config's `max_velocity_mps` so training frames never alias i
 D0 is a single slow, stationary-ish vehicle — a sanity check, not a realistic scene. D3 is
 a dense, fast, tightly-packed multi-target scene.
 
-## Radar presets (`e2e.ml.radar_config.PRESETS`)
+## Radar presets (`e2e.radar_config.PRESETS`)
 
 | Preset | MIMO | TX/RX (virtual) | Range res. | Max range | Velocity res. | Max velocity |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -107,9 +115,9 @@ band) within the device's real operating envelope, and is the right choice for
 signal-chain and ADC work where the detection grid is not involved.
 `radial_like` reproduces the RADIal paper's
 (Rebut et al., CVPR 2022) published resolution/FOV numbers (Table 5) — the paper never
-states its RF chirp parameters, so `radar_config.py` solves for `f0_hz`/`fs_hz`/
+states its RF chirp parameters, so `e2e/radar_config.py` solves for `f0_hz`/`fs_hz`/
 `chirp_period_s` that reproduce the stated numbers; see the inline derivation comments in
-`radar_config.py` for exactly which values are given vs. solved-for. Two deliberate
+`e2e/radar_config.py` for exactly which values are given vs. solved-for. Two deliberate
 deviations from the paper's radar (both documented at the preset): `n_chirps=252` rather
 than 256, so the DDMA replica spacing (`n_chirps/n_tx = 21`) lands on exact Doppler bins
 (a fractional spacing both smears the replicas and defeats any uniformly-dilated demux,
@@ -121,7 +129,7 @@ Doppler unfolding downstream (this package does not).
 ## Data format
 
 **Network input**, `[2*C, R, D]` float32 (real channels then imaginary channels,
-channel-first — see `transforms.rd_to_input`), where `R = cfg.n_samples` always, and
+channel-first — see `e2e.chain.transforms.rd_to_input`), where `R = cfg.n_samples` always, and
 `C`/`D` depend on `cfg.mimo`:
 
 | MIMO | `C` | `D` | `ti_iwr1443` shape | `radial_like` shape |
@@ -149,8 +157,8 @@ energy is; the regression head still predicts the **centre**, because a downstre
 integrates centre-of-mass kinematics. `metrics.evaluate_dataset` matches detections on the
 surface at an unchanged 2.0 m tolerance and reports `range_rmse_m` against the centre, so
 "did you find it" and "did you size it" stay separate numbers. The surface point is
-`e2e.ml.geometry.nearest_surface_point`, the same one `rt_signal_chain` places its coherent
-scatterer on and `rd_synth` places its point target at. `targets_in_grid` tuples are
+`e2e.environment.geometry.nearest_surface_point`, the same one `e2e.environment.rt_signal_chain`
+places its coherent scatterer on and `e2e.chain.rd_synth` places its point target at. `targets_in_grid` tuples are
 `(centre_range_m, sin_azimuth, class, surface_range_m)` and `decode_detections` tuples are
 `(range_m, sin_azimuth, score, surface_range_m)` — both append-only, and a 3-element tuple
 still means a point target.
@@ -326,14 +334,14 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/corpus_v1/ti_iwr1443_D1/manife
   CUDA extensions (`selective_scan_cuda`, `causal_conv1d`) with **no Windows wheels**, so on
   this box the pure-torch path is what actually runs; a `mamba_ssm`-backed checkpoint is not
   portable to the `"torch"` backend (the two hold different parameter tensors) or vice versa.
-* **TDM Doppler-phase residual.** `transforms.tdm_deinterleave` does not apply any
+* **TDM Doppler-phase residual.** `e2e.chain.transforms.tdm_deinterleave` does not apply any
   per-target Doppler phase de-rotation across TX groups — a moving target's phase advances
   between one TX's chirps and the next (transmitted `n_tx` chirp-periods apart), so the
   de-interleaved virtual array is only exactly coherent for stationary targets. This is
   documented, deliberate, and matches the standard "raw TDM deinterleave" used for ML
   dataset generation (the network learns to cope with/exploit the residual phase, the same
   way FFTRadNet's `MIMO_PreEncoder` learns the DDMA/TDM demux end to end). See the docstring
-  in `transforms.py` for the exact phase term.
+  in `e2e/chain/transforms.py` for the exact phase term.
 
 ## Attribution & licensing
 

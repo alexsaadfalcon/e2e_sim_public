@@ -152,7 +152,7 @@ def _json_default(obj):
 
 def _stable_scene_seed(corpus_tag: str, scene_index: int, seed: int) -> int:
     """A `numpy.random.Generator` seed salted with `corpus_tag`, mirroring
-    `e2e.ml.rt_scenes._stable_seed` (see that function's docstring for the full
+    `e2e.environment.rt_scenes._stable_seed` (see that function's docstring for the full
     rationale). Plain `seed + scene_index` (this module's ORIGINAL scheme) has the
     same latent bug the RT path had: two corpora built with the same `seed` draw
     IDENTICAL scenes at every `scene_index`, which is exactly how

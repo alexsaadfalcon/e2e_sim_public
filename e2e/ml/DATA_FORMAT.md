@@ -3,7 +3,9 @@
 This document lets a recipient decode every frame in an `e2e.ml.dataset`-style radar
 corpus **with numpy alone** — no access to this repository is required, though every
 claim below cites the source file:line it was derived from, in case you do have the
-repo and want to check.
+repo and want to check. (`radar_config.py` and `rd_synth.py`/`transforms.py` moved out of
+`e2e/ml/` in the C1 refactor to `e2e/radar_config.py` and `e2e/chain/`, respectively — the
+old `e2e.ml.*` import paths still work as deprecated shims kept through v1.1.)
 
 A corpus is a directory (in a shipped bundle: `data/`, alongside this file) containing:
 
@@ -35,7 +37,7 @@ Written by `write_manifest` (`e2e/ml/dataset.py:357-403`). Top-level keys:
 | Key | Meaning |
 | --- | --- |
 | `manifest_version` | `2` for everything described here. A directory with this key absent (or `1`) is an older format: its npz files hold a precomputed `"input"` array, not raw `"adc"` (`e2e/ml/dataset.py:96-100`); this document does not cover it. |
-| `config` | `RadarConfig.to_dict()` (`e2e/ml/radar_config.py:201-202`) — the exact radar timing/geometry this corpus was synthesized with. See "Radar config fields" below. |
+| `config` | `RadarConfig.to_dict()` (`e2e/radar_config.py:201-202`) — the exact radar timing/geometry this corpus was synthesized with. See "Radar config fields" below. |
 | `tier` | Difficulty-tier name the scenes were drawn from (`e2e.ml.scenes.DIFFICULTY_TIERS`). Informational only; every field needed to decode a frame is elsewhere in the manifest. |
 | `grid` | `dataclasses.asdict(LabelGrid)` (`e2e/ml/dataset.py:383-384`): `{"n_range": int, "n_azimuth": int, "max_range_m": float}` — the label map's geometry. See "Label array" below. |
 | `snr_db` | Synthesis SNR passed to the frame generator, or `null`. |
@@ -113,7 +115,7 @@ Written per-frame in `e2e/ml/dataset.py:235-244` (`generate_sample`) and extende
 
 * **`adc`**: `complex64 [n_rx, n_chirps, n_samples]` (`e2e/ml/dataset.py:64`).
   * `n_rx` = `config.n_rx` — the number of **physical** RX antennas, *not* the virtual
-    MIMO array size (`n_virtual = n_tx * n_rx`, `e2e/ml/radar_config.py:67-70`). For
+    MIMO array size (`n_virtual = n_tx * n_rx`, `e2e/radar_config.py:67-70`). For
     TDM configs the virtual array is only formed by de-interleaving chirps by which TX
     fired them — not done here; the raw axis order stays TX-interleaved.
   * `n_chirps` = `config.n_chirps` — total chirps in the frame (all TX rounds, for
@@ -122,7 +124,7 @@ Written per-frame in `e2e/ml/dataset.py:235-244` (`generate_sample`) and extende
   * Fast time (last axis) maps to **range**; chirp index (middle axis) maps to
     **Doppler/velocity** after the relevant FFTs — see "Radar config fields" for the
     bin-to-metre/bin-to-m/s formulas. This repo's own derivation (`adc_to_rd` /
-    `tdm_deinterleave`, `e2e/ml/transforms.py`, not reproduced here) is one specific,
+    `tdm_deinterleave`, `e2e/chain/transforms.py`, not reproduced here) is one specific,
     documented choice of how to turn this cube into a range-Doppler map; a recipient
     is free to process the raw cube differently.
 * **`labels`**: `float32 [3, n_range, n_azimuth]` — see "Label array" below.
@@ -205,7 +207,7 @@ ground-truth 4-tuple's `(centre_range_m, ..., surface_range_m)`, but analogous.
 ## Radar config fields — mapping bins to metres and m/s
 
 From `manifest.json["config"]` (a `RadarConfig.to_dict()`,
-`e2e/ml/radar_config.py:27-56`, all base/stored fields):
+`e2e/radar_config.py:27-56`, all base/stored fields):
 
 | Field | Units | Meaning |
 | --- | --- | --- |
@@ -216,12 +218,12 @@ From `manifest.json["config"]` (a `RadarConfig.to_dict()`,
 | `n_samples` | count | ADC samples per chirp. |
 | `fs_hz` | Hz | ADC sample rate. |
 | `chirp_period_s` | s | Chirp-to-chirp period (ramp + idle time). |
-| `mimo` | str | `"tdm"` / `"ddma"` / `"single"` (`e2e/ml/radar_config.py:31-44`). |
+| `mimo` | str | `"tdm"` / `"ddma"` / `"single"` (`e2e/radar_config.py:31-44`). |
 | `frame_rate_hz` | Hz | Frame repetition rate. |
 
 None of the derived quantities below are stored in the manifest (only base fields
-are) — recompute them with these exact formulas (`e2e/ml/radar_config.py:66-159`;
-`C = 299_792_458.0` m/s, `e2e/ml/radar_config.py:22`):
+are) — recompute them with these exact formulas (`e2e/radar_config.py:66-159`;
+`C = 299_792_458.0` m/s, `e2e/radar_config.py:22`):
 
 ```python
 n_chirps_per_tx     = n_chirps // n_tx if mimo == "tdm" else n_chirps
@@ -253,19 +255,19 @@ parameter, not derived from the radar config, `e2e/ml/labels.py:157-170`).
 
 ## Coordinate / angle conventions
 
-* World frame: right-handed, **+z up** (`e2e/ml/rd_synth.py:73-74`, `e2e/ml/labels.py:176-187`).
+* World frame: right-handed, **+z up** (`e2e/chain/rd_synth.py:73-74`, `e2e/ml/labels.py:176-187`).
 * The ULA (array) axis for a given radar pose is `u = normalize(z_up x boresight)`
-  (`e2e/ml/rd_synth.py:78-89`, formula at `:89`) — i.e. the horizontal axis
+  (`e2e/chain/rd_synth.py:78-89`, formula at `:89`) — i.e. the horizontal axis
   perpendicular to where the radar is pointing.
 * For a world point `p` and radar position `origin`, `sin_azimuth = ((p - origin) /
   |p - origin|) . u` — the direction cosine of the line of sight onto the array axis
   (`e2e/ml/labels.py:176-187`). This is the standard quantity a ULA of `n_virtual`
   elements actually resolves (uniformly, unlike an angle-degrees axis) — see
-  `n_virtual = n_tx * n_rx` (`e2e/ml/radar_config.py:67-70`) for the array's angular
+  `n_virtual = n_tx * n_rx` (`e2e/radar_config.py:67-70`) for the array's angular
   resolution, roughly `2 / n_virtual` in `sin_azimuth` units.
 * `range_m` is always straight-line Euclidean distance from `pose_position` to the
   point in question (target centre, target surface, or a clutter point) — not a
   ground-projected range.
 * Elevation is not modeled: a ULA measures only the azimuthal direction cosine, so an
   elevated point is indistinguishable from a coplanar one at the same `sin_azimuth`
-  (`e2e/ml/rd_synth.py:41`).
+  (`e2e/chain/rd_synth.py:41`).

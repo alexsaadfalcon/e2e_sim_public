@@ -1,7 +1,7 @@
 """
 Pre-ship dedup / train-vs-eval leak gate for `e2e.ml` radar-ML corpora.
 
-WHY THIS EXISTS: `e2e.ml.rt_scenes._stable_seed` used to hash only `(tier, frame_idx,
+WHY THIS EXISTS: `e2e.environment.rt_scenes._stable_seed` used to hash only `(tier, frame_idx,
 seed)` -- corpus identity never entered the draw, so two corpora sharing a `(tier,
 seed)` (a common accident: several corpora were generated with the project's default
 `seed=0`/reused seeds) drew IDENTICAL scenes at every `frame_idx`. An audit found the

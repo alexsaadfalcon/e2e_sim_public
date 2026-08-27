@@ -21,7 +21,7 @@ Both quantities are therefore emitted, and they mean different things:
 
 * the **objectness footprint** goes on the nearest visible SURFACE point along the line
   of sight (`e2e.environment.geometry.nearest_surface_point`, the same model
-  `e2e.ml.rt_signal_chain` places its coherent point scatterer on) -- that is where the
+  `e2e.environment.rt_signal_chain` places its coherent point scatterer on) -- that is where the
   energy is, so that is what a detector can learn and what matching is done on;
 * the **regression target stays the object CENTRE**, encoded as a residual from the
   footprint cell exactly as before. It stays the centre because a downstream tracker
