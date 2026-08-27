@@ -143,3 +143,72 @@ def test_effective_n_refine_signature_cannot_see_ground_truth():
 
     sig = inspect.signature(AdaOjaBlock.effective_n_refine)
     assert list(sig.parameters) == ["self", "sv_gap_norm"]
+
+
+def _run_collapse_episode(block, k, d, F=64, T=24, calm_drift=0.03, collapse_drift=0.35,
+                          collapse=range(8, 18), seed=0, device=None, gated=False):
+    """Drive `block` through a synthetic degeneracy episode and return per-frame error.
+
+    Models what the real munich collapse IS (root-caused 2026-08-11): the top-k
+    subspace's identity becomes ill-conditioned, so GROUND TRUTH ITSELF starts moving
+    fast (U_true frame-to-frame drift measured jumping 0.24 -> ~1.0). Here that is the
+    `collapse_drift` stretch. `gated=True` feeds the block a collapsed `sv_gap_norm`
+    during the episode, exactly as `Simulation.feed_forward` does, so the reactive
+    `gap_response` path decides its own effort per frame.
+    """
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def cn(*shp):
+        return (torch.randn(*shp, generator=g, device=device)
+                + 1j * torch.randn(*shp, generator=g, device=device))
+
+    Ut = rand_orth_complex(d, k, device=device)
+    block.oja.U = Ut.clone()
+    err, passes = [], []
+    for t in range(T):
+        degenerate = t in collapse
+        # healthy gap well above the 0.01 trigger; collapsed gap well below it
+        sv_gap_norm = 0.002 if degenerate else 0.05
+        n_ref = block.effective_n_refine(sv_gap_norm) if gated else block.n_refine
+        V = Ut @ cn(k, F)
+        for _ in range(n_ref):
+            A = block.gen_A_ada()
+            block.update(A @ V, A)
+        err.append(float(subspace_dist_frob(Ut, block.oja.U)))
+        passes.append(int(n_ref))
+        Ut = _orth(Ut + (collapse_drift if degenerate else calm_drift) * cn(d, k))
+    return err, passes
+
+
+def test_reactive_gate_holds_error_down_through_a_degeneracy_episode(torch_device):
+    """ERROR-LEVEL regression for the reactive refinement gate (audit s13).
+
+    The existing gap_response tests pin wiring, trigger conditions and call counts --
+    none of them would notice the gate still firing while tracking quality collapsed.
+    This one pins the trajectory: through a synthetic degeneracy episode the gated arm
+    must stay materially closer to the true subspace than the same block at fixed low
+    effort, and must spend its extra passes ONLY inside the episode.
+    """
+    d, k, m = 256, 4, 192
+    collapse = range(8, 18)
+    common = dict(d=d, k=k, device=torch_device, collapse=collapse)
+
+    baseline_block = AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate")
+    base_err, base_passes = _run_collapse_episode(baseline_block, **common, gated=False)
+
+    gated_block = AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate",
+                              gap_response="refine", gap_threshold=0.01, n_refine_hi=60)
+    gate_err, gate_passes = _run_collapse_episode(gated_block, **common, gated=True)
+
+    in_episode = list(collapse)
+    base_mean = sum(base_err[i] for i in in_episode) / len(in_episode)
+    gate_mean = sum(gate_err[i] for i in in_episode) / len(in_episode)
+    # the whole point of the gate: error through the collapse, not effort spent
+    assert gate_mean < 0.5 * base_mean, (
+        f"gated arm did not hold error down through the episode "
+        f"(gated {gate_mean:.3f} vs fixed-low-effort {base_mean:.3f})")
+    # and it must recover after the episode, not carry the damage forward
+    assert gate_err[-1] < base_err[-1]
+    # effort is spent only where the diagnostic says it is needed
+    assert all(gate_passes[i] == 60 for i in in_episode)
+    assert all(gate_passes[t] == 1 for t in range(len(gate_passes)) if t not in in_episode)
