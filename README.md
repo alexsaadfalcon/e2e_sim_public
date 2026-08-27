@@ -46,6 +46,9 @@ pip install -e ".[dev]"           # + the test suite
 The pinned `requirements.txt` / `requirements-dev.txt` files are still provided for
 reproducible environments if you prefer `pip install -r`.
 
+Prefer a guided, copy-pasteable path over reading prose? [`docs/FIRST_SCENARIO.md`](docs/FIRST_SCENARIO.md)
+walks clone -> install -> dry-run scenario -> pipeline run -> web UI -> a block swap, entirely on CPU.
+
 ### Usage
 
 #### Quickstart (no GPU required)
@@ -377,6 +380,8 @@ See also [a quiet single-target D0 scene](docs/media/scene_D0.gif), a
 
 ## Cookbook
 
+Unfamiliar term (frame, block, `sv_gap_norm`, answerability tier, ...)? See [`docs/GLOSSARY.md`](docs/GLOSSARY.md).
+
 Where to look when you want to...
 
 | Goal | Start here |
@@ -400,4 +405,6 @@ pytest
 Tests that need hardware or a human are skipped by default and opt-in via env vars:
 `RUN_SIONNA=1` (real Sionna RT generation), `RUN_SLOW=1` (full RF chain / sweeps),
 `RUN_GUI=1` (live server). CI runs the default suite on every push/PR
-(`.github/workflows/tests.yml`). See `tests/README.md` for details.
+(`.github/workflows/tests.yml`). See `tests/README.md` for details, and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow (device
+conventions, the block/frame API contract, PR etiquette).

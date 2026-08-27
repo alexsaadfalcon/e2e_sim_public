@@ -803,6 +803,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("=" * 70)
 
     out_path = args.out or default_out_path(scenario.name)
+    # A dry run synthesizes frame VALUES analytically. Letting it land on the default
+    # path silently replaces a real ray-traced corpus with synthetic data of the
+    # identical shape -- undetectable downstream, and unrecoverable: these .pkl files
+    # are gitignored, so the only way back is another full RT run. (Measured
+    # 2026-08-27: the onboarding walkthrough's own first command overwrote a 4 GB
+    # ray-traced munich_radar.pkl.) Real runs may still overwrite -- regenerating RT
+    # output with RT output is the intended workflow -- but a dry run must say so.
+    if args.dry_run and args.out is None and os.path.exists(out_path):
+        raise SystemExit(
+            f"refusing to overwrite {out_path} with DRY-RUN (synthetic) frames.\n"
+            f"That file may be real ray-traced output; it is gitignored, so this is "
+            f"not undoable.\nPass --out <path> to write the dry run elsewhere "
+            f"(e.g. --out scratch/{scenario.name}_dryrun.pkl), or delete the file "
+            f"first if you meant to replace it.")
     payload = runner.run(out_path=out_path)
 
     print("-" * 70)

@@ -884,3 +884,36 @@ def test_real_sionna_generation(tmp_path):
     # if Sionna ever emitted a degenerate zero-length-LOS contribution (1/d
     # singularity), NaN/Inf would corrupt the whole frame silently.
     assert np.isfinite(arr).all()
+
+
+def test_dry_run_refuses_to_clobber_the_default_scenario_pkl(tmp_path, monkeypatch):
+    """A dry run must never silently replace real ray-traced frames with synthetic ones.
+
+    Regression for 2026-08-27: the onboarding walkthrough's own first command
+    (`--scenario munich_radar --dry-run`, no `--out`) overwrote a 4 GB ray-traced
+    munich_radar.pkl with analytically synthesized frames of the IDENTICAL shape --
+    undetectable downstream, and unrecoverable because these .pkl files are gitignored.
+    The guard fires only for a dry run onto the DEFAULT path: passing --out is always
+    allowed, and a real (RT) run may still overwrite, which is the intended workflow.
+    """
+    import e2e.environment.scenario_runner as sr
+
+    sims_dir = tmp_path / "sionna_sims"
+    sims_dir.mkdir()
+    existing = sims_dir / "munich_radar.pkl"
+    existing.write_bytes(b"pretend this is 4 GB of ray-traced frames")
+    monkeypatch.setattr(sr, "default_out_path",
+                        lambda name: str(sims_dir / f"{name}.pkl"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        sr.main(["--scenario", "munich_radar", "--dry-run", "--frames", "1"])
+    assert "refusing to overwrite" in str(excinfo.value)
+    # the existing file is untouched
+    assert existing.read_bytes() == b"pretend this is 4 GB of ray-traced frames"
+
+    # ...and an explicit --out writes normally, without touching the default path
+    out = tmp_path / "elsewhere.pkl"
+    assert sr.main(["--scenario", "munich_radar", "--dry-run", "--frames", "1",
+                    "--out", str(out)]) == 0
+    assert out.is_file()
+    assert existing.read_bytes() == b"pretend this is 4 GB of ray-traced frames"
