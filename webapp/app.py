@@ -49,6 +49,7 @@ from webapp.pipeline_runner import (
     figures_from_outputs,
     placeholder_figure,
     run_pipeline,
+    scenario_topdown_figure,
 )
 from webapp.scenario_editor import map_figure, scenario_from_json_safe, summarize
 
@@ -185,6 +186,7 @@ def _update_block_state(enabled_values, param_values, block_state):
     Input("run-button", "n_clicks"),
     State("block-state-store", "data"),
     State("run-nsteps", "value"),
+    State("scenario-json", "value"),
     prevent_initial_call=True,
     # dash>=2.9 supports `running` on plain (non-background) callbacks: the
     # renderer flips these properties synchronously around the request, so the
@@ -194,7 +196,7 @@ def _update_block_state(enabled_values, param_values, block_state):
     # run takes, instead of both being dead decoration.
     running=[(Output("run-button", "disabled"), True, False)],
 )
-def _run_pipeline(n_clicks, block_state, n_steps):
+def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
     """Run the pipeline (lazy heavy imports inside) and stash result figures."""
     block_state = block_state or default_block_state()
     # Unique per-invocation value so "run-sink" always changes -- dcc.Loading only
@@ -211,6 +213,21 @@ def _run_pipeline(n_clicks, block_state, n_steps):
                                     style={"color": "#eb3b5a"}), no_update, sink
 
     figs = figures_from_outputs(outputs)
+    # Geometry FIRST, when the Scenario tab holds a parseable scene: a stripe in
+    # sin(azimuth) is only interpretable next to the layout that produced it (see
+    # pipeline_runner.scenario_topdown_figure). Best-effort by design -- the editor
+    # may hold half-typed JSON, and a results tab must never be lost to a preview
+    # panel, so an unparseable or unrenderable scenario just omits the panel.
+    scene_fig = None
+    if scenario_json:
+        sc, _err = scenario_from_json_safe(scenario_json)
+        if sc is not None:
+            try:
+                scene_fig = scenario_topdown_figure(sc)
+            except Exception:
+                scene_fig = None
+    if scene_fig is not None:
+        figs = {"scene_topdown": scene_fig, **figs}
     # store as plain dicts (Plotly figures are JSON-serializable via to_dict)
     data = {k: f.to_dict() for k, f in figs.items()}
     note = ""
