@@ -227,7 +227,7 @@ def test_crop_range_m_floor_applies_to_a_single_near_target():
 
 # --------------------------------------------------------------------------------
 # plot_frame_detections -- orientation regression (consistent with
-# tests/test_ml_render.py::test_draw_radar_view_imshow_orientation_matches_extent)
+# tests/test_render.py::test_draw_radar_view_imshow_orientation_matches_extent)
 # --------------------------------------------------------------------------------
 def test_plot_frame_detections_imshow_orientation_matches_extent():
     import matplotlib.pyplot as plt

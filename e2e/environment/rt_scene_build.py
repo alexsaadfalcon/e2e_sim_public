@@ -166,7 +166,7 @@ DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0
 
 # --------------------------------------------------------------------------------
 # RENDER-ONLY object colours, by category (review-render legibility, e.g.
-# e2e.ml.render_scene's RT camera path). `RadioMaterial`/`ITURadioMaterial`'s `color`
+# e2e.render_scene's RT camera path). `RadioMaterial`/`ITURadioMaterial`'s `color`
 # kwarg is documented by Sionna as "RGB color ... as displayed in the previewer and
 # renderer" (sionna/rt/radio_materials/radio_material.py) and is passed to Mitsuba as
 # its own `props["color"]` entry, entirely separate from `relative_permittivity` /
@@ -177,7 +177,7 @@ DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0
 # Picked for (a) a distinct hue AND a distinct LUMINANCE per class -- a talk deck is
 # shared over video (Teams), where luma survives compression far better than fine hue
 # differences -- against the flat grey ground and the amber radar marker
-# (`e2e.ml.render_scene._RADAR_MARKER_COLOR`), and (b) keeping "sphere" (the D0
+# (`e2e.render_scene._RADAR_MARKER_COLOR`), and (b) keeping "sphere" (the D0
 # stand-in target -- still tagged `object_class="vehicle"` for RCS/dataset purposes,
 # see `e2e.environment.rt_scenes.build_rt_tier_scenario`) visually distinct from a real vehicle
 # mesh even though they share an `object_class`, since a reviewer needs to tell them

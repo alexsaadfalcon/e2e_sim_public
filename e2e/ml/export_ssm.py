@@ -82,7 +82,7 @@ from e2e.environment.scatterers import frame_scatterers, radar_pose  # noqa: E40
 from e2e.ml import storage  # noqa: E402
 from e2e.ml.labels import LabelGrid, target_geometry, targets_in_grid  # noqa: E402
 from e2e.radar_config import RadarConfig  # noqa: E402
-from e2e.ml.render_scene import _draw_birdseye, _draw_radar_view, range_azimuth_map  # noqa: E402
+from e2e.render_scene import _draw_birdseye, _draw_radar_view, range_azimuth_map  # noqa: E402
 from e2e.environment.rt_scenes import (VEHICLE_FOOTPRINT_M, build_rt_tier_scenario,  # noqa: E402
                                        vehicle_asset_class)
 from e2e.scenario import ObjectKind  # noqa: E402
@@ -242,7 +242,7 @@ def render_sample(cfg: RadarConfig, grid: LabelGrid, scats, pose, adc: torch.Ten
     as the GIF path does) + range-azimuth power map with GT overlay (right, reusing
     `render_scene._draw_radar_view` -- see that function for the `[n_angle, n_range]`
     transpose the imshow extent needs; mirrored here by reuse, not re-derivation, so
-    the recurring transpose bug (`tests/test_ml_render.py`) cannot recur here)."""
+    the recurring transpose bug (`tests/test_render.py`) cannot recur here)."""
     import matplotlib.pyplot as plt
 
     ra_db, sin_az_axis = range_azimuth_map(cfg, adc)

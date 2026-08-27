@@ -20,7 +20,7 @@ figure can never disagree with a reported AP/AR number:
   `RadarFrameDataset._load_raw` uses internally, not `baseline.score_manifest`'s stricter
   "must already be int16-quantized" assumption (an analytic-fallback, CODEC_RAW corpus
   has no `adc_code_re` key at all).
-* `e2e.ml.render_scene.range_azimuth_map` supplies the background range-azimuth power
+* `e2e.render_scene.range_azimuth_map` supplies the background range-azimuth power
   (dB) image (angle-FFT then non-coherent Doppler collapse -- the standard recipe this
   package already has one copy of).
 * `e2e.viz.imshow_ra` OWNS the range-azimuth orientation/transpose convention (see its
@@ -71,7 +71,7 @@ from e2e.ml.labels import LabelGrid, decode_detections  # noqa: E402
 from e2e.ml.metrics import Detection, Target, evaluate_frame  # noqa: E402
 from e2e.viz import imshow_ra  # noqa: E402
 
-# GT marker style: matches e2e.ml.render_scene's radar-view panel convention (square
+# GT marker style: matches e2e.render_scene's radar-view panel convention (square
 # vehicle / circle pedestrian) so a reader who has seen that GIF recognizes the markers.
 _GT_STYLE = {
     "vehicle": dict(marker="s", markeredgecolor="#2d98da"),
@@ -211,7 +211,7 @@ def frame_background_ra(manifest_path, split: str, frame_idx: int, *, n_angle_ff
                         azimuth_window: Optional[str] = "hann"):
     """`(ra_db [n_angle, n_range], sin_az_axis, range_axis_m, cfg)` for ONE frame.
 
-    Reuses `e2e.ml.render_scene.range_azimuth_map` (angle-FFT then non-coherent Doppler
+    Reuses `e2e.render_scene.range_azimuth_map` (angle-FFT then non-coherent Doppler
     collapse -- see that function's docstring) on the frame's own raw ADC, so the plotted
     background is the actual synthesized signal for this exact frame, not a re-derivation
     of the recipe.
@@ -234,7 +234,7 @@ def frame_background_ra(manifest_path, split: str, frame_idx: int, *, n_angle_ff
     """
     from e2e.ml.dataset import RadarFrameDataset
     from e2e.radar_config import RadarConfig
-    from e2e.ml.render_scene import range_azimuth_map
+    from e2e.render_scene import range_azimuth_map
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())

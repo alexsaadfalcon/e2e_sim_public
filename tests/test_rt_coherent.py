@@ -489,7 +489,7 @@ def test_fix_restores_aperture_coherence_on_a_real_traced_target():
     residual at the target's own range-Doppler cell collapses from ~1.0 rad (speckle) to
     ~0.1 rad (a plane wave), and the target rises well above its own map background."""
     from e2e.radar_config import PRESETS
-    from e2e.ml.render_scene import _resolve_frames
+    from e2e.render_scene import _resolve_frames
     from e2e.environment.rt_scene_build import build_rt_scene
     from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
 

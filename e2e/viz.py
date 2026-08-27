@@ -1,8 +1,8 @@
 """Shared plotting helpers for the `e2e/main/main_*.py` example scripts (and
-`e2e.ml.render_scene`).
+`e2e.render_scene`).
 
 Two small pieces of range-azimuth (RA) map plotting logic were independently
-duplicated across five example scripts plus `e2e.ml.render_scene`:
+duplicated across five example scripts plus `e2e.render_scene`:
 
 1. peak-normalized power -> dB, with a DRIFTING epsilon constant at every call site
    (`1e-12`, `1e-30`, `torch.finfo(torch.float32).tiny`, or none at all -- see
@@ -11,7 +11,7 @@ duplicated across five example scripts plus `e2e.ml.render_scene`:
    naturally `[n_angle, n_range]` but `imshow` puts rows on y and columns on x, and
    this project's convention is azimuth-on-x/range-on-y. This exact transpose bug has
    been reintroduced independently at least three times in this project's history;
-   `e2e.ml.render_scene._draw_radar_view` was the one copy with a regression test
+   `e2e.render_scene._draw_radar_view` was the one copy with a regression test
    (`tests/test_ml_render.py::test_draw_radar_view_imshow_orientation_matches_extent`)
    guarding it, and is now a thin wrapper around `imshow_ra` below rather than a
    fourth independent copy.
@@ -56,7 +56,7 @@ def to_db(power, floor_db: Optional[float] = -40.0, eps: float = 1e-12):
     `main_comms_head.py`'s radar map / `main_tx_nonideality.py`'s PSD plot (denominator
     only -- `1e-12` in its log argument, so actually two DIFFERENT epsilons in one
     expression); `torch.finfo(torch.float32).tiny` (~1.18e-38) in
-    `e2e.ml.render_scene.range_azimuth_map`; and no epsilon at all in
+    `e2e.render_scene.range_azimuth_map`; and no epsilon at all in
     `main_sionna_blocks.py` (a bare `torch.log10(torch.abs(...))`, i.e. `log10(0) ==
     -inf` on any exact-zero bin). This function standardizes on `eps=1e-12` for BOTH
     the peak-clamp (guards a `power` that is identically zero) and the ratio-clamp
@@ -100,7 +100,7 @@ def imshow_ra(ax, ra, sin_az_axis=None, range_axis_m=None, **imshow_kw):
 
     `ra` is `[n_angle, n_range]` (angle-FFT rows, range columns -- the natural shape
     after an angle FFT over a range-compressed cube; see e.g.
-    `e2e.ml.render_scene.range_azimuth_map`'s docstring), but `imshow` indexes its
+    `e2e.render_scene.range_azimuth_map`'s docstring), but `imshow` indexes its
     array as `[row=y, col=x]`; with azimuth on x and range on y (the convention every
     call site in this project uses), the array must be TRANSPOSED to `[n_range,
     n_angle]` first, or the image content is scrambled relative to its own axes. This

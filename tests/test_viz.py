@@ -1,5 +1,5 @@
 """Tests for `e2e.viz` -- the shared RA-map dB-normalize + imshow-orientation helpers
-consolidated out of `e2e.ml.render_scene` and five `e2e/main/main_*.py` example
+consolidated out of `e2e.render_scene` and five `e2e/main/main_*.py` example
 scripts (see `e2e.viz`'s module docstring)."""
 import os
 
@@ -98,7 +98,7 @@ def test_to_db_works_on_cuda_tensor_if_available():
 
 # --------------------------------------------------------------------------------
 # imshow_ra -- orientation contract (hot-cell probe, mirrors
-# tests/test_ml_render.py::test_draw_radar_view_imshow_orientation_matches_extent)
+# tests/test_render.py::test_draw_radar_view_imshow_orientation_matches_extent)
 # --------------------------------------------------------------------------------
 def test_imshow_ra_orientation_matches_extent():
     """`ra` is `[n_angle, n_range]`, but with azimuth on x / range on y the array

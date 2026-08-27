@@ -1,4 +1,4 @@
-"""Tests for `e2e.ml.render_scene` (bird's-eye + radar-view scene GIFs).
+"""Tests for `e2e.render_scene` (bird's-eye + radar-view scene GIFs).
 
 Fast/tiny by construction: a shrunk `RadarConfig` (few chirps/samples), a couple of
 animation frames, low DPI. `e2e.ml.scenes`/`e2e.ml.labels` are sibling shards -- if
@@ -18,7 +18,7 @@ pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scenes not pre
 pytest.importorskip("e2e.ml.labels", reason="sibling shard e2e.ml.labels not present")
 PIL_Image = pytest.importorskip("PIL.Image", reason="Pillow required to read/write GIFs")
 
-from e2e.ml import render_scene
+from e2e import render_scene
 from e2e.radar_config import TI_IWR1443
 from e2e.ml.scenes import sample_scene
 
@@ -358,7 +358,7 @@ def test_draw_radar_view_imshow_orientation_matches_extent(tiny_cfg):
 # --------------------------------------------------------------------------------
 def test_cli_help_exits_zero():
     proc = subprocess.run(
-        [sys.executable, "-m", "e2e.ml.render_scene", "--help"],
+        [sys.executable, "-m", "e2e.render_scene", "--help"],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
@@ -368,7 +368,7 @@ def test_cli_help_exits_zero():
 def test_cli_end_to_end_writes_gif(tmp_path):
     out_path = tmp_path / "cli_scene.gif"
     proc = subprocess.run(
-        [sys.executable, "-m", "e2e.ml.render_scene",
+        [sys.executable, "-m", "e2e.render_scene",
          "--tier", "D0", "--config", "ti_iwr1443", "--out", str(out_path),
          "--frames", "3", "--fps", "4", "--dpi", "50", "--seed", "1"],
         capture_output=True, text=True,
@@ -380,7 +380,7 @@ def test_cli_end_to_end_writes_gif(tmp_path):
 
 def test_cli_unknown_config_exits_nonzero(tmp_path):
     proc = subprocess.run(
-        [sys.executable, "-m", "e2e.ml.render_scene",
+        [sys.executable, "-m", "e2e.render_scene",
          "--tier", "D0", "--config", "not_a_real_config", "--out", str(tmp_path / "x.gif")],
         capture_output=True, text=True,
     )
@@ -389,7 +389,7 @@ def test_cli_unknown_config_exits_nonzero(tmp_path):
 
 def test_cli_unknown_tier_exits_nonzero(tmp_path):
     proc = subprocess.run(
-        [sys.executable, "-m", "e2e.ml.render_scene",
+        [sys.executable, "-m", "e2e.render_scene",
          "--tier", "not_a_real_tier", "--config", "ti_iwr1443", "--out", str(tmp_path / "x.gif")],
         capture_output=True, text=True,
     )
@@ -561,7 +561,7 @@ def test_build_rt_scene_for_render_flat_scene_skips_material_patch(monkeypatch, 
     """`base_scene="flat"`/`"free"` (D0-D3) must be a pure no-op: no
     `patched_builtin_loader` import/call, `build_rt_scene` called with the plain
     (scenario, cfg, base_scene=..., frame_idx=0) signature."""
-    from e2e.ml import render_scene
+    from e2e import render_scene
 
     calls = []
     monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene",
@@ -583,7 +583,7 @@ def test_build_rt_scene_for_render_flat_scene_skips_material_patch(monkeypatch, 
 
 
 def test_build_rt_scene_for_render_free_scene_also_skips_material_patch(monkeypatch, tiny_cfg):
-    from e2e.ml import render_scene
+    from e2e import render_scene
 
     monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
     monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader",
@@ -599,7 +599,7 @@ def test_build_rt_scene_for_render_city_scene_wraps_in_patched_loader(monkeypatc
     at the config's centre frequency, with the requested policy -- this is the actual
     fix: the scratch probe showed munich's out-of-band ITU materials (marble/brick)
     hard-raise on `scene.frequency` assignment unless the loader is patched first."""
-    from e2e.ml import render_scene
+    from e2e import render_scene
 
     events = []
 
@@ -628,7 +628,7 @@ def test_build_rt_scene_for_render_city_scene_wraps_in_patched_loader(monkeypatc
 
 
 def test_build_rt_scene_for_render_city_scene_passes_through_policy_overrides(monkeypatch, tiny_cfg):
-    from e2e.ml import render_scene
+    from e2e import render_scene
 
     seen_policy = {}
 
