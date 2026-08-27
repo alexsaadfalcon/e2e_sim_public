@@ -272,6 +272,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "DMC-12's L:W:H (4.267:1.79:1.14) only as z:x:y (z/x=2.18~=L/W=2.38, "
                    "x/y=1.56~=W/H=1.58) -- so length=z, width=x, height=y. scale so "
                    "length = 4.267 m (real DMC-12 length).",
+        license="freestl.com download; usage CONFIRMED CLEARED by the project owner 2026-08-27 (F56). Terms are not published per-file upstream; the clearance is the owner's and is recorded here so consumers and licence audits read a settled status.",
     ),
     "dl_audi_r8": DownloadedAssetSpec(
         name="dl_audi_r8", vehicle_class="car",
@@ -285,6 +286,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "Remaining bbox (x=2.04, y=1.24, z=4.42) matches a real Audi R8's "
                    "W=1.94/H=1.24/L=4.42 almost exactly as x:y:z -> length=z, width=x, "
                    "height=y, raw units already ~metres (scale=1.0).",
+        license="freestl.com download; usage CONFIRMED CLEARED by the project owner 2026-08-27 (F56). Terms are not published per-file upstream; the clearance is the owner's and is recorded here so consumers and licence audits read a settled status.",
     ),
     "dl_truck_daf": DownloadedAssetSpec(
         name="dl_truck_daf", vehicle_class="truck",
@@ -299,6 +301,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "diameter (~1.31 raw units) against a real truck tire (~1.05 m) -> "
                    "scale ~0.80; applied length 15.7 m / height 3.9 m / width 2.9 m are "
                    "all independently plausible for a tractor-trailer.",
+        license="freestl.com download; usage CONFIRMED CLEARED by the project owner 2026-08-27 (F56). Terms are not published per-file upstream; the clearance is the owner's and is recorded here so consumers and licence audits read a settled status.",
     ),
     "dl_trolley": DownloadedAssetSpec(
         name="dl_trolley", vehicle_class="trolley",
@@ -312,6 +315,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "already in this package's (length=x, width=y, height=z) convention "
                    "-- identity permutation. Scale so length = 12.0 m (mid-range of a "
                    "10-14 m streetcar).",
+        license="freestl.com download; usage CONFIRMED CLEARED by the project owner 2026-08-27 (F56). Terms are not published per-file upstream; the clearance is the owner's and is recorded here so consumers and licence audits read a settled status.",
     ),
     "dl_school_bus": DownloadedAssetSpec(
         name="dl_school_bus", vehicle_class="bus",
@@ -325,6 +329,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "height). Already length=x/width=y/height=z -- identity "
                    "permutation. Scale so length = 8.0 m (mid-range of a 7-9 m "
                    "Type B school bus).",
+        license="freestl.com download; usage CONFIRMED CLEARED by the project owner 2026-08-27 (F56). Terms are not published per-file upstream; the clearance is the owner's and is recorded here so consumers and licence audits read a settled status.",
     ),
 
     # ----------------------------------------------------------------------------

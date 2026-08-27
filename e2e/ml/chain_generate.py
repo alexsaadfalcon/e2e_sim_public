@@ -434,10 +434,13 @@ def build_arg_parser():
                    help="deprecated no-op (the TX tributary is now off by default; "
                         "kept so recorded pre-2026-08-24 command lines still run)")
     p.add_argument("--no-local-assets", action="store_true",
-                   help="place only Sionna-bundled meshes (use_local_assets=False). "
-                        "REQUIRED for corpora that may back public figures: the local "
-                        "mesh pool's licences are unestablished (F21/F51), and frames "
-                        "now record their asset provenance either way")
+                   help="exclude the USER-SUPPLIED local mesh pool (use_local_assets="
+                        "False), whose licences are unestablished (F21/F51). It does "
+                        "NOT exclude the registered downloaded pool (Kenney CC0, the "
+                        "cleared freestl meshes, dl_tram_google CC-BY): those are part "
+                        "of every tier's vehicle sampler regardless of this flag. Frames "
+                        "record their asset provenance either way, so a figure's licence "
+                        "status is auditable per scene (F56, 2026-08-27)")
     p.add_argument("--ground-scattering", type=float, default=None,
                    help="ground-plane scattering coefficient for the flat base scene "
                         "(default: rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT). "
