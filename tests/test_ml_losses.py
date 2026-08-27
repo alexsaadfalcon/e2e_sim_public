@@ -185,8 +185,8 @@ def test_detection_loss_gradients_flow_to_both_channels(torch_device):
 # integration with e2e.ml.labels.encode_detection_labels
 # --------------------------------------------------------------------------------
 def test_detection_loss_with_encoded_labels_target(torch_device):
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.labels import LabelGrid, encode_detection_labels
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     grid = LabelGrid(n_range=20, n_azimuth=20, max_range_m=20.0)
     pose = RadarPose()

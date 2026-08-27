@@ -26,12 +26,12 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("e2e.ml.labels", reason="sibling shard e2e.ml.labels not present")
 pytest.importorskip("e2e.ml.rt_scenes", reason="sibling shard e2e.ml.rt_scenes not present")
 
+from e2e.environment.scatterers import frame_scatterers, radar_pose
 from e2e.ml import export_ssm, storage
 from e2e.ml.dataset import write_manifest
 from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
 from e2e.ml.radar_config import RadarConfig
 from e2e.ml.rt_scenes import build_rt_tier_scenario
-from e2e.ml.scatterers import frame_scatterers, radar_pose
 
 TIER = "D0"          # single deterministic sphere-as-"vehicle" scatterer, no Sionna needed
 SEED = 9000

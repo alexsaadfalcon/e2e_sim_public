@@ -1,8 +1,8 @@
 """
 Tests for `e2e.ml.labels` (ground-truth detection-label encode/decode).
 
-Uses the real `Scatterer`/`RadarPose` from `e2e.ml.scatterers` (not stubs, they're a
-sibling shard's dependency-free module) with the default pose: position at the origin,
+Uses the real `Scatterer`/`RadarPose` from `e2e.environment.scatterers` (not stubs,
+they're a dependency-free core module) with the default pose: position at the origin,
 boresight +x, so `array_axis` is +y and `sin_azimuth == y / range` for an in-plane (z=0)
 target -- see `e2e.ml.rd_synth.array_axis`'s docstring for the convention.
 """
@@ -13,8 +13,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from e2e.environment.scatterers import RadarPose, Scatterer
 from e2e.ml.labels import LabelGrid, decode_detections, encode_detection_labels, targets_in_grid
-from e2e.ml.scatterers import RadarPose, Scatterer
 
 
 def _target(r, sin_az, object_class="vehicle"):

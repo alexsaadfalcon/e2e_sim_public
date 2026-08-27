@@ -1,4 +1,4 @@
-"""Tests for e2e.ml.scatterers (Scenario -> per-frame point-scatterer bridge).
+"""Tests for e2e.environment.scatterers (Scenario -> per-frame point-scatterer bridge).
 
 Pure numpy/stdlib -- fast, no Sionna/torch.
 """
@@ -6,8 +6,7 @@ Pure numpy/stdlib -- fast, no Sionna/torch.
 import numpy as np
 import pytest
 
-from e2e.scenario import Motion, Node, NodeRole, Scenario, SceneObject
-from e2e.ml.scatterers import (
+from e2e.environment.scatterers import (
     DEFAULT_RCS_DBSM,
     RadarPose,
     Scatterer,
@@ -16,6 +15,7 @@ from e2e.ml.scatterers import (
     radar_pose,
     vehicle,
 )
+from e2e.scenario import Motion, Node, NodeRole, Scenario, SceneObject
 
 
 def _radar_scenario(num_frames=5, look_at=None):

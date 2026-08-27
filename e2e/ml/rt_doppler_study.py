@@ -241,7 +241,7 @@ def _demo_scenario(n_frames: int, cfg=None, target: str = "sphere"):
     gives a deterministic specular return and is the right target for measuring the
     Doppler model itself (`--no-diffuse`).
     """
-    from e2e.ml.scatterers import vehicle
+    from e2e.environment.scatterers import vehicle
     from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 
     dt = 1.0 / float(cfg.frame_rate_hz) if cfg is not None else 0.1

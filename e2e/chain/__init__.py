@@ -13,16 +13,25 @@ cannot be dragged in by a caller that wanted another. That isolation is structur
 rather than a rule reviewers have to keep enforcing: a module-scope `import sionna.rt`
 here can only ever cost the module that writes it.
 
-The dependency rule runs one way AT MODULE SCOPE: modules here may import from
-`e2e.blocks`, `e2e.ml`, and `e2e.frames` freely; nothing in those packages may import
-`e2e.chain` at module scope.
+The dependency rule runs one way AT MODULE SCOPE, and it inverts the historical
+direction: core (this package, `e2e.blocks`, `e2e.simulation`, `e2e.environment`) never
+imports `e2e.ml` at module scope; `e2e.ml` may import core freely. That is the point of
+the C1 move (`notes/C1_MOVE_PLAN.md`) -- the signal-model modules `e2e.ml` used to own
+(geometry/scatterers, and eventually rd_synth/transforms/impairments/link_budget/
+radar_config) are core, not ML-specific, and belong on this side of the line.
 
-There is one deliberate exception, and it is worth stating rather than pretending the
-rule is absolute. `e2e/ml/rt_gen.py` imports `e2e.chain.dechirp` *inside functions*,
-because the beat-mapping and MIMO-combining code now lives here and rt_gen delegates to
-it -- having two copies of conventions that were validated against re-traced ground
-truth would be far worse than one lazy import. Function-local keeps it off the import
-graph, so no cycle exists at load time.
+As of batch 1, `geometry`/`scatterers` have moved to `e2e.environment`; this package's
+own `receive.py` still imports `e2e.ml.{impairments,transforms,radar_config}` at module
+scope pending batch 2 (their move to `e2e.chain`/`e2e.radar_config`) -- a known,
+temporary hole in the rule during the migration, not a design choice.
+
+There is one deliberate exception that will remain even once the migration is done, and
+it is worth stating rather than pretending the rule is absolute. `e2e/ml/rt_gen.py`
+imports `e2e.chain.dechirp` *inside functions*, because the beat-mapping and
+MIMO-combining code now lives here and rt_gen delegates to it -- having two copies of
+conventions that were validated against re-traced ground truth would be far worse than
+one lazy import. Function-local keeps it off the import graph, so no cycle exists at
+load time.
 
 The hard part of the rule stands: `e2e/ml/dataset.py` stays a pure producer of data.
 The dataset blocks depend on it, never the reverse. That is the one genuine cycle this

@@ -64,7 +64,7 @@ def _scene(cfg, target_pos, velocity_mps, *, scaling=TARGET_SCALING, n_frames=2)
     range expectation corrects for explicitly (see `_expected_bins`). Shrinking it
     further instead would starve the Monte-Carlo diffuse sampling of ray hits.
     """
-    from e2e.ml.scatterers import vehicle
+    from e2e.environment.scatterers import vehicle
 
     return Scenario(
         name="rt_gen_test", base_scene="free", num_frames=n_frames,

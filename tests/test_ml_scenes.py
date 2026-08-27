@@ -240,7 +240,7 @@ def test_presets_smoke():
 # --------------------------------------------------------------------------------
 def _rt_solver_speeds(scenario, dt, classes=("vehicle", "pedestrian")):
     """|v| in m/s exactly as `build_rt_scene` would hand each object to Sionna."""
-    from e2e.ml.scatterers import frame_scatterers
+    from e2e.environment.scatterers import frame_scatterers
 
     scats = frame_scatterers(scenario, 0, dt=dt)
     return [float(np.linalg.norm(s.velocity)) for s in scats if s.object_class in classes]

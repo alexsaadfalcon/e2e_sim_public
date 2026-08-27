@@ -1,5 +1,6 @@
 """
-Tests for `e2e.ml.geometry` -- object extents, yaw, and the monostatic surface point.
+Tests for `e2e.environment.geometry` -- object extents, yaw, and the monostatic surface
+point.
 
 The surface point is the single geometric fact the 2026-08-17 label convention rests on:
 a radar return comes from an object's nearest face, not from its centre. These tests pin
@@ -15,9 +16,10 @@ import math
 import numpy as np
 import pytest
 
-from e2e.ml.geometry import (BOX_EXTENT_M, PEDESTRIAN_EXTENT_M, SIONNA_CAR_EXTENT_M,
-                             SPHERE_EXTENT_M, nearest_surface_point, object_extent_m,
-                             object_yaw_rad, surface_range_offset_m)
+from e2e.environment.geometry import (BOX_EXTENT_M, PEDESTRIAN_EXTENT_M,
+                                      SIONNA_CAR_EXTENT_M, SPHERE_EXTENT_M,
+                                      nearest_surface_point, object_extent_m,
+                                      object_yaw_rad, surface_range_offset_m)
 from e2e.scenario import Motion, ObjectKind, SceneObject
 
 
@@ -162,7 +164,7 @@ def test_downloaded_asset_extent_matches_what_would_be_loaded():
     this machine, and to the Sionna car -- which is what `_object_mesh` would actually
     load -- when it does not. Either way the label describes the geometry in the scene."""
     from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
-    from e2e.ml.geometry import _processed_asset_extent_m
+    from e2e.environment.geometry import _processed_asset_extent_m
 
     name = "kn_sedan"
     assert name in DOWNLOADED_ASSET_SPECS
@@ -192,7 +194,7 @@ def test_explicit_extent_attribute_wins():
 # frame_scatterers wiring
 # --------------------------------------------------------------------------------
 def test_frame_scatterers_carries_extent_and_heading():
-    from e2e.ml.scatterers import frame_scatterers
+    from e2e.environment.scatterers import frame_scatterers
     from e2e.scenario import Node, NodeRole, Scenario
 
     scenario = Scenario(
@@ -211,7 +213,7 @@ def test_analytic_scene_objects_stay_point_targets():
     """`e2e.ml.scenes`' analytic tiers are POINT targets -- `rd_synth` radiates from the
     object's `position`, so giving them an extent would move the label OFF the energy,
     which is the exact failure this convention exists to remove."""
-    from e2e.ml.scatterers import SYNTHETIC_BASE_SCENE, frame_scatterers
+    from e2e.environment.scatterers import SYNTHETIC_BASE_SCENE, frame_scatterers
     from e2e.scenario import Node, NodeRole, Scenario
 
     scenario = Scenario(
@@ -246,9 +248,9 @@ def test_yaw_defers_to_the_heading_the_scene_builder_places():
 def test_parked_object_labels_use_its_placed_heading():
     """End to end through `frame_scatterers`: a parked vehicle's `yaw_rad` is the scene
     builder's heading, so the surface point is computed off the axis it really presents."""
-    from e2e.ml.geometry import scene_seed_for
+    from e2e.environment.geometry import scene_seed_for
     from e2e.ml.rt_scene_build import object_yaw_rad as placed_yaw
-    from e2e.ml.scatterers import frame_scatterers
+    from e2e.environment.scatterers import frame_scatterers
     from e2e.scenario import Node, NodeRole, Scenario
 
     scenario = Scenario(
@@ -284,8 +286,8 @@ def test_a_parked_object_keeps_one_heading_across_frames():
     seed is now derived from the scenario, so it is stable across frames and still
     distinct across scenes.
     """
-    from e2e.ml.geometry import scene_seed_for
-    from e2e.ml.scatterers import frame_scatterers
+    from e2e.environment.geometry import scene_seed_for
+    from e2e.environment.scatterers import frame_scatterers
     from e2e.scenario import Node, NodeRole, Scenario
 
     def _scenario(name):

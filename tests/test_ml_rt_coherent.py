@@ -208,8 +208,8 @@ def test_coherent_term_doppler_matches_the_analytic_point_target(speed):
     object-centre one.
     """
     from e2e.chain.dechirp import beat_from_cfr
+    from e2e.environment.scatterers import frame_scatterers, radar_pose
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import frame_scatterers, radar_pose
 
     scn = _scenario(position=(12.0, 0.0, 1.5), velocity=(speed, 0.0, 0.0))
     scene, paths = _stub_rt_scene(_CFG, (12.0, 0.0, 1.5))
@@ -550,8 +550,8 @@ def test_n_centers_one_matches_the_pre_v11_implementation():
     scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))
 
     def _legacy(cfg, rt_scene, scenario, *, frame_idx, paths):
+        from e2e.environment.scatterers import frame_scatterers, radar_pose
         from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
-        from e2e.ml.scatterers import frame_scatterers, radar_pose
         coh_frac = max(0.0, 1.0 - float(DEFAULT_SCATTERING_COEFFICIENT) ** 2)
         n_chirps = int(cfg.n_chirps)
         freqs = rsc.beat_frequencies(cfg)
@@ -623,7 +623,7 @@ def test_multi_center_widens_azimuth_extent():
 
     def _extent(n_centers):
         scn = _scenario(position=(12.0, 0.0, 1.5))
-        # Truck-sized body via the explicit extent override `e2e.ml.geometry.
+        # Truck-sized body via the explicit extent override `e2e.environment.geometry.
         # object_extent_m` honours (the corners come from the scatterer layer's
         # body-frame extent since A13, not from the stub mesh's world AABB).
         scn.objects[0].extent_m = (5.0, 5.0, 1.6)
@@ -643,7 +643,7 @@ def test_multi_center_falls_back_to_one_point_without_extent(monkeypatch):
     """An object with no resolvable extent is a POINT target (the same convention
     `e2e.ml.labels` uses): there is nowhere deterministic to put extra centres, so
     n_centers=5 must equal n_centers=1 exactly."""
-    import e2e.ml.scatterers as scatterers_mod
+    import e2e.environment.scatterers as scatterers_mod
     monkeypatch.setattr(scatterers_mod, "object_extent_m", lambda obj: None)
     scn = _scenario(position=(12.0, 3.0, 1.5))
     scene, paths = _stub_rt_scene(_CFG, (12.0, 3.0, 1.5))

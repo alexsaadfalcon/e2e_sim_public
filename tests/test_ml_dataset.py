@@ -63,7 +63,7 @@ def _expected_adc_input_shape(cfg):
 # generate_sample
 # --------------------------------------------------------------------------------
 def test_generate_sample_tdm_shapes_and_dtypes(registered_tiny_cfg, torch_device):
-    from e2e.ml.scatterers import vehicle
+    from e2e.environment.scatterers import vehicle
     from e2e.scenario import Node, NodeRole, Scenario
 
     cfg = registered_tiny_cfg
@@ -102,7 +102,7 @@ def test_generate_sample_tdm_shapes_and_dtypes(registered_tiny_cfg, torch_device
 
 
 def test_generate_sample_ddma_shapes(torch_device):
-    from e2e.ml.scatterers import vehicle
+    from e2e.environment.scatterers import vehicle
     from e2e.scenario import Node, NodeRole, Scenario
 
     cfg = dataclasses.replace(RADIAL_LIKE, name="test_tiny_ddma", n_tx=4, n_rx=4, n_chirps=16, n_samples=32)

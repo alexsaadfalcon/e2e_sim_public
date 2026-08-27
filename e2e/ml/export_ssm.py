@@ -35,7 +35,7 @@ Scene reconstruction / ground-truth verification
 The RT corpus's stored `meta["targets"]` (written by
 `e2e.environment.blocks.RTEnvironmentBlock.get_S_pars`, see that class) comes from
 `e2e.ml.labels.targets_in_grid(grid, scats, pose, classes=...)` where `scats`/`pose`
-are `e2e.ml.scatterers.frame_scatterers`/`radar_pose` resolved against
+are `e2e.environment.scatterers.frame_scatterers`/`radar_pose` resolved against
 `e2e.ml.rt_scenes.build_rt_tier_scenario(tier, frame_idx=<scene index>, seed=<manifest
 seed>, num_frames=<frames_per_scene>, use_local_assets=True)` -- see that function's
 "Determinism" docstring section: the SAME `(tier, frame_idx, seed)` triple reproduces
@@ -78,12 +78,12 @@ matplotlib.use("Agg")  # noqa: E402 -- must precede any pyplot import; headless-
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from e2e.environment.scatterers import frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml import storage  # noqa: E402
 from e2e.ml.labels import LabelGrid, target_geometry, targets_in_grid  # noqa: E402
 from e2e.ml.radar_config import RadarConfig  # noqa: E402
 from e2e.ml.render_scene import _draw_birdseye, _draw_radar_view, range_azimuth_map  # noqa: E402
 from e2e.ml.rt_scenes import VEHICLE_FOOTPRINT_M, build_rt_tier_scenario, vehicle_asset_class  # noqa: E402
-from e2e.ml.scatterers import frame_scatterers, radar_pose  # noqa: E402
 from e2e.scenario import ObjectKind  # noqa: E402
 
 _FNAME_RE = re.compile(r"^(?P<tag>.+_scene(?P<scene>\d+))_frame_(?P<frame>\d+)\.npz$")
@@ -196,7 +196,7 @@ def build_target_records(grid: LabelGrid, scenario, scats, pose,
                          label_classes: Sequence[str]) -> List[Dict[str, Any]]:
     """Per-target label record, one per in-grid `label_classes` scatterer, in the
     SAME order `targets_in_grid` returns (`scenario.objects`/`scats` are 1:1, see
-    `e2e.ml.scatterers.frame_scatterers`)."""
+    `e2e.environment.scatterers.frame_scatterers`)."""
     keep = set(label_classes)
     range_bin_m = grid.range_bin_m
     az_bin = grid.az_bin
@@ -394,7 +394,7 @@ Generated `{date}` by `e2e/ml/export_ssm.py` from
 ## Coordinate frame
 
 Radar-centric polar, RADAR AT THE ORIGIN, BORESIGHT = **+x** (every scenario in this
-export uses this convention -- see `e2e.ml.scatterers.RadarPose`). `azimuth` is the
+export uses this convention -- see `e2e.environment.scatterers.RadarPose`). `azimuth` is the
 angle from boresight, positive toward +y; `sin_azimuth` is the ULA direction cosine
 (uniform axis in `[-1, 1)`, NOT linear degrees -- see
 `e2e.ml.labels.LabelGrid`). Radial-frame Cartesian per target:

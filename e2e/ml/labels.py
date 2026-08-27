@@ -20,7 +20,7 @@ buses, trolleys and trucks were total losses; pedestrians and spheres were unaff
 Both quantities are therefore emitted, and they mean different things:
 
 * the **objectness footprint** goes on the nearest visible SURFACE point along the line
-  of sight (`e2e.ml.geometry.nearest_surface_point`, the same model
+  of sight (`e2e.environment.geometry.nearest_surface_point`, the same model
   `e2e.ml.rt_signal_chain` places its coherent point scatterer on) -- that is where the
   energy is, so that is what a detector can learn and what matching is done on;
 * the **regression target stays the object CENTRE**, encoded as a residual from the
@@ -127,7 +127,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from e2e.ml.geometry import nearest_surface_point
+from e2e.environment.geometry import nearest_surface_point
 from e2e.ml.rd_synth import array_axis, device
 
 # Footprint written around each target's cell by `encode_detection_labels` (3x3, per the
@@ -196,7 +196,7 @@ def target_geometry(scatterer, pose) -> Tuple[float, float, float]:
     which objects are in the grid or where they sit.
 
     `surface_range_m` is the range to the nearest point of the object's bounding
-    ellipsoid along the line of sight (`e2e.ml.geometry.nearest_surface_point`), and
+    ellipsoid along the line of sight (`e2e.environment.geometry.nearest_surface_point`), and
     equals `centre_range_m` for a scatterer with no known extent. The surface point is on
     the radar-to-centre line, so the single returned `sin_azimuth` is correct for both.
     """

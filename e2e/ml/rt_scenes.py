@@ -415,7 +415,7 @@ def _sample_velocity(rng: np.random.Generator, speed_range: Tuple[float, float])
     """In-plane velocity, magnitude in `speed_range`, random heading.
 
     Numerically m/s == m/frame under this package's `dt = 1` convention (see
-    `e2e.ml.scatterers.DEFAULT_DT_S`); consumers with a real `frame_rate_hz` should
+    `e2e.environment.scatterers.DEFAULT_DT_S`); consumers with a real `frame_rate_hz` should
     rescale if they need physical timing (this module has no `RadarConfig` to derive
     one from -- callers building a Scenario for `e2e.ml.rt_gen` supply their own `cfg`).
     """
@@ -501,7 +501,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, corpus_tag: str, fra
     `dt` is the SECONDS PER FRAME the consumer will resolve this scenario with, and it
     is applied AFTER sampling, so it never perturbs the determinism key either. Sampled
     speeds are physical m/s; `Motion.velocity` is a per-frame displacement in metres, so
-    the stored displacement is `v * dt` and `e2e.ml.scatterers.frame_scatterers(dt=dt)`
+    the stored displacement is `v * dt` and `e2e.environment.scatterers.frame_scatterers(dt=dt)`
     differences it back to exactly `v` m/s. The default `dt=1.0` reproduces this
     module's historical "m/s == m/frame" convention; a caller with a real frame rate
     (e.g. `e2e.ml.chain_generate`) MUST pass `dt=1/cfg.frame_rate_hz` or every velocity
@@ -575,7 +575,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, corpus_tag: str, fra
            Doppler aliased.
 
         `dt` (seconds per frame) fixes (2): the stored displacement is `vel * dt`, which
-        `e2e.ml.scatterers.frame_scatterers` finite-differences back to exactly `vel` m/s.
+        `e2e.environment.scatterers.frame_scatterers` finite-differences back to exactly `vel` m/s.
         For the single-frame case there is no track to difference, so the physical
         velocity rides on `SceneObject.velocity_mps`, which `frame_scatterers` reads for
         static objects -- fixing (1) without inventing a positional track that a

@@ -267,9 +267,9 @@ def generate_sample(cfg, scenario, grid, *, frame_idx: int = 0, snr_db: Optional
     `LABEL_CLASSES`); pass `None` to label everything, clutter included.
     Returns the sample dict documented in the module docstring.
     """
+    from e2e.environment.scatterers import frame_scatterers, radar_pose
     from e2e.ml.labels import encode_detection_labels, targets_in_grid
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import frame_scatterers, radar_pose
     from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 
     dt = 1.0 / cfg.frame_rate_hz

@@ -107,7 +107,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from e2e.ml.geometry import nearest_surface_point
+from e2e.environment.geometry import nearest_surface_point
 from e2e.ml.rt_scene_build import RTScene, build_rt_scene
 
 # See the module docstring's "Element ordering / array handedness" section.
@@ -630,7 +630,7 @@ def _specular_point(centre: np.ndarray, half: np.ndarray, radar_pos: np.ndarray)
     object's bounding ellipsoid. Exact for a sphere; a documented approximation for
     anything else (see the section banner).
 
-    Delegates to `e2e.ml.geometry.nearest_surface_point`, which is the SAME function
+    Delegates to `e2e.environment.geometry.nearest_surface_point`, which is the SAME function
     `e2e.ml.labels` puts its objectness footprint on -- the label and the energy must not
     be computed by two implementations that can drift apart. No yaw is passed: `half`
     here comes from the Mitsuba mesh's WORLD-space AABB (`_object_bbox`), which already
@@ -648,7 +648,7 @@ def _visible_corner_centers(position, extent_m, yaw_rad: float,
     `coherent_target_cfr`): the corners of a vehicle body are where the strongest
     persistent scattering centres of real automotive targets measure (wheel wells,
     body corners). Corners live at `(+-L/2, +-W/2, 0)` in the object's OWN frame
-    (local +x = length, per `e2e.ml.geometry`), rotated by `yaw_rad` about world +z
+    (local +x = length, per `e2e.environment.geometry`), rotated by `yaw_rad` about world +z
     around `position` (the geometric centre) -- NOT the world-AABB corners the
     pre-2026-08-24 model used, which sat up to ~3 m off-body at oblique yaw because
     an axis-aligned box inflates around a rotated body, with 2 of its 4 corners
@@ -854,8 +854,8 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     big [rx, tx, chirp, freq] materialization once per OBJECT instead of once per
     centre, so 5 centres cost roughly what 1 did.
     """
+    from e2e.environment.scatterers import frame_scatterers, radar_pose
     from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
-    from e2e.ml.scatterers import frame_scatterers, radar_pose
 
     if scattering_coefficient is None:
         scattering_coefficient = DEFAULT_SCATTERING_COEFFICIENT
@@ -1210,7 +1210,7 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
     if rt_scene is None:
         rt_scene = build_rt_scene(scenario, cfg, base_scene=base_scene, frame_idx=frame_idx)
 
-    from e2e.ml.scatterers import frame_scatterers
+    from e2e.environment.scatterers import frame_scatterers
 
     scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))
     base_pos = {obj.name: np.asarray(sc.position, dtype=np.float64)

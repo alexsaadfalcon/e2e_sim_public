@@ -3,8 +3,8 @@ Tests for `e2e.ml.metrics` (RADIal-style detection evaluation, adapted to our po
 (range, sin-azimuth) label format).
 
 Uses the real `Scatterer`/`RadarPose`/`LabelGrid`/`encode_detection_labels`/
-`targets_in_grid` from `e2e.ml.scatterers`/`e2e.ml.labels` (sibling shards' dependency-
-free/torch modules), plus a few hand-built label-map tensors where we need exact,
+`targets_in_grid` from `e2e.environment.scatterers`/`e2e.ml.labels` (dependency-free/
+torch modules), plus a few hand-built label-map tensors where we need exact,
 hand-checkable regression values and exact per-detection scores that
 `encode_detection_labels`' all-ones objectness would otherwise mask (see the RMSE and
 PR-curve tests below).
@@ -21,6 +21,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from e2e.environment.scatterers import RadarPose, Scatterer
 from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
 from e2e.ml.metrics import (
     DEFAULT_CLASSES,
@@ -30,7 +31,6 @@ from e2e.ml.metrics import (
     evaluate_frame,
     match_detections,
 )
-from e2e.ml.scatterers import RadarPose, Scatterer
 
 
 def _target(r, sin_az, object_class="vehicle"):

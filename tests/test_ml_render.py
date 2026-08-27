@@ -105,8 +105,8 @@ def test_render_scene_gif_axes_do_not_move_between_frames(monkeypatch, tiny_cfg,
 def test_range_azimuth_map_norm_peak_shifts_reference(tiny_cfg):
     """`norm_peak` re-references the dB scale: normalizing against 100x the map's own
     peak must shift every bin down by exactly 20 dB (power/10log)."""
+    from e2e.environment.scatterers import RadarPose
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose
 
     scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=10.0, object_class="vehicle")]
@@ -126,8 +126,8 @@ def test_range_azimuth_power_azimuth_window_hann_suppresses_off_target_sidelobe(
     defaulting the figure backdrop to it): a strong, off-boresight target's rectangular-
     window sidelobe skirt at a DIFFERENT azimuth (same range) must be measurably lower
     with the Hann taper than without it."""
+    from e2e.environment.scatterers import RadarPose
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose
 
     scat = [render_scene.Scatterer(position=(20.0, 12.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=20.0, object_class="vehicle")]
@@ -152,8 +152,8 @@ def test_range_azimuth_power_azimuth_window_hann_suppresses_off_target_sidelobe(
 
 
 def test_range_azimuth_power_azimuth_window_rejects_unknown_value(tiny_cfg):
+    from e2e.environment.scatterers import RadarPose
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose
 
     scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=10.0, object_class="vehicle")]
@@ -222,9 +222,9 @@ def _ddma_single_target_adc(n_samples=256, sin_az=0.35, rng_m=30.0):
     """One stationary point target at a known azimuth, on the DDMA `radial_like` config."""
     import math
 
+    from e2e.environment.scatterers import Scatterer
     from e2e.ml.radar_config import RADIAL_LIKE
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import Scatterer
 
     cfg = dataclasses.replace(RADIAL_LIKE, n_samples=n_samples)
     pos = (rng_m * math.sqrt(1.0 - sin_az ** 2), rng_m * sin_az, 0.0)
@@ -281,14 +281,14 @@ def test_range_azimuth_map_peak_matches_known_target(tiny_cfg):
     """A single static target's range-azimuth peak should land within a couple of
     bins of its true (range, sin_azimuth) -- a coarse correctness check, not a tight
     numerical one (see rd_synth's own tests for exact-bin checks)."""
-    from e2e.ml.scatterers import frame_scatterers, radar_pose, vehicle
+    from e2e.environment.scatterers import frame_scatterers, radar_pose, vehicle
     from e2e.scenario import Node, NodeRole, Scenario
 
     scenario = Scenario(
         name="single_target",
         # POINT target: this checks `rd_synth`'s bin placement against the object's own
         # position, so the object must not carry an extent (a meshed scene's object
-        # returns from its nearest SURFACE instead -- see e2e.ml.geometry).
+        # returns from its nearest SURFACE instead -- see e2e.environment.geometry).
         base_scene="synthetic",
         nodes=[Node(name="radar", role=NodeRole.RADAR, position=(0.0, 0.0, 0.0),
                     look_at=(1.0, 0.0, 0.0))],
@@ -327,8 +327,8 @@ def test_draw_radar_view_imshow_orientation_matches_extent(tiny_cfg):
     """
     import matplotlib.pyplot as plt
 
+    from e2e.environment.scatterers import RadarPose
     from e2e.ml.labels import LabelGrid
-    from e2e.ml.scatterers import RadarPose
 
     n_angle, n_range = 8, 5
     angle_idx, range_idx = 2, 4  # deliberately distinct so a transpose is detectable

@@ -107,8 +107,8 @@ def _tiny_corpus(tmp_path, cfg):
     """
     from e2e.ml import dataset as ml_dataset
     from e2e.ml import storage
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.labels import encode_detection_labels
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     grid = LabelGrid.for_config(cfg)
     pose = RadarPose()
@@ -187,8 +187,8 @@ def _tiny_corpus_with_train(tmp_path, cfg):
     arm has targets to fit its box on."""
     from e2e.ml import dataset as ml_dataset
     from e2e.ml import storage
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.labels import encode_detection_labels
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     grid = LabelGrid.for_config(cfg)
     pose = RadarPose()

@@ -13,9 +13,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from e2e.environment.scatterers import frame_scatterers, radar_pose, vehicle
 from e2e.ml.radar_config import RADIAL_LIKE, TI_IWR1443
 from e2e.ml.rd_synth import C_LIGHT, synthesize_adc
-from e2e.ml.scatterers import frame_scatterers, radar_pose, vehicle
 from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 from e2e.scenario import Node, NodeRole, Scenario
 
@@ -27,7 +27,7 @@ def _scene(target_pos, target_vel, base_scene="synthetic"):
     `rd_synth` synthesizes and what the exact-bin assertions below are about. Pass a
     meshed base scene ("flat") to get an object with a real extent, whose return (and
     whose label) then sits on its nearest SURFACE, ~1 m nearer than its centre for the
-    sphere primitive `vehicle()` defaults to. See `e2e.ml.scatterers.SYNTHETIC_BASE_SCENE`.
+    sphere primitive `vehicle()` defaults to. See `e2e.environment.scatterers.SYNTHETIC_BASE_SCENE`.
     """
     return Scenario(
         name="ml_integration",

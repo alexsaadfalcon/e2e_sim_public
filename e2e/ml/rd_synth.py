@@ -93,11 +93,11 @@ _SCATTERER_CHUNK = 64
 # --------------------------------------------------------------------------------
 # Scene frame / radar pose
 # --------------------------------------------------------------------------------
-# The canonical RadarPose lives in the torch-free `scatterers` module (the scene
-# side of the package); it is re-exported here so synthesis-side callers can keep
-# importing it from `rd_synth`. Scene-frame convention (right-handed, +z world up,
+# The canonical RadarPose lives in the torch-free `e2e.environment.scatterers` module;
+# it is re-exported here so synthesis-side callers can keep importing it from
+# `rd_synth`. Scene-frame convention (right-handed, +z world up,
 # ULA along u = normalise(z_up x boresight)) is documented on the class itself.
-from e2e.ml.scatterers import RadarPose  # noqa: E402  (re-export)
+from e2e.environment.scatterers import RadarPose  # noqa: E402  (re-export)
 
 
 def array_axis(pose):
@@ -131,7 +131,7 @@ def _scattering_point(sc, origin):
 
     Its `position` (the object's geometric CENTRE) when nothing is known about its size,
     and its nearest SURFACE point along the line of sight when an extent is
-    (`e2e.ml.geometry.nearest_surface_point`). A monostatic return comes off the nearest
+    (`e2e.environment.geometry.nearest_surface_point`). A monostatic return comes off the nearest
     face, not the middle of the body: this is the same specular-point stand-in
     `e2e.ml.rt_signal_chain.coherent_target_cfr` places its coherent term on, and the same
     point `e2e.ml.labels` writes its objectness footprint at -- one answer, three layers.
@@ -145,7 +145,7 @@ def _scattering_point(sc, origin):
     extent = getattr(sc, "extent_m", None)
     if extent is None:
         return centre
-    from e2e.ml.geometry import nearest_surface_point
+    from e2e.environment.geometry import nearest_surface_point
 
     return nearest_surface_point(centre, 0.5 * np.asarray(extent, dtype=np.float64),
                                  origin, yaw_rad=float(getattr(sc, "yaw_rad", 0.0)))

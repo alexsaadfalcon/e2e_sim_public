@@ -215,7 +215,7 @@ class RTEnvironmentBlock:
             build_rt_scene,
             rt_cfr_frame,
         )
-        from e2e.ml.scatterers import frame_scatterers, radar_pose
+        from e2e.environment.scatterers import frame_scatterers, radar_pose
 
         dev = _resolve_device(self.device)
         sc_coeff = (DEFAULT_SCATTERING_COEFFICIENT if self.scattering_coefficient is None

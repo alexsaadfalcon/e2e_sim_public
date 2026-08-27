@@ -2,7 +2,7 @@
 Animated bird's-eye + radar-view GIFs of `e2e.ml.scenes` scenarios.
 
 Purely a visualization/README-media tool: it reuses the existing scene/synthesis stack
-(`e2e.ml.scatterers.frame_scatterers`/`radar_pose`, `e2e.ml.rd_synth.synthesize_adc`,
+(`e2e.environment.scatterers.frame_scatterers`/`radar_pose`, `e2e.ml.rd_synth.synthesize_adc`,
 `e2e.ml.transforms.adc_to_rd`/`tdm_deinterleave`, `e2e.ml.labels.LabelGrid`/
 `targets_in_grid`) end to end; nothing here re-derives geometry or re-implements
 synthesis. Two panels, side by side, one frame per animation tick:
@@ -66,9 +66,9 @@ from matplotlib.animation import PillowWriter  # noqa: E402
 from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.patches import Arc, Wedge  # noqa: E402
 
+from e2e.environment.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
 from e2e.ml.rd_synth import synthesize_adc  # noqa: E402
-from e2e.ml.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml.transforms import adc_to_rd, ddma_demux, tdm_deinterleave  # noqa: E402
 from e2e.viz import imshow_ra  # noqa: E402
 
@@ -869,8 +869,8 @@ def _render_rt_topdown_frames(scenario, cfg, *, n_frames: int, dt: float,
     from e2e.ml.rt_gen import _box_mesh_path
     from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
                                        _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
+    from e2e.environment.scatterers import frame_scatterers
     from e2e.ml.rt_scenes import _footprint_radius, tier_summary
-    from e2e.ml.scatterers import frame_scatterers
     from e2e.scenario import ObjectKind
 
     if n_frames < 1:
@@ -1043,7 +1043,7 @@ def render_scene_gif_2x2(cfg, scenario, out_path, *, n_frames: int = 10, fps: in
     (bottom-right). Needs Sionna RT (imported lazily, via `_render_rt_topdown_frames`)
     AND a `scenario` with REAL geometry -- i.e. NOT `e2e.ml.scenes.sample_scene`'s
     `base_scene="synthetic"` point-target scenes, which have no mesh for a camera to
-    render (see `e2e.ml.scatterers.SYNTHETIC_BASE_SCENE`). Build `scenario` with
+    render (see `e2e.environment.scatterers.SYNTHETIC_BASE_SCENE`). Build `scenario` with
     `e2e.ml.rt_scenes.build_rt_tier_scenario(tier, num_frames=n_frames,
     dt=1/cfg.frame_rate_hz, ...)` instead -- passing `dt` there is load-bearing (see that
     function's own docstring: omitting it inflates every velocity `frame_rate_hz`-fold).

@@ -61,8 +61,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from e2e.environment.geometry import scene_seed_for
 from e2e.ml.assets import DOWNLOADED_ASSET_SPECS, process_asset
-from e2e.ml.geometry import scene_seed_for
 
 # Material defaults -- deliberately NOT Sionna's (pure specular mirror); see above.
 DEFAULT_SCATTERING_COEFFICIENT = 0.3
@@ -963,7 +963,7 @@ def build_rt_scene(scenario, cfg, *, base_scene: str = "flat", frame_idx: int = 
     """
     import sionna.rt as rt
 
-    from e2e.ml.scatterers import frame_scatterers, radar_pose
+    from e2e.environment.scatterers import frame_scatterers, radar_pose
 
     pose = radar_pose(scenario, frame_idx)
     scats = frame_scatterers(scenario, frame_idx, dt=1.0 / float(cfg.frame_rate_hz))

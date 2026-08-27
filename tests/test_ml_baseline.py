@@ -109,8 +109,8 @@ def test_classical_map_localizes_a_synthesized_target_in_range(torch_device):
     """A single strong scatterer at a known range must produce the map's peak in the
     correct range bin. Azimuth is deliberately not asserted -- a 12-element array cannot
     place it to grid-cell precision, which is the whole point of this module."""
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     cfg = PRESETS["ti_iwr1443"]
     grid = LabelGrid.for_config(cfg)
@@ -135,8 +135,8 @@ def test_range_azimuth_power_shape_matches_the_virtual_array(torch_device):
     """No zero-padding by default: the angle axis has exactly one bin per virtual element,
     since interpolation would place peaks between resolution cells without adding
     information."""
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     cfg = PRESETS["ti_iwr1443"]
     adc = synthesize_adc(cfg, [Scatterer(position=(10.0, 1.0, 0.0), velocity=(0.0, 0.0, 0.0),
@@ -168,8 +168,8 @@ def _write_tiny_baseline_corpus(tmp_path, cfg):
     """
     from e2e.ml import dataset as ml_dataset
     from e2e.ml import storage
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.labels import encode_detection_labels, targets_in_grid
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     grid = LabelGrid.for_config(cfg)
     pose = RadarPose()
@@ -377,8 +377,8 @@ def test_classical_map_localizes_a_point_target_at_every_fine_bin_offset(offset_
     default flip exposed it): nearest-neighbour range decimation sampled only fine
     bins stride*i + stride//2, so a point target in any OTHER fine bin of its cell
     was invisible to the detector. Peak-pooling must localize it at every offset."""
+    from e2e.environment.scatterers import RadarPose, Scatterer
     from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.scatterers import RadarPose, Scatterer
 
     cfg = PRESETS["ti_iwr1443"]
     grid = LabelGrid.for_config(cfg)

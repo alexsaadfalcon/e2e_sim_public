@@ -5,8 +5,8 @@ Draws a `e2e.scenario.Scenario` -- a radar node plus a mix of vehicle/pedestrian
 targets and static low-RCS clutter -- from one of a handful of "difficulty tiers"
 (`DIFFICULTY_TIERS`), ranging from a single slow vehicle (D0, a sanity check) up to a
 dense, fast, tightly-packed multi-target scene (D3). `dataset.py` calls `sample_scene`
-per training example; `scatterers.py`/`rd_synth.py` turn the resulting `Scenario` into
-point scatterers and, from there, a range-Doppler cube.
+per training example; `e2e.environment.scatterers`/`rd_synth.py` turn the resulting
+`Scenario` into point scatterers and, from there, a range-Doppler cube.
 
 `sample_scene(..., n_frames=1)` defaults to a single-instant scene (the original
 behavior); `n_frames>1` gives moving (vehicle/pedestrian) objects a real
@@ -14,8 +14,8 @@ constant-velocity `Motion` track spanning `Scenario.num_frames == n_frames`, so
 `dataset.py` can synthesize a SEQUENCE of consecutive, motion-consistent frames from
 one scene (see `sample_scene`'s docstring). Clutter is always static.
 
-Only numpy + stdlib + `e2e.scenario` / `e2e.ml.scatterers` are imported here (no
-torch), matching the rest of this package's torch-free scene-description layer.
+Only numpy + stdlib + `e2e.scenario` / `e2e.environment.scatterers` are imported here
+(no torch), matching the rest of this package's torch-free scene-description layer.
 
 Determinism is the *caller's* contract: `sample_scene` draws every random value from
 the numpy `Generator` it is given and nothing else (no hidden global RNG, no
@@ -31,7 +31,7 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 
-from e2e.ml.scatterers import DEFAULT_RCS_DBSM, pedestrian, vehicle
+from e2e.environment.scatterers import DEFAULT_RCS_DBSM, pedestrian, vehicle
 from e2e.scenario import Motion, Node, NodeRole, Scenario, SceneObject
 
 # Fraction of the radar's unambiguous range/angle FOV that targets are placed within
