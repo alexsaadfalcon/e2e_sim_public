@@ -127,12 +127,20 @@ def test_kenney_license_is_cc0_not_the_generic_unknown_text():
         assert "UNKNOWN" not in spec.license
 
 
-def test_pre_kenney_assets_keep_the_default_unverified_license():
-    """Extending the spec with `license`/`axis_scale_m` must not change behaviour for
-    the five original freestl.com entries -- both fields default to None."""
+def test_pre_kenney_assets_carry_the_owner_confirmed_clearance():
+    """The five original freestl.com entries record an EXPLICIT licence since the
+    owner confirmed their clearance (F56, 2026-08-27).
+
+    They previously fell through to the generic "terms not verified / INTERNAL-ONLY"
+    text, which the b1_bench_v2 corpus review flagged: the meshes are in ~62% of
+    generated scenes, so the stale marking made every corpus read as unpublishable.
+    `axis_scale_m` still defaults to None for them -- only the Kenney fleet needs
+    per-axis scaling."""
     for name in ("dl_delorean", "dl_audi_r8", "dl_truck_daf", "dl_trolley", "dl_school_bus"):
         spec = DOWNLOADED_ASSET_SPECS[name]
-        assert spec.license is None
+        assert spec.license is not None and "CLEARED" in spec.license
+        # the settled status must not read as unverified to a grep-based licence audit
+        assert "UNKNOWN" not in spec.license
         assert spec.axis_scale_m is None
 
 
