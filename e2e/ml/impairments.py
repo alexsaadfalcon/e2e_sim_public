@@ -20,6 +20,12 @@ from e2e.chain.impairments import (  # noqa: F401,E402
     C_MPS,
     DEFAULT_POWER_REFERENCE,
     REFERENCE_NOISE,
+    # private names below are consumed by out-of-git reproducibility scripts under
+    # notes/tools (a15_clutter_anchor_probe, a17_comet_tail_probe) — the exact class
+    # of consumer the shim policy exists to protect (C1 close review finding).
+    _k_distributed_gain,
+    _mimo_tx_factor,
+    _thermal_reference,
     REFERENCE_PEAK,
     REFERENCE_THERMAL,
     ClutterParams,
