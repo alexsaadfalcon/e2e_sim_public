@@ -2,14 +2,14 @@
 
 `RTEnvironmentBlock` is the `e2e.ml` radar-generation family's counterpart of
 `e2e.blocks.SionnaEnvironmentBlock`: instead of iterating precomputed `.pkl`
-S-parameter frames, it ray-traces `e2e.ml.rt_gen`'s FMCW radar scene per frame and
+S-parameter frames, it ray-traces `e2e.environment.rt_gen`'s FMCW radar scene per frame and
 exposes the same `get_S_pars()`/`step()`/`reset()`/`array_shape` interface
 `e2e.simulation.Simulation` expects -- so a declarative `Scenario` + `RadarConfig` can
 drive the runtime pipeline directly. It emits the RAW channel frequency response
 (DOMAIN_CFR, pre-dechirp, see `e2e/frames.py`); `e2e.chain.dechirp.DechirpBlock(cfg)`
 is the bridge from there to a dechirped ADC cube.
 
-Sionna is imported LAZILY (inside `get_S_pars`, via `e2e.ml.rt_gen`'s own lazy
+Sionna is imported LAZILY (inside `get_S_pars`, via `e2e.environment.rt_gen`'s own lazy
 imports) so `import e2e.environment.blocks` never requires DrJit/Sionna -- matching
 `e2e.environment.scenario_runner`'s disciplined pattern.
 
@@ -36,7 +36,7 @@ class RTEnvironmentBlock:
         raw CFR, NOT yet dechirped; feed it to `DechirpBlock(cfg)` for `adc`.
       * `step()` / `reset()` -- advance / rewind `self.frame_counter`, wrapping at
         `scenario.num_frames` (same semantics as `SionnaEnvironmentBlock`).
-      * `array_shape` -- `(cfg.n_rx, 1)`: `e2e.ml.rt_gen.build_rt_scene` gives the
+      * `array_shape` -- `(cfg.n_rx, 1)`: `e2e.environment.rt_gen.build_rt_scene` gives the
         radar a 1 x `cfg.n_rx` receive ULA (not a 2-D planar array), so the aperture
         grid it factors into is one-dimensional.
 
@@ -66,13 +66,13 @@ class RTEnvironmentBlock:
     Target physics (CHANGED 2026-08-17): `coherent_targets=True` and a DIRECTIVE antenna
     element pattern (`antenna_pattern=None` -> `rt_scene_build.DEFAULT_ANTENNA_PATTERN`)
     are the defaults, because ray tracing alone does not make targets detectable -- see
-    the "HYBRID RT" banner in `e2e.ml.rt_signal_chain` and `DEFAULT_ANTENNA_PATTERN` for
+    the "HYBRID RT" banner in `e2e.environment.rt_signal_chain` and `DEFAULT_ANTENNA_PATTERN` for
     the measurements. To reproduce a pre-2026-08-17 corpus, pass
     `coherent_targets=False, antenna_pattern="iso"`. `ground_scattering_coefficient` and
     `samples_per_src` are the two cost/realism knobs -- see
     `rt_scene_build.DEFAULT_GROUND_SCATTERING_COEFFICIENT` before touching either.
 
-    A fresh scene is ray-traced (via `e2e.ml.rt_gen.build_rt_scene` + `rt_cfr_frame`) on
+    A fresh scene is ray-traced (via `e2e.environment.rt_gen.build_rt_scene` + `rt_cfr_frame`) on
     every `get_S_pars()` call -- the same per-frame rebuild `rt_synthesize_adc` does by
     default (not an incremental/cached scene) -- so moving-object geometry is always
     exactly resolved for `self.frame_counter`.
@@ -113,7 +113,7 @@ class RTEnvironmentBlock:
         self.scattering_pattern = scattering_pattern
         # Add each object's coherent specular return on top of the traced diffuse lobe.
         # ON by default since 2026-08-17 -- see the "HYBRID RT" banner in
-        # `e2e.ml.rt_signal_chain`; False reproduces a pre-2026-08-17 corpus.
+        # `e2e.environment.rt_signal_chain`; False reproduces a pre-2026-08-17 corpus.
         self.coherent_targets = bool(coherent_targets)
         # Antenna ELEMENT pattern; None -> `rt_scene_build.DEFAULT_ANTENNA_PATTERN`
         # ("tr38901", directive). Pass "iso" to reproduce a pre-2026-08-17 corpus.
@@ -204,10 +204,10 @@ class RTEnvironmentBlock:
             self.frame_counter = 0
 
     def get_S_pars(self):
-        # Lazy: this is the only method that needs Sionna (via e2e.ml.rt_gen), and only
+        # Lazy: this is the only method that needs Sionna (via e2e.environment.rt_gen), and only
         # at call time -- see the module docstring.
         from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
-        from e2e.ml.rt_gen import (
+        from e2e.environment.rt_gen import (
             DEFAULT_ANTENNA_PATTERN,
             DEFAULT_SCATTERING_COEFFICIENT,
             DEFAULT_SCATTERING_PATTERN,
@@ -231,7 +231,7 @@ class RTEnvironmentBlock:
                            ground_scattering_coefficient=self.ground_scattering_coefficient)
         if self.base_scene in ("flat", "free"):
             # Synthetic scenes only ever use in-band materials (see
-            # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, so "flat" (the
+            # `e2e.environment.rt_gen._GROUND_MATERIAL`) -- unmodified, so "flat" (the
             # default) stays exactly as it was before city scenes existed.
             rt_scene = build_rt_scene(self.scenario, self.cfg, **build_kwargs)
         else:

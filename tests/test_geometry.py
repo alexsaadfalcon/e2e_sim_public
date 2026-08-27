@@ -98,7 +98,7 @@ def test_rt_specular_point_delegates_here():
     a label computed differently from where the energy was placed is the defect the
     surface convention exists to remove."""
     pytest.importorskip("torch")
-    from e2e.ml.rt_signal_chain import _specular_point
+    from e2e.environment.rt_signal_chain import _specular_point
 
     centre = np.array([12.0, -3.0, 1.0])
     half = np.array([2.2, 0.9, 0.75])
@@ -163,7 +163,7 @@ def test_downloaded_asset_extent_matches_what_would_be_loaded():
     """A downloaded mesh resolves to its processed bbox when the asset cache exists on
     this machine, and to the Sionna car -- which is what `_object_mesh` would actually
     load -- when it does not. Either way the label describes the geometry in the scene."""
-    from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
+    from e2e.environment.assets import DOWNLOADED_ASSET_SPECS
     from e2e.environment.geometry import _processed_asset_extent_m
 
     name = "kn_sedan"
@@ -227,12 +227,12 @@ def test_analytic_scene_objects_stay_point_targets():
 def test_yaw_defers_to_the_heading_the_scene_builder_places():
     """The label layer must not hold a second opinion about which way an object faces.
 
-    `e2e.ml.rt_scene_build.object_yaw_rad` sets the mesh's real orientation, including a
+    `e2e.environment.rt_scene_build.object_yaw_rad` sets the mesh's real orientation, including a
     deterministic pseudo-random heading for PARKED objects -- where a naive "0.0 if not
     moving" would be wrong by up to |L-W|/2 (1.2 m for a car, 6.4 m for a 15.7 m semi),
     which is more than the metric's whole 2.0 m match tolerance.
     """
-    from e2e.ml.rt_scene_build import object_yaw_rad as placed_yaw
+    from e2e.environment.rt_scene_build import object_yaw_rad as placed_yaw
 
     class _Scat:
         velocity = (0.0, 0.0, 0.0)
@@ -249,7 +249,7 @@ def test_parked_object_labels_use_its_placed_heading():
     """End to end through `frame_scatterers`: a parked vehicle's `yaw_rad` is the scene
     builder's heading, so the surface point is computed off the axis it really presents."""
     from e2e.environment.geometry import scene_seed_for
-    from e2e.ml.rt_scene_build import object_yaw_rad as placed_yaw
+    from e2e.environment.rt_scene_build import object_yaw_rad as placed_yaw
     from e2e.environment.scatterers import frame_scatterers
     from e2e.scenario import Node, NodeRole, Scenario
 

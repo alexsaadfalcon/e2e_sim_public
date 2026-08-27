@@ -403,10 +403,10 @@ def test_cli_unknown_tier_exits_nonzero(tmp_path):
 # --------------------------------------------------------------------------------
 def test_default_object_render_color_distinguishes_sphere_from_mesh_vehicle():
     """A D0 sphere target and a D1+ mesh vehicle share `object_class="vehicle"` (see
-    `e2e.ml.rt_scenes.build_rt_tier_scenario`) but must still get DIFFERENT colours --
+    `e2e.environment.rt_scenes.build_rt_tier_scenario`) but must still get DIFFERENT colours --
     a reviewer needs to tell a bare sphere from a real car mesh by eye."""
-    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE,
-                                       _default_object_render_color)
+    from e2e.environment.rt_scene_build import (_OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE,
+                                                _default_object_render_color)
     from e2e.scenario import ObjectKind, SceneObject
 
     sphere = SceneObject(name="s", kind=ObjectKind.SPHERE, object_class="vehicle")
@@ -419,13 +419,13 @@ def test_default_object_render_color_distinguishes_sphere_from_mesh_vehicle():
 
 
 def test_default_object_render_color_covers_every_rt_scenes_class():
-    """Every object kind/class `e2e.ml.rt_scenes.build_rt_tier_scenario` actually
+    """Every object kind/class `e2e.environment.rt_scenes.build_rt_tier_scenario` actually
     produces (sphere, mesh vehicle, mesh pedestrian, box clutter) resolves to a
     distinct colour, and an unrecognized combination falls back to the legacy default
     rather than raising."""
-    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_DEFAULT,
-                                       _OBJECT_COLOR_PEDESTRIAN, _OBJECT_COLOR_SPHERE,
-                                       _OBJECT_COLOR_VEHICLE, _default_object_render_color)
+    from e2e.environment.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_DEFAULT,
+                                                _OBJECT_COLOR_PEDESTRIAN, _OBJECT_COLOR_SPHERE,
+                                                _OBJECT_COLOR_VEHICLE, _default_object_render_color)
     from e2e.scenario import ObjectKind, SceneObject
 
     pedestrian = SceneObject(name="p", kind=ObjectKind.MESH, object_class="pedestrian",
@@ -564,7 +564,7 @@ def test_build_rt_scene_for_render_flat_scene_skips_material_patch(monkeypatch, 
     from e2e.ml import render_scene
 
     calls = []
-    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene",
+    monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene",
                         lambda *a, **kw: calls.append(("build_rt_scene", a, kw)) or "SCENE")
 
     def _boom(*a, **kw):
@@ -585,7 +585,7 @@ def test_build_rt_scene_for_render_flat_scene_skips_material_patch(monkeypatch, 
 def test_build_rt_scene_for_render_free_scene_also_skips_material_patch(monkeypatch, tiny_cfg):
     from e2e.ml import render_scene
 
-    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
+    monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
     monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader",
                         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not be called")))
 
@@ -617,7 +617,7 @@ def test_build_rt_scene_for_render_city_scene_wraps_in_patched_loader(monkeypatc
         return "SCENE"
 
     monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader", fake_patched_loader)
-    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", fake_build_rt_scene)
+    monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene", fake_build_rt_scene)
 
     scenario = types.SimpleNamespace(base_scene="munich")
     result = render_scene._build_rt_scene_for_render(scenario, tiny_cfg)
@@ -639,7 +639,7 @@ def test_build_rt_scene_for_render_city_scene_passes_through_policy_overrides(mo
         yield
 
     monkeypatch.setattr("e2e.environment.city_scenes.patched_builtin_loader", fake_patched_loader)
-    monkeypatch.setattr("e2e.ml.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
+    monkeypatch.setattr("e2e.environment.rt_gen.build_rt_scene", lambda *a, **kw: "SCENE")
 
     scenario = types.SimpleNamespace(base_scene="etoile")
     render_scene._build_rt_scene_for_render(
@@ -652,8 +652,8 @@ def test_build_rt_scene_for_render_city_scene_passes_through_policy_overrides(mo
 def test_build_rt_tier_scenario_d4_uses_munich_base_scene_no_sionna_needed():
     """Sanity: the D4 tier that triggers the city-scene branch above really does resolve
     to `base_scene="munich"` -- `build_rt_tier_scenario` itself needs no Sionna (see
-    `e2e.ml.rt_scenes`'s module docstring), so this is a real (non-mocked) check."""
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    `e2e.environment.rt_scenes`'s module docstring), so this is a real (non-mocked) check."""
+    from e2e.environment.rt_scenes import build_rt_tier_scenario
 
     scenario = build_rt_tier_scenario("D4", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                       use_local_assets=False)
@@ -663,7 +663,7 @@ def test_build_rt_tier_scenario_d4_uses_munich_base_scene_no_sionna_needed():
 # --------------------------------------------------------------------------------
 # Real Sionna RT renders: the top-down camera calibration and the per-class colour
 # fallback end to end, plus render_rt_topdown_gif's actual motion. Gated behind
-# @pytest.mark.sionna (RUN_SIONNA=1) like tests/test_ml_rt_gen.py -- these are plain
+# @pytest.mark.sionna (RUN_SIONNA=1) like tests/test_rt_gen.py -- these are plain
 # geometry renders (no path solve), so they are comparatively cheap, but they still
 # need a working Sionna RT / DrJit install. Verified locally with
 # CUDA_VISIBLE_DEVICES=1 (GPU 0 was busy with an unrelated generation job).
@@ -678,7 +678,7 @@ def test_build_camera_topdown_calibration_matches_bird_eye_axes(tmp_path):
     sionna_rt = pytest.importorskip("sionna.rt")
     from PIL import Image
 
-    from e2e.ml.rt_scene_build import _synthetic_scene_path
+    from e2e.environment.rt_scene_build import _synthetic_scene_path
 
     scene = sionna_rt.load_scene(_synthetic_scene_path("flat"), merge_shapes=False)
     scene.frequency = 77e9
@@ -728,9 +728,9 @@ def test_build_rt_scene_assigns_distinct_colors_per_class_without_touching_rf_pa
     i.e. colour and RF material are decoupled, verified empirically against the
     installed Sionna materials, not just read off its source."""
     pytest.importorskip("sionna.rt")
-    from e2e.ml.rt_gen import build_rt_scene
-    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
-                                       _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
+    from e2e.environment.rt_gen import build_rt_scene
+    from e2e.environment.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
+                                                _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
     from e2e.scenario import Node, NodeRole, ObjectKind, Scenario, SceneObject
 
     scenario = Scenario(

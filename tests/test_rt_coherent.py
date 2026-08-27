@@ -2,7 +2,7 @@
 
 The defect: Sionna's image-method specular search cannot find a monostatic backscatter
 path off a tessellated convex body at range (see the "HYBRID RT" banner in
-`e2e.ml.rt_signal_chain` for the geometry and the measurements), so every ray-traced
+`e2e.environment.rt_signal_chain` for the geometry and the measurements), so every ray-traced
 target's entire return was Monte-Carlo diffuse speckle -- roughly the right ENERGY but
 spread over range and decorrelated across the aperture, earning almost none of the
 chain's coherent processing gain. `coherent_target_cfr` supplies the coherent complement.
@@ -25,12 +25,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml import rt_signal_chain as rsc
+from e2e.environment import rt_signal_chain as rsc
 from e2e.radar_config import RadarConfig
-from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
-                                   DEFAULT_GROUND_SCATTERING_COEFFICIENT,
-                                   DEFAULT_SCATTERING_COEFFICIENT,
-                                   _flat_scene_xml, _synthetic_scene_path)
+from e2e.environment.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
+                                            DEFAULT_GROUND_SCATTERING_COEFFICIENT,
+                                            DEFAULT_SCATTERING_COEFFICIENT,
+                                            _flat_scene_xml, _synthetic_scene_path)
 from e2e.scenario import (ArrayConfig, Motion, Node, NodeRole, ObjectKind, Scenario,
                           SceneObject)
 
@@ -252,7 +252,7 @@ def test_directive_antenna_pattern_is_the_default():
     frame (see `DEFAULT_ANTENNA_PATTERN`)."""
     import inspect
 
-    from e2e.ml.rt_scene_build import build_rt_scene
+    from e2e.environment.rt_scene_build import build_rt_scene
 
     assert DEFAULT_ANTENNA_PATTERN != "iso"
     sig = inspect.signature(build_rt_scene)
@@ -296,8 +296,8 @@ def test_rt_environment_block_defaults_to_the_fixed_physics():
 def test_rt_environment_block_forwards_the_fix_to_rt_cfr_frame(monkeypatch):
     """`get_S_pars()` is the only seam corpus generation goes through, so the kwargs have
     to arrive THERE. Sionna-free: `get_S_pars` resolves `build_rt_scene`/`rt_cfr_frame`
-    from `e2e.ml.rt_gen` at call time, so both are monkeypatchable."""
-    import e2e.ml.rt_gen as rt_gen
+    from `e2e.environment.rt_gen` at call time, so both are monkeypatchable."""
+    import e2e.environment.rt_gen as rt_gen
     from e2e.environment.blocks import RTEnvironmentBlock
 
     seen = {}
@@ -390,7 +390,7 @@ def test_chain_generate_cli_exposes_the_reproduction_flags():
 # End-to-end, real ray tracing
 # --------------------------------------------------------------------------------
 def _d0_scene():
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.environment.rt_scenes import build_rt_tier_scenario
 
     return build_rt_tier_scenario("D0", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                   use_local_assets=False)
@@ -401,7 +401,7 @@ def test_specular_only_finds_no_path_on_a_curved_target():
     """The root cause, pinned so nobody "simplifies" the coherent term away: Sionna's
     image method finds NOTHING off a tessellated sphere, at any tessellation or range."""
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_scene_build import build_rt_scene
+    from e2e.environment.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
     scn = _d0_scene()
@@ -419,7 +419,7 @@ def test_diffuse_lobe_follows_s_squared():
     term's `1 - S^2` complements. MEASURED 10.5 dB between S=0.3 and S=1.0 against
     10.46 dB predicted."""
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_scene_build import build_rt_scene
+    from e2e.environment.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
     scn = _d0_scene()
@@ -444,7 +444,7 @@ def test_coherent_targets_false_reproduces_the_old_path_exactly():
     """The reproduction escape hatch must be exact, not approximate -- it is how a
     pre-2026-08-17 corpus gets regenerated for comparison."""
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_scene_build import build_rt_scene
+    from e2e.environment.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
     scn = _d0_scene()
@@ -490,7 +490,7 @@ def test_fix_restores_aperture_coherence_on_a_real_traced_target():
     ~0.1 rad (a plane wave), and the target rises well above its own map background."""
     from e2e.radar_config import PRESETS
     from e2e.ml.render_scene import _resolve_frames
-    from e2e.ml.rt_scene_build import build_rt_scene
+    from e2e.environment.rt_scene_build import build_rt_scene
     from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
 
     cfg = PRESETS["ti_iwr1443"]
@@ -551,7 +551,7 @@ def test_n_centers_one_matches_the_pre_v11_implementation():
 
     def _legacy(cfg, rt_scene, scenario, *, frame_idx, paths):
         from e2e.environment.scatterers import frame_scatterers, radar_pose
-        from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
+        from e2e.environment.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
         coh_frac = max(0.0, 1.0 - float(DEFAULT_SCATTERING_COEFFICIENT) ** 2)
         n_chirps = int(cfg.n_chirps)
         freqs = rsc.beat_frequencies(cfg)

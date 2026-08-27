@@ -132,7 +132,7 @@ def build_chain_simulation(
     `environment_block`). `coherent_targets=True` adds each object's coherent specular
     return -- without it a ray-traced target is pure Monte-Carlo speckle and earns almost
     none of the chain's coherent processing gain (see the "HYBRID RT" banner in
-    `e2e.ml.rt_signal_chain`). `antenna_pattern=None` takes
+    `e2e.environment.rt_signal_chain`). `antenna_pattern=None` takes
     `rt_scene_build.DEFAULT_ANTENNA_PATTERN` (`"tr38901"`, directive), which is what keeps
     the flat scene's nadir ground bounce from owning the cube peak -- and therefore from
     owning the reference `ImpairmentBlock`'s relative-power stages calibrate against. Pass
@@ -309,7 +309,7 @@ def generate_chain_corpus(
     from e2e.ml.dataset import write_manifest
     from e2e.ml.labels import LabelGrid
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
+    from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
 
     if cfg_name not in PRESETS:
         raise ValueError(f"unknown radar config {cfg_name!r}; choices: {sorted(PRESETS)}")
@@ -400,7 +400,7 @@ def build_arg_parser():
     )
     p.add_argument("--config", required=True, help="radar config preset name (see e2e.radar_config.PRESETS)")
     p.add_argument("--tier", required=True,
-                   help="RT difficulty tier (see e2e.ml.rt_scenes.RT_DIFFICULTY_TIERS)")
+                   help="RT difficulty tier (see e2e.environment.rt_scenes.RT_DIFFICULTY_TIERS)")
     p.add_argument("--n", type=int, required=True, help="number of scenes to generate")
     p.add_argument("--seed", type=int, default=0, help="base RNG seed (scene i uses seed + i)")
     p.add_argument("--out", default=None, help="output root directory (default: e2e/ml/datasets)")
@@ -482,7 +482,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # corpus path, whose tier set (D0-D4, incl. the Munich city tier) is what
     # `generate_chain_corpus` itself validates against. Checking the analytic dict here
     # (the pre-2026-08-23 bug) made D4 unreachable from the CLI.
-    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
+    from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS
 
     if args.tier not in RT_DIFFICULTY_TIERS:
         print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
@@ -501,8 +501,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"if hpf: {'OFF (pre-A2)' if args.no_if_hpf else 'on'}")
         print(f"local assets: {'OFF (Sionna-bundled only; public-figure safe)' if args.no_local_assets else 'ON (licence-unestablished pool -- see F21/F51)'}")
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
-        from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
-                                           DEFAULT_GROUND_SCATTERING_COEFFICIENT)
+        from e2e.environment.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
+                                                    DEFAULT_GROUND_SCATTERING_COEFFICIENT)
         print(f"coherent targets: {'OFF (pre-2026-08-17 bug)' if args.no_coherent_targets else 'on'}"
               f"   antenna pattern: "
               f"{args.antenna_pattern or DEFAULT_ANTENNA_PATTERN + ' (default)'}"

@@ -2,10 +2,10 @@
 
 Two halves:
 
-* Ungated (default `pytest`, no Sionna): `e2e.ml.rt_scenes`' tier determinism and the
+* Ungated (default `pytest`, no Sionna): `e2e.environment.rt_scenes`' tier determinism and the
   procedural pedestrian placeholder's geometry -- neither needs a ray tracer, only
-  `e2e.scenario` / `e2e.ml.rt_gen`'s asset-name constants (torch is imported by
-  `e2e.ml.rt_gen` at module level, so this whole file needs torch installed, same as
+  `e2e.scenario` / `e2e.environment.rt_gen`'s asset-name constants (torch is imported by
+  `e2e.environment.rt_gen` at module level, so this whole file needs torch installed, same as
   the rest of `e2e.ml`'s test suite -- see CLAUDE.md).
 * Gated (`@pytest.mark.sionna`, RUN_SIONNA=1): every bundled car mesh loads and is
   automotive-scale, the pedestrian placeholder loads through Sionna itself, a D1 (car
@@ -14,7 +14,7 @@ Two halves:
   scattering, BOX mesh resolution, real car meshes in `sionna_env.add_cars`).
 
 Sionna is imported inside a session fixture (`sionna_rt`), never at module level --
-see `tests/test_ml_rt_gen.py`'s module docstring for why (DrJit/CUDA init at collection
+see `tests/test_rt_gen.py`'s module docstring for why (DrJit/CUDA init at collection
 would break the ungated suite).
 """
 import math
@@ -24,13 +24,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
-from e2e.ml.rt_gen import (ASSET_LICENSES, CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
-                          LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
-                          PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
-                          object_local_height_m)
-from e2e.ml.rt_scenes import (RT_DIFFICULTY_TIERS, VEHICLE_CLASS_POOLS,
-                             build_rt_tier_scenario, tier_summary, vehicle_asset_class)
+from e2e.environment.assets import DOWNLOADED_ASSET_SPECS
+from e2e.environment.rt_gen import (ASSET_LICENSES, CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
+                                    LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
+                                    PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
+                                    object_local_height_m)
+from e2e.environment.rt_scenes import (RT_DIFFICULTY_TIERS, VEHICLE_CLASS_POOLS,
+                                       build_rt_tier_scenario, tier_summary, vehicle_asset_class)
 from e2e.scenario import ObjectKind
 
 # Every asset name a "vehicle" object can legitimately carry in the DEFAULT (use_local_
@@ -76,7 +76,7 @@ def _read_ascii_ply_vertices(path):
 
 
 def test_pedestrian_placeholder_is_generated_not_committed(tmp_path):
-    from e2e.ml.rt_gen import _pedestrian_mesh_path
+    from e2e.environment.rt_gen import _pedestrian_mesh_path
 
     path = _pedestrian_mesh_path()
     # lives under a temp dir (regenerated per process), not inside the repo tree.
@@ -86,7 +86,7 @@ def test_pedestrian_placeholder_is_generated_not_committed(tmp_path):
 
 
 def test_pedestrian_placeholder_height_in_range():
-    from e2e.ml.rt_gen import _pedestrian_mesh_path
+    from e2e.environment.rt_gen import _pedestrian_mesh_path
 
     verts = _read_ascii_ply_vertices(_pedestrian_mesh_path())
     zs = [v[2] for v in verts]
@@ -96,13 +96,13 @@ def test_pedestrian_placeholder_height_in_range():
 
 
 def test_pedestrian_placeholder_path_is_cached():
-    from e2e.ml.rt_gen import _pedestrian_mesh_path
+    from e2e.environment.rt_gen import _pedestrian_mesh_path
 
     assert _pedestrian_mesh_path() == _pedestrian_mesh_path()
 
 
 # --------------------------------------------------------------------------------
-# RT difficulty tiers (ungated -- e2e.ml.rt_scenes is pure Python/numpy)
+# RT difficulty tiers (ungated -- e2e.environment.rt_scenes is pure Python/numpy)
 # --------------------------------------------------------------------------------
 @pytest.mark.parametrize("tier", sorted(RT_DIFFICULTY_TIERS))
 def test_every_tier_builds_a_valid_scenario(tier):
@@ -138,7 +138,7 @@ def test_tier_determinism_changing_any_key_component_changes_the_draw(vary):
     elif vary == "corpus_tag":
         # The 2026-08-18 fix: corpus identity is now PART of the determinism key --
         # two corpora sharing (tier, frame_idx, seed) must draw different scenes (see
-        # e2e.ml.rt_scenes._stable_seed's docstring for the leak this closes).
+        # e2e.environment.rt_scenes._stable_seed's docstring for the leak this closes).
         changed["corpus_tag"] = "a-different-corpus"
     else:
         changed[vary] = base[vary] + 1
@@ -229,7 +229,7 @@ def test_a_tier_draws_more_than_just_cars_over_many_seeds():
 def test_clutter_boxes_do_not_sit_in_a_targets_line_of_sight():
     import math
 
-    from e2e.ml.rt_scenes import _CLUTTER_LOS_MARGIN_SIN_AZ, _CLUTTER_LOS_RANGE_MARGIN_M
+    from e2e.environment.rt_scenes import _CLUTTER_LOS_MARGIN_SIN_AZ, _CLUTTER_LOS_RANGE_MARGIN_M
 
     def _polar(dx, dy):
         r = math.hypot(dx, dy)
@@ -272,7 +272,7 @@ def test_every_object_position_z_is_ground_rest_centre(tier):
     place each object's CENTER at `0.5 * object_local_height_m(...) * scaling`, not at
     world z=0 -- z=0 is what Sionna's `SceneObject.position` setter would then use as
     the bbox CENTER, burying the bottom half of the object below ground (see
-    `e2e.ml.rt_gen`'s module docstring)."""
+    `e2e.environment.rt_gen`'s module docstring)."""
     sc = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=1, num_frames=1)
     for o in sc.objects:
         expected_z = 0.5 * object_local_height_m(o.kind, o.asset) * float(o.scaling)
@@ -284,7 +284,7 @@ def test_every_object_position_z_is_ground_rest_centre(tier):
 # --------------------------------------------------------------------------------
 # Local (unshipped) asset library -- degrades gracefully when the files aren't present
 # (this file must pass whether or not this happens to be the workstation that has
-# them; see e2e.ml.rt_gen's module docstring).
+# them; see e2e.environment.rt_gen's module docstring).
 # --------------------------------------------------------------------------------
 def test_local_asset_specs_are_recorded_with_unknown_license():
     assert len(LOCAL_ASSET_SPECS) > 0
@@ -376,7 +376,7 @@ def test_use_local_assets_true_stays_within_the_expanded_pool():
 @pytest.mark.sionna
 @pytest.mark.parametrize("name", CAR_ASSET_NAMES)
 def test_every_bundled_car_mesh_loads_and_is_automotive_scale(sionna_rt, name):
-    from e2e.ml.rt_gen import _car_mesh_path
+    from e2e.environment.rt_gen import _car_mesh_path
 
     path = _car_mesh_path(sionna_rt, name)
     mesh = sionna_rt.load_mesh(path)
@@ -390,7 +390,7 @@ def test_every_bundled_car_mesh_loads_and_is_automotive_scale(sionna_rt, name):
 
 @pytest.mark.sionna
 def test_pedestrian_placeholder_loads_through_sionna(sionna_rt):
-    from e2e.ml.rt_gen import _pedestrian_mesh_path
+    from e2e.environment.rt_gen import _pedestrian_mesh_path
 
     mesh = sionna_rt.load_mesh(_pedestrian_mesh_path())
     bbox = mesh.bbox()
@@ -403,7 +403,7 @@ def test_object_mesh_dispatch_resolves_cars_and_pedestrian(sionna_rt):
     """`rt_gen._object_mesh` resolves sphere/box/car-name/pedestrian-sentinel/raw-path."""
     import dataclasses
 
-    from e2e.ml.rt_gen import _object_mesh
+    from e2e.environment.rt_gen import _object_mesh
     from e2e.scenario import SceneObject
 
     sphere = _object_mesh(sionna_rt, SceneObject(name="s", kind=ObjectKind.SPHERE))
@@ -428,7 +428,7 @@ def test_object_mesh_dispatch_resolves_downloaded_assets(sionna_rt, name):
     """`rt_gen._object_mesh` for a downloaded (car/truck/bus/trolley) asset name --
     either the real processed PLY (if the source is present on this machine) or a
     graceful degrade to `SIONNA_CAR_REPRESENTATIVE`, either way a loadable mesh."""
-    from e2e.ml.rt_gen import _object_mesh
+    from e2e.environment.rt_gen import _object_mesh
     from e2e.scenario import SceneObject
 
     path = _object_mesh(sionna_rt, SceneObject(name="v", kind=ObjectKind.MESH, asset=name))
@@ -447,7 +447,7 @@ def test_d1_tier_scene_solves_to_nonzero_return_monostatically(sionna_rt):
     import dataclasses
 
     from e2e.radar_config import TI_IWR1443
-    from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene
+    from e2e.environment.rt_gen import _beat_from_paths, _solve, build_rt_scene
 
     cfg = dataclasses.replace(TI_IWR1443, name="rt_mesh_test", n_chirps=8, n_samples=64)
     scenario = build_rt_tier_scenario("D1", corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1)
@@ -481,7 +481,7 @@ def test_every_placed_object_rests_on_or_above_ground(sionna_rt, tier, use_local
     if not scenario.objects:
         pytest.skip(f"{tier} draw at this seed placed zero objects")
 
-    from e2e.ml.rt_gen import build_rt_scene
+    from e2e.environment.rt_gen import build_rt_scene
 
     rt_scene = build_rt_scene(scenario, TI_IWR1443, base_scene="flat", frame_idx=0)
     for obj in scenario.objects:
@@ -607,7 +607,7 @@ def test_placed_objects_do_not_interpenetrate():
     at the time: 0.57% of pairs overlapped. This asserts zero, using the module's own
     footprints so the test tracks placement rather than re-guessing it.
     """
-    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint
+    from e2e.environment.rt_scenes import build_rt_tier_scenario, _footprint
 
     def box(obj):
         if obj.name.startswith("pedestrian"):
@@ -639,7 +639,7 @@ def test_no_vehicle_extends_back_through_the_radar():
     """A 16 m semi-trailer centred at the 6 m minimum range reaches BEHIND the antenna.
     A review render caught exactly that. Minimum range now grows with the object's own
     half-length, so every vehicle's near edge stays in front of the radar."""
-    from e2e.ml.rt_scenes import build_rt_tier_scenario, _footprint_radius
+    from e2e.environment.rt_scenes import build_rt_tier_scenario, _footprint_radius
 
     closest = float("inf")
     for tier in ("D1", "D2", "D3"):
@@ -663,7 +663,7 @@ def test_local_assets_are_classified_by_their_real_class():
     neighbours and defeating the separation check that depends on this function. It also
     skewed the vehicle mix: trucks drew at 5.5% against a 12% target.
     """
-    from e2e.ml.rt_scenes import _asset_vehicle_class, _footprint
+    from e2e.environment.rt_scenes import _asset_vehicle_class, _footprint
 
     assert _asset_vehicle_class("local_tractor_trailer") == "truck"
     assert _footprint("vehicle", "local_tractor_trailer")[0] > 10.0
@@ -675,8 +675,8 @@ def test_vehicle_class_mix_matches_its_weights():
     shows up here as a deficit, which is how the tractor-trailer bug surfaced."""
     import collections
     import numpy as np
-    from e2e.ml.rt_scenes import (VEHICLE_CLASS_WEIGHTS, _asset_vehicle_class,
-                                  _draw_vehicle_asset)
+    from e2e.environment.rt_scenes import (VEHICLE_CLASS_WEIGHTS, _asset_vehicle_class,
+                                           _draw_vehicle_asset)
 
     rng = np.random.default_rng(0)
     counts = collections.Counter(
@@ -692,7 +692,7 @@ def test_kenney_fleet_is_registered_in_the_default_pool():
     """The Kenney fleet must be reachable through the normal (use_local_assets=False)
     draw path -- it's registered via DOWNLOADED_ASSET_SPECS, same as every other
     downloaded mesh, not through the separate (workstation-only) LOCAL_ASSET_SPECS."""
-    from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
+    from e2e.environment.assets import DOWNLOADED_ASSET_SPECS
 
     kenney_names = {n for n, s in DOWNLOADED_ASSET_SPECS.items() if n.startswith("kn_")}
     assert len(kenney_names) == 15
@@ -724,7 +724,7 @@ def test_draw_vehicle_asset_survives_an_empty_class_pool():
 
     import numpy as np
 
-    from e2e.ml import rt_scenes
+    from e2e.environment import rt_scenes
 
     original = dict(rt_scenes.VEHICLE_CLASS_POOLS)
     try:

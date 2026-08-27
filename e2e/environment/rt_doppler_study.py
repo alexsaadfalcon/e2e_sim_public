@@ -1,18 +1,18 @@
 """
-Native-vs-re-trace Doppler-error study + CLI for `e2e.ml.rt_gen`'s ray-traced ADC
+Native-vs-re-trace Doppler-error study + CLI for `e2e.environment.rt_gen`'s ray-traced ADC
 generation.
 
-Quantifies how well `e2e.ml.rt_signal_chain`'s one-solve-per-frame native Doppler
+Quantifies how well `e2e.environment.rt_signal_chain`'s one-solve-per-frame native Doppler
 model (see that module's docstring, "The CFR -> beat mapping") tracks a ground-truth
 per-chirp re-trace, and reports the price of the ground-truth path. Split out of the
-original `rt_gen.py`; scene/mesh/asset construction lives in `e2e.ml.rt_scene_build`,
-the CFR/beat-cube physics in `e2e.ml.rt_signal_chain`. `e2e.ml.rt_gen` re-exports this
+original `rt_gen.py`; scene/mesh/asset construction lives in `e2e.environment.rt_scene_build`,
+the CFR/beat-cube physics in `e2e.environment.rt_signal_chain`. `e2e.environment.rt_gen` re-exports this
 module's public and private names for backward compatibility, including its CLI entry
 point.
 
 CLI
 ---
-    python -m e2e.ml.rt_gen [--config radial_like] [--frames 2] [--chirps 16]
+    python -m e2e.environment.rt_gen [--config radial_like] [--frames 2] [--chirps 16]
                             [--samples 128] [--base-scene flat|free|<sionna scene>]
                             [--target sphere|box] [--no-diffuse]
 runs `doppler_error_study` and prints the native-vs-re-trace table. Use
@@ -29,8 +29,8 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import torch
 
-from e2e.ml.rt_scene_build import build_rt_scene
-from e2e.ml.rt_signal_chain import _resolve_device, rt_retrace_reference, rt_synthesize_adc
+from e2e.environment.rt_scene_build import build_rt_scene
+from e2e.environment.rt_signal_chain import _resolve_device, rt_retrace_reference, rt_synthesize_adc
 
 # --------------------------------------------------------------------------------
 # Doppler error study: native evolution vs per-chirp re-trace
@@ -267,11 +267,11 @@ def _demo_scenario(n_frames: int, cfg=None, target: str = "sphere"):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m e2e.ml.rt_gen",
+        prog="python -m e2e.environment.rt_gen",
         description="Ray-traced FMCW ADC generation: native Doppler vs per-chirp re-trace.",
     )
     p.add_argument("--config", default="radial_like",
-                   help="radar preset (e2e.ml.radar_config.PRESETS). Defaults to "
+                   help="radar preset (e2e.radar_config.PRESETS). Defaults to "
                         "radial_like (12 TX x 16 RX = 192 virtual elements): the label "
                         "grid's 192 azimuth bins and the metric's match tolerance are only "
                         "physically answerable at that array size -- see "

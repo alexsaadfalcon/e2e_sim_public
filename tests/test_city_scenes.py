@@ -4,11 +4,11 @@ docstring for the mechanism/policy trade-off), plus the `RTEnvironmentBlock` wir
 (`e2e.environment.blocks`) that lets `base_scene="munich"`/`"etoile"` work end to end.
 
 Real Sionna RT ray tracing, gated behind `@pytest.mark.sionna` (RUN_SIONNA=1) -- see
-`tests/test_ml_rt_gen.py` for why the Sionna import lives in a session fixture rather
+`tests/test_rt_gen.py` for why the Sionna import lives in a session fixture rather
 than at module scope (keeps a plain `pytest` run from touching DrJit/CUDA at all).
 
 Munich's ~1150+ individually-meshed objects (`merge_shapes=False`, hardcoded in
-`e2e.ml.rt_gen._load_base_scene` -- not owned by this file) make a full-fidelity
+`e2e.environment.rt_gen._load_base_scene` -- not owned by this file) make a full-fidelity
 `PathSolver` call there measurably expensive (tens of seconds on this box; see
 `test_measure_city_vs_flat_frame_cost`), so this module keeps the number of actual
 `_solve()` calls to a minimum and uses `city_scenes` functions directly (load + swap,
@@ -234,10 +234,10 @@ def test_both_policies_produce_a_working_scene(sionna_rt):
 @pytest.mark.sionna
 def test_munich_loads_and_solves_at_the_radars_frequency(sionna_rt, cfg):
     """End to end through the SAME path `RTEnvironmentBlock.get_S_pars()` uses
-    (`patched_builtin_loader` wrapping `e2e.ml.rt_gen.build_rt_scene`): munich must
+    (`patched_builtin_loader` wrapping `e2e.environment.rt_gen.build_rt_scene`): munich must
     solve at 77-ish GHz and find real paths, not silently return zero."""
     from e2e.environment.city_scenes import EXTRAPOLATED, patched_builtin_loader
-    from e2e.ml.rt_gen import _solve, build_rt_scene
+    from e2e.environment.rt_gen import _solve, build_rt_scene
 
     sc = Scenario(name="munich_test", base_scene="munich", num_frames=1,
                  nodes=[_munich_node()], objects=[])
@@ -255,7 +255,7 @@ def test_munich_loads_and_solves_at_the_radars_frequency(sionna_rt, cfg):
 @pytest.mark.sionna
 def test_etoile_loads_and_solves_at_the_radars_frequency(sionna_rt, cfg):
     from e2e.environment.city_scenes import EXTRAPOLATED, patched_builtin_loader
-    from e2e.ml.rt_gen import _solve, build_rt_scene
+    from e2e.environment.rt_gen import _solve, build_rt_scene
 
     sc = Scenario(name="etoile_test", base_scene="etoile", num_frames=1,
                  nodes=[_etoile_node()], objects=[])

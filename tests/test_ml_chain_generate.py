@@ -410,7 +410,7 @@ def test_corpus_identity_tag_distinct_across_out_roots(tmp_path):
     real corpus's train split. The salt must differ across out roots, stay
     machine-stable (no absolute path), and feed a DIFFERENT scene draw."""
     from e2e.ml.chain_generate import _corpus_identity_tag
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.environment.rt_scenes import build_rt_tier_scenario
 
     a = _corpus_identity_tag(tmp_path / "b1_smoke" / "benchmark_v1_D2")
     b = _corpus_identity_tag(tmp_path / "b1_bench_v1" / "benchmark_v1_D2")

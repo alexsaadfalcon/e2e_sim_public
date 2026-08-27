@@ -1,16 +1,16 @@
 """
-Ray-traced (Sionna RT) path-to-signal physics for `e2e.ml.rt_gen`.
+Ray-traced (Sionna RT) path-to-signal physics for `e2e.environment.rt_gen`.
 
-Turns a solved Sionna `Paths` object (see `e2e.ml.rt_scene_build.build_rt_scene`) into
+Turns a solved Sionna `Paths` object (see `e2e.environment.rt_scene_build.build_rt_scene`) into
 the **same** dechirped ADC cube -- `complex64 [n_rx, n_chirps, n_samples]` -- that
-`e2e.ml.rd_synth` produces from its closed-form point-target model, so
-`e2e.ml.transforms`, `e2e.ml.labels` and `e2e.ml.dataset` cannot tell which generator
+`e2e.chain.rd_synth` produces from its closed-form point-target model, so
+`e2e.chain.transforms`, `e2e.ml.labels` and `e2e.ml.dataset` cannot tell which generator
 produced a frame. Split out of the original `rt_gen.py`; scene/mesh/asset construction
-lives in `e2e.ml.rt_scene_build`, the native-vs-re-trace experiment harness + CLI in
-`e2e.ml.rt_doppler_study`. `e2e.ml.rt_gen` re-exports this module's public and private
+lives in `e2e.environment.rt_scene_build`, the native-vs-re-trace experiment harness + CLI in
+`e2e.environment.rt_doppler_study`. `e2e.environment.rt_gen` re-exports this module's public and private
 names for backward compatibility.
 
-Sionna is imported lazily (inside functions), so `import e2e.ml.rt_signal_chain` works
+Sionna is imported lazily (inside functions), so `import e2e.environment.rt_signal_chain` works
 on a machine without Sionna/DrJit -- only the generation calls need it.
 
 
@@ -108,7 +108,7 @@ import numpy as np
 import torch
 
 from e2e.environment.geometry import nearest_surface_point
-from e2e.ml.rt_scene_build import RTScene, build_rt_scene
+from e2e.environment.rt_scene_build import RTScene, build_rt_scene
 
 # See the module docstring's "Element ordering / array handedness" section.
 _ANTENNA_INDEX_REVERSED = True
@@ -327,7 +327,7 @@ def cfr_sum_over_paths(a, tau, doppler, freqs, *, f_c: float, chirp_period_s: fl
     generated before this date used the uncorrected (`range_migration=False`) model; see
     CHANGELOG.md. THIS function's own default stays False deliberately: it is a
     general-purpose closed-form utility (also exercised directly, with both values, by
-    `tests/test_ml_doppler_validity.py`), and `cfr_from_paths` always passes the flag
+    `tests/test_rt_doppler_validity.py`), and `cfr_from_paths` always passes the flag
     explicitly rather than relying on this default.
     """
     a = np.asarray(a)
@@ -855,7 +855,7 @@ def coherent_target_cfr(cfg, rt_scene, scenario, *, frame_idx: int = 0,
     centre, so 5 centres cost roughly what 1 did.
     """
     from e2e.environment.scatterers import frame_scatterers, radar_pose
-    from e2e.ml.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
+    from e2e.environment.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT
 
     if scattering_coefficient is None:
         scattering_coefficient = DEFAULT_SCATTERING_COEFFICIENT
@@ -1102,9 +1102,9 @@ def rt_synthesize_adc(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "f
                       samples_per_src: Optional[int] = None) -> torch.Tensor:
     """Ray-trace one radar frame and return its dechirped ADC cube.
 
-    Drop-in replacement for `e2e.ml.rd_synth.synthesize_adc(cfg, scatterers, pose, ...)`
+    Drop-in replacement for `e2e.chain.rd_synth.synthesize_adc(cfg, scatterers, pose, ...)`
     at the dataset level: same return contract, `complex64 [n_rx, n_chirps, n_samples]`
-    on `device`, consumable by `e2e.ml.transforms` unchanged.
+    on `device`, consumable by `e2e.chain.transforms` unchanged.
 
     ONE `PathSolver` solve is performed; the chirp axis comes from Sionna's Doppler
     time-evolution (native evolution, `range_migration` correcting the delay it freezes
@@ -1199,7 +1199,7 @@ def rt_retrace_reference(cfg, scenario, *, frame_idx: int = 0, base_scene: str =
     coherent specular return -- see the "HYBRID RT" banner. It MUST track the native
     path's setting or this reference stops being a reference: a static scene's re-trace
     and native cubes agree to <1e-4 relative only when both arms make the same choice
-    (pinned by `tests/test_ml_rt_gen.py`'s static-scene equality test).
+    (pinned by `tests/test_rt_gen.py`'s static-scene equality test).
 
     Expensive by design: cost is `n_chirps` solves instead of one. `n_chirps_cap`
     truncates the CPI (the returned cube then has `min(n_chirps, cap)` chirps, which

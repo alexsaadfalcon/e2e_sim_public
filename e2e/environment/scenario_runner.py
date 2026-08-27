@@ -114,10 +114,11 @@ _SPEED_OF_LIGHT = 299_792_458.0
 # 0, and the solver's `diffuse_reflection` defaulted to False below), which made a
 # monostatic radar link's own scene objects (cars/pedestrians/etc.) effectively
 # invisible: a curved/irregular target has no specular return straight back at the
-# radar, only a diffuse one. Mirrors `e2e.ml.rt_gen`'s
+# radar, only a diffuse one. Mirrors `e2e.environment.rt_gen`'s
 # `DEFAULT_SCATTERING_COEFFICIENT`/`DEFAULT_SCATTERING_PATTERN` (not imported from
-# there -- this module stays independent of the `e2e.ml` package); 0.3 is a plausible
-# mid-range value for a rough painted/metallic surface at mmWave, not a measured one.
+# there -- this module stays free of a torch-importing sibling dependency); 0.3 is a
+# plausible mid-range value for a rough painted/metallic surface at mmWave, not a
+# measured one.
 _OBJECT_SCATTERING_COEFFICIENT = 0.3
 _OBJECT_SCATTERING_PATTERN = "lambertian"
 
@@ -605,7 +606,7 @@ class ScenarioRunner:
 
     @staticmethod
     def _box_mesh_path(rt) -> str:
-        """Path to Sionna's box *mesh* (mirrors `e2e.ml.rt_gen._box_mesh_path`).
+        """Path to Sionna's box *mesh* (mirrors `e2e.environment.rt_gen._box_mesh_path`).
 
         `rt.scene.box` is the path to a box SCENE (`box/box.xml`), not a mesh, so
         passing it straight to `SceneObject(fname=...)` raises "Invalid mesh type" --

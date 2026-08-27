@@ -1,4 +1,4 @@
-"""Tests for scene-object heading (`e2e.ml.rt_scene_build.object_yaw_rad`).
+"""Tests for scene-object heading (`e2e.environment.rt_scene_build.object_yaw_rad`).
 
 Regression for a realism gap found 2026-08-17: no orientation was applied to any scene
 object, so every mesh sat axis-aligned and — because the radar looks down +x — every
@@ -15,7 +15,7 @@ import math
 
 import pytest
 
-from e2e.ml.rt_scene_build import _YAW_MOVING_EPS_MPS, object_yaw_rad
+from e2e.environment.rt_scene_build import _YAW_MOVING_EPS_MPS, object_yaw_rad
 
 
 class _Scat:

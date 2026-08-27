@@ -1,15 +1,15 @@
 """
-Ray-traced (Sionna RT) scene / mesh / asset construction for `e2e.ml.rt_gen`.
+Ray-traced (Sionna RT) scene / mesh / asset construction for `e2e.environment.rt_gen`.
 
 Builds the Sionna RT `Scene` (ground plane / city tile / free space, plus the
-monostatic TX/RX array pair and every scenario object) that `e2e.ml.rt_signal_chain`
+monostatic TX/RX array pair and every scenario object) that `e2e.environment.rt_signal_chain`
 solves and turns into an ADC cube. Split out of the original `rt_gen.py` -- pure
 scene/mesh/asset plumbing here; the CFR/beat-cube physics live in
-`e2e.ml.rt_signal_chain`, the native-vs-re-trace experiment harness + CLI in
-`e2e.ml.rt_doppler_study`. `e2e.ml.rt_gen` re-exports this module's public and
+`e2e.environment.rt_signal_chain`, the native-vs-re-trace experiment harness + CLI in
+`e2e.environment.rt_doppler_study`. `e2e.environment.rt_gen` re-exports this module's public and
 private names for backward compatibility.
 
-Sionna is imported lazily (inside functions), so `import e2e.ml.rt_scene_build` works
+Sionna is imported lazily (inside functions), so `import e2e.environment.rt_scene_build` works
 on a machine without Sionna/DrJit -- only the generation calls need it.
 
 Materials: Sionna's defaults make every object a perfect specular mirror
@@ -22,7 +22,7 @@ mid-range value for a rough painted/metallic vehicle surface at mmWave -- it is 
 modelling choice, not a measured one.
 
 Diffuse scattering alone is NOT how targets become visible, though -- see the
-"HYBRID RT" banner in `e2e.ml.rt_signal_chain`. Sionna's image-method specular search
+"HYBRID RT" banner in `e2e.environment.rt_signal_chain`. Sionna's image-method specular search
 provably cannot find a monostatic path off a tessellated convex body at range
 (MEASURED: zero specular paths off Sionna's own 15,872-facet sphere at every range from
 0.6 m to 14.2 m, and zero off `low_poly_car`), so the diffuse lobe used to be the only
@@ -39,7 +39,7 @@ bounce 54 dB above the target into every frame; see CHANGELOG / the constants' c
 Ground-rest placement / local (unshipped) asset library
 ---------------------------------------------------------
 `object_local_height_m` reports each object's unscaled mesh z-extent (bbox height) --
-pure constants/cheap file parsing, no Sionna needed -- so `e2e.ml.rt_scenes` can place
+pure constants/cheap file parsing, no Sionna needed -- so `e2e.environment.rt_scenes` can place
 every object's CENTER at `0.5 * height * scaling` above the ground. That matters because
 `SceneObject.position`'s setter (Sionna) re-centers the mesh's AABB on the given point,
 so naively placing every object at world z=0 buries the bottom half of it below the
@@ -62,7 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from e2e.environment.geometry import scene_seed_for
-from e2e.ml.assets import DOWNLOADED_ASSET_SPECS, process_asset
+from e2e.environment.assets import DOWNLOADED_ASSET_SPECS, process_asset
 
 # Material defaults -- deliberately NOT Sionna's (pure specular mirror); see above.
 DEFAULT_SCATTERING_COEFFICIENT = 0.3
@@ -179,7 +179,7 @@ DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0
 # differences -- against the flat grey ground and the amber radar marker
 # (`e2e.ml.render_scene._RADAR_MARKER_COLOR`), and (b) keeping "sphere" (the D0
 # stand-in target -- still tagged `object_class="vehicle"` for RCS/dataset purposes,
-# see `e2e.ml.rt_scenes.build_rt_tier_scenario`) visually distinct from a real vehicle
+# see `e2e.environment.rt_scenes.build_rt_tier_scenario`) visually distinct from a real vehicle
 # mesh even though they share an `object_class`, since a reviewer needs to tell them
 # apart by eye; `_default_object_render_color` therefore checks `obj.kind` before
 # `obj.object_class`.
@@ -236,7 +236,7 @@ CAR_ASSET_NAMES = (
 # `CAR_ASSET_NAMES` is kept above at its full 17-name inventory (mesh-path resolution,
 # license bookkeeping, and any existing scenario that references one of the 16
 # scene-slot names by name all still need it) -- but drawing a scene's cars UNIFORMLY
-# from all 17 draws the SAME geometry ~85% of the time (see `e2e.ml.rt_scenes`'
+# from all 17 draws the SAME geometry ~85% of the time (see `e2e.environment.rt_scenes`'
 # `VEHICLE_CLASS_POOLS`, which uses only this one name plus real downloaded meshes for
 # variety; campaign R3).
 SIONNA_CAR_REPRESENTATIVE = CAR_ASSET_NAMES[0]  # "low_poly_car"
@@ -272,13 +272,13 @@ ASSET_LICENSES = {
     },
 }
 
-# Downloaded vehicle meshes (campaign R3, see `e2e.ml.assets`): real car/truck/bus/
+# Downloaded vehicle meshes (campaign R3, see `e2e.environment.assets`): real car/truck/bus/
 # trolley geometry, decimated + normalized by that module. Most of these are
 # user-supplied files whose redistribution terms have NOT been checked -- the generic
 # "license" text below applies to those. The Kenney fleet (campaign R3 follow-up) is the
 # exception: it carries a VERIFIED `DownloadedAssetSpec.license` (CC0, checked against
 # the kit's own License.txt), which takes precedence over the generic text. No mesh
-# binary is committed to this repository (see `e2e.ml.assets`' cache-directory
+# binary is committed to this repository (see `e2e.environment.assets`' cache-directory
 # docstring); every consumer degrades gracefully to `SIONNA_CAR_REPRESENTATIVE` when the
 # cache/source archive is absent.
 for _name, _spec in DOWNLOADED_ASSET_SPECS.items():
@@ -297,7 +297,7 @@ del _name, _spec
 # compute "where must this object's CENTER be so its bbox rests on z=0 after Sionna's
 # SceneObject.position setter re-centers it" WITHOUT a ray tracer (see the module
 # docstring). Sphere/box are Sionna's own primitives; measured once via
-# `sionna.rt.load_mesh(...).bbox()` (see tests/test_ml_rt_meshes.py's gated mesh-scale
+# `sionna.rt.load_mesh(...).bbox()` (see tests/test_rt_meshes.py's gated mesh-scale
 # checks for the same numbers from a different angle). Cars share one geometry across
 # all of `CAR_ASSET_NAMES` (see that constant's docstring).
 # --------------------------------------------------------------------------------
@@ -610,7 +610,7 @@ def _flat_scene_xml(ground_scattering_coefficient: float
 """
 
 
-#: The default-roughness flat scene. Kept as a module constant because `e2e.ml.rt_gen`
+#: The default-roughness flat scene. Kept as a module constant because `e2e.environment.rt_gen`
 #: re-exports it and callers reference it; parameterised builds go through
 #: `_flat_scene_xml`.
 _FLAT_SCENE_XML = _flat_scene_xml()

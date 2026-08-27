@@ -1,7 +1,7 @@
-"""`e2e.ml.assets`: extraction/decimation/normalization of the downloaded vehicle
+"""`e2e.environment.assets`: extraction/decimation/normalization of the downloaded vehicle
 meshes (campaign R3).
 
-Two halves, same split as `tests/test_ml_rt_meshes.py`:
+Two halves, same split as `tests/test_rt_meshes.py`:
 
 * Ungated (default `pytest`, no Sionna): the asset registry itself (pure dataclasses),
   the mesh-processing primitives (OBJ group filtering, STL reading, vertex-clustering
@@ -17,13 +17,13 @@ Two halves, same split as `tests/test_ml_rt_meshes.py`:
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")  # e2e.ml.rt_gen (imported transitively) needs it
+torch = pytest.importorskip("torch")  # e2e.environment.rt_gen (imported transitively) needs it
 
-from e2e.ml.assets import (ARCHIVE_SPECS, DECIMATE_MAX_TRIS, DOWNLOADED_ASSET_SPECS,
-                          DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
-                          DOWNLOADED_TROLLEY_ASSET_NAMES, DOWNLOADED_TRUCK_ASSET_NAMES,
-                          _read_obj_np, _read_stl_np, _vertex_cluster_pass,
-                          decimate_to_budget, normalize_mesh, process_all, process_asset)
+from e2e.environment.assets import (ARCHIVE_SPECS, DECIMATE_MAX_TRIS, DOWNLOADED_ASSET_SPECS,
+                                    DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
+                                    DOWNLOADED_TROLLEY_ASSET_NAMES, DOWNLOADED_TRUCK_ASSET_NAMES,
+                                    _read_obj_np, _read_stl_np, _vertex_cluster_pass,
+                                    decimate_to_budget, normalize_mesh, process_all, process_asset)
 
 
 @pytest.fixture(scope="session")
@@ -43,7 +43,7 @@ def test_every_class_is_populated():
 def test_car_class_has_more_than_one_distinct_mesh():
     """The whole point of this campaign: a car-class draw must be able to land on more
     than one distinct geometry (delorean vs. audi_r8, on top of the one Sionna
-    representative kept in e2e.ml.rt_gen)."""
+    representative kept in e2e.environment.rt_gen)."""
     assert len(DOWNLOADED_CAR_ASSET_NAMES) >= 2
 
 
@@ -139,7 +139,7 @@ def test_pre_kenney_assets_keep_the_default_unverified_license():
 def test_kenney_archive_uses_an_already_extracted_directory_source():
     """`ensure_extracted`/`load_raw_mesh` must accept a pre-extracted directory (the
     Kenney kit, unzipped once by hand) rather than requiring 7z + downloads_dir()."""
-    from e2e.ml.assets import ARCHIVE_SPECS
+    from e2e.environment.assets import ARCHIVE_SPECS
 
     spec = ARCHIVE_SPECS["kenney_car_kit"]
     assert spec.source_subdir is not None
@@ -163,7 +163,7 @@ def test_kenney_per_axis_scaling_matches_real_class_dims(name):
     while badly overshooting width/height (see the module docstring). Runs against the
     REAL kit files on this workstation; skips gracefully (no Sionna needed either way)
     if the kit isn't present, so CI (which has neither) stays green."""
-    import e2e.ml.assets as assets_mod
+    import e2e.environment.assets as assets_mod
     assets_mod._process_cache.pop(name, None)
 
     result = process_asset(name, force=True)
@@ -179,7 +179,7 @@ def test_kenney_per_axis_scaling_matches_real_class_dims(name):
 # --------------------------------------------------------------------------------
 # OWNER-APPROVED bus + tram (resolves the Kenney follow-up's deferred bus/trolley
 # search): one CC0 bus (ajanhallinta, OpenGameArt) and one CC-BY 3.0 tram (Poly by
-# Google) -- see e2e.ml.assets.DOWNLOADED_ASSET_SPECS' "Follow-up 2" docstring note.
+# Google) -- see e2e.environment.assets.DOWNLOADED_ASSET_SPECS' "Follow-up 2" docstring note.
 # --------------------------------------------------------------------------------
 def test_bus_and_tram_are_registered_with_the_right_class_and_license():
     bus = DOWNLOADED_ASSET_SPECS["dl_bus_ajanhallinta"]
@@ -216,7 +216,7 @@ def test_bus_and_tram_per_axis_scaling_matches_real_class_dims(name):
     """Same load-bearing check as `test_kenney_per_axis_scaling_matches_real_class_dims`,
     against the REAL files on this workstation; skips gracefully if absent so CI (which
     has neither) stays green."""
-    import e2e.ml.assets as assets_mod
+    import e2e.environment.assets as assets_mod
     assets_mod._process_cache.pop(name, None)
 
     result = process_asset(name, force=True)
@@ -372,7 +372,7 @@ def test_vertex_cluster_pass_collapses_a_degenerate_triangle():
 # Normalization (ungated -- synthetic verts + a hand-built spec)
 # --------------------------------------------------------------------------------
 def test_normalize_mesh_permutes_scales_and_rebases():
-    from e2e.ml.assets import DownloadedAssetSpec
+    from e2e.environment.assets import DownloadedAssetSpec
 
     # Raw axes: "length" lives on raw z, "width" on raw x, "height" on raw y (mirrors
     # the delorean/audi_r8/truck_daf finding) -- permutation (2, 0, 1).
@@ -400,7 +400,7 @@ def test_normalize_mesh_permutes_scales_and_rebases():
 def test_process_asset_returns_none_without_cache_or_downloads(tmp_path, monkeypatch):
     monkeypatch.setenv("E2E_ML_ASSET_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("E2E_ML_ASSET_DOWNLOADS_DIR", str(tmp_path / "downloads"))
-    import e2e.ml.assets as assets_mod
+    import e2e.environment.assets as assets_mod
     assets_mod._process_cache.clear()
 
     for name in DOWNLOADED_ASSET_SPECS:
@@ -412,7 +412,7 @@ def test_process_asset_returns_none_without_cache_or_downloads(tmp_path, monkeyp
 
 
 def test_ensure_extracted_false_when_7z_or_archive_missing(tmp_path, monkeypatch):
-    from e2e.ml.assets import ensure_extracted
+    from e2e.environment.assets import ensure_extracted
 
     monkeypatch.setenv("E2E_ML_ASSET_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("E2E_ML_ASSET_DOWNLOADS_DIR", str(tmp_path / "nonexistent_downloads"))
@@ -460,7 +460,7 @@ def test_downloaded_asset_scene_solves_to_nonzero_monostatic_return(sionna_rt, n
     import dataclasses
 
     from e2e.radar_config import TI_IWR1443
-    from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene
+    from e2e.environment.rt_gen import _beat_from_paths, _solve, build_rt_scene
     from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 
     cfg = dataclasses.replace(TI_IWR1443, name="dl_asset_test", n_chirps=8, n_samples=64)

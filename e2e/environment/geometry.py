@@ -6,7 +6,7 @@ Why this module exists
 Two layers need the same answer to the same question -- *where on this object does the
 radar's line of sight first touch it?* -- and they must not answer it differently:
 
-* `e2e.ml.rt_signal_chain.coherent_target_cfr` puts each object's coherent point
+* `e2e.environment.rt_signal_chain.coherent_target_cfr` puts each object's coherent point
   scatterer there (its `_specular_point` fallback now delegates here), and
 * `e2e.ml.labels.encode_detection_labels` puts each object's objectness footprint there.
 
@@ -42,13 +42,13 @@ Extents
 -------
 `object_extent_m` resolves a `e2e.scenario.SceneObject` to `(length, width, height)` in
 metres, after `scaling`, following EXACTLY the same asset dispatch (and the same graceful
-degradation) as `e2e.ml.rt_scene_build._object_mesh` / `object_local_height_m`: if the
+degradation) as `e2e.environment.rt_scene_build._object_mesh` / `object_local_height_m`: if the
 mesh a scene would actually load is the Sionna car (because a downloaded asset's cache is
 absent on this machine), the extent reported here is the Sionna car's too. Placement and
 labelling therefore cannot disagree about what was put in the scene.
 
 Sionna primitive extents are MEASURED (`sionna.rt.load_mesh(...).bbox()`, sionna-rt
-1.2.2), not assumed; downloaded-asset extents are read from `e2e.ml.assets`' own
+1.2.2), not assumed; downloaded-asset extents are read from `e2e.environment.assets`' own
 per-asset stats sidecar -- the bbox of the very mesh that ships. Per-asset (not
 per-class) numbers matter: the "truck" class alone spans a 6.5 m delivery van to a
 15.7 m semi, i.e. half-lengths 3.25 m to 7.87 m, so a single class-typical figure would
@@ -86,7 +86,7 @@ PEDESTRIAN_EXTENT_M: Vec3 = (0.30, 0.53, 1.74)
 
 #: Local (unshipped, this-workstation-only) assets: bboxes as recorded in
 #: `rt_scene_build.LOCAL_ASSET_SPECS`' own measured inventory comment, in the MESH's axis
-#: order (these are loaded WITHOUT an axis permutation, unlike `e2e.ml.assets`' downloaded
+#: order (these are loaded WITHOUT an axis permutation, unlike `e2e.environment.assets`' downloaded
 #: fleet). CAVEAT, inherited not introduced: `local_dodge_charger`'s length runs along its
 #: local +y, so yaw -- which rotates the object's local +x onto its heading -- points that
 #: one mesh across its direction of travel. That is an asset-normalization gap in the
@@ -105,7 +105,7 @@ _extent_cache: Dict[Tuple[str, Optional[str]], Optional[Vec3]] = {}
 
 
 def _processed_asset_extent_m(asset: str) -> Optional[Vec3]:
-    """Bbox of a downloaded asset's PROCESSED mesh, from `e2e.ml.assets`' stats sidecar.
+    """Bbox of a downloaded asset's PROCESSED mesh, from `e2e.environment.assets`' stats sidecar.
 
     That sidecar records the bbox of the exact decimated, metre-normalized mesh
     `rt_scene_build._object_mesh` loads, so a label derived from it lands on the geometry
@@ -115,7 +115,7 @@ def _processed_asset_extent_m(asset: str) -> Optional[Vec3]:
     a machine without the processed mesh also cannot LOAD it, so `_base_extent_m`
     degrades exactly as `_object_mesh` does, to the Sionna car.
     """
-    from e2e.ml.assets import processed_dir
+    from e2e.environment.assets import processed_dir
 
     stats_path = os.path.join(processed_dir(), f"{asset}.ply.stats")
     if not os.path.isfile(stats_path):
@@ -131,12 +131,12 @@ def _processed_asset_extent_m(asset: str) -> Optional[Vec3]:
 def _base_extent_m(kind, asset: Optional[str]) -> Optional[Vec3]:
     """Unscaled `(length, width, height)` for a `(kind, asset)` pair, or None if unknown.
 
-    Dispatch order mirrors `e2e.ml.rt_scene_build._object_mesh` exactly, including its
+    Dispatch order mirrors `e2e.environment.rt_scene_build._object_mesh` exactly, including its
     graceful degradation to a Sionna-bundled mesh when a local/downloaded asset is not
     present on this machine.
     """
-    from e2e.ml.rt_scene_build import (CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
-                                       PEDESTRIAN_ASSET_NAME)
+    from e2e.environment.rt_scene_build import (CAR_ASSET_NAMES, LOCAL_ASSET_SPECS,
+                                                PEDESTRIAN_ASSET_NAME)
     from e2e.scenario import ObjectKind
 
     if kind == ObjectKind.SPHERE:
@@ -152,7 +152,7 @@ def _base_extent_m(kind, asset: Optional[str]) -> Optional[Vec3]:
     if asset in CAR_ASSET_NAMES:
         return SIONNA_CAR_EXTENT_M
     if asset in LOCAL_ASSET_SPECS:
-        from e2e.ml.rt_scene_build import _local_asset_source_path
+        from e2e.environment.rt_scene_build import _local_asset_source_path
 
         if _local_asset_source_path(asset) is not None:
             return LOCAL_ASSET_EXTENT_M.get(asset)
@@ -160,7 +160,7 @@ def _base_extent_m(kind, asset: Optional[str]) -> Optional[Vec3]:
         # report ITS extent (keeps geometry and labels talking about the same object).
         return (PEDESTRIAN_EXTENT_M if LOCAL_ASSET_SPECS[asset].category == "pedestrian"
                 else SIONNA_CAR_EXTENT_M)
-    from e2e.ml.assets import DOWNLOADED_ASSET_SPECS
+    from e2e.environment.assets import DOWNLOADED_ASSET_SPECS
 
     if asset in DOWNLOADED_ASSET_SPECS:
         # `_object_mesh` loads the processed mesh when it exists and the Sionna car when
@@ -196,7 +196,7 @@ def object_extent_m(obj) -> Optional[Vec3]:
 # --------------------------------------------------------------------------------
 class _VelocityOnly:
     """Minimal scatterer stand-in for `rt_scene_build.object_yaw_rad`, which reads only
-    `.velocity` (see that function and `tests/test_ml_object_yaw.py`)."""
+    `.velocity` (see that function and `tests/test_object_yaw.py`)."""
 
     __slots__ = ("velocity",)
 
@@ -226,7 +226,7 @@ def scene_seed_for(scenario) -> int:
 def _placed_object_yaw_rad(velocity, name: str, scene_seed: int) -> Optional[float]:
     """The heading the RT SCENE BUILDER will actually give this object, or None.
 
-    `e2e.ml.rt_scene_build.object_yaw_rad` is what sets `SceneObject.orientation` on the
+    `e2e.environment.rt_scene_build.object_yaw_rad` is what sets `SceneObject.orientation` on the
     real mesh, so it -- not a second opinion computed here -- decides which way an object
     faces. That matters most for a PARKED object: the placer gives it a deterministic
     pseudo-random heading keyed on `(scene_seed, name)`, and a label layer that assumed
@@ -238,7 +238,7 @@ def _placed_object_yaw_rad(velocity, name: str, scene_seed: int) -> Optional[flo
     the velocity heading.
     """
     try:
-        from e2e.ml.rt_scene_build import object_yaw_rad as _placed
+        from e2e.environment.rt_scene_build import object_yaw_rad as _placed
     except Exception:                                  # pragma: no cover - defensive
         return None
     try:
@@ -257,7 +257,7 @@ def object_yaw_rad(obj=None, velocity: Optional[Sequence[float]] = None, *,
     1. an explicit `yaw_rad` / `yaw_deg` attribute on `obj` (the scenario layer does not
        carry one today; this is here so that the moment it does, every consumer of this
        function picks it up together);
-    2. when `name` is given, whatever `e2e.ml.rt_scene_build.object_yaw_rad` will place
+    2. when `name` is given, whatever `e2e.environment.rt_scene_build.object_yaw_rad` will place
        the mesh at -- the moving object's direction of travel, or a deterministic
        per-object heading if it is parked. Deferring to the placer is the point: a label
        derived from a different heading than the mesh was placed at is wrong by up to

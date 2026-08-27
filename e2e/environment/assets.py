@@ -2,12 +2,12 @@
 Real downloaded vehicle meshes for the ray-traced ML radar corpus (campaign R3).
 
 The problem this solves: every "car" in every RT scene was one low-poly Sionna geometry
-repeated under 17 different names (see `e2e.ml.rt_gen.CAR_ASSET_NAMES`), so a radar model
+repeated under 17 different names (see `e2e.environment.rt_gen.CAR_ASSET_NAMES`), so a radar model
 trained on this data never saw real vehicle-shape diversity. This module owns the three
 steps that turn a handful of user-downloaded artist meshes (mixed units, mixed axis
 conventions, hundreds of thousands of triangles each) into radar-appropriate scene
 assets: **extraction/inventory**, **decimation**, and **scale/orientation normalization**.
-`e2e.ml.rt_gen` (asset dispatch + licensing) and `e2e.ml.rt_scenes` (pool composition)
+`e2e.environment.rt_gen` (asset dispatch + licensing) and `e2e.environment.rt_scenes` (pool composition)
 consume the result; neither owns any of this module's logic.
 
 Nothing here ever touches Sionna -- pure numpy/stdlib, so it runs (and degrades
@@ -82,7 +82,7 @@ under `DECIMATE_MAX_TRIS`.
 
 CLI
 ---
-    python -m e2e.ml.assets [--force]
+    python -m e2e.environment.assets [--force]
 extracts (if needed), decimates, normalizes and caches every `DOWNLOADED_ASSET_SPECS`
 entry whose raw file is found, and prints the before/after triangle count + metre bbox +
 scale-factor inventory table (the same table this module's report used).
@@ -254,7 +254,7 @@ class DownloadedAssetSpec:
     # bounding box. `None` (the default, and every pre-Kenney asset) keeps the original
     # isotropic `scale_m` behaviour.
     axis_scale_m: Optional[Tuple[float, float, float]] = None
-    # Overrides the generic "UNKNOWN, terms not verified" text `e2e.ml.rt_gen.
+    # Overrides the generic "UNKNOWN, terms not verified" text `e2e.environment.rt_gen.
     # ASSET_LICENSES` otherwise applies uniformly to every DOWNLOADED_ASSET_SPECS entry.
     # `None` (default) keeps that generic text -- set only for assets with an actually
     # verified license (e.g. the Kenney fleet's CC0).
@@ -333,7 +333,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
     # verified from the License.txt shipped INSIDE the kit (CC0 1.0 Universal). Unlike
     # the five freestl.com meshes above (UNKNOWN/unverified provenance), these carry an
     # explicit `license` string (see DownloadedAssetSpec.license) that
-    # `e2e.ml.rt_gen.ASSET_LICENSES` picks up in place of the generic UNKNOWN text.
+    # `e2e.environment.rt_gen.ASSET_LICENSES` picks up in place of the generic UNKNOWN text.
     #
     # Kenney's meshes are Y-up with wheels baked in (no separate assembly needed):
     # raw axis convention length=z, width=x, height=y -> axis_permutation=(2, 0, 1),
@@ -570,7 +570,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
                    "tram-google/ -- see that directory's PROVENANCE.txt.",
     ),
     # bus/trolley coverage is now dl_school_bus + dl_bus_ajanhallinta (bus) and
-    # dl_trolley + dl_tram_google (trolley) -- see e2e.ml.rt_scenes' VEHICLE_CLASS_POOLS.
+    # dl_trolley + dl_tram_google (trolley) -- see e2e.environment.rt_scenes' VEHICLE_CLASS_POOLS.
 }
 
 DOWNLOADED_CAR_ASSET_NAMES = tuple(
@@ -585,7 +585,7 @@ DOWNLOADED_TROLLEY_ASSET_NAMES = tuple(
 
 # --------------------------------------------------------------------------------
 # Mesh I/O -- group-aware OBJ reader (needs to drop excluded object groups, which the
-# simpler per-line readers in `e2e.ml.rt_gen` don't need to) + a binary/ASCII STL reader.
+# simpler per-line readers in `e2e.environment.rt_gen` don't need to) + a binary/ASCII STL reader.
 # numpy-backed (these source files run to hundreds of thousands of vertices).
 # --------------------------------------------------------------------------------
 def _read_stl_np(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -923,7 +923,7 @@ def process_all(*, force: bool = False) -> Dict[str, Optional[AssetResult]]:
 # --------------------------------------------------------------------------------
 def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(
-        prog="python -m e2e.ml.assets",
+        prog="python -m e2e.environment.assets",
         description="Extract, decimate and normalize the downloaded vehicle meshes.",
     )
     p.add_argument("--force", action="store_true", help="reprocess even if cached")

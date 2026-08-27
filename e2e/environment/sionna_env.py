@@ -98,8 +98,8 @@ class SionnaEnvironment:
     # package they ship in): the standalone `low_poly_car.ply` plus the
     # `simple_street_canyon_with_cars` demo's 16 duplicate-geometry, differently
     # positioned/named copies (`car-0..7.ply` / `car_1..8.ply`). Duplicated here
-    # (rather than imported) to keep this module independent of the `e2e.ml`
-    # package -- see `e2e.ml.rt_gen.CAR_ASSET_NAMES` for the canonical list.
+    # (rather than imported) to keep this module free of a torch-importing sibling
+    # dependency -- see `e2e.environment.rt_gen.CAR_ASSET_NAMES` for the canonical list.
     _CAR_ASSET_NAMES = (
         ("low_poly_car",)
         + tuple(f"car-{i}" for i in range(8))

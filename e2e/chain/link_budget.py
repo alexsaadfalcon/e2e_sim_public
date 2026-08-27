@@ -2,7 +2,7 @@
 
 WHY THIS MODULE EXISTS -- read this before changing a constant in it.
 
-`e2e.ml.rt_signal_chain` builds a dechirped cube whose per-target amplitude is
+`e2e.environment.rt_signal_chain` builds a dechirped cube whose per-target amplitude is
 
     amp = g_elem^2 * sqrt(sigma) * lambda / ((4*pi)^1.5 * d_r * d_t)
 

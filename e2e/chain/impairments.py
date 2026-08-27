@@ -1,7 +1,7 @@
 """
 FMCW radar impairments applied to dechirped ADC cubes.
 
-Operates on the same contract as `e2e.ml.rt_gen.rt_synthesize_adc` (and
+Operates on the same contract as `e2e.environment.rt_gen.rt_synthesize_adc` (and
 `e2e.chain.rd_synth.synthesize_adc`): a `complex64` tensor `adc[n_rx, n_chirps, n_samples]`
 on some torch device, with fast-time sample `n` of chirp `c` holding
 `exp(j2pi f_RF(n) tau)` for a target at delay `tau` (see `rt_gen`'s module docstring,

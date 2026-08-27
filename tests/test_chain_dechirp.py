@@ -3,7 +3,7 @@
 All tests here are ungated (synthetic `s_pars`, no Sionna/DrJit needed): the block's
 math (conjugate, antenna-index reversal, TDM/DDMA MIMO combine) is pure tensor algebra,
 independent of where the CFR came from. The gated ray-tracing tests in
-`tests/test_ml_rt_gen.py` continue to exercise `_beat_from_paths`/`mimo_combine`, which
+`tests/test_rt_gen.py` continue to exercise `_beat_from_paths`/`mimo_combine`, which
 this module now delegates to (see `e2e/chain/dechirp.py`'s module docstring).
 """
 
@@ -43,7 +43,7 @@ def _random_s_pars(n_rx, n_tx, n_chirp, n_freq, device, seed=0):
 # Bit-exactness against the pre-refactor reference math
 # --------------------------------------------------------------------------------
 def _reference_beat_and_adc(s_pars_np, cfg):
-    """Verbatim transcription of the pre-refactor `e2e.ml.rt_gen._beat_from_paths` /
+    """Verbatim transcription of the pre-refactor `e2e.environment.rt_gen._beat_from_paths` /
     `mimo_combine` numpy math (see that module's git history) -- an independent golden
     reference, NOT a call into `e2e.chain.dechirp`, so this test actually guards against
     the two implementations drifting apart rather than comparing code with itself.
@@ -150,7 +150,7 @@ def test_single_scheme_bit_exact_against_reference(torch_device):
 
 def test_ddma_combine_matches_reference(torch_device):
     """DDMA sums complex products across the TX axis: exact equality is not guaranteed
-    across independently-written summations (the gated `test_ml_rt_gen.py` also only
+    across independently-written summations (the gated `test_rt_gen.py` also only
     checks this scheme with `assert_allclose`, never exact) -- but it must be equal to
     tight numerical precision."""
     cfg = _cfg(n_tx=3, n_rx=4, n_chirps=9, n_samples=5, mimo="ddma")
@@ -161,10 +161,10 @@ def test_ddma_combine_matches_reference(torch_device):
 
 
 def test_rt_gen_delegates_to_dechirp_block_and_stays_bit_exact(torch_device):
-    """`e2e.ml.rt_gen.mimo_combine` (the historical public entry point, still exercised
-    by the gated `test_ml_rt_gen.py`) must be bit-exact with `DechirpBlock`'s combine on
+    """`e2e.environment.rt_gen.mimo_combine` (the historical public entry point, still exercised
+    by the gated `test_rt_gen.py`) must be bit-exact with `DechirpBlock`'s combine on
     the same beat cube, proving the delegation is a true no-op refactor."""
-    from e2e.ml.rt_gen import mimo_combine as rt_gen_mimo_combine
+    from e2e.environment.rt_gen import mimo_combine as rt_gen_mimo_combine
 
     cfg = _cfg(n_tx=3, n_rx=4, n_chirps=9, n_samples=5, mimo="tdm")
     s_pars = _random_s_pars(cfg.n_rx, cfg.n_tx, cfg.n_chirps, cfg.n_samples, torch_device, seed=5)
@@ -188,7 +188,7 @@ def test_declares_cfr_in_rx_time_out():
 
 
 def test_antenna_index_reversal_flag_is_on_by_default():
-    # Locks in the convention e2e.ml.rt_gen's module docstring documents as validated
+    # Locks in the convention e2e.environment.rt_gen's module docstring documents as validated
     # against re-traced ground truth -- see "Element ordering / array handedness".
     assert ANTENNA_INDEX_REVERSED is True
 

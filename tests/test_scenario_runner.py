@@ -822,7 +822,7 @@ def test_cli_loads_scenario_from_json_path(tmp_path):
 
 # --------------------------------------------------------------------------- real-mesh / object fixes (R2)
 # Ungated, pure-Python pins for the three scenario_runner bug fixes -- see
-# tests/test_ml_rt_meshes.py for the @pytest.mark.sionna end-to-end regressions (a real
+# tests/test_rt_meshes.py for the @pytest.mark.sionna end-to-end regressions (a real
 # BOX object building in a scene, a real sphere target actually returning energy).
 
 def test_object_materials_get_a_nonzero_scattering_coefficient():
@@ -852,7 +852,7 @@ def test_real_frame_solver_call_enables_diffuse_reflection():
 
 def test_box_mesh_path_is_a_static_method_independent_of_rt_gen():
     """Bug (b): `ScenarioRunner._box_mesh_path` exists as its own staticmethod (mirrors
-    `e2e.ml.rt_gen._box_mesh_path`'s pattern without importing e2e.ml -- this module
+    `e2e.environment.rt_gen._box_mesh_path`'s pattern without importing e2e.ml -- this module
     must stay independent of that package)."""
     import inspect
 

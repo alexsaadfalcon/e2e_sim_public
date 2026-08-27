@@ -236,7 +236,7 @@ def test_presets_smoke():
 
 # --------------------------------------------------------------------------------
 # RT tier scenarios: the velocity actually handed to the ray tracer.
-# (e2e.ml.rt_scenes is pure-Python scenario construction -- no Sionna needed here.)
+# (e2e.environment.rt_scenes is pure-Python scenario construction -- no Sionna needed here.)
 # --------------------------------------------------------------------------------
 def _rt_solver_speeds(scenario, dt, classes=("vehicle", "pedestrian")):
     """|v| in m/s exactly as `build_rt_scene` would hand each object to Sionna."""
@@ -260,7 +260,7 @@ def test_rt_tier_scenario_velocity_reaches_solver_in_physical_mps(num_frames):
         consumer's real `dt`, inflating it by `frame_rate_hz` (0-8 m/s -> 0-80 m/s,
         past the unambiguous-velocity limit, so the Doppler aliased).
     """
-    from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
+    from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
 
     cfg = RADIAL_LIKE
     dt = 1.0 / float(cfg.frame_rate_hz)
@@ -283,7 +283,7 @@ def test_rt_tier_scenario_dt_only_rescales_never_redraws():
     """`dt` is applied AFTER sampling, so it must not perturb the determinism key: the
     same (tier, frame_idx, seed) keeps the same object mix and headings, and only the
     stored per-frame displacement scales."""
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.environment.rt_scenes import build_rt_tier_scenario
 
     a = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=2, dt=1.0)
     b = build_rt_tier_scenario("D2", corpus_tag="unit-test", frame_idx=3, seed=7, num_frames=2, dt=0.1)

@@ -6,7 +6,7 @@ transmit-side modulate block): a channel frequency response ``s_pars``
 ``[n_rx, n_chirp, n_samples]`` out. See ``e2e/frames.py`` (``DOMAIN_CFR`` /
 ``DOMAIN_RX_TIME``) for the domain contract this declares and enforces.
 
-The math is ``e2e.ml.rt_gen``'s (see that module's docstring, "The CFR -> beat mapping"
+The math is ``e2e.environment.rt_gen``'s (see that module's docstring, "The CFR -> beat mapping"
 and equation (3), for the full derivation): sampling a CFR on the FMCW ramp's frequency
 grid and conjugating it IS the dechirped beat sample; the antenna index is reversed to
 match this project's ULA handedness convention (see rt_gen's "Element ordering / array
@@ -22,7 +22,7 @@ nonlinearity (residual deviation of the instantaneous frequency from the ideal r
 which would smear this one-to-one mapping; it is a stated approximation of the whole
 sensing chain (see ``e2e.chain.rd_synth``'s scope list), not something this block could
 patch locally. This module is now the ONE implementation of
-the beat-mapping and MIMO-combine steps; ``e2e.ml.rt_gen`` builds the raw CFR (the
+the beat-mapping and MIMO-combine steps; ``e2e.environment.rt_gen`` builds the raw CFR (the
 Sionna-specific half: chunked ``Paths.cfr`` calls) and delegates the rest here so the
 math exists in exactly one place. See ``tests/test_chain_dechirp.py`` for the
 bit-exactness check against the pre-refactor reference math.
@@ -36,7 +36,7 @@ import torch
 
 from e2e.frames import CHIRP_NATIVE, DOMAIN_CFR, DOMAIN_RX_TIME, FrameCapabilities
 
-# Mirrors `e2e.ml.rt_gen._ANTENNA_INDEX_REVERSED` -- see that module's docstring
+# Mirrors `e2e.environment.rt_gen._ANTENNA_INDEX_REVERSED` -- see that module's docstring
 # ("Element ordering / array handedness") for the derivation. This is now where the
 # reversal is actually applied; rt_gen's own flag stays in sync (see its module
 # docstring) but no longer performs the reversal itself.
@@ -60,7 +60,7 @@ def mimo_combine(cfg, beat: torch.Tensor) -> torch.Tensor:
     """Beat cube `[n_rx, n_tx, n_chirps, n_samples]` -> ADC cube `[n_rx, n_chirps, n_samples]`.
 
     Mirrors `e2e.chain.rd_synth.synthesize_adc`'s per-chirp TX factor exactly (see
-    `e2e.ml.rt_gen`'s module docstring):
+    `e2e.environment.rt_gen`'s module docstring):
 
     * `"tdm"` / `"single"`: chirp `c` is transmitted by TX `c % n_tx` alone, so only
       that TX's column survives -- this is the selection `e2e.chain.transforms.
@@ -90,7 +90,7 @@ class DechirpBlock:
     (DOMAIN_RX_TIME).
 
     Consumes the current-frame `s_pars` (assumed already sampled on the FMCW ramp's
-    beat-frequency grid, e.g. by `RTEnvironmentBlock` / `e2e.ml.rt_gen.rt_cfr_frame`),
+    beat-frequency grid, e.g. by `RTEnvironmentBlock` / `e2e.environment.rt_gen.rt_cfr_frame`),
     applies `beat_from_cfr` then `mimo_combine`, and emits `adc` +
     `signal_domain=DOMAIN_RX_TIME`. `accepts_mimo=True` because MIMO combining (the TX
     axis, dim 1) is exactly this block's job, not something upstream must have already

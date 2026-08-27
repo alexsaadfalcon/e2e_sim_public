@@ -4,9 +4,9 @@ Ray-traced (Sionna RT) difficulty tiers D0-D3 for the radar-ML data campaign.
 This is the RT sibling of `e2e.ml.scenes` (which samples scenes for the analytic
 point-target synthesizer, `rd_synth`): it draws a `e2e.scenario.Scenario` whose objects
 are REAL meshes -- one representative Sionna car plus real downloaded vehicle meshes
-(cars/trucks/buses/trolleys, see `VEHICLE_CLASS_POOLS` and `e2e.ml.assets`) and the
+(cars/trucks/buses/trolleys, see `VEHICLE_CLASS_POOLS` and `e2e.environment.assets`) and the
 procedural pedestrian placeholder -- instead of sphere-as-target scatterers, for
-consumption by `e2e.ml.rt_gen.build_rt_scene` / `rt_synthesize_adc` or
+consumption by `e2e.environment.rt_gen.build_rt_scene` / `rt_synthesize_adc` or
 `e2e.environment.scenario_runner`.
 
 Difficulty ramps along TWO axes, not just target count:
@@ -22,14 +22,14 @@ Difficulty ramps along TWO axes, not just target count:
   `_sample_clutter_offset`) so they add background return without hiding the tier's
   actual targets.
 
-Vehicle variety: `CAR_ASSET_NAMES` (`e2e.ml.rt_gen`) is 17 Sionna mesh NAMES sharing ONE
+Vehicle variety: `CAR_ASSET_NAMES` (`e2e.environment.rt_gen`) is 17 Sionna mesh NAMES sharing ONE
 geometry, so drawing uniformly from it (the pre-campaign-R3 behaviour) put the SAME car
 shape in a scene ~85% of the time. `VEHICLE_CLASS_POOLS` instead keeps exactly ONE
 representative Sionna name (`SIONNA_CAR_REPRESENTATIVE`) and fills variety from real,
-decimated, metre-scaled downloaded meshes (`e2e.ml.assets.DOWNLOADED_ASSET_SPECS`),
+decimated, metre-scaled downloaded meshes (`e2e.environment.assets.DOWNLOADED_ASSET_SPECS`),
 grouped by class (car/truck/bus/trolley) so a tier's vehicle draws are a realistic MIX
 of vehicle types, not a uniform draw over every available name regardless of size. Every
-downloaded mesh degrades gracefully (see `e2e.ml.assets`/`rt_gen`) to
+downloaded mesh degrades gracefully (see `e2e.environment.assets`/`rt_gen`) to
 `SIONNA_CAR_REPRESENTATIVE` on a machine without the asset cache -- this module's own
 determinism/pool-composition tests hold either way.
 
@@ -58,7 +58,7 @@ index here (matching
 `e2e.ml.scenes.sample_scene`'s per-draw usage), not a motion-track frame -- the returned
 Scenario's OWN `num_frames`/`Motion` fields carry any per-frame motion.
 
-Only numpy + stdlib + `e2e.scenario` / `e2e.ml.rt_gen`'s asset-name constants are
+Only numpy + stdlib + `e2e.scenario` / `e2e.environment.rt_gen`'s asset-name constants are
 imported here (no torch, no Sionna) so building a tier scenario needs neither GPU nor a
 ray tracer -- only *generating frames from it* does.
 """
@@ -74,11 +74,11 @@ import warnings
 
 import numpy as np
 
-from e2e.ml.assets import (DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
-                          DOWNLOADED_TROLLEY_ASSET_NAMES, DOWNLOADED_TRUCK_ASSET_NAMES)
-from e2e.ml.rt_gen import (LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
-                          PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
-                          object_local_height_m)
+from e2e.environment.assets import (DOWNLOADED_BUS_ASSET_NAMES, DOWNLOADED_CAR_ASSET_NAMES,
+                                    DOWNLOADED_TROLLEY_ASSET_NAMES, DOWNLOADED_TRUCK_ASSET_NAMES)
+from e2e.environment.rt_gen import (LOCAL_PEDESTRIAN_ASSET_NAMES, LOCAL_VEHICLE_ASSET_NAMES,
+                                    PEDESTRIAN_ASSET_NAME, SIONNA_CAR_REPRESENTATIVE,
+                                    object_local_height_m)
 from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 
 # Placement envelope: targets are scattered in the radar's forward FOV, matching
@@ -417,7 +417,7 @@ def _sample_velocity(rng: np.random.Generator, speed_range: Tuple[float, float])
     Numerically m/s == m/frame under this package's `dt = 1` convention (see
     `e2e.environment.scatterers.DEFAULT_DT_S`); consumers with a real `frame_rate_hz` should
     rescale if they need physical timing (this module has no `RadarConfig` to derive
-    one from -- callers building a Scenario for `e2e.ml.rt_gen` supply their own `cfg`).
+    one from -- callers building a Scenario for `e2e.environment.rt_gen` supply their own `cfg`).
     """
     speed = float(rng.uniform(speed_range[0], speed_range[1]))
     theta = float(rng.uniform(0.0, 2.0 * math.pi))
@@ -525,7 +525,7 @@ def build_rt_tier_scenario(tier: Union[str, RTTierSpec], *, corpus_tag: str, fra
     the duplicate-Sionna-geometry problem it fixes existed by default.
 
     `use_local_assets`: when True, vehicles/pedestrians ADDITIONALLY draw from
-    `e2e.ml.rt_gen.LOCAL_VEHICLE_ASSET_NAMES` / `LOCAL_PEDESTRIAN_ASSET_NAMES` --
+    `e2e.environment.rt_gen.LOCAL_VEHICLE_ASSET_NAMES` / `LOCAL_PEDESTRIAN_ASSET_NAMES` --
     higher-fidelity meshes that live only on this workstation (see that module's
     docstring), layered on top of the class pools above (`local_tractor_trailer` joins
     "truck", the rest join "car"); on any other machine those names degrade gracefully

@@ -1,4 +1,4 @@
-"""Ray-traced ADC generation (`e2e.ml.rt_gen`) against the analytic dataset contract.
+"""Ray-traced ADC generation (`e2e.environment.rt_gen`) against the analytic dataset contract.
 
 Every test here runs REAL Sionna RT ray tracing on the GPU, so the whole module is
 gated behind `@pytest.mark.sionna` (RUN_SIONNA=1) -- CI has no GPU and, on this box,
@@ -107,7 +107,7 @@ def _rd(cfg, adc):
 # --------------------------------------------------------------------------------
 def test_adc_matches_the_analytic_dataset_contract(sionna_rt, cfg, torch_device):
     """Shape/dtype/device must be indistinguishable from `rd_synth.synthesize_adc`."""
-    from e2e.ml.rt_gen import rt_synthesize_adc
+    from e2e.environment.rt_gen import rt_synthesize_adc
 
     sc = _scene(cfg, (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0))
     adc = rt_synthesize_adc(cfg, sc, base_scene="free", snr_db=None, device=torch_device)
@@ -121,7 +121,7 @@ def test_adc_matches_the_analytic_dataset_contract(sionna_rt, cfg, torch_device)
 
 def test_beat_frequency_grid_spans_the_ramp(sionna_rt, cfg):
     """Equation (3): the CFR grid is the ramp, expressed as offsets from f0 + B/2."""
-    from e2e.ml.rt_gen import beat_frequencies
+    from e2e.environment.rt_gen import beat_frequencies
 
     f = beat_frequencies(cfg)
     assert f.shape == (cfg.n_samples,)
@@ -142,7 +142,7 @@ def test_known_scatterer_lands_in_expected_range_doppler_angle_bins(
     as `tests/test_ml_integration.py`, but the ADC came out of Sionna RT rather than
     the closed-form synthesizer. Range, Doppler AND angle, all within one bin.
     """
-    from e2e.ml.rt_gen import rt_synthesize_adc
+    from e2e.environment.rt_gen import rt_synthesize_adc
 
     pos, vel = (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0)
     sc = _scene(cfg, pos, vel)
@@ -166,7 +166,7 @@ def test_known_scatterer_lands_in_expected_range_doppler_angle_bins(
 
 
 def test_static_scene_puts_all_energy_at_zero_doppler(sionna_rt, cfg, torch_device):
-    from e2e.ml.rt_gen import rt_synthesize_adc
+    from e2e.environment.rt_gen import rt_synthesize_adc
 
     pos = (5.0, 2.0, 1.5)
     sc = _scene(cfg, pos, (0.0, 0.0, 0.0))
@@ -192,7 +192,7 @@ def test_tdm_selects_one_transmitter_per_chirp(sionna_rt, cfg, torch_device):
     what `transforms.tdm_deinterleave` assumes when it gathers chirp `t::n_tx` into
     virtual row `t*n_rx + r`.
     """
-    from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene, mimo_combine
+    from e2e.environment.rt_gen import _beat_from_paths, _solve, build_rt_scene, mimo_combine
 
     sc = _scene(cfg, (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0))
     rt_scene = build_rt_scene(sc, cfg, base_scene="free")
@@ -229,7 +229,7 @@ def test_repeated_generation_is_reproducible(sionna_rt, cfg, torch_device):
     ~100% relative difference, which is why `doppler_error_study` reports an explicit
     Monte-Carlo noise floor.
     """
-    from e2e.ml.rt_gen import build_rt_scene, rt_synthesize_adc
+    from e2e.environment.rt_gen import build_rt_scene, rt_synthesize_adc
 
     sc = _scene(cfg, (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0))
     rt_scene = build_rt_scene(sc, cfg, base_scene="free")
@@ -255,7 +255,7 @@ def test_repeated_generation_is_reproducible(sionna_rt, cfg, torch_device):
 
 def test_noise_raises_the_floor_without_moving_the_peak(sionna_rt, cfg, torch_device):
     """`snr_db` must add energy but leave the target's range/Doppler cell where it was."""
-    from e2e.ml.rt_gen import build_rt_scene, rt_synthesize_adc
+    from e2e.environment.rt_gen import build_rt_scene, rt_synthesize_adc
 
     pos, vel = (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0)
     sc = _scene(cfg, pos, vel)
@@ -280,8 +280,8 @@ def test_snr_calibration_matches_rd_synths_convention(sionna_rt, cfg, torch_devi
     inject noise at 25 dB, measure the injected variance from the clean/noisy
     difference, and recover the SNR with the same estimator the generator used.
     """
-    from e2e.ml.rt_gen import (_coherent_gain, _peak_reference_amplitude,
-                               build_rt_scene, rt_synthesize_adc)
+    from e2e.environment.rt_gen import (_coherent_gain, _peak_reference_amplitude,
+                                        build_rt_scene, rt_synthesize_adc)
 
     sc = _scene(cfg, (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0))
     rt_scene = build_rt_scene(sc, cfg, base_scene="free")
@@ -301,7 +301,7 @@ def test_snr_calibration_matches_rd_synths_convention(sionna_rt, cfg, torch_devi
 # Scene building
 # --------------------------------------------------------------------------------
 def test_build_rt_scene_wires_arrays_objects_and_velocity(sionna_rt, cfg):
-    from e2e.ml.rt_gen import build_rt_scene
+    from e2e.environment.rt_gen import build_rt_scene
 
     sc = _scene(cfg, (5.0, 2.0, 1.5), (-5.0, 0.0, 0.0))
     for base in ("free", "flat"):
@@ -332,7 +332,7 @@ def test_retrace_reference_equals_native_for_a_static_scene(sionna_rt, cfg, torc
     `num_time_steps=1` slicing): any indexing slip would show up here even though the
     physics is trivial.
     """
-    from e2e.ml.rt_gen import build_rt_scene, rt_retrace_reference, rt_synthesize_adc
+    from e2e.environment.rt_gen import build_rt_scene, rt_retrace_reference, rt_synthesize_adc
 
     n_cap = 6
     small = dataclasses.replace(cfg, n_chirps=n_cap)
@@ -350,7 +350,7 @@ def test_retrace_reference_equals_native_for_a_static_scene(sionna_rt, cfg, torc
 
 def test_retrace_reference_first_chirp_matches_native(sionna_rt, cfg, torch_device):
     """Chirp 0 is the same geometry with Doppler phase exp(0) = 1 in both paths."""
-    from e2e.ml.rt_gen import build_rt_scene, rt_retrace_reference, rt_synthesize_adc
+    from e2e.environment.rt_gen import build_rt_scene, rt_retrace_reference, rt_synthesize_adc
 
     n_cap = 6
     small = dataclasses.replace(cfg, n_chirps=n_cap)
@@ -367,7 +367,7 @@ def test_retrace_reference_first_chirp_matches_native(sionna_rt, cfg, torch_devi
 
 def test_doppler_error_study_smoke(sionna_rt, cfg, torch_device):
     """One frame, 12-chirp CPI, specular-only box target (deterministic, no MC floor)."""
-    from e2e.ml.rt_gen import _demo_scenario, doppler_error_study, format_error_study
+    from e2e.environment.rt_gen import _demo_scenario, doppler_error_study, format_error_study
 
     small = dataclasses.replace(cfg, n_chirps=12)
     sc = _demo_scenario(1, small, target="box")

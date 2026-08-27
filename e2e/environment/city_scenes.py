@@ -30,7 +30,7 @@ TWO SUBSTITUTION POLICIES (`policy=`), trade this off differently -- pick per co
     for an unfamiliar material should sanity-check its `(a, b, c, d)` first (see
     `out_of_band_materials`' report).
   * `STAND_IN`: swap for `stand_in_itu_type` (default `"concrete"`, ITU-tabulated
-    1-100 GHz -- the same choice `e2e.ml.rt_gen` makes for its own synthetic "flat"
+    1-100 GHz -- the same choice `e2e.environment.rt_gen` makes for its own synthetic "flat"
     ground plane), keeping Sionna's normal ITU frequency dependence. More
     conservative (no extrapolation at all) but less faithful: a marble facade solved
     as concrete has different real electrical properties, not just a different label.
@@ -53,7 +53,7 @@ STAND_IN = "stand_in"
 _POLICIES = (EXTRAPOLATED, STAND_IN)
 
 # In-band (1-100 GHz) ITU material used by the STAND_IN policy's default swap -- same
-# choice `e2e.ml.rt_gen._GROUND_MATERIAL` makes for the synthetic "flat" ground plane.
+# choice `e2e.environment.rt_gen._GROUND_MATERIAL` makes for the synthetic "flat" ground plane.
 DEFAULT_STAND_IN_ITU_TYPE = "concrete"
 
 
@@ -217,7 +217,7 @@ def patched_builtin_loader(frequency_hz: float, *, policy: str = EXTRAPOLATED,
     (`prepare_scene_for_frequency`).
 
     Why a monkeypatch rather than calling `load_city_scene` directly: the caller this
-    is built for, `e2e.ml.rt_gen.build_rt_scene`, is owned by a different part of this
+    is built for, `e2e.environment.rt_gen.build_rt_scene`, is owned by a different part of this
     codebase (not this module) and itself calls Sionna's `rt.load_scene` (via its
     private `_load_base_scene` helper) and then immediately assigns `scene.frequency`
     -- the exact assignment that hard-raises for an out-of-band ITU material (see

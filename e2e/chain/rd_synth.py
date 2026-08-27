@@ -22,9 +22,9 @@ against it, never the other way around: `e2e.chain.transforms.ddma_demux` /
 `tdm_deinterleave` invert exactly these factors; `e2e.chain.impairments._mimo_tx_factor`
 reproduces them so injected returns survive the demux (F52 -- the defect WAS a module
 inventing its own array convention instead of mirroring this one); and
-`e2e.ml.rt_signal_chain.coherent_target_cfr`'s single-centre output is checked
+`e2e.environment.rt_signal_chain.coherent_target_cfr`'s single-centre output is checked
 against this model's single-point synthesis by the RT-chain oracle tests
-(`tests/test_ml_rt_coherent.py`). If a convention here ever changes, every mirror above changes
+(`tests/test_rt_coherent.py`). If a convention here ever changes, every mirror above changes
 with it in the same commit, or the demux silently misassigns energy -- that is the
 failure class F52 documents. Closed-form single-tone outputs of this module are also
 what the test suite uses as ground truth for the receive chain's oracles.
@@ -47,7 +47,7 @@ Scope / explicitly out of scope
   tone, degrading range resolution and raising the close-in sidelobe floor by an
   amount set by the synthesizer's residual frequency error. This is a deliberate,
   stated approximation everywhere in this package (same premise in
-  `e2e.chain.dechirp`'s CFR->beat identity and `e2e.ml.rt_gen`); modelling it is
+  `e2e.chain.dechirp`'s CFR->beat identity and `e2e.environment.rt_gen`); modelling it is
   future work, not an oversight (physics audit entry 7 / release plan A9).
 * Far-field (plane-wave) array response: the per-element path-length difference is
   linearised as d sin(theta). Valid for R >> aperture^2 / lambda, which holds for
@@ -133,7 +133,7 @@ def _scattering_point(sc, origin):
     and its nearest SURFACE point along the line of sight when an extent is
     (`e2e.environment.geometry.nearest_surface_point`). A monostatic return comes off the nearest
     face, not the middle of the body: this is the same specular-point stand-in
-    `e2e.ml.rt_signal_chain.coherent_target_cfr` places its coherent term on, and the same
+    `e2e.environment.rt_signal_chain.coherent_target_cfr` places its coherent term on, and the same
     point `e2e.ml.labels` writes its objectness footprint at -- one answer, three layers.
     MEASURED offsets: 2.2 m for a 4.4 m car, 7.87 m for a 15.7 m semi.
 

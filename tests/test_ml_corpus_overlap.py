@@ -1,4 +1,4 @@
-"""Tests for the corpus-identity seed salt (`e2e.ml.rt_scenes._stable_seed` /
+"""Tests for the corpus-identity seed salt (`e2e.environment.rt_scenes._stable_seed` /
 `e2e.ml.dataset._stable_scene_seed`), the manifest provenance fields
 (`write_manifest`'s `corpus_tag`/`generator_git_commit`), and the pre-ship dedup gate
 (`e2e.ml.check_corpus_overlap`).
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from e2e.ml import check_corpus_overlap as gate
-from e2e.ml.rt_scenes import _stable_seed, build_rt_tier_scenario
+from e2e.environment.rt_scenes import _stable_seed, build_rt_tier_scenario
 
 # --------------------------------------------------------------------------------
 # Seed salting (rt_scenes)

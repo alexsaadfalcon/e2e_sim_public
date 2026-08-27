@@ -8,7 +8,7 @@ Mirrors `tests/test_afe_sweep.py`'s "build one tiny corpus with a temp-registere
 RadarConfig" pattern, but the FIXTURE writes samples directly via
 `e2e.ml.storage.write_sample_npz` (matching `SinkBlock`'s schema) instead of
 `e2e.ml.dataset.generate_dataset`, since `export_ssm.reconstruct_scene` needs the RT
-tier machinery (`e2e.ml.rt_scenes.build_rt_tier_scenario`) and `meta["targets"]`, which
+tier machinery (`e2e.environment.rt_scenes.build_rt_tier_scenario`) and `meta["targets"]`, which
 the analytic fallback path never writes.
 """
 from __future__ import annotations
@@ -24,14 +24,14 @@ import pytest
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("e2e.ml.labels", reason="sibling shard e2e.ml.labels not present")
-pytest.importorskip("e2e.ml.rt_scenes", reason="sibling shard e2e.ml.rt_scenes not present")
+pytest.importorskip("e2e.environment.rt_scenes", reason="sibling shard e2e.environment.rt_scenes not present")
 
 from e2e.environment.scatterers import frame_scatterers, radar_pose
 from e2e.ml import export_ssm, storage
 from e2e.ml.dataset import write_manifest
 from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
 from e2e.radar_config import RadarConfig
-from e2e.ml.rt_scenes import build_rt_tier_scenario
+from e2e.environment.rt_scenes import build_rt_tier_scenario
 
 TIER = "D0"          # single deterministic sphere-as-"vehicle" scatterer, no Sionna needed
 SEED = 9000

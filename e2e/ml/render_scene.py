@@ -2,8 +2,8 @@
 Animated bird's-eye + radar-view GIFs of `e2e.ml.scenes` scenarios.
 
 Purely a visualization/README-media tool: it reuses the existing scene/synthesis stack
-(`e2e.environment.scatterers.frame_scatterers`/`radar_pose`, `e2e.ml.rd_synth.synthesize_adc`,
-`e2e.ml.transforms.adc_to_rd`/`tdm_deinterleave`, `e2e.ml.labels.LabelGrid`/
+(`e2e.environment.scatterers.frame_scatterers`/`radar_pose`, `e2e.chain.rd_synth.synthesize_adc`,
+`e2e.chain.transforms.adc_to_rd`/`tdm_deinterleave`, `e2e.ml.labels.LabelGrid`/
 `targets_in_grid`) end to end; nothing here re-derives geometry or re-implements
 synthesis. Two panels, side by side, one frame per animation tick:
 
@@ -582,7 +582,7 @@ def _add_pedestrian_flags(rt, rt_scene, scenario, positions) -> List[Any]:
     full-scene framing can't make a real pedestrian mesh legible on its own. Returns
     the added `SceneObject`s (unused by callers today).
     """
-    from e2e.ml.rt_scene_build import _OBJECT_COLOR_PEDESTRIAN
+    from e2e.environment.rt_scene_build import _OBJECT_COLOR_PEDESTRIAN
 
     added = []
     for obj, pos in zip(scenario.objects, positions):
@@ -614,11 +614,11 @@ def _build_rt_scene_for_render(scenario, cfg, *, frame_idx: int = 0,
     frame so objects actually move across the render, unlike `render_rt_tier_png`
     (single-frame scenario, always `frame_idx=0`).
     """
-    from e2e.ml.rt_gen import build_rt_scene
+    from e2e.environment.rt_gen import build_rt_scene
 
     if scenario.base_scene in ("flat", "free"):
         # Synthetic scenes only ever use in-band materials (see
-        # `e2e.ml.rt_gen._GROUND_MATERIAL`) -- unmodified, matching
+        # `e2e.environment.rt_gen._GROUND_MATERIAL`) -- unmodified, matching
         # `RTEnvironmentBlock.get_S_pars`'s same no-op branch.
         return build_rt_scene(scenario, cfg, base_scene=scenario.base_scene,
                               frame_idx=frame_idx)
@@ -655,14 +655,14 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
                        num_samples: int = 128, use_local_assets: bool = True,
                        caption: bool = True, material_policy: str = "extrapolated",
                        stand_in_material: str = "concrete", zoom: float = 1.0):
-    """Ray-trace `e2e.ml.rt_scenes` tier `tier` and save a camera render (array +
+    """Ray-trace `e2e.environment.rt_scenes` tier `tier` and save a camera render (array +
     objects) as a PNG at `out_path`. Needs Sionna RT; this is a plain geometry render
     (no path solve -- `Scene.render_to_file` needs no `PathSolver` output unless a
     `paths=` overlay is requested, which this does not do), so it is comparatively
     cheap. Purely for human-eyes review of the object meshes/environment, not part of
     any training-data pipeline.
 
-    `cfg` (a `RadarConfig`, default `e2e.ml.radar_config.PRESETS["radial_like"]`) only
+    `cfg` (a `RadarConfig`, default `e2e.radar_config.PRESETS["radial_like"]`) only
     sets the radar's array/frequency for scene construction (`rt_gen.build_rt_scene`);
     it plays no role in the image itself. The camera auto-frames the radar node, the
     radar's own amber marker/boresight-rod (see below) AND every object: `_fit_camera_
@@ -688,7 +688,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
 
     `use_local_assets` (default True, unlike `build_rt_tier_scenario`'s own default)
     draws cars/pedestrians from the expanded local-mesh pool when available on this
-    machine (see `e2e.ml.rt_gen`'s module docstring); it degrades gracefully to the
+    machine (see `e2e.environment.rt_gen`'s module docstring); it degrades gracefully to the
     Sionna-bundled meshes elsewhere. `caption` overlays a title bar (tier, object
     counts, radar position) via Pillow if installed; silently skipped otherwise.
 
@@ -700,7 +700,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     inside Sionna and the render never happens. Mirrors
     `e2e.environment.blocks.RTEnvironmentBlock.get_S_pars`'s same guard, so `"flat"`/
     `"free"` tiers (which only ever use in-band materials, see
-    `e2e.ml.rt_gen._GROUND_MATERIAL`) are unaffected. `material_policy`/
+    `e2e.environment.rt_gen._GROUND_MATERIAL`) are unaffected. `material_policy`/
     `stand_in_material` are that module's substitution knobs.
     """
     out_path = Path(out_path)
@@ -709,8 +709,8 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
     import sionna.rt as rt
 
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_gen import _box_mesh_path
-    from e2e.ml.rt_scenes import build_rt_tier_scenario, tier_summary
+    from e2e.environment.rt_gen import _box_mesh_path
+    from e2e.environment.rt_scenes import build_rt_tier_scenario, tier_summary
 
     if cfg is None:
         cfg = PRESETS["radial_like"]
@@ -866,11 +866,11 @@ def _render_rt_topdown_frames(scenario, cfg, *, n_frames: int, dt: float,
     import sionna.rt as rt
     from PIL import Image
 
-    from e2e.ml.rt_gen import _box_mesh_path
-    from e2e.ml.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
-                                       _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
+    from e2e.environment.rt_gen import _box_mesh_path
+    from e2e.environment.rt_scene_build import (_OBJECT_COLOR_CLUTTER_BOX, _OBJECT_COLOR_PEDESTRIAN,
+                                                _OBJECT_COLOR_SPHERE, _OBJECT_COLOR_VEHICLE)
     from e2e.environment.scatterers import frame_scatterers
-    from e2e.ml.rt_scenes import _footprint_radius, tier_summary
+    from e2e.environment.rt_scenes import _footprint_radius, tier_summary
     from e2e.scenario import ObjectKind
 
     if n_frames < 1:
@@ -976,7 +976,7 @@ def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: 
                           num_samples: int = 64, use_local_assets: bool = True,
                           material_policy: str = "extrapolated",
                           stand_in_material: str = "concrete") -> Path:
-    """Ray-trace a TOP-DOWN animated GIF of `e2e.ml.rt_scenes` tier `tier`: ONE scenario,
+    """Ray-trace a TOP-DOWN animated GIF of `e2e.environment.rt_scenes` tier `tier`: ONE scenario,
     objects moving over TIME. Needs Sionna RT; each animation frame is a plain geometry
     render (no path solve, same as `render_rt_tier_png`), so an `n_frames`-frame GIF
     costs about `n_frames` times one PNG render.
@@ -1002,7 +1002,7 @@ def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     from e2e.radar_config import PRESETS
-    from e2e.ml.rt_scenes import build_rt_tier_scenario
+    from e2e.environment.rt_scenes import build_rt_tier_scenario
 
     if cfg is None:
         cfg = PRESETS["radial_like"]
@@ -1044,7 +1044,7 @@ def render_scene_gif_2x2(cfg, scenario, out_path, *, n_frames: int = 10, fps: in
     AND a `scenario` with REAL geometry -- i.e. NOT `e2e.ml.scenes.sample_scene`'s
     `base_scene="synthetic"` point-target scenes, which have no mesh for a camera to
     render (see `e2e.environment.scatterers.SYNTHETIC_BASE_SCENE`). Build `scenario` with
-    `e2e.ml.rt_scenes.build_rt_tier_scenario(tier, num_frames=n_frames,
+    `e2e.environment.rt_scenes.build_rt_tier_scenario(tier, num_frames=n_frames,
     dt=1/cfg.frame_rate_hz, ...)` instead -- passing `dt` there is load-bearing (see that
     function's own docstring: omitting it inflates every velocity `frame_rate_hz`-fold).
 
@@ -1156,12 +1156,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Render an animated bird's-eye + radar-view GIF of a sampled e2e.ml scene "
                     "(or, with --rt, a single ray-traced camera PNG; --rt-topdown-gif, a "
                     "ray-traced top-down GIF; --rt-panel, a 2x2 bird's-eye+RT+ideal+non-ideal "
-                    "GIF -- all of an e2e.ml.rt_scenes tier).",
+                    "GIF -- all of an e2e.environment.rt_scenes tier).",
     )
     p.add_argument("--tier", required=True,
                    help="difficulty tier (e2e.ml.scenes.DIFFICULTY_TIERS, or "
-                        "e2e.ml.rt_scenes.RT_DIFFICULTY_TIERS with --rt)")
-    p.add_argument("--config", required=True, help="radar config preset name (see e2e.ml.radar_config.PRESETS)")
+                        "e2e.environment.rt_scenes.RT_DIFFICULTY_TIERS with --rt)")
+    p.add_argument("--config", required=True, help="radar config preset name (see e2e.radar_config.PRESETS)")
     p.add_argument("--out", required=True, help="output path (.gif, or .png with --rt)")
     p.add_argument("--frames", type=int, default=30, help="animation frame count (GIF mode only)")
     p.add_argument("--fps", type=int, default=8, help="GIF playback frame rate (GIF mode only)")
@@ -1182,7 +1182,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--rt-panel", action="store_true",
                    help="2x2 GIF: bird's-eye | RT top-down camera render | ideal-front-end "
                         "range-azimuth | non-ideal range-azimuth, all four panels driven from ONE "
-                        "e2e.ml.rt_scenes RT-tier scenario (needs Sionna RT; see "
+                        "e2e.environment.rt_scenes RT-tier scenario (needs Sionna RT; see "
                         "render_scene_gif_2x2). Implies --rt's tier vocabulary, not "
                         "e2e.ml.scenes.DIFFICULTY_TIERS -- an analytic sample_scene() scenario has "
                         "no mesh for a camera to render.")
@@ -1210,7 +1210,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg = PRESETS[args.config]
 
     if args.rt_topdown_gif:
-        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
+        from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS
 
         if args.tier not in RT_DIFFICULTY_TIERS:
             print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
@@ -1224,7 +1224,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.rt_panel:
-        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
+        from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
 
         if args.tier not in RT_DIFFICULTY_TIERS:
             print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
@@ -1243,7 +1243,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if args.rt:
-        from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS
+        from e2e.environment.rt_scenes import RT_DIFFICULTY_TIERS
 
         if args.tier not in RT_DIFFICULTY_TIERS:
             print(f"unknown --tier {args.tier!r}; choices: {sorted(RT_DIFFICULTY_TIERS)}", file=sys.stderr)
