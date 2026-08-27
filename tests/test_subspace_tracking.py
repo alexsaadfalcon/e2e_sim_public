@@ -186,29 +186,54 @@ def test_reactive_gate_holds_error_down_through_a_degeneracy_episode(torch_devic
     The existing gap_response tests pin wiring, trigger conditions and call counts --
     none of them would notice the gate still firing while tracking quality collapsed.
     This one pins the trajectory: through a synthetic degeneracy episode the gated arm
-    must stay materially closer to the true subspace than the same block at fixed low
-    effort, and must spend its extra passes ONLY inside the episode.
+    must stay far closer to the true subspace than the same block at fixed low effort,
+    and must spend its extra passes ONLY inside the episode.
+
+    Averaged over seeds because a single draw is not a stable measurement (an earlier
+    version of this test asserted a per-frame value and passed only by luck on one
+    device's RNG stream). What is stable, on every device and seed measured: episode
+    error ~0.002 gated vs ~1.46 ungated.
+
+    Note what is deliberately NOT asserted: any post-episode ADVANTAGE. Once the gap
+    reopens the gate drops back to `n_refine`, and at 1 pass/frame neither arm can hold
+    this synthetic drift -- both settle at the same error. The gate buys accuracy where
+    the diagnostic says to spend, not a lasting head start, and the test says so rather
+    than encoding a hope.
     """
     d, k, m = 256, 4, 192
     collapse = range(8, 18)
-    common = dict(d=d, k=k, device=torch_device, collapse=collapse)
+    seeds = (0, 1, 2)
+    episode, after = list(collapse), list(range(18, 24))
 
-    baseline_block = AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate")
-    base_err, base_passes = _run_collapse_episode(baseline_block, **common, gated=False)
+    def _mean(values, idx):
+        return sum(values[i] for i in idx) / len(idx)
 
-    gated_block = AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate",
-                              gap_response="refine", gap_threshold=0.01, n_refine_hi=60)
-    gate_err, gate_passes = _run_collapse_episode(gated_block, **common, gated=True)
+    base_ep, gate_ep, base_post, gate_post = [], [], [], []
+    for seed in seeds:
+        common = dict(d=d, k=k, device=torch_device, collapse=collapse, seed=seed)
+        base_err, base_passes = _run_collapse_episode(
+            AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate"), **common, gated=False)
+        gate_err, gate_passes = _run_collapse_episode(
+            AdaOjaBlock(d, k, m=m, n_refine=1, method="reestimate", gap_response="refine",
+                        gap_threshold=0.01, n_refine_hi=60), **common, gated=True)
+        base_ep.append(_mean(base_err, episode))
+        gate_ep.append(_mean(gate_err, episode))
+        base_post.append(_mean(base_err, after))
+        gate_post.append(_mean(gate_err, after))
+        # effort is spent only where the diagnostic says it is needed
+        assert all(gate_passes[i] == 60 for i in episode)
+        assert all(p == 1 for t, p in enumerate(gate_passes) if t not in episode)
+        assert all(p == 1 for p in base_passes)
 
-    in_episode = list(collapse)
-    base_mean = sum(base_err[i] for i in in_episode) / len(in_episode)
-    gate_mean = sum(gate_err[i] for i in in_episode) / len(in_episode)
-    # the whole point of the gate: error through the collapse, not effort spent
-    assert gate_mean < 0.5 * base_mean, (
+    mean_base_ep = sum(base_ep) / len(base_ep)
+    mean_gate_ep = sum(gate_ep) / len(gate_ep)
+    # the whole point of the gate: error through the collapse. The measured margin is
+    # ~700x, so 0.25x is a floor far below the noise, not a tuned threshold.
+    assert mean_gate_ep < 0.25 * mean_base_ep, (
         f"gated arm did not hold error down through the episode "
-        f"(gated {gate_mean:.3f} vs fixed-low-effort {base_mean:.3f})")
-    # and it must recover after the episode, not carry the damage forward
-    assert gate_err[-1] < base_err[-1]
-    # effort is spent only where the diagnostic says it is needed
-    assert all(gate_passes[i] == 60 for i in in_episode)
-    assert all(gate_passes[t] == 1 for t in range(len(gate_passes)) if t not in in_episode)
+        f"(gated {mean_gate_ep:.3f} vs fixed-low-effort {mean_base_ep:.3f})")
+    # after the episode the gate is off again, so the two arms track alike: this pins
+    # that the gate STOPS spending, and would catch a gate stuck open.
+    mean_base_post = sum(base_post) / len(base_post)
+    mean_gate_post = sum(gate_post) / len(gate_post)
+    assert abs(mean_gate_post - mean_base_post) < 0.25 * mean_base_post
