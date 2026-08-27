@@ -240,7 +240,8 @@ it = SionnaIterator("sionna_sims/munich_isac.pkl", link="building_comm_tx__car_c
 ### Physical modeling scope & limitations
 
 Honesty contract for this release: what's physically modeled, and what's a placeholder
-or a link-level abstraction.
+or a link-level abstraction. For the full per-stage real-world-effect -> model ->
+approximations -> evidence breakdown, see [`docs/PHYSICS.md`](docs/PHYSICS.md).
 
 - **Diffuse reflection is off.** Ray tracing runs specular/LOS/refraction paths only
   (`max_depth=5`); diffuse scattering from rough surfaces or foliage is not represented,
