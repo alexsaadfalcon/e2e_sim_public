@@ -208,7 +208,11 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
     assert checkpoint["manifest"] == str(tiny_manifest_path)
     assert set(checkpoint) == {"model_state", "model_name", "manifest", "history",
                                "input_format", "train_config", "best_epoch",
-                               "best_val_AP"}
+                               "best_val_AP", "epochs_completed"}
+    # A run that finished records every requested epoch; a killed one records fewer
+    # (see test_checkpoint_survives_a_run_killed_mid_training), which is how a
+    # truncated run is told apart from a complete one after the fact.
+    assert checkpoint["epochs_completed"] == 2
     # Training provenance (B2 review 2026-08-25): a checkpoint must record its own
     # hyperparameters and WHICH epoch it is, or the run is reproducible only from
     # shell history.
@@ -613,3 +617,48 @@ def test_load_model_for_eval_contract(tiny_manifest_path, tmp_path):
         tiny_manifest_path, ckpt, device=torch.device("cpu"), manifest_for_model=hook)
     assert called["fmt"] == input_format
     assert isinstance(model2, torch.nn.Module)
+
+
+def test_checkpoint_survives_a_run_killed_mid_training(tiny_manifest_path, tmp_path):
+    """A long run killed before its last epoch must leave the best checkpoint it had
+    actually reached -- not an empty directory.
+
+    Regression for 2026-08-27: `train` held the best weights in memory and wrote
+    `best.pt` only after the final epoch, so a 120-epoch SSM run whose parent process
+    exited at epoch 106 forfeited ~9 GPU-hours and produced nothing. The fix writes
+    (atomically) on every validation improvement. Simulated here by interrupting the
+    run from inside the evaluation hook after the second epoch, exactly as a kill
+    would land between epochs.
+    """
+    out_dir = tmp_path / "run_killed"
+    real_evaluate = train_mod._evaluate_split
+    calls = {"n": 0}
+
+    def _evaluate_then_die(*args, **kwargs):
+        metrics = real_evaluate(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            # let epoch 2's improvement be persisted, then kill the process the way
+            # a terminated parent does: after the checkpoint write, before the end.
+            raise KeyboardInterrupt("simulated kill between epochs")
+        return metrics
+
+    train_mod._evaluate_split = _evaluate_then_die
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            train_mod.train(tiny_manifest_path, "fftradnet", epochs=8, batch_size=2,
+                            out_dir=out_dir, seed=0)
+    finally:
+        train_mod._evaluate_split = real_evaluate
+
+    best_pt = out_dir / "best.pt"
+    assert best_pt.is_file(), "a killed run must still leave the best checkpoint so far"
+    ckpt = torch.load(best_pt, map_location="cpu", weights_only=False)
+    # It records that it is a PARTIAL run: fewer epochs completed than requested.
+    assert ckpt["train_config"]["epochs"] == 8
+    assert ckpt["epochs_completed"] < 8
+    assert ckpt["best_epoch"] is not None and ckpt["best_val_AP"] is not None
+    assert ckpt["model_state"], "checkpoint must carry real weights"
+    # No temp files left behind by the atomic write.
+    assert not (out_dir / "best.pt.tmp").exists()
+    assert not (out_dir / "history.json.tmp").exists()

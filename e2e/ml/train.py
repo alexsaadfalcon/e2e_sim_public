@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -372,6 +373,44 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     best_ap = -1.0
     best_state = None
 
+    def _write_checkpoint(state) -> None:
+        """Write `best.pt` + `history.json` for the best epoch SO FAR, atomically.
+
+        Called on every validation improvement and once at the end, so a killed run
+        leaves the best weights it had actually reached instead of nothing. Writes
+        to a temp file and `os.replace`s it (atomic on Windows and POSIX), so an
+        interrupted write can never leave a truncated checkpoint where a complete
+        one used to be.
+        """
+        payload = {
+            "model_state": state, "model_name": model_name, "input_format": input_format,
+            "manifest": str(manifest_path), "history": history,
+            # Full training provenance (B2 review, 2026-08-25: a checkpoint that does
+            # not record its own hyperparameters -- epochs, batch size, accumulation,
+            # lr -- is reproducible only from shell history, which is nothing).
+            # `best_epoch` names WHICH epoch the saved weights come from; without it,
+            # a truncated run whose best == last is indistinguishable from a converged
+            # one. `epochs_completed` distinguishes a finished run from a killed one.
+            "train_config": {
+                "epochs": int(epochs), "batch_size": int(batch_size), "lr": float(lr),
+                "seed": int(seed), "reg_weight": float(reg_weight), "gamma": float(gamma),
+                "cls_normalize": cls_normalize, "amp": str(amp),
+                "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
+            },
+            "epochs_completed": len(history["epoch"]),
+            "best_epoch": (int(history["epoch"][int(max(range(len(history["val_AP"])),
+                                                        key=history["val_AP"].__getitem__))])
+                           if history.get("val_AP") else None),
+            "best_val_AP": (max(history["val_AP"]) if history.get("val_AP") else None),
+        }
+        tmp = out_dir / "best.pt.tmp"
+        torch.save(payload, tmp)
+        os.replace(tmp, out_dir / "best.pt")
+        tmp_hist = out_dir / "history.json.tmp"
+        with open(tmp_hist, "w") as f:
+            json.dump(history, f, indent=2)
+        os.replace(tmp_hist, out_dir / "history.json")
+
     n_train_batches = len(train_loader)
     for epoch in range(1, epochs + 1):
         model.train()
@@ -437,32 +476,16 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         if val_metrics["AP"] >= best_ap:
             best_ap = val_metrics["AP"]
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            # Persist EVERY time the best improves, not once at the end: a long run
+            # killed at epoch N used to leave an empty directory and forfeit all of
+            # it (measured: a 120-epoch SSM run lost ~9 GPU-hours at epoch 106 when
+            # its parent process exited, 2026-08-27). The write is atomic, so a kill
+            # mid-write cannot corrupt an already-good checkpoint either.
+            _write_checkpoint(best_state)
 
     if best_state is None:  # epochs == 0 edge case: nothing trained, save the initial weights
         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-
-    torch.save(
-        {"model_state": best_state, "model_name": model_name, "input_format": input_format,
-         "manifest": str(manifest_path), "history": history,
-         # Full training provenance (B2 review, 2026-08-25: a checkpoint that does not
-         # record its own hyperparameters -- epochs, batch size, accumulation, lr --
-         # is reproducible only from shell history, which is nothing). `best_epoch`
-         # names WHICH epoch the saved weights come from; without it, a truncated run
-         # whose best == last is indistinguishable from a converged one.
-         "train_config": {
-             "epochs": int(epochs), "batch_size": int(batch_size), "lr": float(lr),
-             "seed": int(seed), "reg_weight": float(reg_weight), "gamma": float(gamma),
-             "cls_normalize": cls_normalize, "amp": str(amp),
-             "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
-         },
-         "best_epoch": (int(history["epoch"][int(max(range(len(history["val_AP"])),
-                                                     key=history["val_AP"].__getitem__))])
-                        if history.get("val_AP") else None),
-         "best_val_AP": (max(history["val_AP"]) if history.get("val_AP") else None)},
-        out_dir / "best.pt",
-    )
-    with open(out_dir / "history.json", "w") as f:
-        json.dump(history, f, indent=2)
+    _write_checkpoint(best_state)  # final write: history through the LAST epoch
 
     return history
 
