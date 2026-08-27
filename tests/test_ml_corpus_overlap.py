@@ -105,14 +105,22 @@ def test_write_manifest_explicit_corpus_tag_overrides_directory_name(tmp_path):
 
 def test_generator_git_commit_never_raises(monkeypatch):
     """Provenance is best-effort: git being unavailable must degrade to "unknown",
-    never crash a generation run."""
+    never crash a generation run. Since F55 the SHA is resolved ONCE at module
+    import (so mid-run commits cannot poison a corpus's provenance) and
+    `_generator_git_commit` returns that cache — so the degrade-gracefully
+    property lives on `_read_git_commit`, and the cache property is asserted
+    separately."""
     ml_dataset = pytest.importorskip("e2e.ml.dataset")
 
     def _boom(*a, **k):
         raise FileNotFoundError("no git on this box")
 
     monkeypatch.setattr(subprocess, "run", _boom)
-    assert ml_dataset._generator_git_commit() == "unknown"
+    # the resolver degrades, never raises
+    assert ml_dataset._read_git_commit() == "unknown"
+    # the recorded value is the import-time cache: unaffected by the broken
+    # subprocess NOW, because it was captured at process start (F55 semantics)
+    assert ml_dataset._generator_git_commit() == ml_dataset._GENERATOR_GIT_COMMIT_AT_IMPORT
 
 
 # --------------------------------------------------------------------------------
