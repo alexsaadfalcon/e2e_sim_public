@@ -25,7 +25,7 @@ from e2e.frames import (
     FrameContractError,
     require_domain,
 )
-from e2e.ml.radar_config import TI_IWR1443
+from e2e.radar_config import TI_IWR1443
 
 
 def _cfg(**overrides):

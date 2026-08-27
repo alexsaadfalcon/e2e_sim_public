@@ -1,4 +1,4 @@
-"""Tests for `e2e.ml.impairments` (FMCW ADC-domain radar impairments)."""
+"""Tests for `e2e.chain.impairments` (FMCW ADC-domain radar impairments)."""
 
 import math
 
@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.impairments import (  # noqa: E402
+from e2e.chain.impairments import (  # noqa: E402
     ClutterParams,
     LeakageParams,
     PhaseNoiseParams,
@@ -19,7 +19,7 @@ from e2e.ml.impairments import (  # noqa: E402
     apply_leakage,
     apply_phase_noise,
 )
-from e2e.ml.radar_config import PRESETS, RadarConfig  # noqa: E402
+from e2e.radar_config import PRESETS, RadarConfig  # noqa: E402
 
 np = pytest.importorskip("numpy")
 
@@ -226,7 +226,7 @@ def test_leakage_bins_and_power(cfg, torch_device):
     # reference is now the absolute thermal floor (F35 flip), so measuring the tone
     # against the cube's own peak would test a relationship the code no longer asserts --
     # and would quietly start passing again if someone reverted the flip.
-    from e2e.ml.impairments import REFERENCE_PEAK, _reference_power
+    from e2e.chain.impairments import REFERENCE_PEAK, _reference_power
     if params.reference == REFERENCE_PEAK:
         p_ref = (a0 * cfg.n_samples) ** 2
     else:
@@ -359,7 +359,7 @@ def test_clutter_azimuth_recovered_through_tdm_deinterleave(torch_device):
     detection path processes clutter (deinterleave -> per-TX virtual array -> angle
     FFT), must localize at the azimuth `apply_clutter` drew for it. The pre-F52 model
     (i.i.d. per-RX gains, no code) put a period-n_rx comb here instead."""
-    from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+    from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
     import dataclasses as _dc
 
     cfg = RadarConfig(name="f52_tdm", f0_hz=77e9, bandwidth_hz=500e6, n_tx=4, n_rx=4,
@@ -403,7 +403,7 @@ def test_clutter_azimuth_recovered_through_ddma_demux(torch_device):
     code must place the scatterer's replicas so the demux reassembles the full
     n_tx*n_rx virtual aperture at the drawn azimuth (pre-F52: all energy was confined
     to TX-0's sub-band, a 1/n_tx aperture)."""
-    from e2e.ml.transforms import adc_to_rd, ddma_demux
+    from e2e.chain.transforms import adc_to_rd, ddma_demux
 
     cfg = RadarConfig(name="f52_ddma", f0_hz=77e9, bandwidth_hz=500e6, n_tx=3, n_rx=4,
                       n_chirps=63, n_samples=128, fs_hz=10e6, chirp_period_s=20e-6,
@@ -465,7 +465,7 @@ def test_leakage_power_calibration_holds_under_ddma(torch_device):
                       n_rx=8, n_chirps=64, n_samples=128, fs_hz=10e6,
                       chirp_period_s=20e-6, mimo="ddma")
     assert not cfg.validate()
-    from e2e.ml.impairments import _reference_power
+    from e2e.chain.impairments import _reference_power
     params = LeakageParams(bumper_relative_db=-300.0)  # isolate the 0 m tone
     silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
                          device=torch_device)
@@ -554,7 +554,7 @@ def test_apply_all_defaults_and_skip(cfg, torch_device):
     assert out_all.dtype == adc.dtype
     assert not torch.allclose(out_all, adc)
 
-    from e2e.ml.impairments import stage_seed
+    from e2e.chain.impairments import stage_seed
     out_skip = apply_all(adc, cfg, {"leakage": None, "clutter": None}, seed=1)
     out_phase_only = apply_phase_noise(adc, cfg, PhaseNoiseParams(),
                                        seed=stage_seed(1, "phase_noise"))
@@ -573,7 +573,7 @@ def test_apply_all_clutter_seed_is_frame_independent_others_are_not(cfg, torch_d
     every frame), while phase_noise/leakage key off `seed + frame_idx` (fresh draw
     every frame) -- see `apply_all`'s docstring and PHYSICS_JUSTIFICATION_AUDIT.md
     entry 10."""
-    from e2e.ml.impairments import stage_seed
+    from e2e.chain.impairments import stage_seed
 
     silent = torch.zeros(4, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64, device=torch_device)
 
@@ -606,7 +606,7 @@ def test_clutter_passes_through_the_oscillator_phase_noise(cfg, torch_device):
     entirely. Test: inject clutter alone into a silent cube, then check the composite is
     modified by the phase-noise stage rather than passing through untouched."""
     import torch
-    from e2e.ml.impairments import (ClutterParams, PhaseNoiseParams, apply_all,
+    from e2e.chain.impairments import (ClutterParams, PhaseNoiseParams, apply_all,
                                     apply_clutter, apply_phase_noise)
 
     silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples,
@@ -630,7 +630,7 @@ def test_stage_seeds_never_collide_across_frames_or_stages():
     seed -- the same noise realization filed under two different labels, which
     quietly correlates a corpus. Sweep frames and stages and assert every sub-seed
     is distinct."""
-    from e2e.ml.impairments import stage_seed
+    from e2e.chain.impairments import stage_seed
 
     stages = ("phase_noise", "leakage", "clutter")
     seeds = {}
@@ -649,7 +649,7 @@ def test_stage_seed_is_stable_across_processes():
     import subprocess
     import sys
 
-    code = ("from e2e.ml.impairments import stage_seed;"
+    code = ("from e2e.chain.impairments import stage_seed;"
             "print(stage_seed(7, 'clutter'))")
     runs = {
         subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
@@ -738,7 +738,7 @@ def test_clutter_power_calibration_holds_under_ddma(torch_device):
                       n_rx=4, n_chirps=63, n_samples=128, fs_hz=10e6,
                       chirp_period_s=20e-6, mimo="ddma")
     assert not cfg.validate()
-    from e2e.ml.impairments import _thermal_reference
+    from e2e.chain.impairments import _thermal_reference
     params = ClutterParams(density=8.0, nu=50.0, total_relative_db=10.0)
     silent = torch.zeros(cfg.n_rx, cfg.n_chirps, cfg.n_samples, dtype=torch.complex64,
                          device=torch_device)

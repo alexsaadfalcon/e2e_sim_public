@@ -18,7 +18,7 @@ from e2e.ml.baseline import (
 )
 from e2e.ml.labels import LabelGrid
 from e2e.ml.metrics import MatchCriterion
-from e2e.ml.radar_config import PRESETS
+from e2e.radar_config import PRESETS
 
 
 # --------------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def test_classical_map_localizes_a_synthesized_target_in_range(torch_device):
     correct range bin. Azimuth is deliberately not asserted -- a 12-element array cannot
     place it to grid-cell precision, which is the whole point of this module."""
     from e2e.environment.scatterers import RadarPose, Scatterer
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     cfg = PRESETS["ti_iwr1443"]
     grid = LabelGrid.for_config(cfg)
@@ -136,7 +136,7 @@ def test_range_azimuth_power_shape_matches_the_virtual_array(torch_device):
     since interpolation would place peaks between resolution cells without adding
     information."""
     from e2e.environment.scatterers import RadarPose, Scatterer
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     cfg = PRESETS["ti_iwr1443"]
     adc = synthesize_adc(cfg, [Scatterer(position=(10.0, 1.0, 0.0), velocity=(0.0, 0.0, 0.0),
@@ -378,7 +378,7 @@ def test_classical_map_localizes_a_point_target_at_every_fine_bin_offset(offset_
     bins stride*i + stride//2, so a point target in any OTHER fine bin of its cell
     was invisible to the detector. Peak-pooling must localize it at every offset."""
     from e2e.environment.scatterers import RadarPose, Scatterer
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     cfg = PRESETS["ti_iwr1443"]
     grid = LabelGrid.for_config(cfg)

@@ -14,7 +14,7 @@ import pytest
 def test_doppler_validity_scales_inversely_with_speed_and_bandwidth():
     """N(eps) = eps*sqrt(3)*c / (2*pi*B*v*T_c): halving the speed or the bandwidth
     doubles the usable chirp count."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity
 
     cfg = PRESETS["radial_like"]
@@ -31,7 +31,7 @@ def test_doppler_validity_scales_inversely_with_speed_and_bandwidth():
 def test_doppler_validity_reproduces_the_measured_numbers():
     """Pinned against the stable-path-set measurement (planar target, free space,
     max_depth=1): ~73 chirps at 1 m/s for radial_like, scaling as 1/v."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity
 
     cfg = PRESETS["radial_like"]
@@ -43,7 +43,7 @@ def test_doppler_validity_flags_the_shipped_frame_length():
     """The uncomfortable one, pinned deliberately: radial_like's 252-chirp frame is
     OUTSIDE the 5% bound even for a 1 m/s target, so every frame in a corpus generated
     at this preset violates it. Intra-frame range migration is the missing term."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity
 
     assert doppler_validity(PRESETS["radial_like"], 1.0)["within_target"] is False
@@ -55,7 +55,7 @@ def test_doppler_validity_slope_is_dimensionless_and_consistent():
     ~1/T_c (13158x) too large. Two independent invariants pin it:
     usable_chirps == eps / slope, and the error at frame end == slope * n_chirps.
     Both would have caught the missing factor; neither existed before."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity
 
     cfg = PRESETS["radial_like"]
@@ -72,7 +72,7 @@ def test_doppler_validity_slope_is_dimensionless_and_consistent():
 
 
 def test_doppler_validity_static_target_is_exact():
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import doppler_validity
 
     d = doppler_validity(PRESETS["radial_like"], 0.0)
@@ -83,7 +83,7 @@ def test_doppler_validity_static_target_is_exact():
 def test_warn_if_doppler_invalid_warns_and_returns_the_verdict():
     import warnings as _w
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import warn_if_doppler_invalid
 
     with pytest.warns(UserWarning, match="range migration"):

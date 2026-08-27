@@ -73,7 +73,7 @@ def test_dataset_stable_scene_seed_changes_with_corpus_tag():
 # --------------------------------------------------------------------------------
 def test_write_manifest_records_corpus_tag_and_git_commit(tmp_path):
     ml_dataset = pytest.importorskip("e2e.ml.dataset")
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
 
     cfg = dataclasses.replace(TI_IWR1443, name="test_tiny_provenance", n_chirps=4, n_samples=8)
     dataset_dir = tmp_path / "some_corpus_ti_iwr1443_D1"
@@ -90,7 +90,7 @@ def test_write_manifest_records_corpus_tag_and_git_commit(tmp_path):
 
 def test_write_manifest_explicit_corpus_tag_overrides_directory_name(tmp_path):
     ml_dataset = pytest.importorskip("e2e.ml.dataset")
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
 
     cfg = dataclasses.replace(TI_IWR1443, name="test_tiny_provenance2", n_chirps=4, n_samples=8)
     dataset_dir = tmp_path / "irrelevant_dir_name"

@@ -19,7 +19,7 @@ labels = pytest.importorskip("e2e.ml.labels", reason="sibling shard e2e.ml.label
 scenes = pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scenes not present")
 
 from e2e.ml import dataset as ml_dataset
-from e2e.ml.radar_config import PRESETS, RADIAL_LIKE, TI_IWR1443
+from e2e.radar_config import PRESETS, RADIAL_LIKE, TI_IWR1443
 
 # Any valid tier works for these plumbing tests; we don't assert on tier-specific content.
 TIER = sorted(scenes.DIFFICULTY_TIERS)[0]
@@ -307,7 +307,7 @@ def test_radar_frame_dataset_rd_matches_generate_sample_input(
 
     with np.load(manifest_path.parent / ds.files[0]) as data:
         adc = torch.from_numpy(data["adc"]).to(torch.complex64)
-    from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+    from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 
     if cfg.mimo == "tdm":
         sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
@@ -378,7 +378,7 @@ def _write_v1_dataset(tmp_path, cfg, torch_device, n=3, seed=0):
     manifest.pop("manifest_version", None)  # v1 predates this field
     all_files = manifest["files"]["train"] + manifest["files"]["val"] + manifest["files"]["test"]
 
-    from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+    from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 
     for fname in all_files:
         path = manifest_path.parent / fname

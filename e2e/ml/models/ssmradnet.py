@@ -23,7 +23,7 @@ The paper's selling point is that this replaces the range/Doppler FFTs with lear
 Documented deviations
 ---------------------
 * **Input is post-RD-FFT `[B, C, R, D]`, not raw ADC.** This repo's dataset layer
-  (`e2e.ml.transforms.rd_to_input` -> `e2e.ml.dataset`) serves range-Doppler tensors with
+  (`e2e.chain.transforms.rd_to_input` -> `e2e.ml.dataset`) serves range-Doppler tensors with
   real/imag stacked on the channel axis, and the sibling `fftradnet.py` consumes the same
   tensor. Serving raw ADC purely for this model would fork the dataset contract. The
   two-scale idea survives the change intact: the "fast axis" scan still runs along the
@@ -69,7 +69,7 @@ upstream's intent that pooling never precedes the SSM that is supposed to model 
 Honest fork from upstream, not resolved by this code: upstream's raw ADC is **DDMA** (all
 TX transmit every chirp, so consecutive chirps are simultaneous-TX snapshots); this
 simulator's TDM MIMO config fires **one TX per chirp, round-robin** (chirp `c` was
-illuminated by TX `c % n_tx` only -- see `e2e.ml.transforms.tdm_deinterleave`'s docstring).
+illuminated by TX `c % n_tx` only -- see `e2e.chain.transforms.tdm_deinterleave`'s docstring).
 `input_mode="adc"` does **not** deinterleave (deinterleaving is itself a hand-engineered
 MIMO-demux step that would defeat the "raw signal" premise this input mode exists to
 serve), so for TDM configs the slow axis `slow_ssm` scans is TX-interleaved: it must learn
@@ -161,7 +161,7 @@ class SSMRadNet(nn.Module):
     in_channels, n_range_in, n_doppler_in
         Shape of the input tensor `[B, in_channels, n_range_in, n_doppler_in]`. For
         `input_mode="rd"` (default) this is the `[2*n_rx, range_bin, doppler_bin]` layout
-        produced by `e2e.ml.transforms.rd_to_input`; for `input_mode="adc"` it is the raw
+        produced by `e2e.chain.transforms.rd_to_input`; for `input_mode="adc"` it is the raw
         `[2*n_rx, n_samples, n_chirps]` layout produced by `e2e.ml.dataset.RadarFrameDataset._derive_input`
         -- same tensor rank/argument order, different physical axis meaning (samples
         instead of range bins, chirps instead of Doppler bins). See "Raw-ADC input mode"

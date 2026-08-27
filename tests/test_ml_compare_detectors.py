@@ -22,7 +22,7 @@ torch = pytest.importorskip("torch")
 
 from e2e.ml import compare_detectors
 from e2e.ml.labels import LabelGrid
-from e2e.ml.radar_config import PRESETS
+from e2e.radar_config import PRESETS
 
 
 # ------------------------------------------------------------------------------------

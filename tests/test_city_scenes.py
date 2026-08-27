@@ -23,7 +23,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.radar_config import TI_IWR1443
+from e2e.radar_config import TI_IWR1443
 from e2e.scenario import Node, NodeRole, Scenario
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent

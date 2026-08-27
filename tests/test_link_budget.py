@@ -1,4 +1,4 @@
-"""Tests for `e2e.ml.link_budget` -- the absolute power reference for the whole chain.
+"""Tests for `e2e.chain.link_budget` -- the absolute power reference for the whole chain.
 
 These constants set the absolute SNR of every target in every generated corpus, so the
 tests here are deliberately of the "check it against something that is not this code" kind
@@ -22,8 +22,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml import link_budget as lb
-from e2e.ml.radar_config import PRESETS, RadarConfig
+from e2e.chain import link_budget as lb
+from e2e.radar_config import PRESETS, RadarConfig
 
 CFG = PRESETS["ti_iwr1443"]
 

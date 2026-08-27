@@ -3,7 +3,7 @@ Radar-ML corpus generation AS A COMPOSED `e2e.simulation.Simulation` RUN.
 
 This is the migration `report/chain_integration_design.html`'s "The result" section
 specifies: the corpus generator no longer calls the analytic point-target synthesizer
-(`e2e.ml.rd_synth.synthesize_adc`, still available as `e2e.ml.dataset`'s explicitly-
+(`e2e.chain.rd_synth.synthesize_adc`, still available as `e2e.ml.dataset`'s explicitly-
 labelled CI/offline fallback) directly. Instead it builds an `e2e.simulation.Simulation`
 out of the SAME blocks the runtime pipeline uses, ray-traces via
 `e2e.environment.blocks.RTEnvironmentBlock`, and runs it frame by frame:
@@ -214,7 +214,7 @@ def build_chain_simulation(
     # with the target. That is F35's ceiling and F42's missing floor, and both dissolve
     # once the cube is on an absolute scale with a real k*T*B*F floor beneath it.
     if use_link_budget:
-        from e2e.ml.link_budget import ThermalNoiseBlock
+        from e2e.chain.link_budget import ThermalNoiseBlock
         serial_stages.append(ThermalNoiseBlock(cfg, seed=impairment_seed))
     serial_stages.append(
         ImpairmentBlock(cfg, impairment_chain_params, seed=impairment_seed)
@@ -308,7 +308,7 @@ def generate_chain_corpus(
     """
     from e2e.ml.dataset import write_manifest
     from e2e.ml.labels import LabelGrid
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_scenes import RT_DIFFICULTY_TIERS, build_rt_tier_scenario
 
     if cfg_name not in PRESETS:
@@ -325,7 +325,7 @@ def generate_chain_corpus(
     # class of invalid corpus a discovered fact; this guard makes it an impossible state.
     # `allow_unanswerable=True` is the deliberate escape hatch (ablations, regression
     # reproductions); the resulting corpus must never back a detection benchmark.
-    from e2e.ml.radar_config import answerability_problems
+    from e2e.radar_config import answerability_problems
     problems = answerability_problems(
         cfg, top_speed_mps=RT_DIFFICULTY_TIERS[tier].speed_mps[1])
     if problems and not allow_unanswerable:
@@ -398,7 +398,7 @@ def build_arg_parser():
                     "dechirp -> impairments -> quantizer -> radar cube -> sink). "
                     "Needs Sionna RT.",
     )
-    p.add_argument("--config", required=True, help="radar config preset name (see e2e.ml.radar_config.PRESETS)")
+    p.add_argument("--config", required=True, help="radar config preset name (see e2e.radar_config.PRESETS)")
     p.add_argument("--tier", required=True,
                    help="RT difficulty tier (see e2e.ml.rt_scenes.RT_DIFFICULTY_TIERS)")
     p.add_argument("--n", type=int, required=True, help="number of scenes to generate")
@@ -471,7 +471,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = build_arg_parser().parse_args(argv)
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
 
     if args.config not in PRESETS:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)
@@ -509,7 +509,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"   ground S: "
               f"{DEFAULT_GROUND_SCATTERING_COEFFICIENT if args.ground_scattering is None else args.ground_scattering}"
               f"   samples_per_src: {args.samples_per_src or 'sionna default'}")
-        from e2e.ml.radar_config import answerability_problems
+        from e2e.radar_config import answerability_problems
         spec = RT_DIFFICULTY_TIERS.get(args.tier)
         if spec is not None:
             problems = answerability_problems(cfg, top_speed_mps=spec.speed_mps[1])

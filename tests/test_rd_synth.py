@@ -1,5 +1,5 @@
 """
-Physics tests for the analytic FMCW raw-ADC synthesizer (`e2e.ml.rd_synth`).
+Physics tests for the analytic FMCW raw-ADC synthesizer (`e2e.chain.rd_synth`).
 
 Everything here is checked against closed-form expectations derived from the
 waveform parameters, not against golden data:
@@ -27,7 +27,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.rd_synth import C_LIGHT, RadarPose, array_axis, synthesize_adc
+from e2e.chain.rd_synth import C_LIGHT, RadarPose, array_axis, synthesize_adc
 
 
 # --------------------------------------------------------------------------------

@@ -4,7 +4,7 @@ Tests for `e2e.ml.labels` (ground-truth detection-label encode/decode).
 Uses the real `Scatterer`/`RadarPose` from `e2e.environment.scatterers` (not stubs,
 they're a dependency-free core module) with the default pose: position at the origin,
 boresight +x, so `array_axis` is +y and `sin_azimuth == y / range` for an in-plane (z=0)
-target -- see `e2e.ml.rd_synth.array_axis`'s docstring for the convention.
+target -- see `e2e.chain.rd_synth.array_axis`'s docstring for the convention.
 """
 
 import math

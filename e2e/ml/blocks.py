@@ -360,7 +360,7 @@ class NeuralDetectorBlock:
       * "adc" -- the raw physical-channel transform (transpose + stack
         real/imag), matching `RadarFrameDataset._derive_input`'s "adc" branch
         exactly -- no `cfg` needed.
-      * "rd"  -- `e2e.ml.transforms.adc_to_rd` (+ `tdm_deinterleave` for
+      * "rd"  -- `e2e.chain.transforms.adc_to_rd` (+ `tdm_deinterleave` for
         `cfg.mimo == "tdm"`) + `rd_to_input`, the same chain
         `e2e.ml.dataset.generate_sample` uses -- needs `cfg` (a `RadarConfig`).
     Loading from a checkpoint infers `input_format` from the checkpoint (or
@@ -475,7 +475,7 @@ class NeuralDetectorBlock:
                 "e2e.ml.dataset.generate_sample does -- pass cfg=, or use "
                 "input_format='adc'"
             )
-        from e2e.ml import transforms
+        from e2e.chain import transforms
 
         if self.cfg.mimo == "tdm":
             sub_cfg = dataclasses.replace(self.cfg, n_tx=1, mimo="single",

@@ -14,9 +14,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e.environment.scatterers import frame_scatterers, radar_pose, vehicle
-from e2e.ml.radar_config import RADIAL_LIKE, TI_IWR1443
-from e2e.ml.rd_synth import C_LIGHT, synthesize_adc
-from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+from e2e.radar_config import RADIAL_LIKE, TI_IWR1443
+from e2e.chain.rd_synth import C_LIGHT, synthesize_adc
+from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 from e2e.scenario import Node, NodeRole, Scenario
 
 

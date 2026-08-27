@@ -1,5 +1,5 @@
 """
-Tests for `e2e.ml.transforms` (raw ADC -> Range-Doppler -> network-input tensors).
+Tests for `e2e.chain.transforms` (raw ADC -> Range-Doppler -> network-input tensors).
 
 These tests build a small local `_RadarConfigStub` rather than importing the real
 `RadarConfig` (owned by a sibling shard, may not exist yet / is developed in parallel).
@@ -13,7 +13,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml import transforms
+from e2e.chain import transforms
 
 
 @dataclass

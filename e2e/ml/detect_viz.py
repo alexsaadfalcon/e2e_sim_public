@@ -186,7 +186,7 @@ def decode_classical_frame(manifest_path, split: str, frame_idx: int, *,
     """
     from e2e.ml.baseline import classical_detection_map
     from e2e.ml.dataset import RadarFrameDataset
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())
@@ -233,7 +233,7 @@ def frame_background_ra(manifest_path, split: str, frame_idx: int, *, n_angle_ff
     subtitle whenever `azimuth_window` is not `None`.
     """
     from e2e.ml.dataset import RadarFrameDataset
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
     from e2e.ml.render_scene import range_azimuth_map
 
     manifest_path = Path(manifest_path)

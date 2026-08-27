@@ -24,7 +24,7 @@ from e2e.ml import chain_generate
 from e2e.ml.blocks import SinkBlock
 from e2e.ml.dataset import RadarFrameDataset, write_manifest
 from e2e.ml.labels import LabelGrid
-from e2e.ml.radar_config import RadarConfig
+from e2e.radar_config import RadarConfig
 
 
 # Small single-TX config: fast, and sidesteps a pre-existing TDM bug in
@@ -319,7 +319,7 @@ def test_answerability_default_tolerance_reads_match_criterion():
     truth, not a second hardcoded 0.06 (lives here rather than in
     test_ml_radar_config because MatchCriterion needs torch)."""
     from e2e.ml.metrics import MatchCriterion
-    from e2e.ml.radar_config import PRESETS, answerability_problems
+    from e2e.radar_config import PRESETS, answerability_problems
     cfg = PRESETS["ti_iwr1443"]
     assert answerability_problems(cfg, top_speed_mps=5.0) == \
         answerability_problems(cfg, top_speed_mps=5.0,
@@ -331,7 +331,7 @@ def test_generate_dataset_warns_but_generates_on_unanswerable_pair(
     """The analytic FALLBACK path warns instead of refusing (plumbing tests and tiny
     configs depend on it) -- but the warning must fire."""
     from e2e.ml import dataset as ml_dataset
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
 
     tiny = dataclasses.replace(_CFG, name="test_answerability_tiny")
     assert tiny.n_virtual == 4  # Rayleigh 0.5 >> 0.06: azimuth-unanswerable

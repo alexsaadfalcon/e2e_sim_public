@@ -20,7 +20,7 @@ time sweep the frequency axis uniformly, making "sample the CFR on the ramp's gr
 and "dechirped beat signal" the same object. Real synthesizers have chirp
 nonlinearity (residual deviation of the instantaneous frequency from the ideal ramp),
 which would smear this one-to-one mapping; it is a stated approximation of the whole
-sensing chain (see ``e2e.ml.rd_synth``'s scope list), not something this block could
+sensing chain (see ``e2e.chain.rd_synth``'s scope list), not something this block could
 patch locally. This module is now the ONE implementation of
 the beat-mapping and MIMO-combine steps; ``e2e.ml.rt_gen`` builds the raw CFR (the
 Sionna-specific half: chunked ``Paths.cfr`` calls) and delegates the rest here so the
@@ -59,11 +59,11 @@ def beat_from_cfr(s_pars: torch.Tensor) -> torch.Tensor:
 def mimo_combine(cfg, beat: torch.Tensor) -> torch.Tensor:
     """Beat cube `[n_rx, n_tx, n_chirps, n_samples]` -> ADC cube `[n_rx, n_chirps, n_samples]`.
 
-    Mirrors `e2e.ml.rd_synth.synthesize_adc`'s per-chirp TX factor exactly (see
+    Mirrors `e2e.chain.rd_synth.synthesize_adc`'s per-chirp TX factor exactly (see
     `e2e.ml.rt_gen`'s module docstring):
 
     * `"tdm"` / `"single"`: chirp `c` is transmitted by TX `c % n_tx` alone, so only
-      that TX's column survives -- this is the selection `e2e.ml.transforms.
+      that TX's column survives -- this is the selection `e2e.chain.transforms.
       tdm_deinterleave` inverts.
     * `"ddma"`: every TX transmits on every chirp, TX `t` carrying the extra per-chirp
       phase `2pi t c / n_tx`; the TX columns are summed with that code applied.
@@ -97,7 +97,7 @@ class DechirpBlock:
     resolved; `chirps=CHIRP_NATIVE` because it consumes the chirp axis directly (every
     chirp's TX selection/code depends on its own chirp index).
 
-    `cfg` is a `e2e.ml.radar_config.RadarConfig`-like object; only `cfg.mimo` is read
+    `cfg` is a `e2e.radar_config.RadarConfig`-like object; only `cfg.mimo` is read
     (the frequency grid `s_pars` was sampled at is the caller's concern, not this
     block's -- see `beat_from_cfr`'s docstring).
     """

@@ -379,7 +379,7 @@ def collect_stats(manifest_path, *, tensor_sample_per_split: Optional[int] = Non
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
 
     cfg = RadarConfig.from_dict(manifest["config"])
     clamp_cap = CLAMP_FRAC * cfg.max_velocity_mps

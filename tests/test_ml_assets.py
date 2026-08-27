@@ -459,7 +459,7 @@ def test_downloaded_asset_scene_solves_to_nonzero_monostatic_return(sionna_rt, n
 
     import dataclasses
 
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
     from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene
     from e2e.scenario import Motion, Node, NodeRole, ObjectKind, Scenario, SceneObject
 

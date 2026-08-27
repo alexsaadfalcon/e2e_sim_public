@@ -65,7 +65,7 @@ WHAT IT COMPUTES
 ----------------
 Textbook FMCW processing, then a 2-D cell-averaging CFAR:
 
-1. range/Doppler FFTs via `e2e.ml.transforms.adc_to_rd` (TDM inputs are de-interleaved
+1. range/Doppler FFTs via `e2e.chain.transforms.adc_to_rd` (TDM inputs are de-interleaved
    into a virtual array first, exactly as the dataset layer does);
 2. an angle FFT across the virtual-channel axis, per Doppler bin -- this is the step that
    needs per-channel phase, so it must precede any Doppler collapse;
@@ -98,7 +98,7 @@ import torch.nn.functional as F
 
 from e2e.ml.labels import LabelGrid
 from e2e.ml.metrics import MatchCriterion, evaluate_dataset
-from e2e.ml.transforms import adc_to_rd, ddma_demux, tdm_deinterleave
+from e2e.chain.transforms import adc_to_rd, ddma_demux, tdm_deinterleave
 
 # CFAR ratio (dB) mapped onto the [0, 1] objectness range the metric thresholds over.
 # 0 dB == "cell equals its local noise estimate" -> objectness 0; 20 dB -> objectness 1.
@@ -407,7 +407,7 @@ def score_manifest(manifest_path, split: str = "val", *, limit: Optional[int] = 
     numbers this produced).
     """
     from e2e.ml.dataset import RadarFrameDataset
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())

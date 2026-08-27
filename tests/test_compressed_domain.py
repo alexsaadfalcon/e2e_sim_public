@@ -16,7 +16,7 @@ from e2e.ml import afe_sweep
 from e2e.ml import compressed_domain as cd
 from e2e.ml import dataset as ml_dataset
 from e2e.ml import train as train_mod
-from e2e.ml.radar_config import PRESETS, TI_IWR1443
+from e2e.radar_config import PRESETS, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS
 
 TIER = sorted(DIFFICULTY_TIERS)[0]

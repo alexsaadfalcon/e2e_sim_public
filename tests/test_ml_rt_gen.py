@@ -23,8 +23,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.ml.radar_config import C_MPS, TI_IWR1443
-from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+from e2e.radar_config import C_MPS, TI_IWR1443
+from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
 from e2e.scenario import Node, NodeRole, Scenario
 
 pytestmark = pytest.mark.sionna

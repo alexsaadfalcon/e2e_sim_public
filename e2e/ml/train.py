@@ -79,7 +79,7 @@ from torch.utils.data import DataLoader
 from e2e.ml.dataset import RadarFrameDataset
 from e2e.ml.losses import detection_loss
 from e2e.ml.metrics import evaluate_dataset
-from e2e.ml.radar_config import RadarConfig
+from e2e.radar_config import RadarConfig
 
 _MODEL_NAMES = ("fftradnet", "ssmradnet")
 

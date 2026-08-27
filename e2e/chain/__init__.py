@@ -17,13 +17,14 @@ The dependency rule runs one way AT MODULE SCOPE, and it inverts the historical
 direction: core (this package, `e2e.blocks`, `e2e.simulation`, `e2e.environment`) never
 imports `e2e.ml` at module scope; `e2e.ml` may import core freely. That is the point of
 the C1 move (`notes/C1_MOVE_PLAN.md`) -- the signal-model modules `e2e.ml` used to own
-(geometry/scatterers, and eventually rd_synth/transforms/impairments/link_budget/
-radar_config) are core, not ML-specific, and belong on this side of the line.
+(geometry/scatterers, and rd_synth/transforms/impairments/link_budget/radar_config) are
+core, not ML-specific, and belong on this side of the line.
 
-As of batch 1, `geometry`/`scatterers` have moved to `e2e.environment`; this package's
-own `receive.py` still imports `e2e.ml.{impairments,transforms,radar_config}` at module
-scope pending batch 2 (their move to `e2e.chain`/`e2e.radar_config`) -- a known,
-temporary hole in the rule during the migration, not a design choice.
+As of batch 2, `geometry`/`scatterers` (batch 1) and `rd_synth`/`transforms`/
+`impairments`/`link_budget`/`radar_config` (batch 2) have all moved to `e2e.environment`,
+`e2e.chain`, and `e2e.radar_config` respectively; this package's own `receive.py` now
+imports them from their new homes, closing the hole the rule used to have during the
+migration.
 
 There is one deliberate exception that will remain even once the migration is done, and
 it is worth stating rather than pretending the rule is absolute. `e2e/ml/rt_gen.py`

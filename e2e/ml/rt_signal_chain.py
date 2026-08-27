@@ -117,7 +117,7 @@ _ANTENNA_INDEX_REVERSED = True
 def _resolve_device(dev):
     """`None` -> the library device; anything else -> `torch.device(dev)`."""
     if dev is None:
-        from e2e.ml.rd_synth import device as _lib_device
+        from e2e.chain.rd_synth import device as _lib_device
 
         return _lib_device
     return torch.device(dev)

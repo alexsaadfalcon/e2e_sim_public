@@ -35,7 +35,7 @@ DEFAULT_RCS_DBSM = {
 }
 
 #: `Scenario.base_scene` value marking a scene whose objects are POINT targets: there is
-#: no ray tracer and no mesh, and `e2e.ml.rd_synth.synthesize_adc` puts each object's
+#: no ray tracer and no mesh, and `e2e.chain.rd_synth.synthesize_adc` puts each object's
 #: entire return at its `position`. `e2e.ml.scenes` (the analytic tier sampler) sets it.
 #: Such objects get NO `extent_m`, because giving them one would move the label off the
 #: energy -- the exact defect the surface convention exists to remove. Every other
@@ -86,7 +86,7 @@ class RadarPose:
     Scene frame convention: right-handed, **+z is world up**, distances in
     metres. `boresight` is the unit vector the array points along; the physical
     ULA is laid out along the lateral axis ``u = normalise(z_up x boresight)``
-    (see `e2e.ml.rd_synth.array_axis`), so with the default pose (boresight
+    (see `e2e.chain.rd_synth.array_axis`), so with the default pose (boresight
     = +x) a target at +y sits at positive azimuth.
     """
     position: Vec3 = (0.0, 0.0, 0.0)

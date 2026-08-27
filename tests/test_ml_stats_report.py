@@ -19,7 +19,7 @@ scenes = pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scene
 
 from e2e.ml import dataset as ml_dataset
 from e2e.ml import stats_report
-from e2e.ml.radar_config import PRESETS, TI_IWR1443
+from e2e.radar_config import PRESETS, TI_IWR1443
 
 
 @pytest.fixture

@@ -28,7 +28,7 @@ from e2e.ml import train as train_mod
 from e2e.ml.dataset import RadarFrameDataset
 from e2e.ml.labels import LabelGrid, decode_detections
 from e2e.ml.metrics import evaluate_frame, match_detections
-from e2e.ml.radar_config import PRESETS, TI_IWR1443
+from e2e.radar_config import PRESETS, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS
 
 _CPU = torch.device("cpu")

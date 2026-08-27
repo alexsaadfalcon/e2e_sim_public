@@ -44,7 +44,7 @@ Conventions
 * Output-map geometry (`LabelGrid`): a `(range, sin(azimuth))` grid, NOT a `(range,
   angle_degrees)` grid -- azimuth is stored as `sin(theta)` on a uniform `[-1, 1)` axis,
   matching the direction-cosine convention a ULA actually resolves (see
-  `e2e.ml.rd_synth.array_axis`), rather than the reference's linear-degrees axis.
+  `e2e.chain.rd_synth.array_axis`), rather than the reference's linear-degrees axis.
 * Label map: float32 `[3, n_range, n_azimuth]`.
   - channel 0: objectness, `1.0` on a dense 3x3 footprint centred on each target's
     (SURFACE range, azimuth) cell, `0.0` elsewhere. Footprints are clipped (not wrapped)
@@ -128,7 +128,7 @@ import torch
 import torch.nn.functional as F
 
 from e2e.environment.geometry import nearest_surface_point
-from e2e.ml.rd_synth import array_axis, device
+from e2e.chain.rd_synth import array_axis, device
 
 # Footprint written around each target's cell by `encode_detection_labels` (3x3, per the
 # RADIal reference's `geometry.size == 3` configuration).

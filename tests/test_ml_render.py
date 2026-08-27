@@ -19,7 +19,7 @@ pytest.importorskip("e2e.ml.labels", reason="sibling shard e2e.ml.labels not pre
 PIL_Image = pytest.importorskip("PIL.Image", reason="Pillow required to read/write GIFs")
 
 from e2e.ml import render_scene
-from e2e.ml.radar_config import TI_IWR1443
+from e2e.radar_config import TI_IWR1443
 from e2e.ml.scenes import sample_scene
 
 
@@ -106,7 +106,7 @@ def test_range_azimuth_map_norm_peak_shifts_reference(tiny_cfg):
     """`norm_peak` re-references the dB scale: normalizing against 100x the map's own
     peak must shift every bin down by exactly 20 dB (power/10log)."""
     from e2e.environment.scatterers import RadarPose
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=10.0, object_class="vehicle")]
@@ -127,7 +127,7 @@ def test_range_azimuth_power_azimuth_window_hann_suppresses_off_target_sidelobe(
     window sidelobe skirt at a DIFFERENT azimuth (same range) must be measurably lower
     with the Hann taper than without it."""
     from e2e.environment.scatterers import RadarPose
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     scat = [render_scene.Scatterer(position=(20.0, 12.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=20.0, object_class="vehicle")]
@@ -153,7 +153,7 @@ def test_range_azimuth_power_azimuth_window_hann_suppresses_off_target_sidelobe(
 
 def test_range_azimuth_power_azimuth_window_rejects_unknown_value(tiny_cfg):
     from e2e.environment.scatterers import RadarPose
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     scat = [render_scene.Scatterer(position=(20.0, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
                                    rcs_dbsm=10.0, object_class="vehicle")]
@@ -207,7 +207,7 @@ def test_render_scene_gif_color_scale_is_global_and_fixed(monkeypatch, tiny_cfg,
 
 def test_render_scene_gif_ddma_config_also_renders(tiny_scenario, tmp_path):
     """DDMA (no tdm_deinterleave step) is a distinct code path in range_azimuth_map."""
-    from e2e.ml.radar_config import RADIAL_LIKE
+    from e2e.radar_config import RADIAL_LIKE
 
     cfg = dataclasses.replace(RADIAL_LIKE, name="test_tiny_ddma", n_chirps=24, n_samples=64)
     scenario = sample_scene(cfg, "D0", np.random.default_rng(1))
@@ -223,8 +223,8 @@ def _ddma_single_target_adc(n_samples=256, sin_az=0.35, rng_m=30.0):
     import math
 
     from e2e.environment.scatterers import Scatterer
-    from e2e.ml.radar_config import RADIAL_LIKE
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.radar_config import RADIAL_LIKE
+    from e2e.chain.rd_synth import synthesize_adc
 
     cfg = dataclasses.replace(RADIAL_LIKE, n_samples=n_samples)
     pos = (rng_m * math.sqrt(1.0 - sin_az ** 2), rng_m * sin_az, 0.0)
@@ -248,7 +248,7 @@ def test_range_azimuth_power_ddma_uses_the_full_virtual_aperture(tiny_cfg):
     """
     import torch
 
-    from e2e.ml.transforms import adc_to_rd, ddma_demux
+    from e2e.chain.transforms import adc_to_rd, ddma_demux
 
     cfg, adc, sin_az = _ddma_single_target_adc()
     n_fft = 256
@@ -299,7 +299,7 @@ def test_range_azimuth_map_peak_matches_known_target(tiny_cfg):
     scat = frame_scatterers(scenario, 0)
     pose = radar_pose(scenario, 0)
 
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     adc = synthesize_adc(tiny_cfg, scat, pose, snr_db=30.0, seed=0)
     ra_db, sin_az_axis = render_scene.range_azimuth_map(tiny_cfg, adc)

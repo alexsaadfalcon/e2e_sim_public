@@ -259,7 +259,7 @@ def test_sink_compression_reduces_on_disk_size_for_quantized_corpus(tmp_path, to
 def test_dataset_generate_dataset_records_codec_in_meta(tmp_path, torch_device):
     scenes = pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scenes not present")
     from e2e.ml import dataset as ml_dataset
-    from e2e.ml.radar_config import PRESETS, TI_IWR1443
+    from e2e.radar_config import PRESETS, TI_IWR1443
 
     tiny_cfg = dataclasses.replace(TI_IWR1443, name="test_storage_tiny_tdm", n_chirps=12, n_samples=64)
     PRESETS[tiny_cfg.name] = tiny_cfg
@@ -291,7 +291,7 @@ def test_dataset_reader_loads_a_legacy_manifest_v2_corpus_without_codec_key(tmp_
     the raw array directly, and meta has no "codec" key at all. RadarFrameDataset
     must still load it (existing on-disk contract, unbroken)."""
     from e2e.ml import dataset as ml_dataset
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
 
     cfg = dataclasses.replace(TI_IWR1443, name="test_storage_legacy", n_chirps=12, n_samples=64)
     dataset_dir = tmp_path / f"{cfg.name}_D0"

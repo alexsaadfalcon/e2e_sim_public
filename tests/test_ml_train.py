@@ -22,7 +22,7 @@ pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scenes not pre
 
 from e2e.ml import dataset as ml_dataset
 from e2e.ml import train as train_mod
-from e2e.ml.radar_config import PRESETS, TI_IWR1443
+from e2e.radar_config import PRESETS, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS
 
 # Any valid tier works for these plumbing tests; D0 (single vehicle/frame) keeps every
@@ -427,7 +427,7 @@ class _StubRadarFrameDataset(torch.utils.data.Dataset):
     _SPLIT_SEEDS = {"train": 0, "val": 1, "test": 2}
 
     def __init__(self, manifest_path, split: str = "train", input_format: str = "rd"):
-        from e2e.ml.radar_config import RadarConfig  # local: not imported at module scope here
+        from e2e.radar_config import RadarConfig  # local: not imported at module scope here
 
         with open(manifest_path) as f:
             manifest = json.load(f)

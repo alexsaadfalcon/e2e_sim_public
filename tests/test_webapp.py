@@ -1225,7 +1225,7 @@ def test_registry_dechirp_preset_and_mimo_params():
     params = {p.key: p for p in BLOCKS_BY_ID["dechirp"].params}
     # Every choice must be a real PRESETS entry (the registry list is hand-maintained;
     # 2026-08-24 it gained benchmark_v1 + ddma_wide_v1, the two answerable presets).
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     assert set(params["preset"].choices) <= set(PRESETS)
     assert {"radial_like", "benchmark_v1", "ddma_wide_v1"} <= set(params["preset"].choices)
     # radial_like (12 TX x 16 RX = 192 virtual) is the default: the detection label grid's
@@ -1332,7 +1332,7 @@ def test_run_pipeline_dechirp_chain_replaces_frequency_domain_products(
     checkpoint/multi-chirp guards tested elsewhere) purely so the downstream
     product list isn't empty -- see test_run_pipeline_dechirp_with_no_product_raises
     for what happens when it is. 'impairment' is deliberately left off: its
-    phase-noise stage (e2e/ml/impairments.py, not owned by this shard) hits an
+    phase-noise stage (e2e/chain/impairments.py, not owned by this shard) hits an
     unrelated pre-existing in-place aliasing RuntimeError on this synthetic-frame
     path (see handoff notes) -- a separate bug from the one this test covers."""
     pytest.importorskip("torch")

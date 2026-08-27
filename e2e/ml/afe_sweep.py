@@ -94,7 +94,7 @@ from e2e.ml import baseline
 from e2e.ml import train as train_mod
 from e2e.ml.dataset import RadarFrameDataset
 from e2e.ml.metrics import evaluate_dataset
-from e2e.ml.radar_config import RadarConfig
+from e2e.radar_config import RadarConfig
 
 DEFAULT_M_LIST = (16, 12, 8, 4, 2)
 

@@ -123,7 +123,7 @@ def score_classical(manifest_path, split: str, *, device=None,
     from e2e.ml.baseline import classical_detection_map
     from e2e.ml.dataset import RadarFrameDataset
     from e2e.ml.labels import LabelGrid
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text())

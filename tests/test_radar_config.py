@@ -1,10 +1,10 @@
-"""Tests for e2e.ml.radar_config -- dependency-free, no torch needed."""
+"""Tests for e2e.radar_config -- dependency-free, no torch needed."""
 
 import math
 
 import pytest
 
-from e2e.ml.radar_config import (
+from e2e.radar_config import (
     C_MPS,
     PRESETS,
     RADIAL_LIKE,
@@ -200,7 +200,7 @@ def test_radial_like_matches_paper_resolutions():
 # torch-free. The default-tolerance coupling is tested in test_ml_chain_generate.
 
 def test_answerability_benchmark_v1_is_answerable():
-    from e2e.ml.radar_config import BENCHMARK_V1, answerability_problems
+    from e2e.radar_config import BENCHMARK_V1, answerability_problems
     assert answerability_problems(BENCHMARK_V1, top_speed_mps=8.0,
                                   max_sin_az_err=0.06) == []
 
@@ -211,7 +211,7 @@ def test_ddma_wide_v1_is_the_answerable_radial_replacement():
     4 x 48 keeps radial_like's full 192-element virtual aperture while reusing
     benchmark_v1's proven chirp timing for a 21% v_max margin over the 8 m/s scene
     ceiling."""
-    from e2e.ml.radar_config import DDMA_WIDE_V1, answerability_problems
+    from e2e.radar_config import DDMA_WIDE_V1, answerability_problems
     cfg = DDMA_WIDE_V1
     assert cfg.n_virtual == 192                    # radial_like aperture parity
     assert cfg.max_velocity_mps == pytest.approx(9.69, rel=0.01)
@@ -222,7 +222,7 @@ def test_ddma_wide_v1_is_the_answerable_radial_replacement():
 
 
 def test_answerability_radial_like_aliases_in_doppler():
-    from e2e.ml.radar_config import answerability_problems
+    from e2e.radar_config import answerability_problems
     problems = answerability_problems(RADIAL_LIKE, top_speed_mps=8.0,
                                       max_sin_az_err=0.06)
     # Azimuth is fine (192 virtual elements); Doppler is the F43 failure.
@@ -231,7 +231,7 @@ def test_answerability_radial_like_aliases_in_doppler():
 
 
 def test_answerability_ti_iwr1443_azimuth_unanswerable():
-    from e2e.ml.radar_config import answerability_problems
+    from e2e.radar_config import answerability_problems
     # 12 virtual elements -> Rayleigh 0.1667; keep speeds under its 12.8 m/s v_max
     # so only the azimuth failure fires.
     problems = answerability_problems(TI_IWR1443, top_speed_mps=5.0,
@@ -241,15 +241,15 @@ def test_answerability_ti_iwr1443_azimuth_unanswerable():
 
 
 def test_answerability_both_failures_reported():
-    from e2e.ml.radar_config import answerability_problems
+    from e2e.radar_config import answerability_problems
     problems = answerability_problems(RADIAL_LIKE, top_speed_mps=8.0,
                                       max_sin_az_err=0.005)  # finer than 2/192
     assert len(problems) == 2
 
 
 def test_answerability_boundary_is_inclusive():
-    from e2e.ml.radar_config import answerability_problems
-    from e2e.ml.radar_config import BENCHMARK_V1 as cfg
+    from e2e.radar_config import answerability_problems
+    from e2e.radar_config import BENCHMARK_V1 as cfg
     # Exactly at v_max and exactly at the Rayleigh limit both pass (>=, not >).
     assert answerability_problems(cfg, top_speed_mps=cfg.max_velocity_mps,
                                   max_sin_az_err=2.0 / cfg.n_virtual) == []

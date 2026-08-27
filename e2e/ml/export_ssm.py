@@ -81,7 +81,7 @@ import torch  # noqa: E402
 from e2e.environment.scatterers import frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml import storage  # noqa: E402
 from e2e.ml.labels import LabelGrid, target_geometry, targets_in_grid  # noqa: E402
-from e2e.ml.radar_config import RadarConfig  # noqa: E402
+from e2e.radar_config import RadarConfig  # noqa: E402
 from e2e.ml.render_scene import _draw_birdseye, _draw_radar_view, range_azimuth_map  # noqa: E402
 from e2e.ml.rt_scenes import VEHICLE_FOOTPRINT_M, build_rt_tier_scenario, vehicle_asset_class  # noqa: E402
 from e2e.scenario import ObjectKind  # noqa: E402
@@ -317,7 +317,7 @@ class SSMExportDataset(torch.utils.data.Dataset):
     sections). NO range-Doppler / range-azimuth transform is applied here -- apply
     your own (e.g. a windowed FFT over the fast-time/slow-time axes) to match
     whatever input convention your model expects; the source simulator's own
-    transform is `e2e.ml.transforms.adc_to_rd` (FFT over samples then chirps,
+    transform is `e2e.chain.transforms.adc_to_rd` (FFT over samples then chirps,
     Hann-windowed, zero-Doppler centred), documented in the README for reference,
     not required.
 

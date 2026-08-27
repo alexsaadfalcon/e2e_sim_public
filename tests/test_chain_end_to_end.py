@@ -26,7 +26,7 @@ from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import ImpairmentBlock, QuantizerBlock, RadarCubeBlock
 from e2e.chain.waveform import ModulateBlock, TxPABlock, WaveformBlock
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
-from e2e.ml.radar_config import PRESETS
+from e2e.radar_config import PRESETS
 from e2e.simulation import Simulation
 
 

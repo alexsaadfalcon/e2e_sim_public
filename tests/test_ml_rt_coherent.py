@@ -26,7 +26,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e.ml import rt_signal_chain as rsc
-from e2e.ml.radar_config import RadarConfig
+from e2e.radar_config import RadarConfig
 from e2e.ml.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
                                    DEFAULT_GROUND_SCATTERING_COEFFICIENT,
                                    DEFAULT_SCATTERING_COEFFICIENT,
@@ -209,7 +209,7 @@ def test_coherent_term_doppler_matches_the_analytic_point_target(speed):
     """
     from e2e.chain.dechirp import beat_from_cfr
     from e2e.environment.scatterers import frame_scatterers, radar_pose
-    from e2e.ml.rd_synth import synthesize_adc
+    from e2e.chain.rd_synth import synthesize_adc
 
     scn = _scenario(position=(12.0, 0.0, 1.5), velocity=(speed, 0.0, 0.0))
     scene, paths = _stub_rt_scene(_CFG, (12.0, 0.0, 1.5))
@@ -400,7 +400,7 @@ def _d0_scene():
 def test_specular_only_finds_no_path_on_a_curved_target():
     """The root cause, pinned so nobody "simplifies" the coherent term away: Sionna's
     image method finds NOTHING off a tessellated sphere, at any tessellation or range."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
@@ -418,7 +418,7 @@ def test_diffuse_lobe_follows_s_squared():
     """The traced diffuse energy is `S^2` of the reflected power -- the law the coherent
     term's `1 - S^2` complements. MEASURED 10.5 dB between S=0.3 and S=1.0 against
     10.46 dB predicted."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
@@ -443,7 +443,7 @@ def test_diffuse_lobe_follows_s_squared():
 def test_coherent_targets_false_reproduces_the_old_path_exactly():
     """The reproduction escape hatch must be exact, not approximate -- it is how a
     pre-2026-08-17 corpus gets regenerated for comparison."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_scene_build import build_rt_scene
 
     cfg = PRESETS["ti_iwr1443"]
@@ -488,10 +488,10 @@ def test_fix_restores_aperture_coherence_on_a_real_traced_target():
     """The headline before/after: on the D0 single-sphere scene the aperture phase
     residual at the target's own range-Doppler cell collapses from ~1.0 rad (speckle) to
     ~0.1 rad (a plane wave), and the target rises well above its own map background."""
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.render_scene import _resolve_frames
     from e2e.ml.rt_scene_build import build_rt_scene
-    from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+    from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
 
     cfg = PRESETS["ti_iwr1443"]
     scn = _d0_scene()

@@ -9,7 +9,7 @@ a given file.
 
 MEASURED (see the investigation behind this module -- not re-derived here) on
 `ti_iwr1443`-preset ADC cubes (4 rx x 192 chirps x 512 samples, complex64, 3.145
-MB/frame), BOTH clean and impaired (`e2e.ml.impairments.apply_all` -- a realistic
+MB/frame), BOTH clean and impaired (`e2e.chain.impairments.apply_all` -- a realistic
 corpus is noisier, and therefore less compressible, than a clean one, so measuring
 only clean cubes would flatter the result):
 

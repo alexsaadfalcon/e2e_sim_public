@@ -20,7 +20,7 @@ pytest.importorskip("e2e.ml.scenes", reason="sibling shard e2e.ml.scenes not pre
 from e2e.ml import afe_sweep
 from e2e.ml import dataset as ml_dataset
 from e2e.ml import train as train_mod
-from e2e.ml.radar_config import PRESETS, TI_IWR1443
+from e2e.radar_config import PRESETS, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS
 
 TIER = sorted(DIFFICULTY_TIERS)[0]
@@ -300,9 +300,9 @@ def test_build_model_sized_to_m(tiny_afe_fixture):
     shape, since a TDM config's "rd" channel count is `2*n_tx*n_rx` (virtual array),
     not `2*n_rx` -- `_manifest_at_m`'s `n_rx` override must still shape-agree with the
     runtime `tdm_deinterleave` call, which reads `n_rx` off the ACTUAL degraded array
-    (see `e2e.ml.transforms.tdm_deinterleave`), not off `cfg.n_rx`.
+    (see `e2e.chain.transforms.tdm_deinterleave`), not off `cfg.n_rx`.
     """
-    from e2e.ml.radar_config import RadarConfig
+    from e2e.radar_config import RadarConfig
 
     manifest_path = tiny_afe_fixture["manifest_path"]
     n_rx = tiny_afe_fixture["cfg"].n_rx

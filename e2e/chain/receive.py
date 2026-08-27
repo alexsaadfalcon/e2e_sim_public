@@ -10,7 +10,7 @@ runs before the chain has actually crossed into RX time (e.g. no DechirpBlock in
 
 Four blocks:
 
-- `ImpairmentBlock`  -- wraps `e2e.ml.impairments.apply_all` (phase noise, TX/RX
+- `ImpairmentBlock`  -- wraps `e2e.chain.impairments.apply_all` (phase noise, TX/RX
   leakage, clutter). Serial stage: rewrites `adc`.
 - `IFHighPassBlock`  -- the IF-chain high-pass every FMCW receiver puts between the
   mixer and the ADC. Serial stage: rewrites `adc`. Sits AFTER `ImpairmentBlock`
@@ -18,7 +18,7 @@ Four blocks:
   `QuantizerBlock` (protecting the converter's dynamic range is its job).
 - `QuantizerBlock`   -- ADC digitization (full-scale clip + uniform quantization).
   Serial stage: rewrites `adc`.
-- `RadarCubeBlock`   -- range-Doppler product via `e2e.ml.transforms.adc_to_rd`.
+- `RadarCubeBlock`   -- range-Doppler product via `e2e.chain.transforms.adc_to_rd`.
   Downstream product block: reads `adc`, emits `radar_cube`, never rewrites `adc`.
 """
 
@@ -29,9 +29,9 @@ import torch
 
 from e2e import frames
 from e2e.frames import FrameCapabilities
-from e2e.ml.impairments import apply_all, ClutterParams, LeakageParams, PhaseNoiseParams
-from e2e.ml.radar_config import C_MPS
-from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+from e2e.chain.impairments import apply_all, ClutterParams, LeakageParams, PhaseNoiseParams
+from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
+from e2e.radar_config import C_MPS
 
 
 # Every block here consumes the post-dechirp ADC cube; none handle the chirp/MIMO axes
@@ -72,7 +72,7 @@ def _resolve_impairment_params(chain_params):
 
 
 class ImpairmentBlock:
-    """FMCW ADC impairments (phase noise, TX/RX leakage, clutter) -- `e2e.ml.impairments
+    """FMCW ADC impairments (phase noise, TX/RX leakage, clutter) -- `e2e.chain.impairments
     .apply_all` as a chain stage. Serial stage: rewrites `adc` in place (in the state
     dict, not the tensor).
 
@@ -105,7 +105,7 @@ class ImpairmentBlock:
     persistent scene (the road/barriers do not get redrawn each frame), so its FIELD
     (scatterer positions/velocities/gains) is drawn once from the block's base `seed`
     -- not `seed + frame_idx` -- and only evolves via a deterministic per-scatterer
-    Doppler phase advance keyed to `frame_idx` (see `e2e.ml.impairments.apply_clutter`).
+    Doppler phase advance keyed to `frame_idx` (see `e2e.chain.impairments.apply_clutter`).
     Phase noise and leakage are unaffected: they still redraw every frame from
     `seed + frame_idx`, because a noisy oscillator/coupling genuinely is a new draw.
     See notes/PHYSICS_JUSTIFICATION_AUDIT.md entry 10.
@@ -163,7 +163,7 @@ class IFHighPassBlock:
     convolution along fast time. The complex analog response `H(j*2*pi*f)`
     (`|H| = 1/sqrt(1 + (fc/f)^(2*order))`, `H(0) = 0` exactly) is evaluated on a
     zero-padded DFT grid over the full `[0, fs)` beat span (the positive-exponent
-    beat convention -- see `e2e.ml.rd_synth`'s derivation -- is one-sided, so the
+    beat convention -- see `e2e.chain.rd_synth`'s derivation -- is one-sided, so the
     kernel is deliberately NOT conjugate-symmetric: bins near `fs` are far RANGES
     here, not negative frequencies, and must pass), and the record is filtered by
     zero-padded FFT multiplication -- i.e. genuine linear convolution with the
@@ -424,7 +424,7 @@ class RadarCubeBlock:
     `RangeAzBlock`): reads `adc` and emits `state['radar_cube']`, never rewriting
     `adc` itself.
 
-    Wraps `e2e.ml.transforms.adc_to_rd`; the returned cube is complex64
+    Wraps `e2e.chain.transforms.adc_to_rd`; the returned cube is complex64
     `[n_rx (or n_virtual for TDM), range_bin, doppler_bin]` with `range_bin ==
     cfg.n_samples` and `doppler_bin == cfg.n_chirps` (or `cfg.n_chirps_per_tx` after
     TDM de-interleave -- see below), matching `cfg`'s configured bin counts.

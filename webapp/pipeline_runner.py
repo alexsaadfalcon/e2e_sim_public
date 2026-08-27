@@ -182,7 +182,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     if _enabled(state, "rt_environment"):
         try:
             from e2e.environment.blocks import RTEnvironmentBlock
-            from e2e.ml.radar_config import PRESETS
+            from e2e.radar_config import PRESETS
             from e2e.scenario import REFERENCE_SCENARIOS
         except ImportError as e:
             raise PipelineError(
@@ -296,11 +296,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     if _enabled(state, "dechirp"):
         try:
             from e2e.chain.dechirp import DechirpBlock
-            from e2e.ml.radar_config import PRESETS
+            from e2e.radar_config import PRESETS
         except ImportError as e:
             raise PipelineError(
                 "Could not import the ADC-cube chain backend (e2e.chain.dechirp / "
-                "e2e.ml.radar_config). Underlying error: " + str(e)
+                "e2e.radar_config). Underlying error: " + str(e)
             )
         preset_name = _p(state, "dechirp", "preset")
         if preset_name not in PRESETS:
@@ -356,10 +356,10 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # each stage's position is load-bearing -- see the corpus builder's comments).
         if _enabled(state, "thermal_noise"):
             try:
-                from e2e.ml.link_budget import ThermalNoiseBlock
+                from e2e.chain.link_budget import ThermalNoiseBlock
             except ImportError as e:
                 raise PipelineError(
-                    "Could not import the link-budget stage (e2e.ml.link_budget). "
+                    "Could not import the link-budget stage (e2e.chain.link_budget). "
                     "Underlying error: " + str(e)
                 )
             serial_stages_override.append(

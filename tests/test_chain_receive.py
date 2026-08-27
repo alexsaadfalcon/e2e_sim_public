@@ -10,8 +10,8 @@ import torch
 
 from e2e import frames
 from e2e.chain.receive import ImpairmentBlock, QuantizerBlock, RadarCubeBlock
-from e2e.ml.impairments import ClutterParams, LeakageParams, PhaseNoiseParams
-from e2e.ml.radar_config import RadarConfig
+from e2e.chain.impairments import ClutterParams, LeakageParams, PhaseNoiseParams
+from e2e.radar_config import RadarConfig
 
 
 # Tiny single-TX config so tests run fast; RadarCubeBlock's expected output shape is
@@ -422,7 +422,7 @@ def test_if_hpf_response_is_monotonic_and_transparent_at_far_range():
 
 def test_if_hpf_corner_range_conversion_and_explicit_override():
     from e2e.chain.receive import IFHighPassBlock
-    from e2e.ml.radar_config import C_MPS
+    from e2e.radar_config import C_MPS
     blk = IFHighPassBlock(_CFG, corner_range_m=2.0)
     assert blk.corner_hz == pytest.approx(2.0 * _CFG.ramp_slope_hzps * 2.0 / C_MPS)
     assert IFHighPassBlock(_CFG, corner_hz=123e3).corner_hz == 123e3

@@ -29,7 +29,7 @@ Sample format
                  the on-disk source of truth (see "On-disk dataset layout" below);
                  kept in the returned dict too so a caller synthesizing one-off frames
                  doesn't need to re-derive it.
-      "input":   float32 CPU tensor, [2*C, R, D] -- see `e2e.ml.transforms.rd_to_input`
+      "input":   float32 CPU tensor, [2*C, R, D] -- see `e2e.chain.transforms.rd_to_input`
                  (real channels then imaginary channels; C/R/D depend on `cfg.mimo`:
                  TDM de-interleaves to the virtual array first, so C = n_virtual and
                  D = n_chirps_per_tx; DDMA/single use the raw ADC, C = n_rx, D = n_chirps.
@@ -269,8 +269,8 @@ def generate_sample(cfg, scenario, grid, *, frame_idx: int = 0, snr_db: Optional
     """
     from e2e.environment.scatterers import frame_scatterers, radar_pose
     from e2e.ml.labels import encode_detection_labels, targets_in_grid
-    from e2e.ml.rd_synth import synthesize_adc
-    from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+    from e2e.chain.rd_synth import synthesize_adc
+    from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 
     dt = 1.0 / cfg.frame_rate_hz
     scatterers = frame_scatterers(scenario, frame_idx, dt=dt)
@@ -369,7 +369,7 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     Returns the path to the written `manifest.json`.
     """
     from e2e.ml.labels import LabelGrid
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.scenes import DIFFICULTY_TIERS, sample_scene, scene_summary
 
     if cfg_name not in PRESETS:
@@ -385,7 +385,7 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
     # unanswerable pair WARNS here instead of refusing the way the real corpus path
     # (`e2e.ml.chain_generate.generate_chain_corpus`) does. The warning is the tripwire:
     # a corpus generated under it must never back a detection benchmark (F43).
-    from e2e.ml.radar_config import answerability_problems
+    from e2e.radar_config import answerability_problems
     spec = DIFFICULTY_TIERS[tier]
     top_speed = max(spec.vehicle_speed_mps[1], spec.pedestrian_speed_mps[1])
     problems = answerability_problems(cfg, top_speed_mps=top_speed)
@@ -512,7 +512,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
 
     `__getitem__` lazily loads the frame's `.npz` and returns `(input, labels)` as
     float32 tensors (no augmentation/normalization -- callers compose that on top,
-    e.g. via `e2e.ml.transforms.normalize`).
+    e.g. via `e2e.chain.transforms.normalize`).
 
     `input_format` selects how the network-input tensor is derived from the on-disk
     frame (a manifest_version-2 corpus stores raw ADC, not a precomputed "input" --
@@ -540,7 +540,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
 
     Per-`input_format` note: RD and raw-ADC have very different per-channel
     statistics (RD has FFT coherent-gain peaks; raw ADC is closer to AWGN + weak beat
-    tones) -- normalization constants (`e2e.ml.transforms.input_stats`) must be
+    tones) -- normalization constants (`e2e.chain.transforms.input_stats`) must be
     computed/stored SEPARATELY per `input_format`, never shared across the two.
 
     `in_memory_cache=True` opt-in caches each `__getitem__`'s derived `(input,
@@ -580,7 +580,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
 
     def _radar_config(self):
         if self._cfg is None:
-            from e2e.ml.radar_config import RadarConfig
+            from e2e.radar_config import RadarConfig
 
             self._cfg = RadarConfig.from_dict(self.manifest["config"])
         return self._cfg
@@ -622,7 +622,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
 
         # input_format == "rd": re-derive exactly what generate_sample used to
         # precompute (deterministic, no RNG -- safe under any num_workers).
-        from e2e.ml.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+        from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
 
         cfg = self._radar_config()
         if cfg.mimo == "tdm":
@@ -673,7 +673,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="python -m e2e.ml.dataset",
         description="Generate a labeled FMCW radar range-Doppler dataset.",
     )
-    p.add_argument("--config", required=True, help="radar config preset name (see e2e.ml.radar_config.PRESETS)")
+    p.add_argument("--config", required=True, help="radar config preset name (see e2e.radar_config.PRESETS)")
     p.add_argument("--tier", required=True, help="difficulty tier (see e2e.ml.scenes.DIFFICULTY_TIERS)")
     p.add_argument("--n", type=int, required=True, help="number of frames to generate")
     p.add_argument("--seed", type=int, default=0, help="base RNG seed (frame i uses seed + i)")
@@ -690,7 +690,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
 
     if args.config not in PRESETS:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)

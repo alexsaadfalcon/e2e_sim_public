@@ -30,7 +30,7 @@ from e2e.environment.scatterers import frame_scatterers, radar_pose
 from e2e.ml import export_ssm, storage
 from e2e.ml.dataset import write_manifest
 from e2e.ml.labels import LabelGrid, encode_detection_labels, targets_in_grid
-from e2e.ml.radar_config import RadarConfig
+from e2e.radar_config import RadarConfig
 from e2e.ml.rt_scenes import build_rt_tier_scenario
 
 TIER = "D0"          # single deterministic sphere-as-"vehicle" scatterer, no Sionna needed

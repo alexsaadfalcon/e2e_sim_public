@@ -39,7 +39,7 @@ def _rd_peak_bin(cfg, adc: torch.Tensor):
     """`(range_bin, doppler_bin)` of the strongest cell, through the shipped transforms."""
     import dataclasses as _dc
 
-    from e2e.ml.transforms import adc_to_rd, tdm_deinterleave
+    from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
 
     n_chirps = int(adc.shape[1])
     if str(cfg.mimo).lower() == "tdm":
@@ -292,7 +292,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     args = build_arg_parser().parse_args(argv)
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
 
     if args.config not in PRESETS:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)

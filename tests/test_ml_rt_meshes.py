@@ -446,7 +446,7 @@ def test_d1_tier_scene_solves_to_nonzero_return_monostatically(sionna_rt):
     radar, not just geometrically exist in the scene."""
     import dataclasses
 
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
     from e2e.ml.rt_gen import _beat_from_paths, _solve, build_rt_scene
 
     cfg = dataclasses.replace(TI_IWR1443, name="rt_mesh_test", n_chirps=8, n_samples=64)
@@ -474,7 +474,7 @@ def test_every_placed_object_rests_on_or_above_ground(sionna_rt, tier, use_local
     local (unshipped) asset pool wired in (use_local_assets degrades gracefully to
     Sionna meshes on a machine without the local files -- see rt_gen's module
     docstring -- so this must hold either way)."""
-    from e2e.ml.radar_config import TI_IWR1443
+    from e2e.radar_config import TI_IWR1443
 
     scenario = build_rt_tier_scenario(tier, corpus_tag="unit-test", frame_idx=0, seed=0, num_frames=1,
                                       use_local_assets=use_local_assets)

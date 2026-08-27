@@ -68,8 +68,8 @@ from matplotlib.patches import Arc, Wedge  # noqa: E402
 
 from e2e.environment.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
 from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
-from e2e.ml.rd_synth import synthesize_adc  # noqa: E402
-from e2e.ml.transforms import adc_to_rd, ddma_demux, tdm_deinterleave  # noqa: E402
+from e2e.chain.rd_synth import synthesize_adc  # noqa: E402
+from e2e.chain.transforms import adc_to_rd, ddma_demux, tdm_deinterleave  # noqa: E402
 from e2e.viz import imshow_ra  # noqa: E402
 
 # Marker/color convention: loosely matches `webapp/scenario_editor.py`'s ROLE_COLORS /
@@ -708,7 +708,7 @@ def render_rt_tier_png(tier, out_path, *, cfg=None, frame_idx: int = 0, seed: in
 
     import sionna.rt as rt
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_gen import _box_mesh_path
     from e2e.ml.rt_scenes import build_rt_tier_scenario, tier_summary
 
@@ -1001,7 +1001,7 @@ def render_rt_topdown_gif(tier, out_path, *, cfg=None, n_frames: int = 20, fps: 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
     from e2e.ml.rt_scenes import build_rt_tier_scenario
 
     if cfg is None:
@@ -1202,7 +1202,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
-    from e2e.ml.radar_config import PRESETS
+    from e2e.radar_config import PRESETS
 
     if args.config not in PRESETS:
         print(f"unknown --config {args.config!r}; choices: {sorted(PRESETS)}", file=sys.stderr)

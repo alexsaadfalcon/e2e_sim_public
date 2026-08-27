@@ -6,7 +6,7 @@ Pure numpy/stdlib -- fast, no Sionna/torch.
 import numpy as np
 import pytest
 
-from e2e.ml.radar_config import PRESETS, RADIAL_LIKE, TI_IWR1443
+from e2e.radar_config import PRESETS, RADIAL_LIKE, TI_IWR1443
 from e2e.ml.scenes import DIFFICULTY_TIERS, TierSpec, sample_scene, scene_summary
 from e2e.scenario import Motion, Scenario
 
