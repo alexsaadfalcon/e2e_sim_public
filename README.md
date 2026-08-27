@@ -367,6 +367,34 @@ python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
 format, smoke-test results, and model attribution/licensing notes.
 
+### The detection benchmark measures its own chance floor
+
+`e2e.ml.compare_detectors` scores every arm at **matched recall** and always includes a
+**data-blind null arm** — a detector that places boxes at random inside the region where
+training-set targets live, seeing no input at all. That arm is the benchmark's chance
+floor: measured on the same frames and the same metric, rather than assumed to be zero.
+
+On a 1,721-scene ray-traced corpus (`benchmark_v1`, tier D2), at recall 0.5:
+
+| arm | average precision |
+|---|---|
+| classical CA-CFAR | 0.129 |
+| learned detectors (FFTRadNet, SSMRadNet) | ~0.095 |
+| **data-blind null (chance floor)** | **0.065** |
+
+Two readings, both of which the null arm is what makes possible. Classical CFAR still
+leads both learned detectors, by +0.02 to +0.055 AP (95% CI). And both learned detectors
+now score significantly above the chance floor (+0.030, 95% CI [+0.019, +0.041]) where on
+a 500-scene corpus they did not — a corpus-size result, visible only because the floor is
+measured.
+
+Read the accompanying caveats before quoting any of this: "false alarms" in these maps
+include deliberately-unlabelled clutter a correct detector *should* fire on, the maps are
+overwhelmingly ground-truth-free by construction, and comparison figures must use per-arm
+operating points (a single shared threshold shows whichever arm is calibrated near it).
+`compare_detectors` records the operating point and PR curve for every arm so these are
+checkable rather than taken on trust.
+
 `python -m e2e.render_scene` renders a sampled scene to an animated GIF with three
 panels: the bird's-eye view, an **ideal front end** (receiver noise disabled, so the
 only content is the scene's own targets, auxiliary scatterers, and clutter), and the
