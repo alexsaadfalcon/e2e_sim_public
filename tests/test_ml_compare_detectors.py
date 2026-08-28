@@ -213,6 +213,77 @@ def _tiny_corpus_with_train(tmp_path, cfg):
                                      splits=(0.5, 0.5, 0.0))
 
 
+# ------------------------------------------------------------------------------------
+# --use-ignore-regions -- opt-in don't-care threading (task brief item (b))
+# ------------------------------------------------------------------------------------
+def _tiny_corpus_with_clutter(tmp_path, cfg, grid):
+    """`_tiny_corpus_with_train`, plus a `scene_provenance` clutter box a few range bins
+    past each frame's labelled target -- close enough to fall inside the null arm's
+    fitted GT box, so its dense per-cell random score (see `score_null`) reliably lands
+    a "detection" on the clutter cell too. No RF is involved (the null arm never reads
+    `adc`), so the ADC payload here is a placeholder, unlike `_tiny_corpus`'s."""
+    from e2e.ml import dataset as ml_dataset
+    from e2e.ml import storage
+
+    d = tmp_path / "tiny_ignore_corpus"
+    d.mkdir()
+    sequences = []
+    for i in range(8):
+        r_target = (10 + i) * grid.range_bin_m + 0.5 * grid.range_bin_m
+        clutter_pos = (r_target + 6 * grid.range_bin_m, 0.3, 0.0)
+        meta = {
+            "targets": [(float(r_target), 0.0, "vehicle", float(r_target), 0.0)],
+            "scene_provenance": {
+                "scene": {
+                    "nodes": [{"name": "radar", "role": "radar", "position": [0.0, 0.0, 0.0]}],
+                    "objects": [
+                        {"name": "clutter-box-0", "kind": "box",
+                         "position": list(clutter_pos), "scaling": 0.15},
+                    ],
+                }
+            },
+        }
+        fname = f"frame_{i:05d}.npz"
+        storage.write_sample_npz(
+            d / fname, {"adc": np.zeros((1,), dtype=np.complex64)},
+            meta, payload_key="adc", full_scale=1.0)
+        sequences.append([fname])
+    return ml_dataset.write_manifest(d, cfg, "test_tier", sequences, grid=grid,
+                                     splits=(0.5, 0.0, 0.5))
+
+
+def test_use_ignore_regions_defaults_off_and_reproduces_the_baseline_score(tmp_path):
+    """Default OFF must not move any existing published number (task brief item (b))."""
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    manifest = _tiny_corpus_with_clutter(tmp_path, cfg, grid)
+
+    kwargs = dict(decode_threshold=0.01, target_recall=0.99, seed=0)
+    implicit = compare_detectors.score_null(manifest, "test", **kwargs)
+    explicit_off = compare_detectors.score_null(manifest, "test", use_ignore_regions=False,
+                                                **kwargs)
+    assert implicit == explicit_off
+
+
+def test_use_ignore_regions_flag_actually_moves_the_score(tmp_path):
+    """The flag must not be inert (this project has shipped that twice, per the task
+    brief): enabling it drops the clutter-adjacent detection every frame's null arm
+    otherwise counts as a false positive, so `fp_per_frame` must strictly decrease
+    while `tp`/recall are untouched (the flag never changes what MATCHED a target)."""
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    manifest = _tiny_corpus_with_clutter(tmp_path, cfg, grid)
+
+    kwargs = dict(decode_threshold=0.01, target_recall=0.99, seed=0)
+    off = compare_detectors.score_null(manifest, "test", use_ignore_regions=False, **kwargs)
+    on = compare_detectors.score_null(manifest, "test", use_ignore_regions=True, **kwargs)
+
+    assert off["operating_point"]["reached"] and on["operating_point"]["reached"]
+    assert on["operating_point"]["fp_per_frame"] < off["operating_point"]["fp_per_frame"]
+    assert on["operating_point"]["tp"] == off["operating_point"]["tp"]
+    assert on["n_detections"] < off["n_detections"]
+
+
 def test_compare_gives_every_arm_the_same_frames(tmp_path, monkeypatch):
     """`--limit` must reach EVERY arm. False alarms per frame divided by two different
     frame counts is not a comparison, and the denominator is invisible in the headline

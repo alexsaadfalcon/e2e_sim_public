@@ -488,11 +488,18 @@ def test_unlabelled_objects_returns_objects_with_no_matching_target(tmp_path):
 
     result = ds.unlabelled_objects(0)
     assert len(result) == 1
+    # `range_m` is the object's SURFACE range, not centre-to-centre distance (see
+    # `unlabelled_objects`'s docstring) -- an unscaled Sionna box primitive (10x10x5 m)
+    # sits ~4.7 m closer at its surface than at its 7.228 m centre range here. The
+    # expected value (2.5231180156691257) was computed independently via
+    # `e2e.environment.geometry.nearest_surface_point` outside this test file and
+    # hardcoded, so this pins the actual number rather than re-deriving it with the
+    # same code path under test.
     d = np.asarray(clutter_pos) - np.asarray(radar_pos)
-    expected_range = float(np.linalg.norm(d))
-    expected_sin_az = float(d[1] / expected_range)
+    centre_range = float(np.linalg.norm(d))
+    expected_sin_az = float(d[1] / centre_range)
     r, s = result[0]
-    assert r == pytest.approx(expected_range, abs=1e-6)
+    assert r == pytest.approx(2.5231180156691257, abs=1e-6)
     assert s == pytest.approx(expected_sin_az, abs=1e-6)
 
 
@@ -503,6 +510,55 @@ def test_unlabelled_objects_tolerance_boundary():
     implementation's own tolerance instead of duplicating arithmetic."""
     assert ml_dataset._UNLABELLED_MATCH_RANGE_M == pytest.approx(0.75)
     assert ml_dataset._UNLABELLED_MATCH_SIN_AZ == pytest.approx(0.02)
+
+
+def test_unlabelled_objects_surface_range_agrees_with_matchers_convention(tmp_path):
+    """Integration oracle for the producer/consumer unit-convention bug (task brief item
+    (a)): `e2e.ml.metrics.match_detections` reads a bare `(range_m, sin_azimuth)` ignore
+    entry's `range_m` AS the object's SURFACE range -- `_surface_range` falls back to
+    element 0 for any tuple with no 4th element, and that is unconditionally the surface
+    range for every OTHER tuple kind the matcher scores (see that module's
+    `MatchCriterion` docstring, "WHICH range" section). So a detection sitting exactly on
+    an unlabelled object's true (independently computed, hardcoded) reflecting surface
+    must be dropped as a don't-care.
+
+    FAILS on the pre-fix `unlabelled_objects`, which returned the object's CENTRE range
+    (20.0 m here) instead: the detection at the true surface (17.5 m, computed
+    independently via `nearest_surface_point` for this axis-aligned box and hardcoded, not
+    re-derived from the code under test) would then sit 2.5 m from the ignore entry --
+    outside `MatchCriterion`'s default 2.0 m tolerance -- so it stays a false positive.
+    That is exactly the "detector correctly located real clutter and got charged a false
+    alarm for it" defect the ignore-region feature exists to prevent.
+    """
+    from e2e.ml.metrics import match_detections
+
+    radar_pos = (0.0, 0.0, 0.0)
+    clutter_pos = (20.0, 0.0, 0.0)      # sin_az = 0 -- azimuth cannot mask a range offset
+    meta = {
+        "targets": [],
+        "scene_provenance": {
+            "scene": {
+                "nodes": [{"name": "radar", "role": "radar", "position": list(radar_pos)}],
+                "objects": [
+                    {"name": "clutter-box-0", "kind": "box", "position": list(clutter_pos),
+                     "scaling": 0.5},
+                ],
+            }
+        },
+    }
+    manifest_path = _write_bare_frame_dataset(tmp_path, meta)
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    ignore = ds.unlabelled_objects(0)
+    assert len(ignore) == 1
+
+    true_surface_range_m = 17.5   # independently verified: 20.0 - 0.5*(0.5*10.0)
+    detections = [(true_surface_range_m, 0.0, 0.9)]
+    _matches, unmatched_det, _unmatched_gt = match_detections(detections, [], ignore=ignore)
+    assert unmatched_det == [], (
+        "a detection at the object's true reflecting surface must be dropped as a "
+        "don't-care -- the producer's ignore range_m and the matcher's surface-range "
+        "convention disagree"
+    )
 
 
 def test_unlabelled_objects_degrades_gracefully_without_provenance(tmp_path):

@@ -91,10 +91,16 @@ def parse_checkpoint_arg(spec: str) -> Tuple[str, str]:
 
 
 def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
-               decode_threshold: float, target_recall: float) -> Dict:
-    """`evaluate_dataset` at the decode floor + the matched-recall operating point."""
+               decode_threshold: float, target_recall: float,
+               ignore_lists: Optional[Sequence] = None) -> Dict:
+    """`evaluate_dataset` at the decode floor + the matched-recall operating point.
+
+    `ignore_lists`, if given, is `evaluate_dataset`'s per-frame don't-care list (see
+    `e2e.ml.metrics`' "Don't-care / ignore regions"); `None` (the default) reproduces
+    the pre-existing (ignore-less) score bit-for-bit.
+    """
     metrics = evaluate_dataset(pred_maps, target_lists, grid,
-                               score_threshold=decode_threshold)
+                               score_threshold=decode_threshold, ignore=ignore_lists)
     op = false_alarms_at_recall(metrics["pr_curve"], n_frames,
                                 target_recall=target_recall)
     return {
@@ -116,8 +122,16 @@ def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
 def score_classical(manifest_path, split: str, *, device=None,
                     decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                     target_recall: float = DEFAULT_TARGET_RECALL,
-                    limit: Optional[int] = None, **kwargs) -> Dict:
-    """The CFAR baseline arm. `kwargs` reach `baseline.classical_detection_map`."""
+                    limit: Optional[int] = None, use_ignore_regions: bool = False,
+                    **kwargs) -> Dict:
+    """The CFAR baseline arm. `kwargs` reach `baseline.classical_detection_map`.
+
+    `use_ignore_regions` (default False -- opt-in, see `build_arg_parser`'s
+    `--use-ignore-regions`): score with `RadarFrameDataset.unlabelled_objects`' don't-care
+    positions passed through to `evaluate_dataset`, so a detection on real-but-unlabelled
+    clutter is neither a hit nor a false alarm. False by default so this arm's number does
+    not move under anyone who does not ask for it.
+    """
     import numpy as np
 
     from e2e.ml.baseline import classical_detection_map
@@ -138,6 +152,7 @@ def score_classical(manifest_path, split: str, *, device=None,
     targets_ds = RadarFrameDataset(manifest_path, split=split)
 
     pred_maps, target_lists = [], []
+    ignore_lists = [] if use_ignore_regions else None
     for i, fn in enumerate(files):
         with np.load(manifest_path.parent / fn, allow_pickle=True) as z:
             if "adc_code_re" not in z.files:
@@ -150,15 +165,19 @@ def score_classical(manifest_path, split: str, *, device=None,
             adc = adc.to(device)
         pred_maps.append(classical_detection_map(cfg, adc, grid, **kwargs).cpu())
         target_lists.append(targets_ds.targets(i))
+        if use_ignore_regions:
+            ignore_lists.append(targets_ds.unlabelled_objects(i))
 
     return _score_arm(pred_maps, target_lists, grid, n_frames=len(files),
-                      decode_threshold=decode_threshold, target_recall=target_recall)
+                      decode_threshold=decode_threshold, target_recall=target_recall,
+                      ignore_lists=ignore_lists)
 
 
 def score_null(manifest_path, split: str, *,
                decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                target_recall: float = DEFAULT_TARGET_RECALL,
-               seed: int = 0, limit: Optional[int] = None) -> Dict:
+               seed: int = 0, limit: Optional[int] = None,
+               use_ignore_regions: bool = False) -> Dict:
     """The DATA-BLIND chance baseline (B4, from the 2026-08-25 B2 adversarial
     review): uniform random scores inside the TRAIN-split ground-truth bounding box
     (range x sin_az), exactly zero outside, never looking at the RF. Fitted on the
@@ -198,6 +217,7 @@ def score_null(manifest_path, split: str, *,
     eval_ds = RadarFrameDataset(manifest_path, split=split)
     n = len(eval_ds) if limit is None else min(limit, len(eval_ds))
     pred_maps, target_lists = [], []
+    ignore_lists = [] if use_ignore_regions else None
     for i in range(n):
         rng = np.random.default_rng(int(seed) + i)
         # [3, R, A], the detector output format every arm shares: channel 0 = score,
@@ -208,9 +228,12 @@ def score_null(manifest_path, split: str, *,
                                                 dtype=np.float32)
         pred_maps.append(torch.from_numpy(m))
         target_lists.append(eval_ds.targets(i))
+        if use_ignore_regions:
+            ignore_lists.append(eval_ds.unlabelled_objects(i))
 
     res = _score_arm(pred_maps, target_lists, grid, n_frames=n,
-                     decode_threshold=decode_threshold, target_recall=target_recall)
+                     decode_threshold=decode_threshold, target_recall=target_recall,
+                     ignore_lists=ignore_lists)
     res["null_box"] = {"range_bins": [r_lo, r_hi], "az_bins": [a_lo, a_hi],
                        "fit_split": "train", "seed": int(seed)}
     return res
@@ -220,7 +243,8 @@ def score_checkpoint(manifest_path, checkpoint_path, split: str, *, device=None,
                      decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                      target_recall: float = DEFAULT_TARGET_RECALL,
                      batch_size: int = 8, ssm_chunk_size: Optional[int] = None,
-                     limit: Optional[int] = None) -> Dict:
+                     limit: Optional[int] = None,
+                     use_ignore_regions: bool = False) -> Dict:
     """One trained-checkpoint arm, reusing `train.py`'s reload and forward seams.
 
     `limit` truncates to the first N frames. `RadarFrameDataset` walks
@@ -236,11 +260,15 @@ def score_checkpoint(manifest_path, checkpoint_path, split: str, *, device=None,
     ds = _make_dataset(manifest_path, split, input_format)
     pred_maps = _predict_split(model, ds, device=device, batch_size=batch_size)
     target_lists = [ds.targets(i) for i in range(len(ds))]
+    ignore_lists = [ds.unlabelled_objects(i) for i in range(len(ds))] if use_ignore_regions else None
     if limit is not None:
         pred_maps, target_lists = pred_maps[:limit], target_lists[:limit]
+        if ignore_lists is not None:
+            ignore_lists = ignore_lists[:limit]
 
     res = _score_arm(pred_maps, target_lists, grid, n_frames=len(pred_maps),
-                     decode_threshold=decode_threshold, target_recall=target_recall)
+                     decode_threshold=decode_threshold, target_recall=target_recall,
+                     ignore_lists=ignore_lists)
     res["model"] = type(model).__name__
     res["checkpoint"] = str(checkpoint_path)
     return res
@@ -256,12 +284,19 @@ def compare(manifest_path, *, split: str = "test",
             limit: Optional[int] = None,
             classical_kwargs: Optional[Dict] = None,
             classical_doppler_reduce: Optional[Sequence[str]] = None,
-            null_baseline: bool = True) -> Dict:
+            null_baseline: bool = True,
+            use_ignore_regions: bool = False) -> Dict:
     """Every requested arm, scored on the same split at the same matched recall.
 
     `null_baseline` (default True -- see `score_null`) appends the data-blind
     chance arm to every comparison; disable only for a run whose output feeds a
     caller that adds its own floor.
+
+    `use_ignore_regions` (default False, opt-in -- see `build_arg_parser`'s
+    `--use-ignore-regions`): threads each arm's don't-care positions (`e2e.ml.dataset.
+    RadarFrameDataset.unlabelled_objects`) through to `evaluate_dataset`, so a detection
+    on real-but-unlabelled clutter is dropped rather than charged as a false alarm.
+    False reproduces every arm's pre-existing score bit-for-bit.
     """
     if not classical and not checkpoints:
         raise ValueError("nothing to compare: pass --classical and/or --checkpoint")
@@ -282,6 +317,7 @@ def compare(manifest_path, *, split: str = "test",
                          **score_classical(manifest_path, split, device=device,
                                            decode_threshold=decode_threshold,
                                            target_recall=target_recall, limit=limit,
+                                           use_ignore_regions=use_ignore_regions,
                                            **kw)})
     for name, path in checkpoints:
         arms.append({"name": name,
@@ -290,14 +326,16 @@ def compare(manifest_path, *, split: str = "test",
                                         target_recall=target_recall,
                                         batch_size=batch_size,
                                         ssm_chunk_size=ssm_chunk_size,
-                                        limit=limit)})
+                                        limit=limit,
+                                        use_ignore_regions=use_ignore_regions)})
     null_skipped = None
     if null_baseline:
         try:
             arms.append({"name": "null (random-in-GT-box)",
                          **score_null(manifest_path, split,
                                       decode_threshold=decode_threshold,
-                                      target_recall=target_recall, limit=limit)})
+                                      target_recall=target_recall, limit=limit,
+                                      use_ignore_regions=use_ignore_regions)})
         except ValueError as e:
             # A corpus with no train targets cannot fit the box (e.g. a val-only
             # test corpus). Degrade to a RECORDED skip, never a silent one: the
@@ -310,6 +348,7 @@ def compare(manifest_path, *, split: str = "test",
         "split": split,
         "target_recall": target_recall,
         "decode_threshold": decode_threshold,
+        "use_ignore_regions": use_ignore_regions,
         "arms": arms,
     }
 
@@ -378,6 +417,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="omit the data-blind random-in-GT-box chance arm (on by "
                         "default -- see score_null: never print an AP table without "
                         "its chance floor)")
+    p.add_argument("--use-ignore-regions", action="store_true",
+                   help="score with real-but-unlabelled clutter (e2e.ml.dataset."
+                        "RadarFrameDataset.unlabelled_objects) as don't-care regions, so "
+                        "a detection on one is neither a hit nor a false alarm (see "
+                        "e2e.ml.metrics' 'Don't-care / ignore regions'). Default OFF -- "
+                        "every arm's score is unchanged unless this is passed")
     p.add_argument("--out", default=None, help="write the full result dict as JSON here")
     return p
 
@@ -394,7 +439,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      decode_threshold=args.decode_threshold, device=device,
                      batch_size=args.batch_size, ssm_chunk_size=args.ssm_chunk_size,
                      limit=args.limit, classical_doppler_reduce=reductions,
-                     null_baseline=not args.no_null)
+                     null_baseline=not args.no_null,
+                     use_ignore_regions=args.use_ignore_regions)
     print(format_table(result))
 
     if args.out:

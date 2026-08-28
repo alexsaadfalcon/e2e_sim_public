@@ -230,6 +230,39 @@ _UNLABELLED_MATCH_RANGE_M = 0.75
 _UNLABELLED_MATCH_SIN_AZ = 0.02
 
 
+def _object_surface_range_m(obj: Dict[str, Any], pos: np.ndarray, radar_pos: np.ndarray,
+                            centre_range_m: float) -> float:
+    """SURFACE range of a generator-placed `obj` (a `scene_provenance` object dict), to
+    match the convention `e2e.ml.metrics.match_detections` uses for a bare `(range_m,
+    sin_azimuth)` ignore entry -- see `RadarFrameDataset.unlabelled_objects`'s docstring
+    for why that convention, not centre range, is the one an ignore entry must carry.
+
+    Uses the same extent/surface-point helpers `e2e.ml.labels.target_geometry` uses for
+    real targets (`e2e.environment.geometry.object_extent_m`/`nearest_surface_point`),
+    duck-typing `obj` (a plain JSON dict) into the attribute-style object those helpers
+    expect. Yaw is taken as 0 rather than resolved through `object_yaw_rad` (which needs
+    the full scene plus a per-scenario heading seed to answer for a parked object):
+    exact for `ObjectKind.SPHERE`/`ObjectKind.BOX` -- the kinds behind almost every
+    unlabelled object (`clutter-box-*`), since both have equal x/y extents, so their
+    ellipsoid surface point is yaw-invariant -- and merely an approximation for an
+    asymmetric mesh (car/pedestrian) object that happens to have no matching label.
+    `centre_range_m` (the pre-fix value) if the object's geometry is unknown, i.e. a
+    point target, for which surface == centre exactly as `target_geometry` defines it.
+    """
+    from types import SimpleNamespace
+
+    from e2e.environment.geometry import nearest_surface_point, object_extent_m
+
+    proxy = SimpleNamespace(kind=obj.get("kind", ""), asset=obj.get("asset"),
+                            scaling=obj.get("scaling", 1.0), extent_m=None)
+    extent = object_extent_m(proxy)
+    if extent is None:
+        return centre_range_m
+    half = tuple(0.5 * float(e) for e in extent)
+    surface = nearest_surface_point(pos, half, radar_pos, yaw_rad=0.0)
+    return float(np.linalg.norm(surface - radar_pos))
+
+
 def _target_extras(grid, scatterers, pose, classes) -> List[Dict[str, Any]]:
     """Per-target `{"rcs_dbsm", "velocity_mps"}`, one entry per `targets_in_grid`
     tuple, in the SAME order (so callers can `zip(meta["targets"],
@@ -706,12 +739,30 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         `e2e.ml.detect_viz.scene_objects_for_plot` uses, independently re-derived here
         rather than imported -- that module is visualization-layer and owned
         separately, and dataset.py should not depend downward on it): `d =
-        object_position - radar_position`; `range_m = norm(d)`; `sin_azimuth = d[1] /
-        range_m`. Round-trip-checked against a real frame (test split frame 69,
-        `sphere-0` at `(26.97, -11.22, 0.499)`, radar at `(0, 0, 1.5)`): this gives
-        `range_m = 29.23`, `sin_azimuth = -0.3839`, matching that frame's first
-        labelled target exactly (as it must -- `sphere-0` is a labelled pedestrian
-        surrogate in that scene, not one of the objects this method returns).
+        object_position - radar_position`; `centre_range_m = norm(d)`; `sin_azimuth =
+        d[1] / centre_range_m`. Round-trip-checked against a real frame (test split
+        frame 69, `sphere-0` at `(26.97, -11.22, 0.499)`, radar at `(0, 0, 1.5)`): this
+        gives `centre_range_m = 29.23`, `sin_azimuth = -0.3839`, matching that frame's
+        first labelled target exactly (as it must -- `sphere-0` is a labelled pedestrian
+        surrogate in that scene, not one of the objects this method returns). This
+        centre range is used ONLY for the "is this the same object as a labelled
+        target" identity check below, against `targets()`' own centre range (element 0)
+        -- it is NOT what gets returned.
+
+        The RETURNED range is the object's SURFACE range, not its centre range: `e2e.
+        ml.metrics.match_detections` treats a bare `(range_m, sin_azimuth)` ignore entry
+        as a point target, i.e. it reads `range_m` AS the surface range (`_surface_range`
+        falls back to element 0 for any tuple with no 4th element -- see that module's
+        `MatchCriterion` docstring and its "WHICH range" section, which is unconditionally
+        surface range for every OTHER tuple kind the matcher scores). An unlabelled
+        clutter object with real extent (`clutter-box-*`, `ObjectKind.BOX`) has a surface
+        several tenths of a metre to a metre closer than its centre; reporting the centre
+        range here would silently violate the matcher's own convention and under-cover
+        the ignore region by exactly that offset. `_object_surface_range_m` computes it
+        via `e2e.environment.geometry.object_extent_m`/`nearest_surface_point`, the same
+        helpers `e2e.ml.labels.target_geometry` uses for real targets, with yaw taken as
+        0 -- see that function's docstring for why that is exact for the box/sphere
+        clutter this method mostly serves.
 
         An object "corresponds to a labelled target" iff some entry of `targets(idx)`
         is within `0.75` m of it in range AND `0.02` in sin-azimuth -- matched by
@@ -747,15 +798,16 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         for obj in objects:
             pos = np.asarray(obj.get("position", (0.0, 0.0, 0.0)), dtype=float)
             d = pos - radar_pos
-            range_m = float(np.linalg.norm(d))
-            sin_az = float(d[1] / range_m) if range_m > 1e-9 else 0.0
+            centre_range_m = float(np.linalg.norm(d))
+            sin_az = float(d[1] / centre_range_m) if centre_range_m > 1e-9 else 0.0
             labelled = any(
-                abs(range_m - r) <= _UNLABELLED_MATCH_RANGE_M
+                abs(centre_range_m - r) <= _UNLABELLED_MATCH_RANGE_M
                 and abs(sin_az - s) <= _UNLABELLED_MATCH_SIN_AZ
                 for r, s in target_ranges_sin_az
             )
             if not labelled:
-                out.append((range_m, sin_az))
+                surface_range_m = _object_surface_range_m(obj, pos, radar_pos, centre_range_m)
+                out.append((surface_range_m, sin_az))
         return out
 
 
