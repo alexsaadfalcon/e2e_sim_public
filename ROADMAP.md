@@ -49,7 +49,7 @@ contract **self-describing and general** so blocks compose freely and the geomet
 
 ## Mid-term — widen the contract, pay down abstraction debt
 
-- **A3 — Widen the runtime shape contract. ✅ DONE 2026-07** (e2e/frames.py accessor + named per-block capability errors). Route geometry through one accessor and
+- **A3 — Widen the runtime shape contract. ✅ MECHANISM DONE 2026-07, ROLLOUT PARTIAL** (e2e/frames.py accessor + named per-block capability errors; several stages still hard-declare single-chirp/no-MIMO, so do not yet rely on MIMO routing end to end). Route geometry through one accessor and
   relax the no-MIMO / single-chirp assertions into scoped per-block capabilities.
   Unblocks **MIMO** and **multi-chirp / Doppler**. (Depends on A1.)
 - **A2 — Unify the Block protocol. ✅ DONE 2026-07** (serial stages share the apply-state protocol; feed_forward is two loops; serial_stages override hook; verified bit-exact). Original: give every stage one `apply(state) -> state`
@@ -171,7 +171,9 @@ original list are DONE — A1 self-describing frames, the subspace-tracking revi
 what remains:)
 
 1. **RFFE operating-point** review (low effort, high credibility payoff).
-2. **A3 — widen the shape contract** (A1 made it nearly free; sets up Doppler/MIMO).
+2. **A3 — finish the shape-contract ROLLOUT** (the mechanism landed 2026-07, see above;
+   what remains is declaring capabilities on the stages that still hard-assert
+   single-chirp/no-MIMO, e.g. `e2e/blocks.py`'s `_SINGLE_CHIRP` users).
 3. Polish: cookbook, base-scene options.
 
 A2 (block-protocol unification) and A4 (multi-link ISAC consumer) are deferred to

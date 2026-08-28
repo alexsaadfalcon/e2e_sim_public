@@ -367,10 +367,20 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     crop_m = _crop_range_m(fd.targets, fd.detections, full_max_range_m)
 
     fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=dpi)
+    # Single-frame figures carry the SAME protocol caveat as the comparison figure.
+    # Until 2026-08-27 only `render_comparison_figure` stamped it, so a single-frame
+    # panel could travel with a bare dot count and no statement that "false alarms"
+    # here include deliberately-unlabelled clutter -- the exact misreading the footer
+    # exists to prevent, on the figures most likely to be pasted into a slide alone.
+    note = _PROTOCOL_FOOTER
+    if azimuth_window is not None:
+        note += (f"\nbackdrop display-tapered ({azimuth_window!r}) for legibility -- "
+                 "detector thresholded its own map, not this one")
+
     plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
                           threshold=threshold, title=f"{fd.model_name}  {split} frame {frame_idx}",
                           max_range_m=crop_m, full_max_range_m=full_max_range_m,
-                          vmin=-float(db_span))
+                          vmin=-float(db_span), note=note)
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -381,8 +391,14 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
 #: "false alarms" here include deliberately-unlabelled clutter objects a correct
 #: detector SHOULD fire on, and the map is overwhelmingly ground-truth-free by
 #: construction -- so a dot count is not a false-alarm rate (B2 review, 2026-08-25).
-_PROTOCOL_FOOTER = ("FA counts include deliberately-unlabelled clutter (~2.9/frame); "
-                    "the map is ~83% GT-free by construction -- dot counts are not a "
+#: The per-frame clutter rate and GT-free fraction were MEASURED ON b1_bench_v1 (500
+#: scenes) and are quoted with that provenance rather than as corpus-independent facts:
+#: this string is stamped on figures rendered from any corpus or tier, and a figure
+#: carrying an unattributed number from a different corpus would have on-image authority
+#: it has not earned (statistics review, 2026-08-27).
+_PROTOCOL_FOOTER = ("FA counts include deliberately-unlabelled clutter and the map is "
+                    "overwhelmingly GT-free by construction (measured on b1_bench_v1: "
+                    "~2.9 clutter/frame, ~83% GT-free) -- dot counts are not a "
                     "false-alarm rate and are not comparable across benchmarks")
 
 
