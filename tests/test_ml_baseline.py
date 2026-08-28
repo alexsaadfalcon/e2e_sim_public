@@ -389,3 +389,91 @@ def test_classical_map_localizes_a_point_target_at_every_fine_bin_offset(offset_
     out = classical_detection_map(cfg, adc, grid)
     peak_range_bin = int(torch.argmax(out[0].max(dim=1).values))
     assert abs(peak_range_bin * grid.range_bin_m - range_m) <= 2.0 * grid.range_bin_m
+
+
+
+
+def _peak_azimuth_sidelobe_db(cfg, adc, **kw):
+    """Peak azimuth sidelobe of the strongest range bin, dB below the mainlobe.
+
+    Zero-pads the ANGLE axis only to sample the underlying continuous pattern -- this
+    measures a pattern, it does not detect anything, so interpolation here adds no
+    resolution claim (contrast `_to_grid`, where it would).
+    """
+    import numpy as np
+    from e2e.ml.baseline import range_azimuth_power
+
+    p = range_azimuth_power(cfg, adc, n_angle_fft=1024, **kw).cpu().numpy()
+    ri = int(np.unravel_index(p.argmax(), p.shape)[1])
+    cut = p[:, ri] / p[:, ri].max()
+    db = 10.0 * np.log10(cut + 1e-300)
+    c = int(np.argmax(db))
+    k = c
+    while k + 1 < len(db) and db[k + 1] < db[k]:
+        k += 1                                  # walk down out of the mainlobe, right
+    j = c
+    while j - 1 >= 0 and db[j - 1] < db[j]:
+        j -= 1                                  # and left
+    return float(max(db[k:].max(), db[:j + 1].max()))
+
+
+class _PointTarget:
+    """A true point scatterer (no extent), so the response IS the array's own."""
+
+    def __init__(self, range_m, sin_az, speed_mps, rcs_dbsm=10.0):
+        y = range_m * sin_az
+        self.position = (float((range_m ** 2 - y ** 2) ** 0.5), float(y), 0.0)
+        self.velocity = (-float(speed_mps), 0.0, 0.0)
+        self.rcs_dbsm = float(rcs_dbsm)
+        self.extent_m = None
+        self.object_class = "vehicle"
+
+
+def test_tdm_doppler_compensation_restores_the_aperture_for_moving_targets(torch_device):
+    """TDM fires its transmitters in sequence, so a moving target's phase advances
+    between one TX's chirps and the next. Uncorrected, that corrupts the virtual aperture
+    and raises azimuth sidelobes in proportion to speed. Measured on one point target
+    through `range_azimuth_power`: -31.5 dB at rest (the ideal Hann level for a
+    64-element ULA) degrading to -18.7 dB at 8 m/s -- and the corpus's spurious CFAR
+    detections sit at a median -17.2 dB below their own range's peak.
+
+    `tdm_deinterleave` declines to correct this because the per-target Doppler "is not
+    known before detection". That is true BEFORE the Doppler FFT; `range_azimuth_power`
+    applies it after, where every Doppler bin's f_D is known exactly and the correction
+    is well posed per bin.
+
+    Pins the PROPERTY rather than the exact decibels: uncompensated must degrade with
+    speed, compensated must stay near the stationary level.
+    """
+    from e2e.chain import rd_synth
+
+    cfg = PRESETS["benchmark_v1"]
+    at_rest = _peak_azimuth_sidelobe_db(
+        cfg, rd_synth.synthesize_adc(cfg, [_PointTarget(20.0, 0.0, 0.0)], snr_db=None,
+                                     seed=0, device=torch_device, random_phase=False))
+
+    fast = rd_synth.synthesize_adc(cfg, [_PointTarget(20.0, 0.0, 8.0)], snr_db=None,
+                                   seed=0, device=torch_device, random_phase=False)
+    uncompensated = _peak_azimuth_sidelobe_db(cfg, fast)
+    compensated = _peak_azimuth_sidelobe_db(cfg, fast, tdm_doppler_comp=True)
+
+    assert at_rest < -30.0, f"a STATIONARY target should already be clean, got {at_rest:.1f} dB"
+    assert uncompensated > at_rest + 8.0, (
+        f"expected motion to wreck the aperture: at rest {at_rest:.1f} dB, "
+        f"moving {uncompensated:.1f} dB -- if this now fails the coupling was fixed "
+        f"upstream and this test should move with it")
+    assert compensated < at_rest + 1.0, (
+        f"compensation should restore the stationary sidelobe level: at rest "
+        f"{at_rest:.1f} dB, compensated {compensated:.1f} dB")
+
+
+def test_tdm_doppler_compensation_refuses_a_non_tdm_config():
+    """It de-rotates by TX index; on a non-TDM config that is meaningless, so it must
+    raise rather than silently return a differently-wrong map."""
+    from e2e.chain import rd_synth
+    from e2e.ml.baseline import range_azimuth_power
+
+    cfg = PRESETS["ddma_wide_v1"]
+    adc = rd_synth.synthesize_adc(cfg, [_PointTarget(20.0, 0.0, 3.0)], snr_db=None, seed=0)
+    with pytest.raises(ValueError, match="tdm_doppler_comp"):
+        range_azimuth_power(cfg, adc, tdm_doppler_comp=True)
