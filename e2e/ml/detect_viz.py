@@ -317,11 +317,27 @@ def _crop_range_m(targets, detections, full_max_range_m: float, *,
     return min(cropped, float(full_max_range_m))
 
 
+def unlabelled_for_frame(manifest_path, split: str, frame_idx: int) -> List:
+    """Placed-but-unlabelled objects for one frame, or `[]` if this corpus cannot say.
+
+    Corpora generated before `scene_provenance` was recorded have no way to answer, and
+    a figure must still draw for them -- so every failure here is swallowed deliberately
+    and yields an empty list rather than raising. The cost of being wrong is one missing
+    annotation; the cost of raising is no figure at all.
+    """
+    try:
+        from e2e.ml.dataset import RadarFrameDataset
+        return list(RadarFrameDataset(manifest_path, split=split).unlabelled_objects(frame_idx))
+    except Exception:
+        return []
+
+
 def plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, targets, detections, *,
                           threshold: float, title: str, max_range_m: Optional[float] = None,
                           full_max_range_m: Optional[float] = None,
                           vmin: float = -_DEFAULT_DB_SPAN, vmax: float = 0.0,
-                          note: Optional[str] = None) -> None:
+                          note: Optional[str] = None,
+                          unlabelled: Optional[Sequence] = None) -> None:
     """Draw one range-azimuth panel on `ax`: background power (dB) + GT + detections.
 
     The background goes through `e2e.viz.imshow_ra` (owns the RA-map orientation/
@@ -351,6 +367,19 @@ def plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, targets, detecti
         seen_labels.add(cls)
         ax.plot(sin_az, r, markersize=9, markerfacecolor="none", markeredgewidth=1.6,
                 linestyle="none", label=label, **style)
+
+    # Placed-but-UNLABELLED objects (clutter boxes, scene furniture). These are real
+    # reflectors: a detection landing on one is the detector doing its job, and the
+    # label set is what is silent, not the scene. Drawn so a reader can see that for
+    # themselves rather than reading a '+' with no GT marker under it as an error.
+    # Owner, 2026-08-28: "A clutter detection IS AN ACTUAL OBJECT from the current
+    # implementation, so it's not a true false/spurious detection."
+    if unlabelled:
+        for i, obj in enumerate(unlabelled):
+            ax.plot(obj[1], obj[0], marker="o", markersize=13, markerfacecolor="none",
+                    markeredgecolor="#9fb3c8", markeredgewidth=1.4, linestyle="none",
+                    label="unlabelled real object" if i == 0 else None)
+        seen_labels.add("unlabelled real object")
 
     det_label = f"detection (score>={threshold:.2f})"
     for det in detections:
@@ -519,7 +548,8 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
                             ssm_chunk_size=None, n_angle_fft=None, dpi: int = 120,
                             azimuth_window: Optional[str] = "hann",
                             db_span: float = _DEFAULT_DB_SPAN,
-                            scene_panel: bool = False) -> Path:
+                            scene_panel: bool = False,
+                            max_range_m: Optional[float] = None) -> Path:
     """One-panel figure: ground truth + one checkpoint's detections over one frame's RA map.
     With `scene_panel=True`, a second panel (`plot_scene_panel`) draws the generator's own
     placed objects beside it -- see that function's docstring for what it adds and how it
@@ -534,13 +564,29 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd = decode_model_frame(manifest_path, checkpoint_path, split, frame_idx,
-                            threshold=threshold, device=device, ssm_chunk_size=ssm_chunk_size)
+    # checkpoint_path=None selects the CLASSICAL CFAR arm. It has always been decodable
+    # here (`decode_classical_frame`) but was unreachable from the CLI, so anyone wanting
+    # a classical-only panel had to compose one in a scratch script -- which is precisely
+    # how the transposed-axes figure reached a talk (F59). The capability belongs in
+    # tracked code.
+    if checkpoint_path is None:
+        fd = decode_classical_frame(manifest_path, split, frame_idx,
+                                    threshold=threshold, device=device)
+    else:
+        fd = decode_model_frame(manifest_path, checkpoint_path, split, frame_idx,
+                                threshold=threshold, device=device,
+                                ssm_chunk_size=ssm_chunk_size)
     ra_db, sin_az_axis, range_axis_m, _cfg = frame_background_ra(
         manifest_path, split, frame_idx, n_angle_fft=n_angle_fft, azimuth_window=azimuth_window)
 
     full_max_range_m = fd.grid.max_range_m
-    crop_m = _crop_range_m(fd.targets, fd.detections, full_max_range_m)
+    # An explicit crop overrides the automatic one. The automatic rule follows the
+    # farthest DETECTION, so a single far false alarm can stretch the axis over an
+    # empty swath and squash all the real content into a strip -- which is what it
+    # did on the deck-bound render of this frame (two detections at ~100 m against
+    # everything else under 30 m). The crop is stated in the axis label either way.
+    crop_m = (float(max_range_m) if max_range_m is not None
+              else _crop_range_m(fd.targets, fd.detections, full_max_range_m))
 
     if scene_panel:
         # Wider than 2x the single-panel width, and the long protocol caveat moves OUT
@@ -564,7 +610,8 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
                           threshold=threshold, title=f"{fd.model_name}  {split} frame {frame_idx}",
                           max_range_m=crop_m, full_max_range_m=full_max_range_m,
-                          vmin=-float(db_span), note=None if scene_panel else note)
+                          vmin=-float(db_span), note=None,
+                          unlabelled=unlabelled_for_frame(manifest_path, split, frame_idx))
 
     if scene_panel:
         from e2e.ml.dataset import RadarFrameDataset
@@ -583,8 +630,15 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
         plt.close(fig)
         return out_path
 
-    fig.tight_layout()
-    fig.savefig(out_path)
+    # Same treatment the scene-panel branch gets, and for the same reason: the note is
+    # long, and threading it through the panel TITLE ran it off both edges of the canvas
+    # (measured 2026-08-28 on a deck-bound render -- the text was clipped mid-word at
+    # each side). Along the bottom it has the full width and can wrap. A footer that is
+    # unreadable is a footer that is not there.
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
+    fig.text(0.5, 0.075, note, ha="center", va="top", fontsize=7.5, wrap=True,
+             color="#333333")
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
@@ -684,10 +738,12 @@ def render_comparison_figure(manifest_path, fftradnet_checkpoint, ssmradnet_chec
     full_max_range_m = cfar_fd.grid.max_range_m
     crop_m = max(_crop_range_m(fd.targets, fd.detections, full_max_range_m)
                 for fd in (cfar_fd, fft_fd, ssm_fd))
+    unlabelled = unlabelled_for_frame(manifest_path, split, frame_idx)
     for ax, title, fd in zip(axes, titles, (cfar_fd, fft_fd, ssm_fd)):
         plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
                               threshold=thr[title], title=title, max_range_m=crop_m,
-                              full_max_range_m=full_max_range_m, vmin=-float(db_span))
+                              full_max_range_m=full_max_range_m, vmin=-float(db_span),
+                              unlabelled=unlabelled)
     # State the protocol by what each panel ACTUALLY got, never by whether the numbers
     # happen to differ: a partial mapping (one arm matched, the rest silently on the
     # default) must not be advertised as "per-arm", and three per-arm points that
@@ -1010,6 +1066,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                   "mode) or --fftradnet-checkpoint (--compare mode)")
 
     p.add_argument("--checkpoint", default=None, help="single-model mode: one checkpoint .pt")
+    p.add_argument("--max-range-m", type=float, default=None,
+                   help="crop the range axis to this many metres (default: a little past "
+                        "the farthest thing drawn). The crop is STATED in the axis label, "
+                        "so a cropped panel can never be mistaken for the full swath")
+    p.add_argument("--classical", action="store_true",
+                   help="single-panel CLASSICAL CFAR mode (no checkpoint); needs --frame")
     p.add_argument("--compare", action="store_true",
                    help="3-way comparison mode: classical CFAR | FFTRadNet | SSMRadNet")
     p.add_argument("--fftradnet-checkpoint", default=None,
@@ -1055,9 +1117,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         rank_checkpoint = args.fftradnet_checkpoint
     else:
-        if not args.checkpoint:
-            print("single-model mode needs --checkpoint (or pass --compare with the two "
-                  "model checkpoints)", file=sys.stderr)
+        if not args.checkpoint and not args.classical:
+            print("single-model mode needs --checkpoint or --classical (or pass --compare "
+                  "with the two model checkpoints)", file=sys.stderr)
+            return 2
+        if args.classical and args.checkpoint:
+            print("--classical and --checkpoint are mutually exclusive", file=sys.stderr)
+            return 2
+        if args.classical and args.frame is None:
+            print("--classical needs an explicit --frame (--select ranks frames with a "
+                  "checkpoint)", file=sys.stderr)
             return 2
         rank_checkpoint = args.checkpoint
 
@@ -1089,10 +1158,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             azimuth_window=azimuth_window, db_span=args.db_span)
     else:
         out_path = render_detection_figure(
-            args.manifest, args.checkpoint, args.split, frame_idx, args.out,
+            args.manifest, None if args.classical else args.checkpoint,
+            args.split, frame_idx, args.out,
             threshold=args.threshold, device=device, ssm_chunk_size=args.ssm_chunk_size,
             n_angle_fft=args.n_angle_fft, azimuth_window=azimuth_window, db_span=args.db_span,
-            scene_panel=args.scene_panel)
+            scene_panel=args.scene_panel, max_range_m=args.max_range_m)
 
     print(f"wrote {out_path}")
     return 0
