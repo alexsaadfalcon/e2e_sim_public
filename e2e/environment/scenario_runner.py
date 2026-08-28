@@ -473,8 +473,25 @@ class ScenarioRunner:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         if verbose:
             print(f"dumping to file {out_path}")
-        with open(out_path, "wb") as f:
-            pickle.dump(payload, f)
+        # Write to a sibling temp file and rename into place, rather than dumping
+        # straight onto out_path. `open(out_path, "wb")` TRUNCATES the destination
+        # before pickle.dump writes a single byte, so anything that interrupts a
+        # multi-GB dump -- OOM, Ctrl-C, an RT error -- destroys the previous contents
+        # and leaves an unloadable stub behind. (Measured 2026-08-28: a dump raising
+        # partway through left the file truncated and EOFError on load.) That is the
+        # same data-loss class as the dry-run clobber guarded in `main`, but it bites
+        # REAL ray-traced runs too, which is exactly when the file is most expensive.
+        # os.replace is atomic on both POSIX and Windows when src and dst share a
+        # directory. Costs transient 2x disk for the duration of the dump.
+        partial = f"{out_path}.partial"
+        try:
+            with open(partial, "wb") as f:
+                pickle.dump(payload, f)
+            os.replace(partial, out_path)
+        except BaseException:  # includes KeyboardInterrupt -- leave no stub behind
+            if os.path.exists(partial):
+                os.remove(partial)
+            raise
         if verbose:
             shapes = {k: v.shape for k, v in stacks.items()}
             print(f"done dumping  {len(stacks)} links {shapes}")
@@ -786,6 +803,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="synthesize frames of the correct shape WITHOUT Sionna RT")
     p.add_argument("--seed", type=int, default=41, help="RNG / path solver seed")
+    p.add_argument("--force", action="store_true",
+                   help="allow a --dry-run to overwrite an EXISTING output file "
+                        "(synthetic frames replacing possibly-real ray-traced ones)")
     return p
 
 
@@ -810,13 +830,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 2026-08-27: the onboarding walkthrough's own first command overwrote a 4 GB
     # ray-traced munich_radar.pkl.) Real runs may still overwrite -- regenerating RT
     # output with RT output is the intended workflow -- but a dry run must say so.
-    if args.dry_run and args.out is None and os.path.exists(out_path):
+    #
+    # The condition is "the destination already exists", NOT "the user omitted --out".
+    # The original guard keyed on `args.out is None`, which left the hazard fully open
+    # to `--dry-run --out <the default path>` -- and copying that path out of a doc or
+    # a colleague's message is a normal thing to do. Verified 2026-08-28: that form
+    # silently replaced an existing file with synthetic frames and printed no warning.
+    # What makes the write dangerous is the destination, not the spelling.
+    if args.dry_run and os.path.exists(out_path) and not args.force:
         raise SystemExit(
             f"refusing to overwrite {out_path} with DRY-RUN (synthetic) frames.\n"
             f"That file may be real ray-traced output; it is gitignored, so this is "
-            f"not undoable.\nPass --out <path> to write the dry run elsewhere "
-            f"(e.g. --out scratch/{scenario.name}_dryrun.pkl), or delete the file "
-            f"first if you meant to replace it.")
+            f"not undoable.\nPass --out <path> to write the dry run somewhere new "
+            f"(e.g. --out scratch/{scenario.name}_dryrun.pkl), delete the file first "
+            f"if you meant to replace it, or pass --force if you are certain.")
     payload = runner.run(out_path=out_path)
 
     print("-" * 70)

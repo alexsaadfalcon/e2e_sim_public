@@ -893,8 +893,10 @@ def test_dry_run_refuses_to_clobber_the_default_scenario_pkl(tmp_path, monkeypat
     (`--scenario munich_radar --dry-run`, no `--out`) overwrote a 4 GB ray-traced
     munich_radar.pkl with analytically synthesized frames of the IDENTICAL shape --
     undetectable downstream, and unrecoverable because these .pkl files are gitignored.
-    The guard fires only for a dry run onto the DEFAULT path: passing --out is always
-    allowed, and a real (RT) run may still overwrite, which is the intended workflow.
+    The guard fires for a dry run onto ANY existing destination -- see
+    `test_dry_run_guard_keys_on_the_destination_not_on_how_it_was_spelled`, which pins
+    the case the original `args.out is None` condition let through. A real (RT) run may
+    still overwrite, which is the intended workflow, and `--force` is the escape hatch.
     """
     import e2e.environment.scenario_runner as sr
 
@@ -911,9 +913,69 @@ def test_dry_run_refuses_to_clobber_the_default_scenario_pkl(tmp_path, monkeypat
     # the existing file is untouched
     assert existing.read_bytes() == b"pretend this is 4 GB of ray-traced frames"
 
-    # ...and an explicit --out writes normally, without touching the default path
+    # ...and an explicit --out to a NEW path writes normally, without touching the default
     out = tmp_path / "elsewhere.pkl"
     assert sr.main(["--scenario", "munich_radar", "--dry-run", "--frames", "1",
                     "--out", str(out)]) == 0
     assert out.is_file()
     assert existing.read_bytes() == b"pretend this is 4 GB of ray-traced frames"
+
+
+def test_dry_run_guard_keys_on_the_destination_not_on_how_it_was_spelled(tmp_path):
+    """`--dry-run --out <an existing file>` must refuse just as hard as the no-`--out` form.
+
+    The first version of this guard tested `args.out is None`, so it protected only the
+    accident of omitting `--out`. But the default path is itself a perfectly legal
+    `--out` value, and copying it out of a doc or a colleague's message is a normal
+    thing to do -- verified 2026-08-28, that form silently replaced an existing file
+    with synthetic frames and printed no warning at all. What makes the write dangerous
+    is the DESTINATION, not the spelling, so the guard keys on existence.
+    """
+    import e2e.environment.scenario_runner as sr
+
+    precious = tmp_path / "munich_radar.pkl"
+    precious.write_bytes(b"pretend this is 4 GB of ray-traced frames")
+
+    with pytest.raises(SystemExit) as excinfo:
+        sr.main(["--scenario", "munich_radar", "--dry-run", "--frames", "1",
+                 "--out", str(precious)])
+    assert "refusing to overwrite" in str(excinfo.value)
+    assert precious.read_bytes() == b"pretend this is 4 GB of ray-traced frames"
+
+    # --force is the documented escape hatch, and it really does overwrite.
+    assert sr.main(["--scenario", "munich_radar", "--dry-run", "--frames", "1",
+                    "--out", str(precious), "--force"]) == 0
+    assert precious.read_bytes() != b"pretend this is 4 GB of ray-traced frames"
+
+
+def test_a_failed_dump_leaves_the_previous_output_file_intact(tmp_path, monkeypatch):
+    """An interrupted dump must not destroy the file it was going to replace.
+
+    `open(out_path, "wb")` truncates the destination before `pickle.dump` writes a
+    byte, so an OOM, a Ctrl-C, or an RT error partway through a multi-GB dump used to
+    leave a truncated, unloadable stub with the original gone. That is the same
+    data-loss class as the dry-run clobber, except it bites REAL ray-traced runs --
+    precisely when the output is most expensive to recreate. `run()` now dumps to a
+    sibling `.partial` and `os.replace`s it into place.
+    """
+    import e2e.environment.scenario_runner as sr
+
+    out = tmp_path / "precious.pkl"
+    out.write_bytes(b"irreplaceable real ray-traced frames")
+
+    sc = munich_radar_scenario()
+    sc.num_frames = 1
+    sc.frequency.num_freqs = 8
+    runner = sr.ScenarioRunner(sc, dry_run=True)
+
+    def boom(obj, f):
+        f.write(b"partial garbage")           # get bytes on disk, then fail
+        raise RuntimeError("simulated crash partway through the dump")
+
+    monkeypatch.setattr(sr.pickle, "dump", boom)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        runner.run(out_path=str(out), verbose=False)
+
+    # the original survived byte-for-byte, and no stub was left lying around
+    assert out.read_bytes() == b"irreplaceable real ray-traced frames"
+    assert not (tmp_path / "precious.pkl.partial").exists()
