@@ -15,7 +15,8 @@ built/validated/serialized anywhere, independent of the heavy synthesis code.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+import warnings
+from dataclasses import asdict, dataclass, fields
 from typing import Any, Dict, List, Optional
 
 # Speed of light, m/s.
@@ -67,7 +68,10 @@ class RadarConfig:
     # detector's curves look better -- that is the failure mode they exist to end.
     tx_power_dbm: float = 12.0        # per transmit channel
     noise_figure_db: float = 15.0     # receiver, referenced at the antenna input
-    temperature_k: float = 290.0      # IEEE noise-figure reference, a definition
+    # `temperature_k` (290.0 K) lived here until 2026-08-28 and was read by nothing:
+    # `e2e/chain/link_budget.py` and `e2e/circuit/rffe_model.py` each hardcode their own
+    # T0_KELVIN. Removed on the owner's call. Manifests written before that date still
+    # serialize it, which `from_dict` now tolerates -- see its docstring.
 
     def __post_init__(self):
         # Normalize the mimo tag once, at construction. rd_synth lower-cases its
@@ -217,7 +221,27 @@ class RadarConfig:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RadarConfig":
-        return cls(**d)
+        """Rebuild a config, tolerating keys this version no longer defines.
+
+        This used to be a bare `cls(**d)`, which made every on-disk `manifest.json`
+        a hard constraint on the dataclass: removing ANY field broke loading every
+        corpus generated before the removal, with a `TypeError` at load time rather
+        than a warning. Measured 2026-08-28 when `temperature_k` was retired -- both
+        shipped corpora serialize it in `config`, so the strict unpack rejected them.
+
+        Unknown keys are dropped with a warning rather than silently, so a genuine
+        typo in a hand-edited manifest still surfaces instead of being swallowed.
+        """
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(d) - known)
+        if unknown:
+            warnings.warn(
+                f"RadarConfig.from_dict ignoring unknown key(s) {unknown} -- this is "
+                f"expected for a manifest written by an older version, but check for a "
+                f"typo if you hand-edited it.",
+                stacklevel=2,
+            )
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 def answerability_problems(cfg: "RadarConfig", *, top_speed_mps: float,

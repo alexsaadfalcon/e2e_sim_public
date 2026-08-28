@@ -161,6 +161,36 @@ def test_dict_round_trip():
     assert restored == cfg
 
 
+def test_from_dict_tolerates_keys_a_newer_version_dropped():
+    """A manifest written by an older version must still load, with a warning.
+
+    `from_dict` used to be a bare `cls(**d)`, which made every on-disk manifest.json a
+    hard constraint on the dataclass: removing any field broke loading every corpus
+    generated before the removal, with a TypeError at load time. Measured 2026-08-28
+    when `temperature_k` was retired -- both shipped corpora serialize it in `config`,
+    so the strict unpack rejected them outright.
+
+    Dropping unknown keys must stay LOUD: a typo in a hand-edited manifest should still
+    surface rather than being silently swallowed.
+    """
+    d = _make(name="legacy").to_dict()
+    d["temperature_k"] = 290.0          # the real retired field
+    d["a_typo_nobody_meant"] = 1.0
+
+    with pytest.warns(UserWarning, match="unknown key"):
+        restored = RadarConfig.from_dict(d)
+
+    assert restored == _make(name="legacy")
+    assert not hasattr(restored, "temperature_k")
+
+
+def test_temperature_k_is_gone_and_nothing_reads_it():
+    """Retired 2026-08-28 (owner call): read by nothing -- link_budget and rffe_model
+    each hardcode their own T0_KELVIN. Pinned so it is not reintroduced by reflex."""
+    from dataclasses import fields as dc_fields
+    assert "temperature_k" not in {f.name for f in dc_fields(RadarConfig)}
+
+
 # ---- presets -----------------------------------------------------------------
 
 @pytest.mark.parametrize("cfg", [TI_IWR1443, RADIAL_LIKE])
