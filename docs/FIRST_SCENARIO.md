@@ -58,16 +58,16 @@ moving:     ['radar']
   frame 1/5
   ...
   frame 5/5
-dumping to file .../e2e/environment/sionna_sims/munich_radar.pkl
+dumping to file .../scratch/first_scenario_dryrun.pkl
 done dumping  1 links {'radar': (5, 1024, 1, 1, 5000)}
 ----------------------------------------------------------------------
-Generated 5 frames x 1 links -> .../e2e/environment/sionna_sims/munich_radar.pkl
+Generated 5 frames x 1 links -> .../scratch/first_scenario_dryrun.pkl
   link radar: (5, 1024, 1, 1, 5000), dtype complex64
 (dry-run: synthetic data; replace with real generation by dropping --dry-run on a
 machine with Sionna RT installed.)
 ```
 
-This writes (overwrites) `e2e/environment/sionna_sims/munich_radar.pkl`. That
+This writes `scratch/first_scenario_dryrun.pkl` — the path you passed. Without `--out` it would target the scenario's default path under `e2e/environment/sionna_sims/`, which the runner now refuses rather than overwrite. That
 directory is gitignored — the `.pkl` it just wrote is scratch output, not something
 to commit. `munich_radar` is a *generation* scenario name (a `REFERENCE_SCENARIOS`
 entry); it is not the same namespace as the *runtime* base-scene name `munich` used
@@ -96,7 +96,7 @@ saves the subspace-error curve and two azimuth-elevation maps under
 **Expected:** it completes in a few seconds on CPU and prints a `tqdm` progress bar
 (`RUNNING ARRAY SIMULATION: 100%|##########| 2/2`). We verified the underlying call
 directly (`main(scenario_name='munich', n_steps=2, k=8, show=False)`, i.e. the same
-code path minus the plotting) against this repo's shipped `munich.pkl`:
+code path minus the plotting) against a locally-generated `munich.pkl` (the repo does not ship one):
 
 ```
 RUNNING ARRAY SIMULATION: 100%|##########| 2/2 [00:02<00:00, 1.03it/s]
@@ -108,8 +108,8 @@ Each key is a length-2 list (one entry per frame). `subspace_err` is the number 
 watch: the tracked-vs-true subspace distance each frame (see `docs/GLOSSARY.md`).
 
 If frames aren't present, the script raises a `FileNotFoundError` with a message
-that names both fixes (generate real frames, or run `scenario_runner --dry-run` as
-in step 1) — that message is itself part of the tested contract
+that names both fixes (generate real frames, or point a `--dry-run` at the
+filename this script loads — the message spells out the exact command) — that message is itself part of the tested contract
 (`tests/test_main_sionna_blocks.py`).
 
 ## 3. Launch the web UI (shell only, no server left running)

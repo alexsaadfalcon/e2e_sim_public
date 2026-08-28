@@ -57,9 +57,15 @@ def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=Fa
             raise FileNotFoundError(
                 f"No precomputed frames found for scenario '{scenario_name}'. Generate "
                 "them first: `python -m e2e.environment.sionna_simple_channel` (writes "
-                "munich.pkl), or for a quick check with no Sionna/GPU needed, "
-                "`python -m e2e.environment.scenario_runner --scenario munich_radar "
-                f"--dry-run`. Missing file: {e}"
+                "munich.pkl), or for a quick check with no Sionna/GPU needed, write "
+                "SYNTHETIC frames to the name this script loads:\n"
+                "  python -m e2e.environment.scenario_runner --scenario munich_radar "
+                "--dry-run --out e2e/environment/sionna_sims/munich.pkl\n"
+                "The --out is required: this script's environment block loads "
+                "'munich.pkl'/'etoile.pkl' by scenario name, and the runner's default "
+                "path is munich_radar.pkl, which it never opens. Those frames are "
+                "synthetic -- fine for a smoke run, not for physics.\n"
+                f"Missing file: {e}"
             ) from e
 
     downstream_blocks = [

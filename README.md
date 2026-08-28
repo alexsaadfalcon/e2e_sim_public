@@ -6,8 +6,9 @@ Simulate a large antenna array **end to end**: a ray-traced RF environment
 ([Sionna RT](https://nvlabs.github.io/sionna/)) → analog RF front-end distortion →
 a measurement-driven interconnect → adaptive feature extraction → online subspace
 tracking → radar maps, target scenes, and OFDM communications. Every stage is a
-swappable **block**, configurable from Python or from the browser — and every figure
-below is produced by code in this repository.
+swappable **block**, configurable from Python or from the browser. Every figure below
+comes from this simulator; each caption names the command that regenerates it, and
+flags the one whose plotting script is not in this tree.
 
 <p align="center">
   <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">
@@ -27,7 +28,7 @@ ray-traced frames through the full receive chain, and inspect the radar products
 | *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied: the reactive gate reaches the 60-pass accuracy floor for 37% of its compute, which is compute bought, not accuracy. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborator's measured 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every measured arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the worst of the six (−0.541 dB median loss and 0.113 dB ripple, against −0.249 to −0.291 dB and ≤0.030 dB for the rest). TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
 
 ![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
-*Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4).*
+*Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
 
 ## Getting Started
 
@@ -61,8 +62,13 @@ all scheduling / motion / serialization logic and emits *synthetic* frames, so i
 needs neither Sionna nor a GPU:
 
 ```bash
-python -m e2e.environment.scenario_runner --scenario munich_radar --dry-run
+python -m e2e.environment.scenario_runner --scenario munich_radar --dry-run     --out scratch/munich_radar_dryrun.pkl
 ```
+
+Pass `--out`: without it the runner writes to the scenario's default path under
+`e2e/environment/sionna_sims/`, replacing any real ray-traced frames you have there
+with synthetic ones. (The runner now refuses that specific case rather than doing it
+silently.)
 
 **2. Run the communications / ISAC examples.** Each example saves figures to
 `e2e/main/figures/` and **falls back to a synthetic channel when frames are absent**,

@@ -543,7 +543,7 @@ scene has been found and fixed; it is inert at default settings.)
 
 ## 18. Scene generation & difficulty tiers — `e2e/environment/rt_scenes.py`
 
-**Effect:** a difficulty ladder (tiers D0–D4) of generated scenes with real-dimension
+**Effect:** a difficulty ladder of generated scenes with real-dimension
 vehicle/pedestrian meshes, street-furniture-scale clutter objects, and per-frame
 motion, used to build labeled training/benchmark corpora.
 
