@@ -127,6 +127,14 @@ def expected_target_snr_db(cfg, range_m: float, rcs_dbsm: float,
     does. `tests/test_ml_link_budget.py` compares it against what the chain actually
     produces; the two agreeing is the oracle for this whole module.
 
+    That file was cited here from the day this docstring was written and **did not exist
+    until 2026-08-28** -- `tests/test_link_budget.py` did, but every test in it is an
+    isolated unit test of a formula and none composes a `build_chain_simulation`. So the
+    claimed oracle was absent for the entire life of the module, which is exactly how
+    F62.2 (the RF front end normalising the absolute scale away before this budget is
+    ever applied) survived every review. If this sentence is ever true again by accident,
+    check the file exists before trusting it.
+
     Post-integration SNR adds the coherent gain of the range and Doppler transforms,
     `10*log10(n_samples * n_chirps_per_tx)`; see `coherent_processing_gain_db`.
     """
