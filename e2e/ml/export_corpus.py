@@ -102,8 +102,9 @@ Where meshes were used:
   attribution required.** Credit: "'Tram' by Poly by Google, licensed under
   CC-BY 3.0."
 * Five additional meshes sourced from freestl.com (a DeLorean, an Audi R8 Spyder, a
-  DAF truck, a trolley car, and a school bus) carry no verified license terms
-  (provenance unknown/unverified at time of use).
+  DAF truck, a trolley car, and a school bus). Their terms are not published
+  per-file upstream; their use here was cleared by the project owner (2026-08-27),
+  which is the basis recorded in `e2e.environment.assets`' per-spec license fields.
 
 None of the above mesh files themselves are included in this bundle -- only the
 radar returns (and, where relevant, target class/extent metadata) computed from

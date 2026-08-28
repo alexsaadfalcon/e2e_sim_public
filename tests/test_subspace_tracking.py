@@ -162,6 +162,13 @@ def _run_collapse_episode(block, k, d, F=64, T=24, calm_drift=0.03, collapse_dri
         return (torch.randn(*shp, generator=g, device=device)
                 + 1j * torch.randn(*shp, generator=g, device=device))
 
+    # `rand_orth_complex` draws from the GLOBAL torch RNG, not from `g`. Without
+    # seeding it here the two arms would be compared on DIFFERENT ground truth, which
+    # is not a comparison at all (and is exactly the flake class this test already
+    # shipped once). Seed globally so both arms start from the same U_true.
+    torch.manual_seed(seed)
+    if device is not None and torch.device(device).type == "cuda":
+        torch.cuda.manual_seed_all(seed)
     Ut = rand_orth_complex(d, k, device=device)
     block.oja.U = Ut.clone()
     err, passes = [], []

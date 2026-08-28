@@ -1431,3 +1431,37 @@ def test_results_survive_a_topdown_figure_that_raises(monkeypatch):
                                         REFERENCE_SCENARIOS["munich_radar"]().to_json())
 
     assert "scene_topdown" not in data and "fft" in data
+
+
+# --------------------------------------------------------------------------------
+# Layering: core never imports e2e.ml at module scope (the C1 rule the docs assert)
+# --------------------------------------------------------------------------------
+def test_core_modules_do_not_import_e2e_ml_at_module_scope():
+    """CONTRIBUTING.md and e2e/ml/__init__.py both promise core does not import the ML
+    package at module scope. Nothing enforced it, and a module relocation quietly broke
+    it (e2e/render_scene.py, 2026-08-27) while the docs kept asserting otherwise.
+
+    Function-local (lazy) imports are the sanctioned escape hatch and are ignored here;
+    only module-scope imports fail this test.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1] / "e2e"
+    ml_dir = root / "ml"
+    offenders = []
+    for path in root.rglob("*.py"):
+        if ml_dir in path.parents or path == ml_dir:
+            continue  # the ML package may of course import itself
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:  # module scope ONLY: top-level statements
+            names = []
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("e2e.ml"):
+                names = [node.module]
+            elif isinstance(node, ast.Import):
+                names = [a.name for a in node.names if a.name.startswith("e2e.ml")]
+            if names:
+                offenders.append(f"{path.relative_to(root.parent)}:{node.lineno} -> {names}")
+
+    assert not offenders, (
+        "core modules import e2e.ml at module scope (make them function-local, or "
+        "update the documented rule):\n  " + "\n  ".join(offenders))

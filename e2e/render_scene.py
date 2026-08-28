@@ -67,7 +67,10 @@ from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.patches import Arc, Wedge  # noqa: E402
 
 from e2e.environment.scatterers import RadarPose, Scatterer, frame_scatterers, radar_pose  # noqa: E402
-from e2e.ml.labels import LabelGrid, targets_in_grid  # noqa: E402
+# `e2e.ml.labels` is imported LAZILY, inside the two functions that need it: this
+# module lives in core, and core does not import e2e.ml at module scope (the layering
+# rule CONTRIBUTING.md and e2e/ml/__init__.py both state). `from __future__ import
+# annotations` above keeps the LabelGrid type hints below working without the import.
 from e2e.chain.rd_synth import synthesize_adc  # noqa: E402
 from e2e.chain.transforms import adc_to_rd, ddma_demux, tdm_deinterleave  # noqa: E402
 from e2e.viz import imshow_ra  # noqa: E402
@@ -255,10 +258,12 @@ def _draw_birdseye(ax, scatterers: Sequence[Scatterer], pose: RadarPose, cfg):
 # --------------------------------------------------------------------------------
 # Radar-view panel
 # --------------------------------------------------------------------------------
-def _draw_radar_view(ax, cfg, grid: LabelGrid, ra_db: torch.Tensor, sin_az_axis: np.ndarray,
+def _draw_radar_view(ax, cfg, grid: "LabelGrid", ra_db: torch.Tensor, sin_az_axis: np.ndarray,
                      scatterers: Sequence[Scatterer], pose: RadarPose,
                      title: str = "Radar view: range-azimuth power (dB)",
                      vmin: float = -40.0, vmax: float = 0.0):
+    from e2e.ml.labels import targets_in_grid  # lazy: core must not import e2e.ml at module scope
+
     ax.clear()
     max_range = float(cfg.max_range_m)
     n_range = ra_db.shape[1]
@@ -348,6 +353,8 @@ def render_scene_gif(cfg, scenario, out_path, *, n_frames: int = 30, fps: int = 
     returns and the non-ideal arm shows the noise floor that buries them. Narrow this
     only after re-measuring the scene's own dynamic range.
     """
+    from e2e.ml.labels import LabelGrid  # lazy: core must not import e2e.ml at module scope
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1060,6 +1067,8 @@ def render_scene_gif_2x2(cfg, scenario, out_path, *, n_frames: int = 10, fps: in
     measured 80 dB `db_range` rationale). The RT panel is a plain RGB camera image, so
     it has no dB scale of its own and is not part of that normalization.
     """
+    from e2e.ml.labels import LabelGrid  # lazy: core must not import e2e.ml at module scope
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 

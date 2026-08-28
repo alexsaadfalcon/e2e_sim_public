@@ -502,7 +502,16 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"interconnect: {'off' if args.no_interconnect else 'on'}   "
               f"tx chain: {'ON (broken for corpora -- see --transmit-chain help)' if args.transmit_chain else 'off'}   "
               f"if hpf: {'OFF (pre-A2)' if args.no_if_hpf else 'on'}")
-        print(f"local assets: {'OFF (Sionna-bundled only; public-figure safe)' if args.no_local_assets else 'ON (licence-unestablished pool -- see F21/F51)'}")
+        # Say what the flag actually does: it gates the user-supplied LOCAL pool only.
+        # The registered downloaded pool (Kenney CC0, the cleared freestl meshes,
+        # dl_tram_google CC-BY) is sampled either way, so "Sionna-bundled only" was
+        # never true and "public-figure safe" overstated it.
+        print("local assets: " + ("OFF (user-supplied local pool excluded; the "
+                                  "registered downloaded pool is still sampled -- "
+                                  "check per-frame scene_provenance before publishing "
+                                  "a render)"
+                                  if args.no_local_assets else
+                                  "ON (includes the licence-unestablished local pool)"))
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
         from e2e.environment.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
                                                     DEFAULT_GROUND_SCATTERING_COEFFICIENT)

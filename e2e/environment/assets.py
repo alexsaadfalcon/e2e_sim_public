@@ -336,7 +336,7 @@ DOWNLOADED_ASSET_SPECS: Dict[str, DownloadedAssetSpec] = {
     # The "Kenney fleet" (campaign R3 follow-up): 15 CC0 vehicle meshes from Kenney's
     # "Car Kit" (kenney.nl/assets/car-kit) -- APPROVED by the project owner, license
     # verified from the License.txt shipped INSIDE the kit (CC0 1.0 Universal). Unlike
-    # the five freestl.com meshes above (UNKNOWN/unverified provenance), these carry an
+    # the five freestl.com meshes above (owner-cleared, see their license fields), these carry an
     # explicit `license` string (see DownloadedAssetSpec.license) that
     # `e2e.environment.rt_gen.ASSET_LICENSES` picks up in place of the generic UNKNOWN text.
     #
