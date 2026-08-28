@@ -224,8 +224,19 @@ def _run_trial(manifest_path, model_name: str, params: Dict, *, epochs: int, bat
     if history_path.exists():
         with open(history_path) as f:
             history = json.load(f)
-        return _summarize_trial(params, history, stage=stage, out_dir=trial_out,
-                                 wall_s=0.0, resumed=True)
+        # `history.json` existing is NOT proof the trial finished: since training
+        # checkpoints on every validation improvement (so a killed run keeps its best
+        # weights), a trial interrupted at epoch 3 of 30 also leaves one behind. Scoring
+        # that as a completed trial silently corrupts the sweep -- objective_mean_ap_last5
+        # and final_val_AP would be read off a stub, and pick_best could crown it.
+        # Resume only a trial whose recorded epochs reach the requested count; anything
+        # shorter is re-run from scratch.
+        completed = len(history.get("epoch") or [])
+        if completed >= epochs:
+            return _summarize_trial(params, history, stage=stage, out_dir=trial_out,
+                                     wall_s=0.0, resumed=True)
+        print(f"[sweep] {trial_out.name}: partial history ({completed}/{epochs} epochs) "
+              f"-- re-running this trial rather than scoring a truncated one")
 
     trial_out.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()

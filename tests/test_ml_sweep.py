@@ -353,3 +353,57 @@ def test_cli_model_required_and_validated():
         sweep.build_arg_parser().parse_args(["--manifest", "m.json"])  # --model missing
     with pytest.raises(SystemExit):
         sweep.build_arg_parser().parse_args(["--manifest", "m.json", "--model", "nope"])
+
+
+def test_partial_trial_is_re_run_not_scored_as_finished(tmp_path, monkeypatch):
+    """A trial interrupted mid-training must be RE-RUN, not resumed as if complete.
+
+    Regression for 2026-08-27: `train` began writing `history.json` on every validation
+    improvement (so a killed run keeps its best weights). That turned the sweep's
+    resume test -- "history.json exists" -- into a false positive: a trial killed at
+    epoch 1 of 5 would be scored from a 1-epoch stub, corrupting
+    objective_mean_ap_last5 / final_val_AP and letting `pick_best` crown it.
+    """
+    stub, calls = _make_stub_train(epochs=5)
+    monkeypatch.setattr(sweep, "train", stub)
+    out_dir = tmp_path / "sweep_out"
+
+    # Pre-seed ONE trial's directory with a truncated history, as a kill would leave it.
+    params = {"reg_weight": 100.0, "lr": 3e-4, "gamma": 0.0}
+    trial_out = out_dir / sweep.trial_slug(params)
+    trial_out.mkdir(parents=True)
+    (trial_out / "history.json").write_text(json.dumps(
+        {"epoch": [1], "train_loss": [9.0], "train_cls_loss": [1.0], "train_reg_loss": [1.0],
+         "val_AP": [0.01], "val_AR": [0.5], "val_range_rmse_m": [1.0]}))
+
+    sweep.run_sweep(tmp_path / "manifest.json", "fftradnet", epochs=5, batch_size=2,
+                    seed=0, out_dir=out_dir)
+
+    # the truncated trial was re-trained (its params appear among the training calls)
+    key = (params["reg_weight"], params["lr"], params["gamma"])
+    assert any((c["reg_weight"], c["lr"], c["gamma"]) == key for c in calls), \
+        "a partial trial must be re-run, not scored from its stub history"
+
+
+def test_a_complete_trial_still_resumes(tmp_path, monkeypatch):
+    """The resume optimisation itself must survive the fix: a trial whose recorded
+    epochs reach the requested count is still reused without retraining."""
+    stub, calls = _make_stub_train(epochs=5)
+    monkeypatch.setattr(sweep, "train", stub)
+    out_dir = tmp_path / "sweep_out"
+
+    params = {"reg_weight": 100.0, "lr": 3e-4, "gamma": 0.0}
+    trial_out = out_dir / sweep.trial_slug(params)
+    trial_out.mkdir(parents=True)
+    (trial_out / "history.json").write_text(json.dumps(
+        {"epoch": [1, 2, 3, 4, 5], "train_loss": [9, 8, 7, 6, 5],
+         "train_cls_loss": [1] * 5, "train_reg_loss": [1] * 5,
+         "val_AP": [0.1, 0.2, 0.3, 0.4, 0.5], "val_AR": [0.5] * 5,
+         "val_range_rmse_m": [1.0] * 5}))
+
+    sweep.run_sweep(tmp_path / "manifest.json", "fftradnet", epochs=5, batch_size=2,
+                    seed=0, out_dir=out_dir)
+
+    key = (params["reg_weight"], params["lr"], params["gamma"])
+    assert not any((c["reg_weight"], c["lr"], c["gamma"]) == key for c in calls), \
+        "a complete trial must still be resumed without retraining"

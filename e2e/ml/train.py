@@ -55,6 +55,13 @@ Artifact layout
                         `train_reg_loss` are the mean per-epoch `detection_loss` term
                         breakdown, see that function's returned `_parts`).
 
+BOTH ARTIFACTS ARE WRITTEN INCREMENTALLY -- on every validation improvement, not once
+at the end -- so a run killed at epoch N still leaves the best weights it reached (a
+120-epoch run that lost ~9 GPU-hours to an empty directory is why). CONSEQUENCE FOR
+CALLERS: their PRESENCE does not mean the run finished. `best.pt["epochs_completed"]`,
+or `len(history["epoch"])` against the epochs you asked for, is what distinguishes a
+completed run from an interrupted one -- `e2e.ml.sweep` resumes on exactly that test.
+
 CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]

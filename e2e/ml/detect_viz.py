@@ -437,13 +437,22 @@ def render_comparison_figure(manifest_path, fftradnet_checkpoint, ssmradnet_chec
 
     titles = ("classical CFAR", "FFTRadNet", "SSMRadNet")
     thr = {t: float(threshold) for t in titles}
+    matched: Dict[str, str] = {}
     if thresholds:
-        for name, value in thresholds.items():
-            # tolerate the compare JSON's fuller arm names ("classical CFAR", "fftradnet")
-            for t in titles:
-                if name.lower().replace(" ", "") in t.lower().replace(" ", "") or \
-                        t.lower().replace(" ", "") in name.lower().replace(" ", ""):
-                    thr[t] = float(value)
+        # Map the compare JSON's arm names ("classical CFAR", "fftradnet") onto panel
+        # titles. Longest match wins and each panel binds once: a loose substring rule
+        # let a key like "radnet" bleed into BOTH learned panels, silently drawing them
+        # at a threshold meant for neither.
+        def _norm(s):
+            return s.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+        for title in titles:
+            cands = [(len(_norm(n)), n, v) for n, v in thresholds.items()
+                     if _norm(n) in _norm(title) or _norm(title) in _norm(n)]
+            if cands:
+                _, name, value = max(cands)
+                thr[title] = float(value)
+                matched[title] = name
 
     cfar_fd = decode_classical_frame(manifest_path, split, frame_idx,
                                      threshold=thr["classical CFAR"], device=device)
@@ -461,9 +470,19 @@ def render_comparison_figure(manifest_path, fftradnet_checkpoint, ssmradnet_chec
         plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
                               threshold=thr[title], title=title, max_range_m=crop_m,
                               full_max_range_m=full_max_range_m, vmin=-float(db_span))
-    protocol = ("per-arm operating points" if len(set(thr.values())) > 1
-                else f"UNIFORM threshold {threshold:.2f} for all arms -- NOT "
-                     "operating-point matched")
+    # State the protocol by what each panel ACTUALLY got, never by whether the numbers
+    # happen to differ: a partial mapping (one arm matched, the rest silently on the
+    # default) must not be advertised as "per-arm", and three per-arm points that
+    # coincide must not be reported as the --threshold default they are not.
+    if len(matched) == len(titles):
+        protocol = "per-arm operating points"
+    elif matched:
+        missing = ", ".join(t for t in titles if t not in matched)
+        protocol = (f"PARTIAL: {missing} fell back to the shared threshold "
+                    f"{threshold:.2f} -- NOT operating-point matched")
+    else:
+        protocol = (f"UNIFORM threshold {threshold:.2f} for all arms -- NOT "
+                    "operating-point matched")
     subtitle = (f"{split} frame {frame_idx}  --  identical input, three detectors  "
                 f"[{protocol}]\n{_PROTOCOL_FOOTER}")
     if azimuth_window is not None:
@@ -725,7 +744,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--split", default="val", help="dataset split (train/val/test, default val)")
     p.add_argument("--out", required=True, help="output image path (.png)")
     p.add_argument("--threshold", type=float, default=0.5,
-                   help="detection score threshold (same convention as e2e.ml.metrics)")
+                   help="detection score threshold (same convention as e2e.ml.metrics). "
+                        "For --compare prefer --operating-points, which gives each arm "
+                        "its own threshold instead of one shared number")
+    p.add_argument("--operating-points", default=None, metavar="COMPARE.JSON",
+                   help="--compare only: a compare_detectors result JSON. Each arm is "
+                        "drawn at ITS OWN matched-recall operating point read from that "
+                        "file, which is what makes the three panels comparable; without "
+                        "it every panel uses --threshold and the figure says so on its "
+                        "face")
     p.add_argument("--device", default=None, help="torch device (default: cuda if available)")
     p.add_argument("--ssm-chunk-size", type=int, default=None,
                    help="SSMRadNet chunked-scan size (Windows needs e.g. 128 -- see CLAUDE.md)")
@@ -823,10 +850,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     azimuth_window = None if args.azimuth_window == "none" else args.azimuth_window
 
     if args.compare:
+        thresholds = (operating_points_from_compare(args.operating_points)
+                      if args.operating_points else None)
+        if thresholds:
+            print("per-arm operating points: "
+                  + ", ".join(f"{k}={v:.3f}" for k, v in sorted(thresholds.items())))
         out_path = render_comparison_figure(
             args.manifest, args.fftradnet_checkpoint, args.ssmradnet_checkpoint, args.split,
-            frame_idx, args.out, threshold=args.threshold, device=device,
-            ssm_chunk_size=args.ssm_chunk_size, n_angle_fft=args.n_angle_fft,
+            frame_idx, args.out, threshold=args.threshold, thresholds=thresholds,
+            device=device, ssm_chunk_size=args.ssm_chunk_size, n_angle_fft=args.n_angle_fft,
             azimuth_window=azimuth_window, db_span=args.db_span)
     else:
         out_path = render_detection_figure(
