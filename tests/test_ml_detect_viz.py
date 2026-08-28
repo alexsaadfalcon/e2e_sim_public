@@ -329,6 +329,231 @@ def test_plot_frame_detections_note_param_appended_to_title():
 
 
 # --------------------------------------------------------------------------------
+# scene_objects_for_plot / plot_scene_panel -- paired physical-scene panel
+# (all synthetic meta/targets/detections, no real corpora -- see task requirement)
+# --------------------------------------------------------------------------------
+def _synthetic_meta(objects, radar_position=(0.0, 0.0, 0.0)):
+    """A `meta` dict shaped like a written npz's `scene_provenance` -- just the two
+    sub-keys `scene_objects_for_plot` actually reads (`scene.objects`, `scene.nodes`),
+    round-tripped-JSON style (plain strings for role/kind, exactly what a real corpus
+    looks like on disk after `json.loads`)."""
+    return {
+        "scene_provenance": {
+            "scene": {
+                "nodes": [{"name": "radar0", "role": "radar", "position": list(radar_position)}],
+                "objects": objects,
+            }
+        }
+    }
+
+
+def _obj(name, position, kind="mesh"):
+    return {"name": name, "kind": kind, "position": list(position)}
+
+
+def test_scene_objects_for_plot_coordinate_convention():
+    """The task's exact, verified-empirically formula: d = pos - radar_pos,
+    range_m = norm(d), sin_azimuth = d[1] / range_m; plan-view x=d[0], y=d[1]."""
+    meta = _synthetic_meta([_obj("car", (30.0, 4.0, 0.0))], radar_position=(0.0, 0.0, 0.0))
+    rows = detect_viz.scene_objects_for_plot(meta, targets=[])
+    assert rows is not None and len(rows) == 1
+    row = rows[0]
+    d = np.array([30.0, 4.0, 0.0])
+    expected_range = float(np.linalg.norm(d))
+    expected_sin_az = 4.0 / expected_range
+    assert row["range_m"] == pytest.approx(expected_range)
+    assert row["sin_azimuth"] == pytest.approx(expected_sin_az)
+    assert row["x"] == pytest.approx(30.0)
+    assert row["y"] == pytest.approx(4.0)
+    assert row["name"] == "car"
+
+
+def test_scene_objects_for_plot_radar_offset_shifts_the_frame():
+    """Coordinates must be RADAR-relative, not scene-absolute -- an object co-located
+    with a non-origin radar must resolve to zero range."""
+    meta = _synthetic_meta([_obj("car", (10.0, 5.0, 2.0))], radar_position=(10.0, 5.0, 2.0))
+    rows = detect_viz.scene_objects_for_plot(meta, targets=[])
+    assert rows[0]["range_m"] == pytest.approx(0.0, abs=1e-9)
+    assert rows[0]["sin_azimuth"] == pytest.approx(0.0)  # guarded, not a ZeroDivisionError
+
+
+def test_scene_objects_for_plot_labels_matching_and_non_matching_objects():
+    """The whole point of the panel: an object within tolerance of a decoded GT target
+    is `labelled`; one that is not (deliberately-unlabelled clutter) is not, even
+    though it is equally real and equally placed by the generator."""
+    matched_pos = (20.0, 2.0, 0.0)
+    unmatched_pos = (55.0, -6.0, 0.0)
+    meta = _synthetic_meta([_obj("vehicle-0", matched_pos), _obj("pole-7", unmatched_pos, kind="cylinder")])
+
+    d = np.array(matched_pos)
+    r = float(np.linalg.norm(d))
+    sin_az = d[1] / r
+    targets = [(r, sin_az, "vehicle")]  # a Target tuple decoded near the matched object
+
+    rows = detect_viz.scene_objects_for_plot(meta, targets)
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["vehicle-0"]["labelled"] is True
+    assert by_name["pole-7"]["labelled"] is False
+
+
+def test_scene_objects_for_plot_respects_match_tolerance_boundary():
+    pos = (20.0, 0.0, 0.0)  # range 20.0, sin_az 0.0
+    meta = _synthetic_meta([_obj("car", pos)])
+
+    just_inside = [(20.0 + detect_viz._SCENE_MATCH_RANGE_M * 0.5, 0.0, "vehicle")]
+    just_outside = [(20.0 + detect_viz._SCENE_MATCH_RANGE_M * 2.0, 0.0, "vehicle")]
+
+    assert detect_viz.scene_objects_for_plot(meta, just_inside)[0]["labelled"] is True
+    assert detect_viz.scene_objects_for_plot(meta, just_outside)[0]["labelled"] is False
+
+
+def test_scene_objects_for_plot_none_when_no_scene_provenance():
+    assert detect_viz.scene_objects_for_plot({}, []) is None
+    assert detect_viz.scene_objects_for_plot({"scene_provenance": None}, []) is None
+
+
+def test_scene_objects_for_plot_none_when_provenance_has_no_objects():
+    """Empty `objects` list -- the generator ran but placed nothing (or an older
+    provenance shape) -- must degrade the same way as no provenance at all."""
+    meta = _synthetic_meta([])
+    assert detect_viz.scene_objects_for_plot(meta, []) is None
+
+
+def test_scene_objects_for_plot_none_when_no_radar_node():
+    meta = {"scene_provenance": {"scene": {"nodes": [], "objects": [_obj("car", (1, 1, 1))]}}}
+    assert detect_viz.scene_objects_for_plot(meta, []) is None
+
+
+def test_plot_scene_panel_draws_radar_labelled_and_unlabelled_markers():
+    import matplotlib.pyplot as plt
+
+    matched_pos = (20.0, 2.0, 0.0)
+    unmatched_pos = (55.0, -6.0, 0.0)
+    meta = _synthetic_meta([_obj("vehicle-0", matched_pos), _obj("pole-7", unmatched_pos)])
+    d = np.array(matched_pos)
+    r = float(np.linalg.norm(d))
+    targets = [(r, d[1] / r, "vehicle")]
+    detections = [(r, d[1] / r, 0.9)]
+
+    fig, ax = plt.subplots()
+    try:
+        detect_viz.plot_scene_panel(ax, meta, targets, detections)
+        labels = {ln.get_label() for ln in ax.get_lines() if not ln.get_label().startswith("_")}
+        assert labels == {"radar", "labelled object", "unlabelled object",
+                          "detection (back-projected)"}
+        # 1 radar + 2 objects + 1 detection == 4 plotted Line2D objects
+        assert len(ax.get_lines()) == 4
+    finally:
+        plt.close(fig)
+
+
+def test_plot_scene_panel_back_projects_detections_consistently():
+    """x = r*sqrt(1-s^2), y = r*s -- and for an object exactly on that geometry, the
+    back-projected detection marker must land at the object's own (y, x) plot point."""
+    import matplotlib.pyplot as plt
+
+    r, sin_az = 40.0, 0.3
+    x = r * np.sqrt(1.0 - sin_az ** 2)
+    y = r * sin_az
+    meta = _synthetic_meta([_obj("car", (float(x), float(y), 0.0))])
+    detections = [(r, sin_az, 0.8)]
+
+    fig, ax = plt.subplots()
+    try:
+        detect_viz.plot_scene_panel(ax, meta, targets=[], detections=detections)
+        det_line = next(ln for ln in ax.get_lines() if ln.get_label() == "detection (back-projected)")
+        xd, yd = det_line.get_xdata(), det_line.get_ydata()
+        assert xd[0] == pytest.approx(y, abs=1e-6)  # plot x-axis == cross-range
+        assert yd[0] == pytest.approx(x, abs=1e-6)  # plot y-axis == down-range
+    finally:
+        plt.close(fig)
+
+
+def test_plot_scene_panel_states_match_protocol_in_title():
+    import matplotlib.pyplot as plt
+
+    meta = _synthetic_meta([_obj("car", (10.0, 0.0, 0.0))])
+    fig, ax = plt.subplots()
+    try:
+        detect_viz.plot_scene_panel(ax, meta, targets=[], detections=[])
+        title = ax.get_title()
+        assert f"{detect_viz._SCENE_MATCH_RANGE_M:.2f} m" in title
+        assert "not a false alarm" in title
+    finally:
+        plt.close(fig)
+
+
+def test_plot_scene_panel_annotates_unavailable_without_raising():
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    try:
+        detect_viz.plot_scene_panel(ax, {}, targets=[], detections=[])
+        text = " ".join(t.get_text() for t in ax.texts)
+        assert "unavailable" in text.lower()
+        assert len(ax.get_lines()) == 0  # nothing plotted, only the annotation text
+    finally:
+        plt.close(fig)
+
+
+def test_plot_scene_panel_skips_name_annotations_past_the_readability_cap():
+    import matplotlib.pyplot as plt
+
+    many_objects = [_obj(f"obj-{i}", (10.0 + i, 0.0, 0.0))
+                    for i in range(detect_viz._MAX_ANNOTATED_SCENE_OBJECTS + 5)]
+    meta = _synthetic_meta(many_objects)
+
+    fig, ax = plt.subplots()
+    try:
+        detect_viz.plot_scene_panel(ax, meta, targets=[], detections=[])
+        assert len(ax.texts) == 0  # markers still drew (checked elsewhere); names did not
+    finally:
+        plt.close(fig)
+
+
+def test_render_detection_figure_scene_panel_adds_second_axes(tiny_manifest_path,
+                                                               fftradnet_checkpoint, tmp_path):
+    """Integration: `scene_panel=True` on a REAL generated tiny corpus produces a
+    two-axes figure, drawing straight off the frame's own on-disk `scene_provenance`
+    (D0 scenes always place >=1 object -- see `TIER` at module top)."""
+    out_path = tmp_path / "with_scene.png"
+    detect_viz.render_detection_figure(tiny_manifest_path, fftradnet_checkpoint, "val", 0,
+                                       out_path, threshold=0.1, device=_CPU, scene_panel=True)
+    assert out_path.exists() and out_path.stat().st_size > 0
+
+
+def test_render_detection_figure_without_scene_panel_has_one_axes(tiny_manifest_path,
+                                                                   fftradnet_checkpoint,
+                                                                   tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_close = plt.close
+    monkeypatch.setattr(detect_viz.plt, "close",
+                        lambda fig=None: (captured.append(fig), real_close(fig)))
+
+    detect_viz.render_detection_figure(tiny_manifest_path, fftradnet_checkpoint, "val", 0,
+                                       tmp_path / "single.png", threshold=0.1, device=_CPU)
+    assert len(captured[-1].axes) == 1
+
+
+def test_render_detection_figure_scene_panel_two_axes_via_close_capture(tiny_manifest_path,
+                                                                        fftradnet_checkpoint,
+                                                                        tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    captured = []
+    real_close = plt.close
+    monkeypatch.setattr(detect_viz.plt, "close",
+                        lambda fig=None: (captured.append(fig), real_close(fig)))
+
+    detect_viz.render_detection_figure(tiny_manifest_path, fftradnet_checkpoint, "val", 0,
+                                       tmp_path / "scene.png", threshold=0.1, device=_CPU,
+                                       scene_panel=True)
+    assert len(captured[-1].axes) == 2
+
+
+# --------------------------------------------------------------------------------
 # render_detection_figure / render_comparison_figure -- writes a non-empty file
 # --------------------------------------------------------------------------------
 def test_render_detection_figure_writes_nonempty_png(tiny_manifest_path, fftradnet_checkpoint,
@@ -667,6 +892,7 @@ def test_cli_help_exits_zero():
     assert "detect_viz" in proc.stdout
     assert "--azimuth-window" in proc.stdout
     assert "--db-span" in proc.stdout
+    assert "--scene-panel" in proc.stdout
 
 
 def test_cli_azimuth_window_none_and_custom_db_span(tiny_manifest_path, fftradnet_checkpoint,
@@ -697,6 +923,34 @@ def test_cli_single_mode_end_to_end_writes_png(tiny_manifest_path, fftradnet_che
     assert proc.returncode == 0, proc.stderr
     assert out_path.exists() and out_path.stat().st_size > 0
     assert "wrote" in proc.stdout.lower()
+
+
+def test_cli_scene_panel_flag_writes_png(tiny_manifest_path, fftradnet_checkpoint, tmp_path):
+    out_path = tmp_path / "cli_scene.png"
+    proc = subprocess.run(
+        [sys.executable, "-m", "e2e.ml.detect_viz",
+         "--manifest", str(tiny_manifest_path), "--checkpoint", str(fftradnet_checkpoint),
+         "--split", "val", "--frame", "0", "--out", str(out_path),
+         "--threshold", "0.1", "--device", "cpu", "--scene-panel"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out_path.exists() and out_path.stat().st_size > 0
+
+
+def test_cli_scene_panel_rejected_in_compare_mode(tiny_manifest_path, fftradnet_checkpoint,
+                                                   ssmradnet_checkpoint, tmp_path):
+    proc = subprocess.run(
+        [sys.executable, "-m", "e2e.ml.detect_viz",
+         "--manifest", str(tiny_manifest_path), "--compare",
+         "--fftradnet-checkpoint", str(fftradnet_checkpoint),
+         "--ssmradnet-checkpoint", str(ssmradnet_checkpoint),
+         "--split", "val", "--frame", "0", "--out", str(tmp_path / "x.png"),
+         "--device", "cpu", "--scene-panel"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0
+    assert "--scene-panel" in proc.stderr
 
 
 def test_cli_select_mode_prints_chosen_frame(tiny_manifest_path, fftradnet_checkpoint, tmp_path):

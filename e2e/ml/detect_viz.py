@@ -27,6 +27,13 @@ figure can never disagree with a reported AP/AR number:
   module docstring: this exact transpose bug has been reintroduced at least 3 times in
   this project's history) -- every RA panel here is drawn through it, never through a
   raw `ax.imshow`.
+* `plot_scene_panel`/`scene_objects_for_plot` draw a paired PHYSICAL-SCENE plan view
+  (`--scene-panel`) straight from a frame's own `meta['scene_provenance']['scene']` --
+  every object the generator placed, not just the ones that made it into the label
+  set. This exists because the transposed-axes figure that shipped in a talk was drawn
+  by an untracked scratch script reaching for exactly this ("what did the generator
+  actually place here") outside tracked code, with its own raw `ax.imshow` call; the
+  fix is making the capability available HERE so nobody has to write that script again.
 
 The single-frame background is display-tapered (`azimuth_window="hann"`, on by default
 -- see `frame_background_ra`'s docstring) and the range axis is cropped to a little past
@@ -44,9 +51,11 @@ CLI
     python -m e2e.ml.detect_viz --manifest <manifest.json> --split val --select strong \\
         --compare --fftradnet-checkpoint <fft.pt> --ssmradnet-checkpoint <ssm.pt> \\
         --out compare_strong.png
+    python -m e2e.ml.detect_viz --manifest <manifest.json> --checkpoint <best.pt> \\
+        --split val --frame 12 --scene-panel --out frame12_with_scene.png
 
 See `build_arg_parser` for the full flag set (`--threshold`, `--ssm-chunk-size`, `--device`,
-`--azimuth-window`, `--db-span`).
+`--azimuth-window`, `--db-span`, `--scene-panel`).
 """
 
 from __future__ import annotations
@@ -81,6 +90,20 @@ _GT_STYLE = {
 # from either GT marker (open square/circle) and from the inferno background colormap,
 # so GT and detections never visually merge even where they coincide.
 _DET_COLOR = "#20e070"
+
+# Scene-panel marker styles (see plot_scene_panel). Labelled objects reuse the neutral
+# open-circle convention; UNLABELLED objects get a marker AND colour no other element
+# on either panel uses (filled red X) -- "a real object nobody labelled" is the reading
+# this panel exists to support, so it must never be visually confusable with a labelled
+# object or a detection.
+_SCENE_LABELLED_STYLE = dict(marker="o", markerfacecolor="none", markeredgecolor="#2d98da")
+_SCENE_UNLABELLED_STYLE = dict(marker="X", markerfacecolor="#eb3b5a", markeredgecolor="#eb3b5a")
+_SCENE_RADAR_STYLE = dict(marker="^", markerfacecolor="black", markeredgecolor="black")
+# Match tolerances (task's "verified empirically" spec) for deciding whether a placed
+# object corresponds to a decoded GT target: distinct constants (not magic numbers at
+# the call site) so a figure can quote exactly what "labelled" meant on its face.
+_SCENE_MATCH_RANGE_M = 0.75
+_SCENE_MATCH_SIN_AZ = 0.02
 
 
 # --------------------------------------------------------------------------------
@@ -140,6 +163,18 @@ def _frame_adc(ds, idx: int) -> torch.Tensor:
             )
         arr = storage.read_payload(data, meta, "adc")
     return torch.as_tensor(arr, dtype=torch.complex64)
+
+
+def _frame_meta(ds, idx: int) -> Dict:
+    """Full per-frame meta dict (json-decoded) for `ds`'s frame `idx`.
+
+    Mirrors `_frame_adc`'s direct-npz-read pattern -- `scene_provenance` (needed by
+    `plot_scene_panel`) lives only in the raw `meta` array; `RadarFrameDataset.__getitem__`
+    never returns it.
+    """
+    path = ds.dataset_dir / ds.files[idx]
+    with np.load(path) as data:
+        return json.loads(str(data["meta"].item()))
 
 
 def decode_model_frame(manifest_path, checkpoint_path, split: str, frame_idx: int, *,
@@ -342,12 +377,153 @@ def plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, targets, detecti
         ax.legend(loc="upper right", fontsize=7, framealpha=0.7)
 
 
+#: Stamped on every scene panel: states the match protocol that decided "labelled" vs
+#: "unlabelled" on its face, per the task's non-negotiable honesty requirement -- a
+#: reader must never have to guess what rule painted a marker red.
+_SCENE_PANEL_NOTE = (
+    f"labelled = within {_SCENE_MATCH_RANGE_M:.2f} m range / {_SCENE_MATCH_SIN_AZ:.2f} "
+    "sin(az) of a decoded GT target; every OTHER marker is a real generator-placed object "
+    "with no label -- a detector firing there is not a false alarm")
+
+# Past this many placed objects, per-marker name labels turn the panel into unreadable
+# clutter; the markers/colours themselves (the panel's actual point) still draw.
+_MAX_ANNOTATED_SCENE_OBJECTS = 20
+
+
+def scene_objects_for_plot(meta: Mapping, targets: Sequence, *,
+                           match_range_m: float = _SCENE_MATCH_RANGE_M,
+                           match_sin_az: float = _SCENE_MATCH_SIN_AZ
+                           ) -> Optional[List[Dict]]:
+    """Every generator-placed object in `meta['scene_provenance']['scene']`, converted to
+    radar-relative plan-view coordinates and tagged `labelled` against `targets` -- or
+    `None` if this frame's meta carries no usable provenance (older/analytic-fallback
+    corpora have none; callers must degrade gracefully rather than assume the key exists).
+
+    Coordinate convention (verified empirically against the generator -- use exactly
+    this, do not re-derive): `d = object_position - radar_position`; `range_m =
+    norm(d)`; `sin_azimuth = d[1] / range_m`. Radar looks along +x, so the plan-view
+    pair `plot_scene_panel` draws is `x = d[0]` (down-range), `y = d[1]` (cross-range) --
+    the SAME `(range_m, sin_azimuth)` a decoded `Target`/`Detection` would report for
+    the same physical object, which is what makes the two panels comparable.
+
+    An object counts as `labelled` iff SOME entry of `targets` (the exact decoded
+    ground-truth tuples `plot_frame_detections` draws --
+    `(range_m, sin_azimuth, object_class[, surface_range_m])`) falls within
+    `match_range_m` range AND `match_sin_az` sin-azimuth of it. Matched by GEOMETRY, not
+    by name or class: the label-encoding pipeline (`e2e.ml.labels`) does not carry the
+    generator's object identity through to the target tuple, so geometry is the only
+    correspondence available.
+    """
+    if not isinstance(meta, Mapping):
+        return None
+    prov = meta.get("scene_provenance")
+    if not prov:
+        return None
+    scene = prov.get("scene") or {}
+    objects = scene.get("objects") or []
+    if not objects:
+        return None
+    nodes = scene.get("nodes") or []
+    radar_nodes = [n for n in nodes if n.get("role") == "radar"]
+    if not radar_nodes:
+        return None
+    radar_pos = np.asarray(radar_nodes[0].get("position", (0.0, 0.0, 0.0)), dtype=float)
+
+    target_ranges_sin_az = [(float(t[0]), float(t[1])) for t in targets]
+
+    rows: List[Dict] = []
+    for obj in objects:
+        pos = np.asarray(obj.get("position", (0.0, 0.0, 0.0)), dtype=float)
+        d = pos - radar_pos
+        range_m = float(np.linalg.norm(d))
+        sin_az = float(d[1] / range_m) if range_m > 1e-9 else 0.0
+        labelled = any(abs(range_m - r) <= match_range_m and abs(sin_az - s) <= match_sin_az
+                      for r, s in target_ranges_sin_az)
+        rows.append(dict(name=str(obj.get("name", "?")), kind=str(obj.get("kind", "?")),
+                         x=float(d[0]), y=float(d[1]), range_m=range_m, sin_azimuth=sin_az,
+                         labelled=labelled))
+    return rows
+
+
+def plot_scene_panel(ax, meta, targets, detections, *,
+                     title: str = "physical scene (generator ground truth)") -> None:
+    """Plan view of the generator's OWN placed objects, beside (not instead of) the
+    measurement panel -- the capability a scratch script existed to provide out of
+    tracked code (see module docstring), redrawn here so a transpose bug in a one-off
+    script can never ship again.
+
+    Cross-range on x, down-range on y, radar marked at the origin looking along +x
+    (up the panel) -- see `scene_objects_for_plot` for the exact coordinate convention.
+    Objects that correspond to a labelled GT target draw as an open blue circle (the
+    same reading as a GT marker on the measurement panel); every OTHER placed object --
+    real, generator-placed, never in the label set -- draws as a filled red X, a marker
+    AND colour used nowhere else on either panel, because "this detection is on a real
+    object nobody labelled" is the reading this panel exists to support (task
+    requirement). `detections` (the SAME decoded tuples the measurement panel draws)
+    are back-projected via `x = r*sqrt(1-s^2)`, `y = r*s` and drawn with the
+    measurement panel's own detection marker/colour, so the two panels read as the
+    same scene. Object names are annotated unless there are more than
+    `_MAX_ANNOTATED_SCENE_OBJECTS` of them, at which point per-marker text would make
+    the panel unreadable and only the markers/colours (the panel's actual point) draw.
+
+    Degrades to an annotated "unavailable" panel -- never raises -- when `meta` carries
+    no usable `scene_provenance`/`objects`/radar node (see `scene_objects_for_plot`):
+    the measurement panel must still be producible from an older corpus with no
+    provenance at all.
+    """
+    rows = scene_objects_for_plot(meta, targets)
+    if rows is None:
+        ax.text(0.5, 0.5, "scene panel unavailable\n(no scene_provenance/objects/radar "
+                          "node in this frame's meta -- older or non-chain-generated corpus)",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9,
+                color="#8c1d1d", wrap=True)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title, fontsize=9)
+        return
+
+    seen_labels = set()
+    ax.plot(0.0, 0.0, markersize=11, linestyle="none", label="radar", **_SCENE_RADAR_STYLE)
+    seen_labels.add("radar")
+
+    for row in rows:
+        style = _SCENE_LABELLED_STYLE if row["labelled"] else _SCENE_UNLABELLED_STYLE
+        label = "labelled object" if row["labelled"] else "unlabelled object"
+        ax.plot(row["y"], row["x"], markersize=8, markeredgewidth=1.6, linestyle="none",
+               label=label if label not in seen_labels else None, **style)
+        seen_labels.add(label)
+
+    if len(rows) <= _MAX_ANNOTATED_SCENE_OBJECTS:
+        for row in rows:
+            ax.annotate(row["name"], (row["y"], row["x"]), fontsize=6,
+                       xytext=(3, 3), textcoords="offset points")
+
+    det_label = "detection (back-projected)"
+    for det in detections:
+        r, sin_az = float(det[0]), float(det[1])
+        x = r * float(np.sqrt(max(0.0, 1.0 - sin_az ** 2)))
+        y = r * sin_az
+        ax.plot(y, x, marker="+", markersize=10, color=_DET_COLOR, markeredgewidth=1.8,
+               linestyle="none", label=det_label if det_label not in seen_labels else None)
+        seen_labels.add(det_label)
+
+    ax.set_xlabel("cross-range y (m)")
+    ax.set_ylabel("down-range x (m)  [radar looks along +x]")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_title(f"{title}\n{_SCENE_PANEL_NOTE}", fontsize=8)
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.7)
+
+
 def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_idx: int,
                             out_path, *, threshold: float = 0.5, device=None,
                             ssm_chunk_size=None, n_angle_fft=None, dpi: int = 120,
                             azimuth_window: Optional[str] = "hann",
-                            db_span: float = _DEFAULT_DB_SPAN) -> Path:
+                            db_span: float = _DEFAULT_DB_SPAN,
+                            scene_panel: bool = False) -> Path:
     """One-panel figure: ground truth + one checkpoint's detections over one frame's RA map.
+    With `scene_panel=True`, a second panel (`plot_scene_panel`) draws the generator's own
+    placed objects beside it -- see that function's docstring for what it adds and how it
+    degrades on a corpus with no scene provenance.
 
     `azimuth_window`/`db_span` control the display backdrop only (see
     `frame_background_ra`/`plot_frame_detections`); they never touch what the
@@ -366,7 +542,10 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     full_max_range_m = fd.grid.max_range_m
     crop_m = _crop_range_m(fd.targets, fd.detections, full_max_range_m)
 
-    fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=dpi)
+    if scene_panel:
+        fig, (ax, ax_scene) = plt.subplots(1, 2, figsize=(12.5, 5.5), dpi=dpi)
+    else:
+        fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=dpi)
     # Single-frame figures carry the SAME protocol caveat as the comparison figure.
     # Until 2026-08-27 only `render_comparison_figure` stamped it, so a single-frame
     # panel could travel with a bare dot count and no statement that "false alarms"
@@ -381,6 +560,14 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
                           threshold=threshold, title=f"{fd.model_name}  {split} frame {frame_idx}",
                           max_range_m=crop_m, full_max_range_m=full_max_range_m,
                           vmin=-float(db_span), note=note)
+
+    if scene_panel:
+        from e2e.ml.dataset import RadarFrameDataset
+        ds = RadarFrameDataset(manifest_path, split=split)
+        meta = _frame_meta(ds, frame_idx)
+        plot_scene_panel(ax_scene, meta, fd.targets, fd.detections,
+                         title=f"{split} frame {frame_idx}  --  physical scene")
+
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -783,6 +970,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help=f"backdrop color-scale span below the frame's peak, in dB "
                         f"(default: {_DEFAULT_DB_SPAN:.0f}, see _DEFAULT_DB_SPAN's comment "
                         "for the measurement that picked it)")
+    p.add_argument("--scene-panel", action="store_true",
+                   help="single-model mode only: add a second panel drawing the generator's "
+                        "own placed objects (from the frame's meta['scene_provenance']) in "
+                        "radar-relative plan view, distinguishing labelled targets from "
+                        "placed-but-unlabelled objects -- see plot_scene_panel. Omitted/"
+                        "annotated-unavailable on a corpus with no scene provenance")
 
     p.add_argument("--perclass", action="append", default=None, metavar="NAME=METRICS.json",
                    help="corpus-level mode: draw the per-class AP/AR bar chart instead of a "
@@ -842,6 +1035,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("--compare needs both --fftradnet-checkpoint and --ssmradnet-checkpoint",
                   file=sys.stderr)
             return 2
+        if args.scene_panel:
+            print("--scene-panel is single-model mode only (not --compare)", file=sys.stderr)
+            return 2
         rank_checkpoint = args.fftradnet_checkpoint
     else:
         if not args.checkpoint:
@@ -880,7 +1076,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         out_path = render_detection_figure(
             args.manifest, args.checkpoint, args.split, frame_idx, args.out,
             threshold=args.threshold, device=device, ssm_chunk_size=args.ssm_chunk_size,
-            n_angle_fft=args.n_angle_fft, azimuth_window=azimuth_window, db_span=args.db_span)
+            n_angle_fft=args.n_angle_fft, azimuth_window=azimuth_window, db_span=args.db_span,
+            scene_panel=args.scene_panel)
 
     print(f"wrote {out_path}")
     return 0
