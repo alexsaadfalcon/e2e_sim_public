@@ -274,7 +274,16 @@ def _to_grid(power: torch.Tensor, cfg, grid: LabelGrid) -> torch.Tensor:
 
     sin_src = 2.0 * (torch.arange(n_angle, device=dev, dtype=torch.float32) - n_angle // 2) / n_angle
     sin_dst = (torch.arange(grid.n_azimuth, device=dev, dtype=torch.float32) + 0.5) * grid.az_bin - 1.0
-    ai = torch.bucketize(sin_dst, sin_src).clamp_(0, n_angle - 1)
+    # NEAREST source bin, not `torch.bucketize` (2026-08-27). bucketize returns the
+    # INSERTION index -- the first source >= target, i.e. a CEILING -- so every
+    # destination cell sampled the angle bin ABOVE it rather than the closest one, a
+    # systematic half-bin (1/n_angle) bias toward negative sin_az. The docstring below
+    # has always said "nearest-neighbour"; the code did not do it. Because only the
+    # CLASSICAL arm resamples through here (learned arms consume the network input
+    # directly), the bias was not common-mode -- it tilted every classical-vs-learned
+    # comparison against the classical arm. `sin_src` is uniform with spacing
+    # 2/n_angle starting at -1, so the nearest index is a rounding, no search needed.
+    ai = torch.round((sin_dst - sin_src[0]) * (n_angle / 2.0)).long().clamp_(0, n_angle - 1)
 
     r_fine = (torch.arange(n_range_fine, device=dev, dtype=torch.float32) + 0.5) \
         * float(cfg.range_resolution_m)
