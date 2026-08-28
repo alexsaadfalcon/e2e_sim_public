@@ -392,11 +392,22 @@ ray-traced corpus (`benchmark_v1`, tier D2):
 | classical CA-CFAR | 0.129 |
 | FFTRadNet | 0.095 |
 | SSMRadNet (*not converged* — see below) | 0.096 |
-| **data-blind null (chance floor)** | **0.065** |
+| **data-blind null (chance floor)** | **0.063 ± 0.002** |
 
 Classical CFAR leads both learned detectors, and both learned detectors score above the
 chance floor. The null arm is what makes the second statement a measurement rather than
 an assumption.
+
+The null arm is *random*, so a single run is a draw, not a constant: over seeds
+0/1000/2000/3000/4000 it scores 0.0645, 0.0604, 0.0608, 0.0638, 0.0643 — mean 0.0628,
+sd 0.0018. The table reports that mean and spread rather than one seed, because the
+third decimal of any single draw is noise. Reproduce with:
+
+```bash
+python -c "from e2e.ml.compare_detectors import score_null; \
+print([round(score_null('e2e/ml/datasets/b1_bench_v2/benchmark_v1_D2/manifest.json', \
+'test', seed=s)['AP'], 5) for s in (0,1000,2000,3000,4000)])"
+```
 
 **Two known defects depress every absolute number in that table.** Both were found by
 adversarial review, both are measured, and the ordering above survives both because every
