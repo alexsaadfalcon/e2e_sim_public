@@ -513,7 +513,44 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
     return {"metrics": metrics}
 
 
+def _build_arg_parser():
+    """Exists so that `--help` PRINTS HELP instead of running the tutorial.
+
+    Without an argument parser this module's `__main__` ran all three figure builders
+    unconditionally, whatever was on the command line -- so `python -m
+    e2e.main.main_interconnect --help`, the first thing anyone types to find out what a
+    module does, silently spent minutes recomputing and OVERWRITING two files that are
+    tracked in git (`docs/media/interconnect_range_profiles.png` and
+    `interconnect_before_after.png`), leaving a dirty working tree. `docs/PHYSICS.md`
+    points new readers straight at this module, so that was on the onboarding path.
+
+    Running with no arguments behaves exactly as before.
+    """
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="python -m e2e.main.main_interconnect",
+        description="Tutorial: drive InterconnectBlock from measured S21(f) CSVs and "
+                    "compare the resulting range profiles. Writes three figures.",
+    )
+    p.add_argument("--out-dir", default=None,
+                   help="write the figures here instead of the tracked docs/media/ "
+                        "paths -- use this if you do not want a dirty working tree")
+    p.add_argument("--only", choices=("response", "range-profile", "before-after"),
+                   default=None, help="build just one of the three figures")
+    return p
+
+
 if __name__ == "__main__":
-    main()
-    range_profile_comparison()
-    before_after_comparison()
+    _args = _build_arg_parser().parse_args()
+    if _args.out_dir:
+        _out = Path(_args.out_dir)
+        _out.mkdir(parents=True, exist_ok=True)
+        RANGE_PROFILE_FIG_PATH = _out / Path(str(RANGE_PROFILE_FIG_PATH)).name
+        BEFORE_AFTER_FIG_PATH = _out / Path(str(BEFORE_AFTER_FIG_PATH)).name
+    if _args.only in (None, "response"):
+        main()
+    if _args.only in (None, "range-profile"):
+        range_profile_comparison()
+    if _args.only in (None, "before-after"):
+        before_after_comparison()

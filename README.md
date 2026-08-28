@@ -190,7 +190,11 @@ python -m e2e.environment.scenario_runner --scenario path/to/scenario.json --fra
 
 # Drop --dry-run on a machine with Sionna RT + DrJit + LLVM to generate real frames.
 
-# The etoile_radar scenario can back the runtime 'etoile' base scene directly:
+# The etoile_radar scenario can back the runtime 'etoile' base scene directly.
+# NOTE: no --dry-run below means this is a REAL ray-tracing run -- it needs Sionna RT
+# + DrJit + LLVM and a GPU, and etoile_radar is 100 frames x 5000 frequencies, so it
+# is a long job. Add --dry-run (and a scratch --out) first if you only want to see the
+# shapes and the file it would write.
 python -m e2e.environment.scenario_runner --scenario etoile_radar \
     --out e2e/environment/sionna_sims/etoile.pkl
 ```
