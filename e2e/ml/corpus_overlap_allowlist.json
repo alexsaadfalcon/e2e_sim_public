@@ -1,21 +1,5 @@
 {
   "_comment": "Declared-intentional cross-corpus scene reuse for e2e.ml.check_corpus_overlap. Each entry is an unordered [corpus_a, corpus_b] pair (corpus = manifest.json's parent directory, path relative to the scan root, POSIX-separated). A pair here is NOT a bug -- it is documented reuse the owner chose; anything NOT here that the gate finds is a real, undeclared leak.",
-  "pairs": [
-    ["rt_no_interconnect/ti_iwr1443_D1", "rt_corpus_v1/ti_iwr1443_D1"],
-    ["pilot_radial/radial_like_D1", "sweep/gentle/ti_iwr1443_D1"],
-    ["pilot_radial/radial_like_D1", "sweep/moderate/ti_iwr1443_D1"],
-    ["pilot_radial/radial_like_D1", "sweep/overnight/ti_iwr1443_D1"],
-    ["pilot_radial/radial_like_D1", "sweep/strong/ti_iwr1443_D1"],
-    ["pilot_radial/radial_like_D1", "sweep/v_gentle/ti_iwr1443_D1"],
-    ["sweep/gentle/ti_iwr1443_D1", "sweep/moderate/ti_iwr1443_D1"],
-    ["sweep/gentle/ti_iwr1443_D1", "sweep/overnight/ti_iwr1443_D1"],
-    ["sweep/gentle/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
-    ["sweep/gentle/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
-    ["sweep/moderate/ti_iwr1443_D1", "sweep/overnight/ti_iwr1443_D1"],
-    ["sweep/moderate/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
-    ["sweep/moderate/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
-    ["sweep/overnight/ti_iwr1443_D1", "sweep/strong/ti_iwr1443_D1"],
-    ["sweep/overnight/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"],
-    ["sweep/strong/ti_iwr1443_D1", "sweep/v_gentle/ti_iwr1443_D1"]
-  ]
+  "_emptied_2026_08_28": "Every pair this file used to declare named a corpus that has since been deleted from disk (see notes/CORPUS_DELETION_2026-08-28.md: 11 superseded corpora, all pre-A11 physics and/or F43-invalid presets). Stale entries were removed rather than kept as history, because an allowlist entry is a SUPPRESSION rule, not a record: if a corpus of the same name is ever regenerated, a leftover entry would silently excuse an overlap nobody re-verified. History belongs in the notes, not in a live gate. Re-declare a pair here only after checking that specific corpus pair on disk.",
+  "pairs": []
 }
