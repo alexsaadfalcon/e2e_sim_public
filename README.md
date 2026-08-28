@@ -380,19 +380,40 @@ format, smoke-test results, and model attribution/licensing notes.
 training-set targets live, seeing no input at all. That arm is the benchmark's chance
 floor: measured on the same frames and the same metric, rather than assumed to be zero.
 
-On a 1,721-scene ray-traced corpus (`benchmark_v1`, tier D2), at recall 0.5:
+Measured on the **173-scene test split** (1,022 labelled targets) of a 1,721-scene
+ray-traced corpus (`benchmark_v1`, tier D2):
 
 | arm | average precision |
 |---|---|
 | classical CA-CFAR | 0.129 |
-| learned detectors (FFTRadNet, SSMRadNet) | ~0.095 |
+| FFTRadNet | 0.095 |
+| SSMRadNet (*not converged* — see below) | 0.096 |
 | **data-blind null (chance floor)** | **0.065** |
 
-Two readings, both of which the null arm is what makes possible. Classical CFAR still
-leads both learned detectors, by +0.02 to +0.055 AP (95% CI). And both learned detectors
-now score significantly above the chance floor (+0.030, 95% CI [+0.019, +0.041]) where on
-a 500-scene corpus they did not — a corpus-size result, visible only because the floor is
-measured.
+Classical CFAR leads both learned detectors, and both learned detectors score above the
+chance floor. The null arm is what makes the second statement a measurement rather than
+an assumption.
+
+**Two known defects depress every absolute number in that table.** Both were found by
+adversarial review, both are measured, and the ordering above survives both because every
+arm is scored under the identical criterion:
+
+1. **The match criterion is asymmetric.** It matches range against an object's *surface*
+   but azimuth against its *centre*, while the default target model places an object's
+   energy on its corners — an offset of 0.24 in sin(azimuth) for a car at 10 m against a
+   0.06 tolerance. Correcting only the azimuth tolerance raises classical AP from 0.129 to
+   **0.303** on identical maps.
+2. **The label set omits ~34% of the objects the generator places** (clutter), so a
+   detector is charged a false alarm for correctly detecting a real object. Scoring against
+   the full object list raises classical AP from 0.129 to **0.184**. Correcting both gives
+   **0.372**.
+
+So "detection is hard on this corpus" is substantially an artifact of the scoring, not a
+property of the detectors. Quote the ordering; do not quote the absolute values as a
+difficulty measure until both are fixed.
+
+`SSMRadNet`'s entry comes from a run whose best epoch was 74 of 80 — still improving when
+it stopped — so 0.096 is a lower bound, not a converged result.
 
 Read the accompanying caveats before quoting any of this: "false alarms" in these maps
 include deliberately-unlabelled clutter a correct detector *should* fire on, the maps are
