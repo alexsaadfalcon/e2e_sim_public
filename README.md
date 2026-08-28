@@ -404,9 +404,18 @@ arm is scored under the identical criterion:
    0.06 tolerance. Correcting only the azimuth tolerance raises classical AP from 0.129 to
    **0.303** on identical maps.
 2. **The label set omits ~34% of the objects the generator places** (clutter), so a
-   detector is charged a false alarm for correctly detecting a real object. Scoring against
-   the full object list raises classical AP from 0.129 to **0.184**. Correcting both gives
-   **0.372**.
+   detector is charged a false alarm for correctly detecting a real object. Treating those
+   objects as don't-care regions — the standard remedy, and the one now implemented —
+   raises classical AP from 0.129 to **0.141**. (Scoring them as if they had been labelled
+   targets instead gives 0.184, but that is a different and more generous counterfactual:
+   it also credits the detector for finding clutter, which the benchmark does not ask of
+   it.)
+
+The azimuth correction is worth much more than the label one, and its exact value on this
+corpus is not yet measurable: the per-target extent is written at generation time, and a
+corpus built before 2026-08-27 carries none, so the corrected criterion falls back to the
+old behaviour on it. The 0.303 figure above is a uniform-tolerance stand-in that bounds
+the per-target fix from above; pinning it down needs the corpus regenerated.
 
 So "detection is hard on this corpus" is substantially an artifact of the scoring, not a
 property of the detectors. Quote the ordering; do not quote the absolute values as a
