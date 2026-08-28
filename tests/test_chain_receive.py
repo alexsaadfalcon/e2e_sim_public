@@ -475,3 +475,46 @@ def test_if_hpf_steep_order_never_nans(torch_device):
     out = blk.apply({"adc": torch.ones(1, 1, 512, dtype=torch.complex64,
                                        device=torch_device)})["adc"]
     assert not torch.isnan(out.real).any() and not torch.isnan(out.imag).any()
+
+
+def test_quant_snr_is_json_safe_on_a_signal_free_frame(torch_device):
+    """An all-zero frame must not poison a results file with `-Infinity`.
+
+    `quant_snr_db` used to be `float(10*log10(0/tiny))` = `-inf` when nothing reached the
+    converter. `json.dumps` writes that as the bare token `-Infinity`, which is NOT valid
+    JSON -- Python's own loader accepts it by default, but a strict parser (or any other
+    language's) rejects the whole document. One dead frame could invalidate an entire
+    run's report. Undefined is now reported as `None`, i.e. `null`.
+    """
+    import json
+
+    out = QuantizerBlock(bits=12).apply(
+        {"adc": torch.zeros(4, 16, dtype=torch.complex64, device=torch_device)})
+
+    assert out["quant_snr_db"] is None
+    encoded = json.dumps({"quant_snr_db": out["quant_snr_db"]})
+    assert encoded == '{"quant_snr_db": null}'
+
+    def _reject_constants(c):
+        raise ValueError(f"non-standard JSON constant {c!r}")
+
+    json.loads(encoded, parse_constant=_reject_constants)  # must not raise
+
+
+def test_quant_snr_rises_under_clipping_and_that_is_why_it_needs_its_partner(torch_device):
+    """Pins the counter-intuitive behaviour so nobody "fixes" it into a quality score.
+
+    `quant_snr_db` measures the QUANTIZER, referenced to what survives clipping. Drive
+    the converter until every sample rails and the number goes UP, because a railed
+    envelope is nearly constant and quantizes beautifully. That is why `clipped_fraction`
+    is reported beside it and why neither means anything alone.
+    """
+    torch.manual_seed(0)
+    big = ((torch.randn(4, 4096, device=torch_device)
+            + 1j * torch.randn(4, 4096, device=torch_device)).to(torch.complex64) * 1000.0)
+    out = QuantizerBlock(bits=12, full_scale=0.01).apply({"adc": big})
+
+    assert out["clipped_fraction"] > 0.99, "test setup failed to saturate the converter"
+    assert out["quant_snr_db"] > 60.0, (
+        "a fully-railed frame still reports a high QUANTIZER SNR -- if this now fails, "
+        "the metric's meaning changed and the docstring must change with it")

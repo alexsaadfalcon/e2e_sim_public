@@ -352,6 +352,22 @@ class QuantizerBlock:
     the clipped-but-unquantized input over the power of the quantization error added on
     top of it).
 
+    **`quant_snr_db` IS NOT A CONVERTER-QUALITY SCORE, AND MUST BE READ NEXT TO
+    `clipped_fraction`.** It is the SNR of the QUANTIZER, referenced to the signal that
+    survives clipping -- clipping distortion is deliberately not in its numerator or its
+    denominator, because that is reported separately. The consequence is that the number
+    goes UP as the converter is driven harder into saturation: measured 2026-08-28, a
+    frame driven to `clipped_fraction = 1.0000` (every single sample railed) still reports
+    **69.28 dB**, because what is left after clipping is a near-constant envelope that
+    quantizes beautifully. A reader who takes `quant_snr_db` alone as "how good is the
+    ADC" gets exactly the wrong answer in the regime that matters. Neither field is wrong;
+    the pair is the measurement.
+
+    `quant_snr_db` is `None` -- not `-inf` -- when the input carries no signal at all, so
+    the value stays JSON-serializable. `float("-inf")` serializes as the bare token
+    `-Infinity`, which `json.dumps` emits happily and a STRICT JSON parser rejects, so an
+    all-zero frame used to be able to poison a whole results file.
+
     FULL SCALE DEFAULTS TO AUTOMATIC GAIN, and that default matters more than it looks.
     Ray-traced cubes carry PHYSICAL amplitudes -- `rt_gen` deliberately does not
     normalize -- and at 77 GHz over tens of metres a return lands around 1e-7..1e-6,
@@ -413,7 +429,14 @@ class QuantizerBlock:
         sig_power = torch.mean(torch.abs(clipped) ** 2)
         noise_power = torch.mean(torch.abs(out - clipped) ** 2)
         eps = torch.finfo(torch.float32).tiny
-        quant_snr_db = float(10.0 * torch.log10(sig_power / noise_power.clamp_min(eps)))
+        if float(sig_power) <= 0.0:
+            # No signal at all: quantization SNR is undefined, not "-inf". Reporting
+            # -inf serializes as the bare token -Infinity, which json.dumps writes and
+            # a strict parser rejects -- one all-zero frame could invalidate an entire
+            # results file. None serializes as null.
+            quant_snr_db = None
+        else:
+            quant_snr_db = float(10.0 * torch.log10(sig_power / noise_power.clamp_min(eps)))
 
         return {"adc": out, "clipped_fraction": clipped_fraction,
                 "quant_snr_db": quant_snr_db, "adc_full_scale": fs}
