@@ -543,7 +543,12 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     crop_m = _crop_range_m(fd.targets, fd.detections, full_max_range_m)
 
     if scene_panel:
-        fig, (ax, ax_scene) = plt.subplots(1, 2, figsize=(12.5, 5.5), dpi=dpi)
+        # Wider than 2x the single-panel width, and the long protocol caveat moves OUT
+        # of the panel title into a wrapped figure footer below (see `note` handling).
+        # Left in the title, the multi-line footer collides with the scene panel's own
+        # caveat and overruns the canvas -- which would be a legibility defect on the
+        # one figure whose entire job is to stop a viewer misreading a detection map.
+        fig, (ax, ax_scene) = plt.subplots(1, 2, figsize=(15.0, 6.0), dpi=dpi)
     else:
         fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=dpi)
     # Single-frame figures carry the SAME protocol caveat as the comparison figure.
@@ -559,7 +564,7 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
     plot_frame_detections(ax, ra_db, sin_az_axis, range_axis_m, fd.targets, fd.detections,
                           threshold=threshold, title=f"{fd.model_name}  {split} frame {frame_idx}",
                           max_range_m=crop_m, full_max_range_m=full_max_range_m,
-                          vmin=-float(db_span), note=note)
+                          vmin=-float(db_span), note=None if scene_panel else note)
 
     if scene_panel:
         from e2e.ml.dataset import RadarFrameDataset
@@ -567,6 +572,16 @@ def render_detection_figure(manifest_path, checkpoint_path, split: str, frame_id
         meta = _frame_meta(ds, frame_idx)
         plot_scene_panel(ax_scene, meta, fd.targets, fd.detections,
                          title=f"{split} frame {frame_idx}  --  physical scene")
+        # The caveat still travels with the figure -- it just travels along the bottom,
+        # where it has the full canvas width, instead of fighting two panel titles for
+        # the top. It is never dropped: a figure without it can be misread as a
+        # false-alarm rate.
+        fig.tight_layout(rect=(0, 0.10, 1, 1))
+        fig.text(0.5, 0.055, note, ha="center", va="top", fontsize=7.5, wrap=True,
+                 color="#333333")
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
 
     fig.tight_layout()
     fig.savefig(out_path)
