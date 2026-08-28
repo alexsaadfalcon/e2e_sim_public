@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import warnings
+
 import numpy as np
 import torch
 
@@ -659,7 +661,21 @@ def _power_bin(power, n_bins, dim):
     through when L < n_bins (nothing to integrate down).
     """
     L = power.shape[dim]
-    if L <= n_bins:
+    if L < n_bins:
+        # Pass-through, and SAY SO. Callers reasonably read the block docstrings'
+        # "[bins, bins]" as a guarantee and slice on it; before this warning the map
+        # came back [bins, L] silently and the mistake surfaced far from its cause.
+        # We do not pad up to n_bins on purpose: zero-padding would manufacture range
+        # gates -- and their sidelobes -- that the band never resolved.
+        warnings.warn(
+            f"range axis has only {L} samples but {n_bins} display gates were "
+            f"requested, so the map is [{n_bins}, {L}], NOT [{n_bins}, {n_bins}]: a "
+            f"short band is reported at the resolution it actually measured rather "
+            f"than interpolated up. Pass bins<={L} to make this explicit.",
+            stacklevel=3,
+        )
+        return power
+    if L == n_bins:
         return power
     per = -(-L // n_bins)              # ceil division
     pad = per * n_bins - L
@@ -742,8 +758,21 @@ class RangeAzBlock:
     ``window`` optionally tapers the azimuth aperture (None / 'hann' / 'hamming').
 
     Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_az' is
-    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
-    n_chirp > 1.
+    ``[bins, n_range]`` for single-chirp frames and ``[n_chirp, bins, n_range]`` ONLY
+    when n_chirp > 1, where ``n_range = min(bins, n_freqs)``.
+
+    **``n_range`` is ``bins`` only when the band actually has that many samples.**
+    The range axis is produced by power-BINNING the full-band profile DOWN to ``bins``
+    display gates, which is only possible when ``n_freqs >= bins``; with a shorter band
+    there is nothing to bin down and the block returns the ``n_freqs`` gates it really
+    measured. It does NOT pad or interpolate up to ``bins``, and that is deliberate --
+    zero-padding would manufacture range gates, and their sidelobes, that the band never
+    resolved. This docstring previously promised ``[bins, bins]`` unconditionally, which
+    was wrong for any short band and is reachable from a shipped scenario:
+    ``e2e/environment/scenarios/canyon_radar.json`` sets ``num_freqs: 128`` while
+    ``e2e/main/main_sionna_blocks.py`` constructs this block at the default ``bins=256``.
+    A warning is emitted in that case, since a caller who slices assuming a square map
+    would otherwise fail somewhere far away from the cause.
     """
 
     frame_capabilities = _PER_CHIRP
@@ -783,8 +812,9 @@ class RangeElBlock:
     ``window`` optionally tapers the elevation aperture (None / 'hann' / 'hamming').
 
     Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_el' is
-    ``[bins, bins]`` for single-chirp frames and ``[n_chirp, bins, bins]`` ONLY when
-    n_chirp > 1.
+    ``[bins, n_range]`` for single-chirp frames and ``[n_chirp, bins, n_range]`` ONLY
+    when n_chirp > 1, where ``n_range = min(bins, n_freqs)`` -- see ``RangeAzBlock`` for
+    why a short band is reported at its own resolution rather than padded up to ``bins``.
     """
 
     frame_capabilities = _PER_CHIRP

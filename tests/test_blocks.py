@@ -392,3 +392,50 @@ def test_env_block_explicit_array_shape_overrides_v2_meta(tmp_path, monkeypatch)
     # metadata pass-throughs are independent of the array_shape override.
     assert block.freq_plan is not None
     assert block.physical_scale is True
+
+
+def test_range_maps_report_a_short_band_at_its_own_resolution_and_say_so(torch_device):
+    """`[bins, bins]` was promised unconditionally and is false for any short band.
+
+    The range axis is made by power-binning the full-band profile DOWN to `bins` display
+    gates, which only works when `n_freqs >= bins`. With a shorter band there is nothing
+    to bin down, so the block returns the gates it actually measured -- it does NOT pad or
+    interpolate up to `bins`, because zero-padding manufactures range gates, and their
+    sidelobes, that the band never resolved.
+
+    Reachable from shipped config, which is why it is pinned:
+    `e2e/environment/scenarios/canyon_radar.json` sets `num_freqs: 128` while
+    `e2e/main/main_sionna_blocks.py` builds these blocks at the default `bins=256`.
+    """
+    import warnings
+
+    long_band = torch.randn(32, 32, 1, 512, dtype=torch.complex64, device=torch_device)
+    short_band = torch.randn(32, 32, 1, 128, dtype=torch.complex64, device=torch_device)
+
+    # contract holds, and stays quiet
+    with warnings.catch_warnings(record=True) as clean:
+        warnings.simplefilter("always")
+        out = RangeAzBlock(bins=256).apply({"s_pars": long_band})["range_az"]
+    assert tuple(out.shape) == (256, 256)
+    assert not clean, "a band long enough to bin down must not warn"
+
+    # contract cannot hold: reported at native resolution, loudly
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        out = RangeAzBlock(bins=256).apply({"s_pars": short_band})["range_az"]
+    assert tuple(out.shape) == (256, 128), "must NOT be padded up to a square map"
+    assert len(warned) == 1 and "128" in str(warned[0].message)
+
+    # the documented way to make it explicit is silent again
+    with warnings.catch_warnings(record=True) as explicit:
+        warnings.simplefilter("always")
+        out = RangeAzBlock(bins=128).apply({"s_pars": short_band})["range_az"]
+    assert tuple(out.shape) == (128, 128)
+    assert not explicit, "asking for a band-sized map must not warn"
+
+    # RangeElBlock shares the helper and therefore the behaviour
+    with warnings.catch_warnings(record=True) as el:
+        warnings.simplefilter("always")
+        out = RangeElBlock(bins=256).apply({"s_pars": short_band})["range_el"]
+    assert tuple(out.shape) == (256, 128)
+    assert len(el) == 1
