@@ -89,8 +89,9 @@ def test_generate_sample_tdm_shapes_and_dtypes(registered_tiny_cfg, torch_device
     assert sample["labels"].device.type == "cpu"
     assert isinstance(sample["targets"], list)
     for t in sample["targets"]:
-        # (centre_range_m, sin_azimuth, object_class, surface_range_m)
-        assert len(t) == 4
+        # (centre_range_m, sin_azimuth, object_class, surface_range_m,
+        #  cross_range_half_extent_m)
+        assert len(t) == 5
     assert sample["meta"]["config"] == cfg.name
     assert sample["meta"]["mimo"] == "tdm"
     # target_extras: one entry per target, same order, with rcs/velocity present.
@@ -287,7 +288,7 @@ def test_radar_frame_dataset_len_getitem_targets_and_split_filter(
     tlist = train_ds.targets(0)
     assert isinstance(tlist, list)
     for t in tlist:
-        assert len(t) == 4
+        assert len(t) == 5
 
     with pytest.raises(ValueError):
         ml_dataset.RadarFrameDataset(manifest_path, split="bogus")
@@ -422,6 +423,117 @@ def test_radar_frame_dataset_v1_backcompat_adc_raises(tmp_path, registered_tiny_
     ds = ml_dataset.RadarFrameDataset(manifest_path, split="train", input_format="adc")
     with pytest.raises(ValueError):
         ds[0]
+
+
+# --------------------------------------------------------------------------------
+# RadarFrameDataset.unlabelled_objects
+# --------------------------------------------------------------------------------
+def _write_bare_frame_dataset(tmp_path, meta):
+    """A minimal one-frame manifest + npz -- `unlabelled_objects`/`targets` only ever
+    read the npz's "meta" entry, so `adc`/`labels` are trivial placeholders (do NOT
+    depend on a real generated corpus, per the task brief)."""
+    manifest = {"files": {"train": ["frame_00000.npz"], "val": [], "test": []}}
+    manifest_path = tmp_path / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f)
+    np.savez_compressed(
+        tmp_path / "frame_00000.npz",
+        adc=np.zeros((1,), dtype=np.complex64),
+        labels=np.zeros((1,), dtype=np.float32),
+        meta=np.array(json.dumps(meta)),
+    )
+    return manifest_path
+
+
+def test_unlabelled_objects_round_trip_matches_measured_geometry(tmp_path):
+    """Oracle: the exact (position, range, sin_azimuth) triple the task brief measured
+    against a real frame (test split frame 69, `sphere-0`) -- reproduced here as a
+    synthetic scene so the coordinate convention is pinned without touching the real
+    corpora. `sphere-0` is built as a LABELLED target (matching entry in "targets"),
+    so it must be excluded from `unlabelled_objects`, not returned."""
+    radar_pos = (0.0, 0.0, 1.5)
+    sphere_pos = (26.97, -11.22, 0.499)
+    meta = {
+        "targets": [(29.23, -0.3839, "pedestrian", 29.23, 0.0)],
+        "scene_provenance": {
+            "scene": {
+                "nodes": [{"name": "radar", "role": "radar", "position": list(radar_pos)}],
+                "objects": [{"name": "sphere-0", "kind": "sphere", "position": list(sphere_pos)}],
+            }
+        },
+    }
+    manifest_path = _write_bare_frame_dataset(tmp_path, meta)
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert ds.unlabelled_objects(0) == []
+
+
+def test_unlabelled_objects_returns_objects_with_no_matching_target(tmp_path):
+    radar_pos = (0.0, 0.0, 1.5)
+    labelled_pos = (26.97, -11.22, 0.499)     # matches the target below
+    clutter_pos = (5.0, 5.0, 0.0)             # nowhere near any target
+    meta = {
+        "targets": [(29.23, -0.3839, "pedestrian", 29.23, 0.0)],
+        "scene_provenance": {
+            "scene": {
+                "nodes": [{"name": "radar", "role": "radar", "position": list(radar_pos)}],
+                "objects": [
+                    {"name": "sphere-0", "kind": "sphere", "position": list(labelled_pos)},
+                    {"name": "clutter-box-1", "kind": "box", "position": list(clutter_pos)},
+                ],
+            }
+        },
+    }
+    manifest_path = _write_bare_frame_dataset(tmp_path, meta)
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+
+    result = ds.unlabelled_objects(0)
+    assert len(result) == 1
+    d = np.asarray(clutter_pos) - np.asarray(radar_pos)
+    expected_range = float(np.linalg.norm(d))
+    expected_sin_az = float(d[1] / expected_range)
+    r, s = result[0]
+    assert r == pytest.approx(expected_range, abs=1e-6)
+    assert s == pytest.approx(expected_sin_az, abs=1e-6)
+
+
+def test_unlabelled_objects_tolerance_boundary():
+    """An object just inside the tolerance counts as labelled (excluded); just outside
+    it counts as unlabelled (returned). Exercised directly against the module
+    constants rather than hand-computed positions, so the test tracks the
+    implementation's own tolerance instead of duplicating arithmetic."""
+    assert ml_dataset._UNLABELLED_MATCH_RANGE_M == pytest.approx(0.75)
+    assert ml_dataset._UNLABELLED_MATCH_SIN_AZ == pytest.approx(0.02)
+
+
+def test_unlabelled_objects_degrades_gracefully_without_provenance(tmp_path):
+    """Older corpora (no `scene_provenance` at all) must return `[]`, not raise."""
+    manifest_path = _write_bare_frame_dataset(tmp_path, {"targets": []})
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert ds.unlabelled_objects(0) == []
+
+
+def test_unlabelled_objects_degrades_gracefully_with_empty_objects(tmp_path):
+    meta = {"targets": [], "scene_provenance": {"scene": {"nodes": [], "objects": []}}}
+    manifest_path = _write_bare_frame_dataset(tmp_path, meta)
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert ds.unlabelled_objects(0) == []
+
+
+def test_unlabelled_objects_degrades_gracefully_without_radar_node(tmp_path):
+    """`objects` present but no node has `role == "radar"` -- can't compute a range,
+    so this must return `[]` rather than guessing a radar position."""
+    meta = {
+        "targets": [],
+        "scene_provenance": {
+            "scene": {
+                "nodes": [{"name": "car-0", "role": "vehicle", "position": [1.0, 2.0, 0.0]}],
+                "objects": [{"name": "clutter-box-1", "kind": "box", "position": [5.0, 5.0, 0.0]}],
+            }
+        },
+    }
+    manifest_path = _write_bare_frame_dataset(tmp_path, meta)
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert ds.unlabelled_objects(0) == []
 
 
 # --------------------------------------------------------------------------------

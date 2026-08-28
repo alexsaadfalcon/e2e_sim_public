@@ -14,7 +14,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from e2e.environment.scatterers import RadarPose, Scatterer
-from e2e.ml.labels import LabelGrid, decode_detections, encode_detection_labels, targets_in_grid
+from e2e.ml.labels import (
+    LabelGrid,
+    cross_range_half_extent_m,
+    decode_detections,
+    encode_detection_labels,
+    targets_in_grid,
+)
 
 
 def _target(r, sin_az, object_class="vehicle"):
@@ -148,12 +154,13 @@ def test_targets_in_grid_filters_mixed_scene():
 
     result = targets_in_grid(grid, [near, far], pose)
     assert len(result) == 1
-    r, sin_az, cls, surface_r = result[0]
+    r, sin_az, cls, surface_r, cross_half = result[0]
     assert r == pytest.approx(10.0, abs=1e-6)
     assert sin_az == pytest.approx(0.1, abs=1e-6)
     assert cls == "vehicle"
-    # point scatterer (no extent): surface == centre
+    # point scatterer (no extent): surface == centre, no cross-range footprint
     assert surface_r == pytest.approx(10.0, abs=1e-6)
+    assert cross_half == pytest.approx(0.0, abs=1e-9)
 
 
 # --------------------------------------------------------------------------------
@@ -226,9 +233,11 @@ def test_point_target_encoding_is_unchanged_by_the_surface_convention(torch_devi
     ci = int(r_true / grid.range_bin_m)
     assert int(rows.min()) == ci - 1 and int(rows.max()) == ci + 1
 
-    (r_centre, _sin_az, _cls, r_surface), = targets_in_grid(grid, [_target(r_true, 0.1)], pose)
+    (r_centre, _sin_az, _cls, r_surface, cross_half), = targets_in_grid(
+        grid, [_target(r_true, 0.1)], pose)
     assert r_surface == pytest.approx(r_centre)
     assert r_centre == pytest.approx(r_true, abs=1e-6)
+    assert cross_half == pytest.approx(0.0, abs=1e-9)
 
 
 def test_footprint_sits_on_the_surface_and_regression_points_at_the_centre(torch_device):
@@ -241,7 +250,7 @@ def test_footprint_sits_on_the_surface_and_regression_points_at_the_centre(torch
     sc = _extended_target(r_centre, 0.0, (length, 1.8, 1.5), yaw_rad=0.0)
 
     r_surface_expected = r_centre - length / 2.0
-    (r_c, _sin_az, _cls, r_s), = targets_in_grid(grid, [sc], pose)
+    (r_c, _sin_az, _cls, r_s, _cross_half), = targets_in_grid(grid, [sc], pose)
     assert r_c == pytest.approx(r_centre, abs=1e-6)
     assert r_s == pytest.approx(r_surface_expected, abs=1e-6)
 
@@ -275,14 +284,64 @@ def test_broadside_and_end_on_footprints_differ(torch_device):
     end_on = _extended_target(20.0, 0.0, (4.4, 1.8, 1.5), yaw_rad=0.0)
     broadside = _extended_target(20.0, 0.0, (4.4, 1.8, 1.5), yaw_rad=math.pi / 2)
 
-    (_c1, _s1, _k1, surf_end), = targets_in_grid(grid, [end_on], pose)
-    (_c2, _s2, _k2, surf_broad), = targets_in_grid(grid, [broadside], pose)
+    (_c1, _s1, _k1, surf_end, cross_end), = targets_in_grid(grid, [end_on], pose)
+    (_c2, _s2, _k2, surf_broad, cross_broad), = targets_in_grid(grid, [broadside], pose)
     assert surf_end == pytest.approx(20.0 - 2.2, abs=1e-6)
     assert surf_broad == pytest.approx(20.0 - 0.9, abs=1e-6)
+    # Same yaw-awareness for the CROSS-RANGE extent: end-on presents its half-WIDTH
+    # (0.9 m) across azimuth, broadside its half-LENGTH (2.2 m) -- the two footprint
+    # dimensions swap roles exactly as the range-axis surface point does above.
+    assert cross_end == pytest.approx(0.9, abs=1e-6)
+    assert cross_broad == pytest.approx(2.2, abs=1e-6)
 
     rows_end = torch.nonzero(encode_detection_labels(grid, [end_on], pose)[0])[:, 0]
     rows_broad = torch.nonzero(encode_detection_labels(grid, [broadside], pose)[0])[:, 0]
     assert int(rows_broad.min()) > int(rows_end.max())
+
+
+# --------------------------------------------------------------------------------
+# Cross-range half-extent (added 2026-08-27: the azimuth-axis counterpart of the
+# surface-range split above, consumed by e2e.ml.metrics as a widened azimuth
+# match tolerance for don't-care regions)
+# --------------------------------------------------------------------------------
+def test_cross_range_half_extent_zero_for_point_target():
+    """No extent -> no footprint to be off-centre by."""
+    pose = RadarPose()
+    sc = _target(20.0, 0.1)   # built with no extent_m
+    assert cross_range_half_extent_m(sc, pose) == 0.0
+
+
+def test_cross_range_half_extent_matches_ellipse_support_function():
+    """Oracle: independently recompute the ellipse support-function projection
+    (`sqrt((a*n_x)^2 + (b*n_y)^2)`, `n` = the object's own local frame direction of
+    `array_axis(pose)`) for an arbitrary (non-axis-aligned) yaw, and check the
+    module's value against it -- not just the two special-cased 0/90 degree yaws the
+    other tests above use."""
+    pose = RadarPose()   # boresight +x -> array_axis == +y
+    a, b = 2.2, 0.9       # half-length, half-width
+    yaw = math.pi / 6     # 30 degrees, deliberately not a special angle
+    sc = _extended_target(20.0, 0.0, (2 * a, 2 * b, 1.5), yaw_rad=yaw)
+
+    # array_axis is world +y here; express it in the object's own (yawed) frame the
+    # same way the module docstring describes.
+    c, s = math.cos(yaw), math.sin(yaw)
+    nx, ny = c * 0.0 + s * 1.0, -s * 0.0 + c * 1.0
+    expected = math.hypot(a * nx, b * ny)
+
+    assert cross_range_half_extent_m(sc, pose) == pytest.approx(expected, abs=1e-9)
+
+
+def test_cross_range_half_extent_never_exceeds_the_half_diagonal():
+    """Sanity bound: the yaw-aware projection must never exceed the conservative
+    `sqrt(half_len^2 + half_width^2)` half-diagonal fallback the task brief calls out
+    as an acceptable (but cruder) alternative -- it should always be tighter or equal,
+    across arbitrary yaws."""
+    pose = RadarPose()
+    a, b = 2.2, 0.9
+    half_diagonal = math.hypot(a, b)
+    for yaw_deg in range(0, 181, 5):
+        sc = _extended_target(20.0, 0.0, (2 * a, 2 * b, 1.5), yaw_rad=math.radians(yaw_deg))
+        assert cross_range_half_extent_m(sc, pose) <= half_diagonal + 1e-9
 
 
 def test_range_residual_bound_and_regression_loss_scale(torch_device):

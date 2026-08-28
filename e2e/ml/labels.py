@@ -86,11 +86,17 @@ Conventions
     grid resolutions keeps their footprints disjoint.
 * `encode_detection_labels` is tensor-only (matches the RADIal reference's return type);
   `targets_in_grid` is a separate helper for bookkeeping/eval code that wants the raw
-  `(centre_range, sin_azimuth, class, surface_range)` tuples of in-grid targets without
-  re-deriving the geometry. The first three entries keep their pre-2026-08-17 meaning and
-  values exactly; the surface range is APPENDED, so a consumer that only reads
-  `t[0]`/`t[1]`/`t[2]` is unaffected, and `e2e.ml.metrics` (which matches on the surface)
-  falls back to `t[0]` for a 3-tuple, i.e. treats it as a point target.
+  `(centre_range, sin_azimuth, class, surface_range, cross_range_half_extent_m)` tuples
+  of in-grid targets without re-deriving the geometry. The first three entries keep
+  their pre-2026-08-17 meaning and values exactly; `surface_range` and (added
+  2026-08-27) `cross_range_half_extent_m` are both APPENDED, so a consumer that only
+  reads `t[0]`/`t[1]`/`t[2]` is unaffected, and `e2e.ml.metrics` falls back to `t[0]`
+  for a 3-tuple (range matching, i.e. treats it as a point target) and to `0.0` for
+  anything shorter than 5 elements (azimuth matching -- no widened tolerance, i.e. also
+  a point target). `cross_range_half_extent_m` is the half-extent, metres, of the
+  object's footprint projected onto the cross-range (`array_axis`) direction -- see
+  `cross_range_half_extent_m` below -- so `e2e.ml.metrics` can widen its azimuth match
+  tolerance for wide objects the same way the surface range widens the range one.
 * Out-of-grid scatterers are silently skipped, matching the reference encoder's handling
   of its own sentinel/OOB rows. In-grid is tested on the SURFACE point (`r` in
   `[0, max_range_m)`, `|sin_azimuth| < 1`) -- the cell the footprint would be written to --
@@ -120,6 +126,7 @@ Conventions
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -212,19 +219,63 @@ def target_geometry(scatterer, pose) -> Tuple[float, float, float]:
     return float(np.linalg.norm(surface - origin)), sin_az, r_centre
 
 
+def cross_range_half_extent_m(scatterer, pose) -> float:
+    """Half-extent, metres, of `scatterer`'s footprint projected onto the CROSS-RANGE
+    axis -- `e2e.chain.rd_synth.array_axis(pose)`, the actual axis `sin_azimuth` is
+    measured against (not merely "perpendicular to line of sight", which would be a
+    different, target-dependent direction). This is how far the object's true
+    scattering can legitimately sit away from its own centre in the azimuth direction.
+
+    `0.0` for a scatterer with no known extent (`Scatterer.extent_m is None`): a point
+    target has no footprint to be off-centre by, matching `target_geometry`'s
+    surface == centre convention for the same case.
+
+    Uses the same support-function closed form `e2e.environment.geometry.
+    nearest_surface_point` uses for the RANGE direction, applied to the cross-range
+    one instead: for an ellipse with semi-axes `(a, b)` (here `0.5 * extent_m[:2]`,
+    rotated by `yaw_rad`) and a unit direction `n` expressed in the ellipse's own
+    frame, the extreme point along `n` sits at distance `sqrt((a*n_x)^2 + (b*n_y)^2)`.
+    A yaw-aware projection onto the axis matching-tolerance actually cares about, in
+    other words -- not the cruder `sqrt(half_len^2 + half_width^2)` half-diagonal
+    (which over-states the extent for anything but a target seen exactly corner-on).
+
+    Exists so `e2e.ml.metrics` can widen its azimuth match tolerance (`half_extent_m /
+    range_m`) for objects whose footprint is wide enough that a detector correctly
+    resolving one EDGE of it should not be scored a false alarm just because the label
+    sits at the centre -- the same problem the surface/centre range split (module
+    docstring, above) fixes, for the azimuth axis instead of range.
+    """
+    extent = getattr(scatterer, "extent_m", None)
+    if extent is None:
+        return 0.0
+    half = 0.5 * np.asarray(extent, dtype=np.float64).reshape(3)
+    yaw = float(getattr(scatterer, "yaw_rad", 0.0))
+    n = array_axis(pose)  # unit, purely horizontal (n[2] == 0 by construction)
+    if yaw:
+        c, s = math.cos(yaw), math.sin(yaw)
+        nx, ny = c * n[0] + s * n[1], -s * n[0] + c * n[1]
+    else:
+        nx, ny = float(n[0]), float(n[1])
+    return float(math.hypot(half[0] * nx, half[1] * ny))
+
+
 def _in_grid(grid: LabelGrid, r: float, sin_az: float) -> bool:
     return (0.0 <= r < grid.max_range_m) and (abs(sin_az) < 1.0)
 
 
 def targets_in_grid(grid: LabelGrid, scatterers: Sequence, pose,
                     classes: Optional[Sequence[str]] = None
-                    ) -> List[Tuple[float, float, str, float]]:
+                    ) -> List[Tuple[float, float, str, float, float]]:
     """Ground-truth tuples for every scatterer whose SURFACE point falls inside `grid`.
 
-    Each entry is `(centre_range_m, sin_azimuth, object_class, surface_range_m)`. The
-    first three keep their pre-2026-08-17 meaning and value exactly (the object's own
-    centre); the surface range is appended for the matcher (see the module docstring and
-    `e2e.ml.metrics`). For a scatterer with no known extent the two ranges are equal.
+    Each entry is `(centre_range_m, sin_azimuth, object_class, surface_range_m,
+    cross_range_half_extent_m)`. The first three keep their pre-2026-08-17 meaning and
+    value exactly (the object's own centre); the surface range was appended for the
+    range-axis matcher (see the module docstring and `e2e.ml.metrics`), and
+    `cross_range_half_extent_m` (added 2026-08-27, see `cross_range_half_extent_m`
+    above) is the azimuth-axis counterpart -- both `0.0`/equal-to-centre for a
+    scatterer with no known extent. Both are ADDITIVE: existing code that only reads
+    `t[0]`/`t[1]`/`t[2]`/`t[3]` is unaffected.
 
     Reuses the exact same geometry `encode_detection_labels` uses, for dataset/eval code
     that needs the raw target list (e.g. counting objects per frame) without re-deriving
@@ -236,13 +287,14 @@ def targets_in_grid(grid: LabelGrid, scatterers: Sequence, pose,
     clutter is something a detector must reject, not detect. `None` keeps every class.
     """
     keep = None if classes is None else set(classes)
-    out: List[Tuple[float, float, str, float]] = []
+    out: List[Tuple[float, float, str, float, float]] = []
     for sc in scatterers:
         if keep is not None and sc.object_class not in keep:
             continue
         r_surface, sin_az, r_centre = target_geometry(sc, pose)
         if _in_grid(grid, r_surface, sin_az):
-            out.append((r_centre, sin_az, sc.object_class, r_surface))
+            out.append((r_centre, sin_az, sc.object_class, r_surface,
+                       cross_range_half_extent_m(sc, pose)))
     return out
 
 

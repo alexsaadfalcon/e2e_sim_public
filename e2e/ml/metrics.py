@@ -101,6 +101,38 @@ The 2.0 m tolerance is NOT to be widened to paper over a labelling offset. MEASU
 an 8 m tolerance, a detector fed uniformly RANDOM ranges scores the same recall as the
 real one -- i.e. the tolerance buys AP by making the range axis officially unmeasured.
 
+WHICH azimuth (2026-08-27): the surface-range fix above only widened the RANGE axis; the
+azimuth axis still compared detection to target CENTRE against the fixed
+`max_sin_az_err=0.06`, and the default target model splits an extended object's RCS
+across its visible footprint CORNERS -- offset from the centre in azimuth as well as
+range. For a 4.4 m car that corner-to-centre offset is 0.238 sin_az at 10 m and 0.119 at
+20 m, both far outside 0.06, so a detector that correctly locks onto the brightest corner
+was scored as a miss AND a false alarm. Targets optionally carry a 5th element,
+`cross_range_half_extent_m` (`_half_extent`, mirroring `_surface_range` -- 0.0, i.e.
+today's behaviour, if absent); the effective azimuth tolerance used per-target is
+`max(criterion.max_sin_az_err, half_extent_m / max(surface_range_m, eps))`, i.e. the
+fixed tolerance widens only as far as the target's own angular half-extent demands, using
+its SURFACE range (the same range the corner geometry itself lives at) rather than its
+centre range. Like the range axis, this is a WIDENING keyed to the object's own physical
+size, not a global loosening: a point target (no known extent) gets exactly the old
+0.06 tolerance.
+
+Don't-care / ignore regions (KITTI-style, 2026-08-27)
+------------------------------------------------------
+The corpus deliberately leaves ~34% of placed objects (clutter) out of the label set, so
+a detector that correctly locates one of them was being charged a false alarm for
+detecting something real. `match_detections`/`evaluate_frame`/`evaluate_dataset` all take
+a keyword-only `ignore` -- a list of `(range_m, sin_azimuth)` positions of real-but-
+unlabelled objects (one list per frame in `evaluate_dataset`, aligned with
+`target_lists`). A detection that matches no TARGET but falls within the same
+`MatchCriterion` distance of an ignore entry is dropped entirely: neither a true positive
+nor a false positive, and it does not enter the pooled PR curve (mirroring KITTI's
+`DontCare` regions). Targets always win the match first -- a detection close to both a
+real target and an ignore entry scores as the true positive it is, never a dropped
+don't-care. `ignore=None`/empty reproduces today's numbers bit-for-bit: the "which
+detections get scored" set only ever shrinks, and only relative to the ignore-less
+baseline.
+
 Per-class AP/AR (roadmap: "per-frame / per-class-normalized AP for valid cross-tier
 comparison")
 ------------------------------------------------------------------------------------
@@ -129,7 +161,8 @@ from e2e.ml.labels import LabelGrid, decode_detections
 
 # (range_m, sin_azimuth, score[, surface_range_m]) -- see `e2e.ml.labels.decode_detections`
 Detection = Tuple[float, ...]
-# (range_m, sin_azimuth, object_class[, surface_range_m]) -- see `labels.targets_in_grid`
+# (range_m, sin_azimuth, object_class[, surface_range_m[, cross_range_half_extent_m]]) --
+# see `labels.targets_in_grid`
 Target = Tuple
 
 
@@ -142,6 +175,20 @@ def _surface_range(item) -> float:
     behaving exactly as they did before 2026-08-17.
     """
     return float(item[3]) if len(item) > 3 else float(item[0])
+
+
+def _half_extent(tgt: Target) -> float:
+    """The target's CROSS-RANGE half-extent in metres; 0.0 (a point target) if absent.
+
+    Mirrors `_surface_range`'s indexing trick so an optional trailing element cannot break
+    callers: `e2e.ml.labels` appends `cross_range_half_extent_m` as a 5th element only for
+    targets built from an extended object; a bare `(range, sin_az, class[, surface_range])`
+    tuple -- including every hand-built target predating 2026-08-27 -- has no 5th slot and
+    is treated as having zero angular extent, i.e. today's behaviour exactly (see
+    `_normalized_distance` and the module docstring's "WHICH azimuth" section). Also used
+    on `ignore` entries (`(range_m, sin_azimuth)` 2-tuples), which likewise have no extent.
+    """
+    return float(tgt[4]) if len(tgt) > 4 else 0.0
 
 
 @dataclass(frozen=True)
@@ -159,17 +206,45 @@ class MatchCriterion:
     max_sin_az_err: float = 0.06   # ~3.4 deg near boresight; widens off-boresight (see module docstring)
 
 
+#: Floor for the range used to convert `_half_extent` (metres) into a sin-azimuth
+#: tolerance, so a target placed (or hand-built) at r=0 cannot divide by zero.
+_MIN_TOLERANCE_RANGE_M = 1e-6
+
+
 def _normalized_distance(det: Detection, tgt: Target, criterion: MatchCriterion) -> float:
-    """Match distance, computed on the SURFACE range (see `_surface_range`)."""
+    """Match distance, computed on the SURFACE range (see `_surface_range`).
+
+    The azimuth tolerance widens per-target to `tgt`'s own angular half-extent (see the
+    module docstring's "WHICH azimuth" section) -- never narrows, since
+    `criterion.max_sin_az_err` is already a floor for point targets.
+    """
     dr = abs(_surface_range(det) - _surface_range(tgt)) / criterion.max_range_err_m
-    ds = abs(det[1] - tgt[1]) / criterion.max_sin_az_err
+    az_tol = max(criterion.max_sin_az_err,
+                _half_extent(tgt) / max(_surface_range(tgt), _MIN_TOLERANCE_RANGE_M))
+    ds = abs(det[1] - tgt[1]) / az_tol
     return max(dr, ds)
+
+
+def _drop_ignored(detections: Sequence[Detection], unmatched_det: List[int],
+                  ignore: Sequence[Tuple[float, float]], criterion: MatchCriterion) -> List[int]:
+    """Remove from `unmatched_det` any detection that falls within `criterion` of an
+    ignore entry (see the module docstring's "Don't-care / ignore regions" section).
+
+    An ignore entry is a bare `(range_m, sin_azimuth)` pair -- `_surface_range`/
+    `_half_extent` read it as a point target with no known extent, so it gets exactly
+    `criterion`'s fixed tolerances, not the widened per-target one.
+    """
+    return [di for di in unmatched_det
+           if not any(_normalized_distance(detections[di], entry, criterion) <= 1.0
+                      for entry in ignore)]
 
 
 def match_detections(
     detections: Sequence[Detection],
     targets: Sequence[Target],
     criterion: MatchCriterion = None,
+    *,
+    ignore: Sequence[Tuple[float, float]] = None,
 ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
     """Greedily match `detections` to `targets` under `criterion`.
 
@@ -179,10 +254,19 @@ def match_detections(
     distance <= 1.0, i.e. the boundary itself counts as a match), so once a target is
     claimed it cannot be claimed again by a later (lower-score) detection.
 
+    `ignore`, if given, is a list of `(range_m, sin_azimuth)` real-but-unlabelled
+    positions (see the module docstring's "Don't-care / ignore regions" section).
+    Targets are matched FIRST, unconditionally -- `ignore` is only ever consulted for a
+    detection that already failed to match any target -- and such a detection is dropped
+    from `unmatched_det` entirely rather than counted, so it is neither a false positive
+    nor (not having matched a target) a true positive. `None`/empty is a no-op: this
+    reproduces the pre-2026-08-27 return value bit-for-bit.
+
     Returns
     -------
     matches : list of (detection_index, target_index)
-    unmatched_det : list of detection indices with no match (false positives)
+    unmatched_det : list of detection indices with no match (false positives), MINUS any
+        that matched an `ignore` entry instead (dropped, not false positives)
     unmatched_gt : list of target indices with no match (false negatives)
     All index lists are sorted ascending (i.e. in original list order).
     """
@@ -191,7 +275,10 @@ def match_detections(
     if not detections:
         return [], [], list(range(len(targets)))
     if not targets:
-        return [], list(range(len(detections))), []
+        unmatched_det = list(range(len(detections)))
+        if ignore:
+            unmatched_det = _drop_ignored(detections, unmatched_det, ignore, criterion)
+        return [], unmatched_det, []
 
     order = sorted(range(len(detections)), key=lambda i: detections[i][2], reverse=True)
     matched_gt = set()
@@ -216,6 +303,8 @@ def match_detections(
 
     matches.sort(key=lambda m: m[0])
     unmatched_det.sort()
+    if ignore:
+        unmatched_det = _drop_ignored(detections, unmatched_det, ignore, criterion)
     unmatched_gt = sorted(set(range(len(targets))) - matched_gt)
     return matches, unmatched_det, unmatched_gt
 
@@ -227,22 +316,26 @@ def evaluate_frame(
     *,
     threshold: float,
     criterion: MatchCriterion = None,
+    ignore: Sequence[Tuple[float, float]] = None,
 ) -> Dict:
     """Decode `pred_map` at `threshold`, match against `targets`, score one frame.
 
     `pred_map` is anything `decode_detections` accepts (a `[3, n_range, n_azimuth]`
     label/prediction tensor). `targets` is the `targets_in_grid`-style list of
-    `(range_m, sin_azimuth, object_class[, surface_range_m])` tuples.
+    `(range_m, sin_azimuth, object_class[, surface_range_m[, cross_range_half_extent_m]])`
+    tuples. `ignore` is the don't-care list for this frame (see the module docstring's
+    "Don't-care / ignore regions" section); `None`/empty is a no-op.
 
     Returns `{"tp", "fp", "fn", "range_errs", "sin_az_errs"}`; the error lists hold one
     entry per matched pair (empty if nothing matched). Matching is on the surface range,
     the returned `range_errs` are centre-vs-centre (element 0 of both tuples) -- see the
-    module docstring.
+    module docstring. `fp` already excludes any detection dropped as a don't-care.
     """
     if criterion is None:
         criterion = MatchCriterion()
     detections = decode_detections(grid, pred_map, threshold=threshold)
-    matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion)
+    matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion,
+                                                             ignore=ignore)
 
     range_errs = [abs(detections[di][0] - targets[gi][0]) for di, gi in matches]
     sin_az_errs = [abs(detections[di][1] - targets[gi][1]) for di, gi in matches]
@@ -454,26 +547,38 @@ def _score_detections(
     detections_per_frame: Sequence[Sequence[Detection]],
     target_lists: Sequence[Sequence[Target]],
     criterion: MatchCriterion,
+    ignore_per_frame: Sequence[Sequence[Tuple[float, float]]] = None,
 ) -> Dict:
     """Match already-decoded detections against `target_lists` and score the whole split.
 
     Split out from `evaluate_dataset` so the per-class breakdown can re-match the SAME
     decoded detections against a filtered target list without re-decoding every frame.
+    `ignore_per_frame`, if given, is one don't-care list per frame, aligned with
+    `target_lists` -- applied to BOTH the pooled and the per-class re-matching, since a
+    real-but-unlabelled object doesn't stop being real just because the target list was
+    narrowed to one class.
 
     Returns `{"AP", "AR", "precision", "tp", "fp", "fn", "n_detections", "n_targets",
     "pr_curve", "range_errs", "sin_az_errs"}`. `pr_curve` is `None` when there is no
-    ground truth (no recall axis exists to integrate over).
+    ground truth (no recall axis exists to integrate over). `n_detections`/`fp` exclude
+    any detection dropped as a don't-care -- it is neither.
     """
+    if ignore_per_frame is None:
+        ignore_per_frame = [None] * len(detections_per_frame)
     scored_flags: List[Tuple[float, bool]] = []
     range_errs: List[float] = []
     sin_az_errs: List[float] = []
     tp = fp = fn = 0
 
-    for detections, targets in zip(detections_per_frame, target_lists):
-        matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion)
+    for detections, targets, ignore in zip(detections_per_frame, target_lists, ignore_per_frame):
+        matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion,
+                                                                 ignore=ignore)
         matched_det = {di for di, _gi in matches}
-        for di, det in enumerate(detections):
-            scored_flags.append((det[2], di in matched_det))
+        # Score every detection that is either a match or a surviving false positive --
+        # NOT a plain enumerate, since a don't-care detection is in neither set and must
+        # not enter the pooled PR curve at all (see `match_detections`' docstring).
+        for di in sorted(matched_det | set(unmatched_det)):
+            scored_flags.append((detections[di][2], di in matched_det))
         range_errs.extend(abs(detections[di][0] - targets[gi][0]) for di, gi in matches)
         sin_az_errs.extend(abs(detections[di][1] - targets[gi][1]) for di, gi in matches)
         tp += len(matches)
@@ -519,6 +624,7 @@ def evaluate_dataset(
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     criterion: MatchCriterion = None,
     classes: Sequence[str] = DEFAULT_CLASSES,
+    ignore: Sequence[Sequence[Tuple[float, float]]] = None,
 ) -> Dict:
     """Full-dataset detection evaluation: interpolated-PR AP + recall at one operating point.
 
@@ -565,9 +671,16 @@ def evaluate_dataset(
     The 0/0 -> 1.0 convention applies to `AR`/`precision` only where genuinely vacuous
     (no ground truth means nothing to miss; no detections means nothing to be wrong
     about). A silent detector facing real ground truth scores AP = AR = 0.0.
+
+    `ignore`, if given, is a per-frame sequence of don't-care lists (one per entry of
+    `target_lists`, each a list of `(range_m, sin_azimuth)`) -- see the module
+    docstring's "Don't-care / ignore regions" section. `None`/empty reproduces the
+    pre-2026-08-27 result bit-for-bit.
     """
     if criterion is None:
         criterion = MatchCriterion()
+    if ignore is None:
+        ignore = [None] * len(pred_maps)
 
     # ONE decode pass over the split; the pooled and per-class scorings all re-match
     # these same detections (the per-class target filter changes what a detection can
@@ -575,7 +688,7 @@ def evaluate_dataset(
     detections_per_frame = [decode_detections(grid, pred_map, threshold=score_threshold)
                             for pred_map in pred_maps]
 
-    pooled = _score_detections(detections_per_frame, target_lists, criterion)
+    pooled = _score_detections(detections_per_frame, target_lists, criterion, ignore)
 
     result = {
         "AP": pooled["AP"],
@@ -605,7 +718,8 @@ def evaluate_dataset(
             result[f"AP_{cls}"] = float("nan")
             result[f"AR_{cls}"] = float("nan")
         else:
-            cls_result = _score_detections(detections_per_frame, cls_target_lists, criterion)
+            cls_result = _score_detections(detections_per_frame, cls_target_lists, criterion,
+                                           ignore)
             result[f"AP_{cls}"] = cls_result["AP"]
             result[f"AR_{cls}"] = cls_result["AR"]
         result[f"n_targets_{cls}"] = n_cls_targets

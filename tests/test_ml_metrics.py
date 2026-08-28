@@ -827,3 +827,165 @@ def test_fa_at_recall_on_a_perfect_detector_is_zero():
     r = false_alarms_at_recall(curve, n_frames=3, target_recall=1.0)
     assert r["reached"] is True
     assert r["fp_per_frame"] == pytest.approx(0.0)
+
+
+# ------------------------------------------------------------------------------------
+# DEFECT 1 -- azimuth tolerance widened by the target's cross-range half-extent
+#
+# The default target model splits an extended object's RCS across its visible footprint
+# CORNERS, offset from the centre in azimuth as well as range; a fixed 0.06 sin-azimuth
+# tolerance scored a detector correctly locked onto the brightest corner as both a miss
+# and a false alarm. See the module docstring's "WHICH azimuth" section.
+# ------------------------------------------------------------------------------------
+def test_half_extent_widens_azimuth_tolerance_for_corner_offset():
+    """(a) A detection on a target's CORNER fails to match at the fixed 0.06 tolerance,
+    and matches once the SAME target carries its cross-range half-extent."""
+    criterion = MatchCriterion()   # default max_sin_az_err = 0.06
+    # Same target position/surface range; only the optional 5th element differs.
+    tgt_no_extent = (10.0, 0.0, "vehicle", 10.0)                # 4-tuple
+    tgt_with_extent = (10.0, 0.0, "vehicle", 10.0, 3.0)         # half_extent_m=3.0 -> tol=0.3
+    det = [(10.0, 0.2, 0.9)]   # fires at the corner: 0.2 sin_az off centre, dr=0
+
+    _, unmatched_det, unmatched_gt = match_detections(det, [tgt_no_extent], criterion)
+    assert unmatched_det == [0] and unmatched_gt == [0]         # old tolerance: miss + FA
+
+    matches, unmatched_det2, unmatched_gt2 = match_detections(det, [tgt_with_extent], criterion)
+    assert matches == [(0, 0)]
+    assert unmatched_det2 == [] and unmatched_gt2 == []
+
+
+def test_half_extent_absent_is_identical_to_old_behavior():
+    """(b) A target with no 5th element scores EXACTLY as before: `_half_extent` reads a
+    missing element as 0.0, so `max(0.06, 0.0) == 0.06`, the old fixed tolerance -- for
+    both a 3-tuple (no surface range either) and a 4-tuple (surface range, no extent)."""
+    criterion = MatchCriterion()
+    tgt_3 = (10.0, 0.0, "vehicle")
+    tgt_4 = (10.0, 0.0, "vehicle", 10.0)
+    det_hit = [(11.5, 0.0, 0.9)]     # dr = 1.5/2.0 = 0.75, ds = 0 -> inside old tolerance
+    det_miss = [(10.0, 0.2, 0.9)]    # dr = 0, ds = 0.2/0.06 > 1 -> outside old tolerance
+
+    for tgt in (tgt_3, tgt_4):
+        matches, _, _ = match_detections(det_hit, [tgt], criterion)
+        assert matches == [(0, 0)]
+        matches, unmatched_det, _ = match_detections(det_miss, [tgt], criterion)
+        assert matches == [] and unmatched_det == [0]
+
+
+def test_half_extent_never_narrows_the_tolerance():
+    """A half-extent smaller than `max_sin_az_err` must not shrink the tolerance below
+    the criterion's own floor (`max(...)`, not a straight substitution)."""
+    criterion = MatchCriterion()
+    tgt = (10.0, 0.0, "vehicle", 10.0, 0.01)   # half_extent/range = 0.001, well under 0.06
+    det = [(10.0, 0.05, 0.9)]                  # inside the 0.06 floor, outside 0.001
+
+    matches, unmatched_det, _ = match_detections(det, [tgt], criterion)
+    assert matches == [(0, 0)] and unmatched_det == []
+
+
+# ------------------------------------------------------------------------------------
+# DEFECT 2 -- don't-care / ignore regions
+# ------------------------------------------------------------------------------------
+def test_ignored_detection_dropped_not_a_false_positive():
+    """(c) A detection near an `ignore` entry, with no real target anywhere, is dropped
+    entirely by `match_detections`: neither a match nor a counted false positive."""
+    ignore = [(10.0, 0.0)]
+    det = [(10.0, 0.0, 0.9)]
+
+    matches, unmatched_det, unmatched_gt = match_detections(det, [], ignore=ignore)
+    assert matches == []
+    assert unmatched_det == []   # dropped, not a false positive
+    assert unmatched_gt == []
+
+
+def test_ignored_detection_excluded_from_pooled_pr_curve():
+    """(c), dataset level: the dropped detection must not enter the pooled PR curve or
+    inflate `fp`, while a genuine true positive elsewhere in the same frame is untouched."""
+    from e2e.ml.metrics import _score_detections
+
+    detections_per_frame = [[(10.0, 0.0, 0.95), (20.0, 0.0, 0.9)]]   # 2nd is near the ignore
+    target_lists = [[(10.0, 0.0, "vehicle")]]
+    ignore_per_frame = [[(20.0, 0.0)]]
+
+    result = _score_detections(detections_per_frame, target_lists, MatchCriterion(),
+                               ignore_per_frame)
+    assert result["tp"] == 1
+    assert result["fp"] == 0
+    assert result["n_detections"] == 1
+    assert result["pr_curve"]["score"] == [0.95]
+    assert result["pr_curve"]["is_tp"] == [True]
+
+
+def test_ignore_none_or_empty_reproduces_baseline_bit_for_bit(torch_device):
+    """(d) `ignore=None` and `ignore=[[]]` must reproduce the ignore-less result exactly,
+    including the full PR curve, on a case with real false positives to drop if the
+    plumbing were wrong."""
+    grid, pred, targets = _five_detection_pr_case(torch_device)
+    baseline = evaluate_dataset([pred], [targets], grid)
+    with_none = evaluate_dataset([pred], [targets], grid, ignore=None)
+    with_empty = evaluate_dataset([pred], [targets], grid, ignore=[[]])
+
+    for other in (with_none, with_empty):
+        assert other["AP"] == baseline["AP"]
+        assert other["AR"] == baseline["AR"]
+        assert other["tp"] == baseline["tp"]
+        assert other["fp"] == baseline["fp"]
+        assert other["fn"] == baseline["fn"]
+        assert other["pr_curve"] == baseline["pr_curve"]
+
+
+def test_detection_near_target_and_ignore_scores_as_true_positive():
+    """(e) Targets are matched FIRST: a detection close to both a real target and an
+    ignore entry at (nearly) the same place scores as the true positive it is, and is
+    never swallowed as a don't-care."""
+    targets = [(10.0, 0.0, "vehicle")]
+    ignore = [(10.0, 0.0)]     # coincides with the target
+    det = [(10.0, 0.0, 0.9)]
+
+    matches, unmatched_det, unmatched_gt = match_detections(det, targets, ignore=ignore)
+    assert matches == [(0, 0)]
+    assert unmatched_det == []
+    assert unmatched_gt == []
+
+
+def test_evaluate_frame_ignore_drops_fp_without_touching_tp(torch_device):
+    """`evaluate_frame` plumbs `ignore` the same way: `fp` drops, `tp`/`fn` are
+    unaffected, and matched error lists are unchanged."""
+    grid = LabelGrid(n_range=20, n_azimuth=20, max_range_m=20.0)   # range_bin=1.0, az_bin=0.1
+    pred = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32, device=torch_device)
+    pred[0, 5, 5] = 0.9    # real target's cell
+    pred[0, 15, 15] = 0.8  # a real-but-unlabelled object's cell
+
+    targets = [((5 + 0.5) * grid.range_bin_m, -1.0 + (5 + 0.5) * grid.az_bin, "vehicle")]
+    ignore_pos = ((15 + 0.5) * grid.range_bin_m, -1.0 + (15 + 0.5) * grid.az_bin)
+
+    no_ignore = evaluate_frame(pred, targets, grid, threshold=0.5)
+    assert no_ignore["tp"] == 1 and no_ignore["fp"] == 1
+
+    with_ignore = evaluate_frame(pred, targets, grid, threshold=0.5, ignore=[ignore_pos])
+    assert with_ignore["tp"] == 1 and with_ignore["fp"] == 0 and with_ignore["fn"] == 0
+    assert with_ignore["range_errs"] == no_ignore["range_errs"]
+
+
+def test_evaluate_dataset_ignore_is_per_frame_aligned_with_target_lists(torch_device):
+    """`evaluate_dataset`'s `ignore` is a per-frame list aligned with `target_lists`: an
+    ignore entry in frame 0 must not suppress an otherwise-identical false positive in
+    frame 1."""
+    grid = LabelGrid(n_range=20, n_azimuth=20, max_range_m=20.0)
+
+    def _frame(fire_cells):
+        pred = torch.zeros((3, grid.n_range, grid.n_azimuth), dtype=torch.float32,
+                           device=torch_device)
+        for ri, ai in fire_cells:
+            pred[0, ri, ai] = 0.9
+        return pred
+
+    frame0 = _frame([(15, 15)])   # ignored in frame 0
+    frame1 = _frame([(15, 15)])   # same cell, but NOT ignored in frame 1
+
+    ignore_pos = ((15 + 0.5) * grid.range_bin_m, -1.0 + (15 + 0.5) * grid.az_bin)
+    result = evaluate_dataset([frame0, frame1], [[], []], grid,
+                              ignore=[[ignore_pos], []], classes=())
+
+    assert result["tp"] == 0
+    assert result["fp"] == 1   # only frame 1's detection counts
+    assert result["n_detections"] == 1

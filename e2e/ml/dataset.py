@@ -38,8 +38,10 @@ Sample format
                  it from "adc" at load time -- see below).
       "labels":  float32 CPU tensor, [3, grid.n_range, grid.n_azimuth] -- see
                  `e2e.ml.labels.encode_detection_labels`,
-      "targets": list of (range_m, sin_az, object_class, surface_range_m) tuples, one per
-                 scene scatterer inside the label grid (`e2e.ml.labels.targets_in_grid`),
+      "targets": list of (range_m, sin_az, object_class, surface_range_m,
+                 cross_range_half_extent_m) tuples, one per scene scatterer inside the
+                 label grid (`e2e.ml.labels.targets_in_grid`; the last element was
+                 added 2026-08-27 -- additive, see that function's docstring),
       "meta":    small dict of scalar provenance (frame_idx, snr_db, seed, cfg.name,
                  cfg.mimo, radar pose) PLUS "target_extras": a list parallel to
                  "targets" (same order/length) of {"rcs_dbsm", "velocity_mps"} dicts --
@@ -218,6 +220,14 @@ LABEL_CLASSES = ("vehicle", "pedestrian")
 deliberately excluded from labels/targets -- a detector must learn to reject
 clutter, not report it. Without this filter, D2/D3 scenes were 70-80% clutter
 in their own ground truth (adversarial-review finding)."""
+
+# Geometric-correspondence tolerances for `RadarFrameDataset.unlabelled_objects`:
+# same values `e2e.ml.detect_viz` already uses (`_SCENE_MATCH_RANGE_M` /
+# `_SCENE_MATCH_SIN_AZ`) for tagging the same generator object list as
+# labelled/unlabelled, not re-derived independently, so the two call sites agree
+# about which objects a corpus's label set actually covers.
+_UNLABELLED_MATCH_RANGE_M = 0.75
+_UNLABELLED_MATCH_SIN_AZ = 0.02
 
 
 def _target_extras(grid, scatterers, pose, classes) -> List[Dict[str, Any]]:
@@ -652,7 +662,11 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         return x, y
 
     def targets(self, idx: int):
-        """Decoded target list (`(range_m, sin_az, object_class, surface_range_m)`) for `idx`.
+        """Decoded target list for `idx` -- `(range_m, sin_az, object_class,
+        surface_range_m, cross_range_half_extent_m)` for a manifest written since
+        2026-08-27, `(range_m, sin_az, object_class, surface_range_m)` (or shorter) for
+        an older one; see `e2e.ml.labels.targets_in_grid`'s docstring for what each
+        element means and which are additive.
 
         Reads only the npz's "meta" entry -- `np.load`'s `NpzFile` decompresses each
         array lazily per-key access, so skipping "adc"/"input"/"labels" here avoids
@@ -663,6 +677,86 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         with np.load(path) as data:
             meta = json.loads(str(data["meta"].item()))
         return meta["targets"]
+
+    def unlabelled_objects(self, idx: int) -> List[Tuple[float, float]]:
+        """`(range_m, sin_azimuth)` for every generator-PLACED object at frame `idx`
+        that has no corresponding entry in `targets(idx)`.
+
+        WHY: `LABEL_CLASSES` (`("vehicle", "pedestrian")`) filters what becomes ground
+        truth, but the generator places other objects too -- background clutter
+        (`object_class == "scatterer"`, mostly `clutter-box-*`) is roughly 34% of a
+        typical scene's placed objects and contributes SIGNAL without ever appearing
+        in `targets()`. A detector that correctly fires on one of these real,
+        physically-present objects has no way to know it was never labelled, and
+        should not be charged a false alarm for it. This method exists so a scorer can
+        treat these positions as DON'T-CARE regions (excluded from the false-alarm
+        count, not counted as a hit either) -- see `e2e.ml.metrics`.
+
+        Reads `meta['scene_provenance']['scene']['objects']` (every object the
+        generator placed) and `['nodes']` (one of which has `role == "radar"`, for its
+        `position`) -- both written by `e2e.environment.blocks` (`SinkBlock`'s meta
+        allowlist), so this ONLY works for chain-generated corpora (real Sionna RT or
+        the analytic chain path), not the pre-2026 `generate_sample` analytic
+        fallback, which never wrote scene provenance. Degrades to `[]` -- never raises
+        -- for a frame whose meta has no `scene_provenance`, no `scene`, no `objects`,
+        or no `radar`-role node: an older/incompatible corpus must still be loadable,
+        just with no unlabelled-object information available.
+
+        Coordinate convention, verified empirically against the generator (same one
+        `e2e.ml.detect_viz.scene_objects_for_plot` uses, independently re-derived here
+        rather than imported -- that module is visualization-layer and owned
+        separately, and dataset.py should not depend downward on it): `d =
+        object_position - radar_position`; `range_m = norm(d)`; `sin_azimuth = d[1] /
+        range_m`. Round-trip-checked against a real frame (test split frame 69,
+        `sphere-0` at `(26.97, -11.22, 0.499)`, radar at `(0, 0, 1.5)`): this gives
+        `range_m = 29.23`, `sin_azimuth = -0.3839`, matching that frame's first
+        labelled target exactly (as it must -- `sphere-0` is a labelled pedestrian
+        surrogate in that scene, not one of the objects this method returns).
+
+        An object "corresponds to a labelled target" iff some entry of `targets(idx)`
+        is within `0.75` m of it in range AND `0.02` in sin-azimuth -- matched by
+        GEOMETRY (position), not by name/class/index, because the label-encoding
+        pipeline does not carry the generator's object identity through to the target
+        tuple. These tolerances are the same values `e2e.ml.detect_viz` already uses
+        for its own "labelled" tagging of the same object list, chosen there to be
+        tight enough that two genuinely distinct nearby objects are not merged, loose
+        enough to absorb the sub-bin regression/footprint slack in `targets()`'s own
+        geometry (see `e2e.ml.labels`).
+        """
+        path = self.dataset_dir / self.files[idx]
+        with np.load(path) as data:
+            meta = json.loads(str(data["meta"].item()))
+
+        prov = meta.get("scene_provenance")
+        if not prov:
+            return []
+        scene = prov.get("scene") or {}
+        objects = scene.get("objects") or []
+        if not objects:
+            return []
+        nodes = scene.get("nodes") or []
+        radar_nodes = [n for n in nodes if n.get("role") == "radar"]
+        if not radar_nodes:
+            return []
+        radar_pos = np.asarray(radar_nodes[0].get("position", (0.0, 0.0, 0.0)), dtype=float)
+
+        targets = meta.get("targets") or []
+        target_ranges_sin_az = [(float(t[0]), float(t[1])) for t in targets]
+
+        out: List[Tuple[float, float]] = []
+        for obj in objects:
+            pos = np.asarray(obj.get("position", (0.0, 0.0, 0.0)), dtype=float)
+            d = pos - radar_pos
+            range_m = float(np.linalg.norm(d))
+            sin_az = float(d[1] / range_m) if range_m > 1e-9 else 0.0
+            labelled = any(
+                abs(range_m - r) <= _UNLABELLED_MATCH_RANGE_M
+                and abs(sin_az - s) <= _UNLABELLED_MATCH_SIN_AZ
+                for r, s in target_ranges_sin_az
+            )
+            if not labelled:
+                out.append((range_m, sin_az))
+        return out
 
 
 # --------------------------------------------------------------------------------
