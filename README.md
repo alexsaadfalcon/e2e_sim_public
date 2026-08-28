@@ -387,21 +387,44 @@ floor: measured on the same frames and the same metric, rather than assumed to b
 Measured on the **173-scene test split** (1,022 labelled targets) of a 1,721-scene
 ray-traced corpus (`benchmark_v1`, tier D2):
 
-| arm | average precision |
-|---|---|
-| classical CA-CFAR | 0.129 |
-| FFTRadNet | 0.095 |
-| SSMRadNet (*not converged* — see below) | 0.096 |
-| **data-blind null (chance floor)** | **0.063 ± 0.002** |
+| arm | average precision | false alarms / frame | max recall | × chance |
+|---|---|---|---|---|
+| classical CA-CFAR | **0.134** | 16.9 | 0.870 | 2.08× |
+| SSMRadNet | 0.103 | 26.4 | 0.982 | 1.59× |
+| FFTRadNet | 0.095 | 29.1 | 0.970 | 1.47× |
+| **data-blind null (chance floor)** | **0.065** | 41.8 | 1.000 | 1.00× |
+
+All four arms scored on identical frames at matched recall 0.50, from
+`e2e/ml/runs/b3_compare_v2.json`. Reproduce with:
+
+```bash
+python -m e2e.ml.compare_detectors \
+  --manifest e2e/ml/datasets/b1_bench_v2/benchmark_v1_D2/manifest.json --classical \
+  --checkpoint fftradnet=e2e/ml/runs/b3_fftradnet_v1/best.pt \
+  --checkpoint ssmradnet=e2e/ml/runs/b3_ssmradnet_v2_continued/best.pt
+```
 
 Classical CFAR leads both learned detectors, and both learned detectors score above the
 chance floor. The null arm is what makes the second statement a measurement rather than
 an assumption.
 
+**Both learned arms find more targets and pay for it in false alarms**: max recall 0.97–0.98
+against classical's 0.87, at 1.6× the false-alarm rate. The learned/classical gap is a
+precision gap, not a detection gap.
+
+**Every arm is close to the floor**, and that is the honest headline: the best of them is
+about 2× chance. That is not an artifact of the scorer — correcting the metric's known
+defects lifts the detector *and* the floor together — nor of the models: given five frames
+it is allowed to memorise, FFTRadNet drives training loss down by three orders of
+magnitude (259 → 0.26) and separates positive from negative cells 12×, so the model and
+its label plumbing work. It is a property of this corpus, and the known defects described
+below are being worked.
+
 The null arm is *random*, so a single run is a draw, not a constant: over seeds
 0/1000/2000/3000/4000 it scores 0.0645, 0.0604, 0.0608, 0.0638, 0.0643 — mean 0.0628,
-sd 0.0018. The table reports that mean and spread rather than one seed, because the
-third decimal of any single draw is noise. Reproduce with:
+sd 0.0018. The table reports the seed-0 draw, because that is the one every other arm in
+it was scored against; the ratios in the last column therefore carry roughly ±0.004 of
+floor noise and should not be read to three digits. Reproduce the spread with:
 
 ```bash
 python -c "from e2e.ml.compare_detectors import score_null; \
@@ -417,11 +440,12 @@ arm is scored under the identical criterion:
    but azimuth against its *centre*, while the default target model places an object's
    energy on its corners — an offset of 0.24 in sin(azimuth) for a car at 10 m against a
    0.06 tolerance. Correcting only the azimuth tolerance raises classical AP from 0.129 to
-   **0.303** on identical maps.
+   **0.303** on identical maps. (Both figures predate the angle-resampler fix that moved
+   the baseline to 0.134; the delta has not been re-measured against the new baseline.)
 2. **The label set omits ~34% of the objects the generator places** (clutter), so a
    detector is charged a false alarm for correctly detecting a real object. Treating those
    objects as don't-care regions — the standard remedy, and the one now implemented —
-   raises classical AP from 0.129 to **0.141**. (Scoring them as if they had been labelled
+   raises classical AP from 0.129 to **0.141**, also measured pre-resampler-fix. (Scoring them as if they had been labelled
    targets instead gives 0.184, but that is a different and more generous counterfactual:
    it also credits the detector for finding clutter, which the benchmark does not ask of
    it.)
@@ -432,12 +456,28 @@ corpus built before 2026-08-27 carries none, so the corrected criterion falls ba
 old behaviour on it. The 0.303 figure above is a uniform-tolerance stand-in that bounds
 the per-target fix from above; pinning it down needs the corpus regenerated.
 
-So "detection is hard on this corpus" is substantially an artifact of the scoring, not a
-property of the detectors. Quote the ordering; do not quote the absolute values as a
-difficulty measure until both are fixed.
+**An earlier version of this section concluded that "detection is hard on this corpus" was
+substantially an artifact of the scoring. That conclusion was wrong, and it is worth
+recording why.** Both defects above are real and both raise the absolute numbers — but
+they raise the *data-blind null arm* almost exactly as much, because a looser or more
+forgiving criterion helps a random guesser too. Measured across a sweep of the azimuth
+tolerance, the detector's ratio to chance *falls* (2.08× at the shipped tolerance, 1.45×
+at 0.25, 1.25× at 0.40); switching the don't-care regions on moves classical AP from 0.144
+to 0.152 and the floor from 0.063 to 0.066, leaving the ratio flat at 2.29× → 2.30×
+(40-frame subset). Fixing the ruler does not reveal a better detector.
 
-`SSMRadNet`'s entry comes from a run whose best epoch was 74 of 80 — still improving when
-it stopped — so 0.096 is a lower bound, not a converged result.
+So: quote the ordering, and treat the absolute values as *provisional* — they will move
+when the corpus is regenerated. But do not read the known defects as an excuse for the
+absolute numbers. **The detectors really are close to chance on this corpus, and that is
+not the scorer's doing.** It is also not the models': FFTRadNet drives training loss down
+by three orders of magnitude on frames it is allowed to memorise, separating positive from
+negative cells 12× — so the model and its label plumbing work. What remains is the corpus
+itself, which is where the current work is aimed.
+
+`SSMRadNet`'s entry is now a **converged** run: best epoch 107 of 120, with 13 further
+epochs producing no improvement. The earlier 0.096 figure came from an 80-epoch run that
+was still improving when it stopped, and was correctly flagged here as a lower bound; it
+has been superseded rather than merely relabelled.
 
 Read the accompanying caveats before quoting any of this: "false alarms" in these maps
 include deliberately-unlabelled clutter a correct detector *should* fire on, the maps are
