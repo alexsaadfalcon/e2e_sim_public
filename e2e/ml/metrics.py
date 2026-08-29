@@ -625,6 +625,7 @@ def evaluate_dataset(
     criterion: MatchCriterion = None,
     classes: Sequence[str] = DEFAULT_CLASSES,
     ignore: Sequence[Sequence[Tuple[float, float]]] = None,
+    max_range_m: float = None,
 ) -> Dict:
     """Full-dataset detection evaluation: interpolated-PR AP + recall at one operating point.
 
@@ -688,6 +689,26 @@ def evaluate_dataset(
     detections_per_frame = [decode_detections(grid, pred_map, threshold=score_threshold)
                             for pred_map in pred_maps]
 
+    # SCORED SWATH. The label grid spans the radar's full unambiguous range, but a corpus
+    # need not put targets across all of it -- on benchmark_v1/D2 nothing sits beyond
+    # ~34 m of a 102 m grid. Scoring the empty remainder charges every detector for false
+    # alarms in a region where a hit is impossible by construction, which is a property of
+    # the corpus rather than of the detector. `max_range_m` crops BOTH sides of the
+    # comparison (detections and ground truth) at the SURFACE range, which is what
+    # matching uses. Default None scores the whole grid, so no stored number moves unless
+    # a caller asks.
+    if max_range_m is not None:
+        limit = float(max_range_m)
+        if not limit > 0.0:
+            raise ValueError(f"max_range_m must be positive, got {max_range_m!r}")
+        detections_per_frame = [[d for d in dets if _surface_range(d) < limit]
+                                for dets in detections_per_frame]
+        target_lists = [[tgt for tgt in targets if _surface_range(tgt) < limit]
+                        for targets in target_lists]
+        if ignore is not None:
+            ignore = [None if ig is None else [g for g in ig if float(g[0]) < limit]
+                      for ig in ignore]
+
     pooled = _score_detections(detections_per_frame, target_lists, criterion, ignore)
 
     result = {
@@ -696,6 +717,9 @@ def evaluate_dataset(
         "AR_operating_point": (f"recall over all detections with score > {score_threshold:g} "
                                f"(single operating point, not a threshold average)"),
         "score_threshold": float(score_threshold),
+        # Self-describing, like score_threshold: a stored metrics JSON must say what
+        # swath it scored, or two runs are not comparable and nothing on disk says why.
+        "max_range_m": None if max_range_m is None else float(max_range_m),
         "precision": pooled["precision"],
         "tp": pooled["tp"],
         "fp": pooled["fp"],

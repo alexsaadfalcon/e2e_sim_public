@@ -92,7 +92,8 @@ def parse_checkpoint_arg(spec: str) -> Tuple[str, str]:
 
 def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
                decode_threshold: float, target_recall: float,
-               ignore_lists: Optional[Sequence] = None) -> Dict:
+               ignore_lists: Optional[Sequence] = None,
+               max_range_m: Optional[float] = None) -> Dict:
     """`evaluate_dataset` at the decode floor + the matched-recall operating point.
 
     `ignore_lists`, if given, is `evaluate_dataset`'s per-frame don't-care list (see
@@ -100,7 +101,8 @@ def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
     the pre-existing (ignore-less) score bit-for-bit.
     """
     metrics = evaluate_dataset(pred_maps, target_lists, grid,
-                               score_threshold=decode_threshold, ignore=ignore_lists)
+                               score_threshold=decode_threshold, ignore=ignore_lists,
+                               max_range_m=max_range_m)
     op = false_alarms_at_recall(metrics["pr_curve"], n_frames,
                                 target_recall=target_recall)
     return {
@@ -109,6 +111,7 @@ def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
         "n_targets": metrics["n_targets"],
         "n_detections": metrics["n_detections"],
         "decode_threshold": decode_threshold,
+        "max_range_m": metrics.get("max_range_m"),
         "operating_point": op,
         # The FULL curve, kept (B2 review, 2026-08-25): metrics.py's own docstring
         # promises the curve is stored so numbers can be audited or re-plotted
@@ -123,6 +126,7 @@ def score_classical(manifest_path, split: str, *, device=None,
                     decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                     target_recall: float = DEFAULT_TARGET_RECALL,
                     limit: Optional[int] = None, use_ignore_regions: bool = False,
+                    max_range_m: Optional[float] = None,
                     **kwargs) -> Dict:
     """The CFAR baseline arm. `kwargs` reach `baseline.classical_detection_map`.
 
@@ -170,14 +174,15 @@ def score_classical(manifest_path, split: str, *, device=None,
 
     return _score_arm(pred_maps, target_lists, grid, n_frames=len(files),
                       decode_threshold=decode_threshold, target_recall=target_recall,
-                      ignore_lists=ignore_lists)
+                      ignore_lists=ignore_lists, max_range_m=max_range_m)
 
 
 def score_null(manifest_path, split: str, *,
                decode_threshold: float = DEFAULT_DECODE_THRESHOLD,
                target_recall: float = DEFAULT_TARGET_RECALL,
                seed: int = 0, limit: Optional[int] = None,
-               use_ignore_regions: bool = False) -> Dict:
+               use_ignore_regions: bool = False,
+               max_range_m: Optional[float] = None) -> Dict:
     """The DATA-BLIND chance baseline (B4, from the 2026-08-25 B2 adversarial
     review): uniform random scores inside the TRAIN-split ground-truth bounding box
     (range x sin_az), exactly zero outside, never looking at the RF. Fitted on the
@@ -233,7 +238,7 @@ def score_null(manifest_path, split: str, *,
 
     res = _score_arm(pred_maps, target_lists, grid, n_frames=n,
                      decode_threshold=decode_threshold, target_recall=target_recall,
-                     ignore_lists=ignore_lists)
+                     ignore_lists=ignore_lists, max_range_m=max_range_m)
     res["null_box"] = {"range_bins": [r_lo, r_hi], "az_bins": [a_lo, a_hi],
                        "fit_split": "train", "seed": int(seed)}
     return res
@@ -244,7 +249,8 @@ def score_checkpoint(manifest_path, checkpoint_path, split: str, *, device=None,
                      target_recall: float = DEFAULT_TARGET_RECALL,
                      batch_size: int = 8, ssm_chunk_size: Optional[int] = None,
                      limit: Optional[int] = None,
-                     use_ignore_regions: bool = False) -> Dict:
+                     use_ignore_regions: bool = False,
+                     max_range_m: Optional[float] = None) -> Dict:
     """One trained-checkpoint arm, reusing `train.py`'s reload and forward seams.
 
     `limit` truncates to the first N frames. `RadarFrameDataset` walks
@@ -268,7 +274,7 @@ def score_checkpoint(manifest_path, checkpoint_path, split: str, *, device=None,
 
     res = _score_arm(pred_maps, target_lists, grid, n_frames=len(pred_maps),
                      decode_threshold=decode_threshold, target_recall=target_recall,
-                     ignore_lists=ignore_lists)
+                     ignore_lists=ignore_lists, max_range_m=max_range_m)
     res["model"] = type(model).__name__
     res["checkpoint"] = str(checkpoint_path)
     return res
@@ -285,7 +291,8 @@ def compare(manifest_path, *, split: str = "test",
             classical_kwargs: Optional[Dict] = None,
             classical_doppler_reduce: Optional[Sequence[str]] = None,
             null_baseline: bool = True,
-            use_ignore_regions: bool = False) -> Dict:
+            use_ignore_regions: bool = False,
+            max_range_m: Optional[float] = None) -> Dict:
     """Every requested arm, scored on the same split at the same matched recall.
 
     `null_baseline` (default True -- see `score_null`) appends the data-blind
@@ -318,6 +325,7 @@ def compare(manifest_path, *, split: str = "test",
                                            decode_threshold=decode_threshold,
                                            target_recall=target_recall, limit=limit,
                                            use_ignore_regions=use_ignore_regions,
+                                           max_range_m=max_range_m,
                                            **kw)})
     for name, path in checkpoints:
         arms.append({"name": name,
@@ -327,7 +335,8 @@ def compare(manifest_path, *, split: str = "test",
                                         batch_size=batch_size,
                                         ssm_chunk_size=ssm_chunk_size,
                                         limit=limit,
-                                        use_ignore_regions=use_ignore_regions)})
+                                        use_ignore_regions=use_ignore_regions,
+                                        max_range_m=max_range_m)})
     null_skipped = None
     if null_baseline:
         try:
@@ -335,7 +344,8 @@ def compare(manifest_path, *, split: str = "test",
                          **score_null(manifest_path, split,
                                       decode_threshold=decode_threshold,
                                       target_recall=target_recall, limit=limit,
-                                      use_ignore_regions=use_ignore_regions)})
+                                      use_ignore_regions=use_ignore_regions,
+                                      max_range_m=max_range_m)})
         except ValueError as e:
             # A corpus with no train targets cannot fit the box (e.g. a val-only
             # test corpus). Degrade to a RECORDED skip, never a silent one: the
@@ -413,6 +423,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    metavar="N",
                    help="width of the classical arm's zero-Doppler notch, in bins "
                         "(default 1). 0 disables it")
+    p.add_argument("--max-range-m", type=float, default=None, metavar="M",
+                   help="crop the SCORED swath to ranges below M metres, on both the "
+                        "detections and the ground truth. The label grid spans the "
+                        "radar's full unambiguous range, but a corpus need not put "
+                        "targets across all of it; scoring the empty remainder charges "
+                        "every arm for false alarms where a hit is impossible by "
+                        "construction. Default: score the whole grid")
     p.add_argument("--recall", type=float, default=DEFAULT_TARGET_RECALL,
                    help=f"recall to hold every arm at (default {DEFAULT_TARGET_RECALL})")
     p.add_argument("--decode-threshold", type=float, default=DEFAULT_DECODE_THRESHOLD,
@@ -461,7 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      limit=args.limit, classical_doppler_reduce=reductions,
                      classical_kwargs=classical_kwargs or None,
                      null_baseline=not args.no_null,
-                     use_ignore_regions=args.use_ignore_regions)
+                     use_ignore_regions=args.use_ignore_regions,
+                     max_range_m=args.max_range_m)
     print(format_table(result))
 
     if args.out:

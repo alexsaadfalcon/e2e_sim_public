@@ -989,3 +989,53 @@ def test_evaluate_dataset_ignore_is_per_frame_aligned_with_target_lists(torch_de
     assert result["tp"] == 0
     assert result["fp"] == 1   # only frame 1's detection counts
     assert result["n_detections"] == 1
+
+
+def test_scored_swath_crop_drops_far_detections_and_targets():
+    """The scored swath must crop BOTH sides, and must be off by default.
+
+    Ballot 2026-08-28: the label grid spans the radar's full unambiguous range, but on
+    `benchmark_v1`/D2 no target sits beyond ~34 m of a 102 m grid. Scoring the empty
+    remainder charges every arm for false alarms in a region where a hit is impossible by
+    construction -- a property of the corpus, not of the detector.
+
+    Cropping only the detections would be a gift to the detector (its far false alarms
+    vanish while distant targets still count as misses); cropping only the targets would
+    be a penalty. Both, or the number means nothing. Default `None` must reproduce the
+    uncropped score exactly, so no stored comparison moves unless a caller asks.
+    """
+    grid = LabelGrid(n_range=64, n_azimuth=32, max_range_m=100.0)
+
+    near = (10.0, 0.0, "vehicle", 10.0)
+    far = (80.0, 0.5, "vehicle", 80.0)
+    targets = [[near, far]]
+
+    pred = torch.zeros((3, grid.n_range, grid.n_azimuth))
+    for r_m, sin_az in ((10.0, 0.0), (80.0, 0.5)):
+        i = min(int(r_m / grid.range_bin_m), grid.n_range - 1)
+        j = min(int((sin_az + 1.0) / grid.az_bin), grid.n_azimuth - 1)
+        pred[0, i, j] = 1.0
+
+    full = evaluate_dataset([pred], targets, grid, classes=())
+    assert full["n_targets"] == 2
+    assert full["max_range_m"] is None, "the crop must be OFF by default"
+
+    cropped = evaluate_dataset([pred], targets, grid, classes=(), max_range_m=40.0)
+    assert cropped["max_range_m"] == 40.0, "the result must say what swath it scored"
+    assert cropped["n_targets"] == 1, (
+        f"the 80 m target must leave the scored set, got n_targets={cropped['n_targets']}"
+    )
+    assert cropped["n_detections"] == 1, (
+        f"the 80 m detection must leave too -- cropping one side only would make the "
+        f"number meaningless; got n_detections={cropped['n_detections']}"
+    )
+    assert cropped["tp"] == 1 and cropped["fp"] == 0 and cropped["fn"] == 0
+
+
+def test_scored_swath_crop_rejects_a_nonpositive_limit():
+    """A zero or negative swath scores nothing; that is a caller error, not an empty
+    result to be reported as AP 0."""
+    grid = LabelGrid(n_range=8, n_azimuth=8, max_range_m=100.0)
+    pred = torch.zeros((3, grid.n_range, grid.n_azimuth))
+    with pytest.raises(ValueError, match="max_range_m"):
+        evaluate_dataset([pred], [[]], grid, classes=(), max_range_m=0.0)
