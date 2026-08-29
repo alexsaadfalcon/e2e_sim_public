@@ -205,7 +205,7 @@ def _mainlobe_metrics(mag_db):
 def _interconnect_arms(all_cases=False):
     """The arms shared by every multi-arm figure in this module.
 
-    Default is the 4-arm set (ideal, the two measured Tessera datasets, and the legacy
+    Default is the 4-arm set (ideal, the two simulated Tessera datasets, and the legacy
     boxcar placeholder) -- see `range_profile_comparison`'s docstring for what each one is
     and is not. `all_cases=True` swaps the single Case3 arm for all SIX 77 GHz designs,
     which is what the before/after figure wants: the interesting question there is how the
@@ -224,7 +224,7 @@ def _interconnect_arms(all_cases=False):
                 InterconnectBlock(transfer_csv=case_csv(n), band_hz=CASE3_BAND))
     else:
         arms["tessera_case3"] = (
-            "Tessera Case3 (77 GHz auto, worst of 6 measured)",
+            "Tessera Case3 (77 GHz auto, worst of 6 simulated)",
             InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND))
     arms["legacy_boxcar"] = ("legacy 11-tap boxcar (placeholder)", InterconnectBlock())
     return arms
@@ -308,7 +308,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
                   f"peak sidelobe {m['peak_sidelobe_db']:.1f} dB")
         print(f"Tessera TSV: insertion loss {il_tsv:.2f} dB, ripple {ripple_tsv:.2f} dB p-p "
               f"over {BAND[0]/1e9:.1f}-{BAND[1]/1e9:.1f} GHz")
-        print(f"Tessera Case3 (worst of 6 measured): insertion loss {il_c3:.2f} dB, "
+        print(f"Tessera Case3 (worst of 6 simulated): insertion loss {il_c3:.2f} dB, "
               f"ripple {ripple_c3:.2f} dB p-p over {CASE3_BAND[0]/1e9:.1f}-"
               f"{CASE3_BAND[1]/1e9:.1f} GHz")
 
@@ -530,7 +530,7 @@ def _build_arg_parser():
 
     p = argparse.ArgumentParser(
         prog="python -m e2e.main.main_interconnect",
-        description="Tutorial: drive InterconnectBlock from measured S21(f) CSVs and "
+        description="Tutorial: drive InterconnectBlock from simulated S21(f) CSVs and "
                     "compare the resulting range profiles. Writes three figures.",
     )
     p.add_argument("--out-dir", default=None,
