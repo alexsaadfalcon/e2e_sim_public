@@ -34,7 +34,8 @@ from e2e.ml.labels import LabelGrid  # noqa: E402
 from e2e.simulation import CircuitStage  # noqa: E402
 
 
-def _cube_power_db(tx_power_dbm, *, use_rffe, physical_scale=None, device=None):
+def _cube_power_db(tx_power_dbm, *, use_rffe, physical_scale=None, device=None,
+                   use_link_budget=True):
     """Mean power of the radar cube out of the fully composed chain, in dB."""
     cfg = dataclasses.replace(_CFG, tx_power_dbm=float(tx_power_dbm))
     grid = LabelGrid.for_config(cfg, range_stride=1, n_azimuth=8)
@@ -44,6 +45,7 @@ def _cube_power_db(tx_power_dbm, *, use_rffe, physical_scale=None, device=None):
         sim = chain_generate.build_chain_simulation(
             scenario=None, cfg=cfg, out_dir=out_dir, environment_block=env,
             use_rffe=use_rffe, rffe_kwargs=rffe_kwargs, device=device,
+            use_link_budget=use_link_budget,
         )
         sim.run(n_steps=1)
         cube = sim.get_outputs()["radar_cube"][0]
@@ -71,27 +73,24 @@ def test_composed_chain_scales_with_transmit_power(use_rffe, physical_scale, tor
     )
 
 
-def test_ml_corpus_composition_normalises_away_the_absolute_scale(torch_device):
-    """PINS A KNOWN DEFECT (F62.2, diagnosed 2026-08-28) -- read before "fixing" this.
+def test_ml_corpus_composition_keeps_the_absolute_scale(torch_device):
+    """INVERTED 2026-08-29, as the previous version's docstring instructed.
 
-    `RFFEBlock` defaults `physical_scale=False`, and on that path it runs
-    `frame * signal_scaling / mean(abs(frame))` (`e2e/blocks.py:109`) -- a per-frame
-    normalisation to a UNIT-LESS constant. `build_chain_simulation` sets only `n` on the
-    block, so the ML corpus generator has always taken that default, and it then appends
-    `ThermalNoiseBlock` AFTER it under a comment insisting that position "is the whole
-    point" because impairments need an absolute reference to be relative to.
+    Until then this test pinned the DEFECT (F62.2/F63): `RFFEBlock` defaults
+    `physical_scale=False`, on which path it runs `frame * signal_scaling /
+    mean(abs(frame))` -- a per-frame normalisation to a unit-less constant --
+    and `build_chain_simulation` set only `n`, so the ML corpus generator took that
+    default and then appended `ThermalNoiseBlock` AFTER it. The chain installed an
+    absolute kTBF floor beneath a cube whose absolute level had already been erased, so
+    target SNR stopped tracking transmit power, noise figure and range.
 
-    The consequence is not that the cube stops scaling -- it does scale, uniformly, which
-    is why a total-power test like the one above passes even here. It is that the SIGNAL's
-    level relative to the front end's own absolute noise is fixed by `signal_scaling`
-    rather than by the radar equation, so target SNR stops tracking transmit power, noise
-    figure and range.
+    Note what the defect did NOT do: it did not stop the cube scaling. It scaled
+    uniformly, which is why the total-power test above passed even then. That is why the
+    guard has to be structural rather than a power check.
 
-    This test asserts the CURRENT state so the defect is visible in the suite rather than
-    only in a report. When the fix lands -- `physical_scale=True` for the ML composition,
-    together with a CORPUS-WIDE (never per-frame) input normalisation in the training
-    path, which is the part that makes switching it on safe -- this test should be
-    inverted, not deleted, and its docstring updated to say so.
+    `build_chain_simulation` now sets `physical_scale=True`. An explicit override is
+    still honoured, and `test_thermal_noise_refuses_a_normalised_cube` covers what
+    happens if someone takes it.
     """
     grid = LabelGrid.for_config(_CFG, range_stride=1, n_azimuth=8)
     env = _FakeRTEnvironment(_CFG, grid, n_frames=1, device=torch_device, seed=0)
@@ -101,16 +100,44 @@ def test_ml_corpus_composition_normalises_away_the_absolute_scale(torch_device):
         )
     stage = next(s for s in sim.serial_stages if isinstance(s, CircuitStage))
     assert isinstance(stage.rffe_block, RFFEBlock)
-    assert stage.rffe_block.physical_scale is False, (
-        "physical_scale is no longer False for the ML composition -- if that is the "
-        "intended fix, invert this test and update its docstring (see F62.2)."
+    assert stage.rffe_block.physical_scale is True, (
+        "the ML corpus composition must keep the absolute amplitude scale -- an "
+        "absolute thermal floor beneath a normalised cube is F63"
     )
 
 
+def test_thermal_noise_refuses_a_normalised_cube(torch_device):
+    """The invalid composition must FAIL, not quietly produce a plausible corpus.
+
+    Overriding `physical_scale=False` while the link budget is on rebuilds F63 exactly.
+    A silent result here is worse than a crash: the corpus looks fine, trains fine, and
+    every impairment dB on it is referenced to a floor that means nothing. The guard is
+    on `ThermalNoiseBlock` rather than at assembly so it cannot be bypassed by any other
+    route to the same chain.
+    """
+    grid = LabelGrid.for_config(_CFG, range_stride=1, n_azimuth=8)
+    env = _FakeRTEnvironment(_CFG, grid, n_frames=1, device=torch_device, seed=0)
+    with tempfile.TemporaryDirectory() as out_dir:
+        sim = chain_generate.build_chain_simulation(
+            scenario=None, cfg=_CFG, out_dir=out_dir, environment_block=env,
+            rffe_kwargs={"physical_scale": False},
+        )
+        with pytest.raises(ValueError, match="F63"):
+            sim.run(n_steps=1)
+
+
 def test_physical_scale_is_reachable_and_changes_the_output(torch_device):
-    """The fix is a one-line default change, so prove the flag is live, not vestigial."""
-    a = _cube_power_db(12.0, use_rffe=True, physical_scale=False, device=torch_device)
-    b = _cube_power_db(12.0, use_rffe=True, physical_scale=True, device=torch_device)
+    """The fix is a one-line default change, so prove the flag is live, not vestigial.
+
+    Measured with the link budget OFF. With it on, `physical_scale=False` is now a
+    refused composition (see `test_thermal_noise_refuses_a_normalised_cube`), so the
+    comparison has to be made on the one chain where both settings are still legal --
+    which is enough, because what is under test is the RFFE flag, not the floor.
+    """
+    a = _cube_power_db(12.0, use_rffe=True, physical_scale=False, device=torch_device,
+                       use_link_budget=False)
+    b = _cube_power_db(12.0, use_rffe=True, physical_scale=True, device=torch_device,
+                       use_link_budget=False)
     assert abs(b - a) > 1.0, (
         f"physical_scale made no difference ({a:.2f} vs {b:.2f} dB) -- it is supposed "
         f"to be the switch between an arbitrary and an absolute amplitude scale."

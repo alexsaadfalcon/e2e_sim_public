@@ -479,7 +479,16 @@ class CircuitStage:
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
-        return {"s_pars": s_pars, "PRX": PRX}
+        # Advertise WHICH amplitude scale the frame is now on. `RFFEBlock` with
+        # physical_scale=False divides the frame by its own mean magnitude, erasing the
+        # absolute level; anything downstream that installs an ABSOLUTE reference (the
+        # kTBF floor in `ThermalNoiseBlock`) is then meaningless. That composition is
+        # F63, and it survived every review because nothing in the chain could see it.
+        # Blocks other than RFFEBlock are assumed absolute -- only the normalisation
+        # above forfeits the scale.
+        absolute = bool(getattr(self.rffe_block, "physical_scale", True))
+        return {"s_pars": s_pars, "PRX": PRX,
+                "amplitude_scale": "absolute" if absolute else "normalised"}
 
 
 class GridStage:

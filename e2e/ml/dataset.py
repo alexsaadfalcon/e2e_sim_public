@@ -483,11 +483,43 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
                           corpus_tag=corpus_tag)
 
 
+def _input_scale(cfg) -> float:
+    """The ONE constant every consumer divides the network input by (F63, piece 2).
+
+    Under `physical_scale=True` the cube reaching the network is in absolute volts, and
+    its magnitude drops by ~74 dB relative to the old normalised regime -- small enough
+    that training on it raw goes badly. It therefore needs a normalisation, and the
+    choice of normalisation is the whole point of this function.
+
+    It is deliberately NOT computed from the data. A per-frame (or even per-corpus,
+    data-derived) statistic would re-erase the absolute scale one layer further down --
+    inside the training path, where it is even harder to see than F63 was. This constant
+    comes from the RADAR CONFIG alone: the RMS voltage of the thermal floor the chain
+    installed. Dividing by it expresses the cube in units of its own noise floor, so a
+    frame generated at higher transmit power still arrives at the network louder, which
+    is exactly the information `physical_scale=True` exists to preserve.
+
+    Stored in the manifest at generation time so scoring, visualisation and any later
+    re-training resolve the SAME number instead of each recomputing it -- the divergence
+    that F52 was.
+    """
+    from e2e.chain.link_budget import thermal_noise_power_w
+
+    scale = float(np.sqrt(thermal_noise_power_w(cfg)))
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError(
+            f"input_scale must be finite and positive, got {scale!r} for config "
+            f"{getattr(cfg, 'name', cfg)!r} -- check noise_figure_db / bandwidth."
+        )
+    return scale
+
+
 def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
                    grid=None, seed: int = 0, snr_db: Optional[float] = None,
                    frames_per_scene: int = 1, splits: Tuple[float, ...] = (0.8, 0.1, 0.1),
                    label_classes: Sequence[str] = LABEL_CLASSES,
-                   corpus_tag: Optional[str] = None) -> Path:
+                   corpus_tag: Optional[str] = None,
+                   input_scale: Optional[float] = None) -> Path:
     """Write a manifest_version-2 `manifest.json` for a corpus already written to
     `dataset_dir` -- the manifest-writing tail factored out of `generate_dataset` so
     OTHER producers of the same on-disk schema (namely `e2e.ml.chain_generate`, which
@@ -538,6 +570,15 @@ def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
         "label_classes": list(label_classes) if label_classes is not None else None,
         "corpus_tag": corpus_tag if corpus_tag is not None else dataset_dir.name,
         "generator_git_commit": _generator_git_commit(),
+        # F63 piece 2, and ONLY written by a producer that actually put the cube on an
+        # absolute scale (chain_generate with the link budget on). The analytic
+        # generate_sample path never does, so its manifests carry no input_scale and
+        # consumers fall back to 1.0 -- dividing synthetic arbitrary-unit data by a
+        # thermal RMS would be a rescale with no physical meaning.
+        **({} if input_scale is None else {
+            "input_scale": float(input_scale),
+            "input_scale_source": "sqrt(thermal_noise_power_w(cfg)) -- see _input_scale",
+        }),
         "files": files,
         "sequences": sequences,
     }
@@ -617,6 +658,17 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         self.dataset_dir = self.manifest_path.parent
         self._cache: Dict[int, Any] = {}
         self._cfg = None  # lazily built RadarConfig, only needed for input_format="rd"
+        # F63 piece 2. One constant for the whole corpus, read from the manifest so every
+        # consumer resolves the same number. A corpus generated BEFORE the fix carries no
+        # `input_scale` and was written in the normalised regime, where dividing by the
+        # thermal RMS would be wrong -- those get 1.0, i.e. the behaviour they were
+        # trained and scored under. See `_input_scale`.
+        self.input_scale = float(self.manifest.get("input_scale") or 1.0)
+        if self.input_scale <= 0.0:
+            raise ValueError(
+                f"{self.manifest_path} records a non-positive input_scale "
+                f"({self.input_scale!r}); it must be a positive float"
+            )
 
     def __len__(self) -> int:
         return len(self.files)
@@ -683,6 +735,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
                 "array on disk) -- input_format='adc' needs a regenerated corpus"
             )
         x = self._derive_input(array, is_adc)
+        x = x / self.input_scale
         y = torch.from_numpy(labels).to(torch.float32)
         return x, y, meta
 

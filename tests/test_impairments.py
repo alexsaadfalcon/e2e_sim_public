@@ -700,8 +700,18 @@ def test_clutter_reference_decides_whether_target_gains_survive(reference, expec
     ratios = []
     for gain_db in (0.0, 20.0):
         adc = _cube_with_noise_floor_and_target(cfg, gain_db)
+        # range_exponent=0 ON PURPOSE. What is under test is the power REFERENCE
+        # semantics, and `_target_to_background_db` estimates the background as a
+        # median over the whole range axis. That estimator is only meaningful for a
+        # range-FLAT field: under the R^-3 law (the shipped default since 2026-08-29)
+        # the median mixes clutter-dominated near bins with thermal-noise-dominated far
+        # ones, the mixture's composition moves with target gain, and the test reads a
+        # +6.5 dB swing that is the estimator's, not the impairment's. Measured with a
+        # range-LOCAL background the invariance survives the law (+1.3 -> +2.3 dB).
+        # The range law has its own oracles: test_clutter_follows_the_surface_range_law.
         out = apply_clutter(adc, cfg,
-                            ClutterParams(total_relative_db=-10.0, reference=reference),
+                            ClutterParams(total_relative_db=-10.0, reference=reference,
+                                          range_exponent=0.0),
                             seed=1)
         ratios.append(_target_to_background_db(out))
     delta = ratios[1] - ratios[0]
@@ -748,3 +758,97 @@ def test_clutter_power_calibration_holds_under_ddma(torch_device):
     observed = (clutter.abs() ** 2).mean().item()
     observed_db = 10.0 * math.log10(observed / target_total)
     assert abs(observed_db) < 1.5, f"clutter power off calibration by {observed_db:.2f} dB"
+
+
+def _clutter_range_profile(cfg, exponent, *, n_seeds, device, window=True):
+    """Seed-averaged range-power profile of the injected clutter field.
+
+    Two measurement choices, both load-bearing:
+
+    * AVERAGE OVER SEEDS. A single draw is K-distributed speckle; its per-bin variance
+      swamps any range trend, and a slope fitted to one seed is not a measurement.
+    * WINDOW BEFORE THE FFT. Each clutter patch is a TONE in the beat signal, so with a
+      rectangular window the near-range patches -- which the R^-3 law deliberately makes
+      the strongest -- leak across the whole range axis and fill in the far bins. Fitting
+      that measures the window's sidelobes, not the field: it reads a true -3 slope as
+      about -1.35. Hann suppresses the leakage and recovers -2.93.
+    """
+    adc = torch.zeros((cfg.n_rx, cfg.n_chirps, cfg.n_samples), dtype=torch.complex64,
+                      device=device)
+    win = (torch.hann_window(cfg.n_samples, periodic=False, device=device).to(torch.complex64)
+           if window else torch.ones(cfg.n_samples, dtype=torch.complex64, device=device))
+    acc = torch.zeros(cfg.n_samples, dtype=torch.float64, device=device)
+    for s in range(n_seeds):
+        params = ClutterParams(total_relative_db=10.0, reference="thermal",
+                               range_exponent=exponent)
+        out = apply_clutter(adc, cfg, params, seed=s)
+        rp = torch.fft.fft(out * win, dim=-1)
+        acc += (rp.abs() ** 2).mean(dim=(0, 1)).to(torch.float64)
+    return (acc / n_seeds).cpu().numpy()
+
+
+def _fit_log_slope(r, p, lo_m, hi_m):
+    m = (r > lo_m) & (r < hi_m)
+    return float(np.polyfit(np.log10(r[m]), np.log10(p[m]), 1)[0])
+
+
+def test_clutter_follows_the_surface_range_law(torch_device):
+    """Ground clutter must fall as R^-3, and did not until 2026-08-29.
+
+    Surface clutter obeys the two-way radar equation's R^-4 while the illuminated ground
+    patch's AREA grows as R, leaving R^-3. The shipped field was FLAT: scatterers drawn
+    uniformly in range, all given equal mean power. That is not a subtle mis-calibration
+    -- across 6-96 m the correct law spans tens of dB -- and it made near clutter far too
+    weak and far clutter far too strong, the opposite of what a CFAR meets on a road.
+
+    Pins both arms so the law cannot be silently switched off: `range_exponent=0.0`
+    reproduces the old flat field exactly (it is still reachable, deliberately), and the
+    3.0 default reproduces the physics.
+    """
+    cfg = PRESETS["benchmark_v1"]
+    r = np.arange(cfg.n_samples) * cfg.range_resolution_m
+
+    flat = _clutter_range_profile(cfg, 0.0, n_seeds=40, device=torch_device)
+    slope_flat = _fit_log_slope(r, flat, 6.0, 96.0)
+    assert abs(slope_flat) < 0.4, (
+        f"range_exponent=0 must stay flat, fitted slope {slope_flat:+.2f}"
+    )
+
+    law = _clutter_range_profile(cfg, 3.0, n_seeds=40, device=torch_device)
+    slope_law = _fit_log_slope(r, law, 6.0, 96.0)
+    assert slope_law == pytest.approx(-3.0, abs=0.5), (
+        f"clutter power must fall as R^-3 over 6-96 m; fitted slope {slope_law:+.2f}"
+    )
+    assert slope_law < slope_flat - 2.0, (
+        "the range law must be the thing making the difference, not a global rescale"
+    )
+
+
+def test_clutter_range_law_only_redistributes_power(torch_device):
+    """`range_exponent` must not move the TOTAL injected power.
+
+    `total_relative_db` is a difficulty knob that other code (and every recorded corpus
+    manifest) reads as an absolute clutter-to-noise level. If switching the range law on
+    also changed the total, that knob would silently mean something different before and
+    after 2026-08-29, and no stored value would be comparable across the change. The
+    weight is renormalised to unit mean power for exactly this reason.
+    """
+    cfg = PRESETS["benchmark_v1"]
+    adc = torch.zeros((cfg.n_rx, cfg.n_chirps, cfg.n_samples), dtype=torch.complex64,
+                      device=torch_device)
+
+    def total_power(exponent):
+        acc = 0.0
+        for s in range(12):
+            params = ClutterParams(total_relative_db=10.0, reference="thermal",
+                                   range_exponent=exponent)
+            out = apply_clutter(adc, cfg, params, seed=s)
+            acc += float((out.abs() ** 2).mean().item())
+        return acc / 12
+
+    flat, law = total_power(0.0), total_power(3.0)
+    ratio_db = 10.0 * math.log10(law / flat)
+    assert abs(ratio_db) < 1.0, (
+        f"the range law moved total injected power by {ratio_db:+.2f} dB; it is supposed "
+        f"to redistribute the field in range, not change its level"
+    )

@@ -53,7 +53,7 @@ from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
                                RadarCubeBlock)
 from e2e.environment.blocks import RTEnvironmentBlock
 from e2e.ml.blocks import SinkBlock
-from e2e.ml.dataset import DATASETS_DIR
+from e2e.ml.dataset import DATASETS_DIR, _input_scale
 from e2e.simulation import Simulation
 
 DEFAULT_LABEL_CLASSES = ("vehicle", "pedestrian")
@@ -194,6 +194,13 @@ def build_chain_simulation(
     if use_rffe:
         kwargs = dict(rffe_kwargs or {})
         kwargs.setdefault("n", int(cfg.n_rx))
+        # F63: the block's OWN default is physical_scale=False, which divides the frame
+        # by its mean magnitude -- fine for the classic imaging pipeline, fatal here,
+        # because this chain then installs an absolute kTBF floor beneath it and every
+        # impairment dB is referenced to that floor. The ML corpus takes the absolute
+        # scale. A caller may still override explicitly, and `ThermalNoiseBlock` will
+        # refuse the resulting composition rather than silently produce it.
+        kwargs.setdefault("physical_scale", True)
         serial_stages.append(CircuitStage(RFFEBlock(**kwargs)))
     if use_interconnect:
         # The block's own default is an unnormalised 11-tap boxcar placeholder, which
@@ -380,9 +387,17 @@ def generate_chain_corpus(
         scene_files = [f"{tag}_frame_{t:05d}.npz" for t in range(frames_per_scene)]
         sequences.append(scene_files)
 
+    # F63 piece 2: this producer -- and only this one -- puts the cube on an absolute
+    # scale, so it is the only one entitled to record the constant consumers divide by.
+    # It never disables the link budget (it does not expose the flag; `build_chain_
+    # simulation`'s default is on), so the constant always applies here. If a
+    # `use_link_budget` parameter is ever added to this function, this must become
+    # conditional on it -- with the floor off there is nothing to reference.
+    input_scale = _input_scale(cfg)
     return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
                           snr_db=None, frames_per_scene=frames_per_scene, splits=splits,
-                          label_classes=label_classes or (), corpus_tag=corpus_tag)
+                          label_classes=label_classes or (), corpus_tag=corpus_tag,
+                          input_scale=input_scale)
 
 
 # --------------------------------------------------------------------------------

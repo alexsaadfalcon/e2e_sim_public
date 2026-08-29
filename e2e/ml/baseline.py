@@ -404,12 +404,25 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
         raise ValueError(f"doppler_reduce must be one of {_DOPPLER_REDUCTIONS}, "
                          f"got {doppler_reduce!r}")
 
+    # DEFAULTS FLIPPED 2026-08-29 (owner ballot). Together these are worth +28.7% AP on
+    # the benchmark_v1 test split (0.1340 -> 0.1724, 2.08x -> 2.67x chance); NEITHER half
+    # works alone -- compensation by itself is +0.6%. They are defaults HERE, on the
+    # detector, and deliberately not on `range_azimuth_power`, which is also the
+    # visualization path: notching zero Doppler would blank a static scene in a figure.
+    #
+    # `tdm_doppler_comp=None` means AUTO: on for TDM, off otherwise. It cannot be a bare
+    # True, because the correction is only defined for TDM and `range_azimuth_power`
+    # rightly raises on anything else. An explicit True/False is still honoured, and an
+    # explicit True on a non-TDM config still raises rather than being quietly ignored.
+    tdm_comp = kwargs.pop("tdm_doppler_comp", None)
+    if tdm_comp is None:
+        tdm_comp = (cfg.mimo == "tdm")
     power = range_azimuth_power(
         cfg, adc,
         n_angle_fft=kwargs.pop("n_angle_fft", None),
         angle_window=kwargs.pop("angle_window", True),
-        doppler_notch_bins=kwargs.pop("doppler_notch_bins", 0),
-        tdm_doppler_comp=kwargs.pop("tdm_doppler_comp", False),
+        doppler_notch_bins=kwargs.pop("doppler_notch_bins", 1),
+        tdm_doppler_comp=tdm_comp,
         keep_doppler=doppler_reduce != DOPPLER_MAX,
     )
 

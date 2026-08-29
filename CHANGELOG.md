@@ -7,6 +7,37 @@ semantic versioning.
 ## [Unreleased]
 
 ### Fixed
+- **The ML corpus chain normalised away its own absolute amplitude scale, then installed
+  an absolute thermal floor beneath it.** `RFFEBlock` defaults `physical_scale=False`,
+  which divides the frame by its mean magnitude; the corpus generator took that default
+  and appended `ThermalNoiseBlock` after it, so target SNR stopped tracking transmit
+  power, noise figure and range. `build_chain_simulation` now sets `physical_scale=True`;
+  `RadarFrameDataset` divides by a corpus-wide `input_scale` recorded in the manifest
+  (derived from the radar config, never from the data, so it cannot re-erase the scale);
+  and `ThermalNoiseBlock` now REFUSES a normalised cube rather than producing a
+  plausible-looking corpus. **Corpora generated before this carry the defect and cannot
+  be repaired by rescoring — the defect is in the recorded samples.**
+- **Ground clutter had no range dependence.** Scatterers were drawn uniformly in range
+  and given equal mean power, so the injected field was flat (measured slope +0.08 over
+  6-96 m) where surface clutter falls as R^-3 — the two-way R^-4 against a ground patch
+  whose area grows as R. `ClutterParams.range_exponent` (default 3.0) applies the law
+  using the already-drawn ranges, so the module's public RNG draw-order contract is
+  unchanged, and renormalises to preserve total injected power so `total_relative_db`
+  keeps its meaning. Measured after the fix: slope -2.93. Set `range_exponent=0.0` for
+  the previous flat field.
+
+### Changed
+- **The classical detector notches zero Doppler and compensates TDM phase by default**
+  (`classical_detection_map`), together worth +28.7% AP on the `benchmark_v1` test split
+  (0.1340 -> 0.1724); neither half helps alone. `tdm_doppler_comp` defaults to auto-on
+  for TDM configs only. **The notch suppresses genuinely stationary targets** — that is
+  the standard MTI trade, pinned by a regression test, and ego-motion-compensated MTI is
+  what will buy the rejection back without the blind spot. The shared
+  `range_azimuth_power` transform is deliberately unchanged, since it also feeds the
+  visualization path. `compare_detectors` exposes
+  `--classical-no-tdm-doppler-comp` and `--classical-doppler-notch-bins` to score either
+  configuration, including reproducing pre-2026-08-29 numbers.
+
 - **RT scenario targets were stationary, and when they did move they moved 10x too
   fast.** Two independent defects in `e2e.ml.rt_scenes.build_rt_tier_scenario`, both
   silent, both confirmed empirically. (1) A sampled velocity was discarded whenever

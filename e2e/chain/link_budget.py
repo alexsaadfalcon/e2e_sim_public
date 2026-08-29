@@ -217,6 +217,19 @@ class ThermalNoiseBlock:
         adc = state["adc"]
         if not self.enabled:
             return {"adc": adc}
+        # F63 guard. Adding an absolute k*T*B*F floor beneath a cube whose absolute level
+        # was already divided away is not a smaller error than omitting the floor -- it
+        # invents an SNR. `CircuitStage` stamps `amplitude_scale` for exactly this check,
+        # so the invalid composition cannot be re-entered through `rffe_kwargs` by someone
+        # who never reads this file. Refuse loudly rather than produce a plausible corpus.
+        if state.get("amplitude_scale") == "normalised":
+            raise ValueError(
+                "ThermalNoiseBlock was asked to add an absolute thermal floor to a cube "
+                "that an upstream RFFEBlock normalised (physical_scale=False), which "
+                "erases the absolute scale the floor is referenced to. This is F63. "
+                "Either build the RF front end with physical_scale=True (the default for "
+                "ML corpus generation), or disable the link budget."
+            )
         scaled = adc * tx_amplitude_scale(self.cfg)
         out = add_thermal_noise(scaled, self.cfg, seed=self.seed + self._frame_idx)
         self._frame_idx += 1

@@ -611,6 +611,22 @@ class ClutterParams:
     # calibrated for "peak" and must be re-derived as a clutter-to-noise ratio to be
     # meaningful under "noise".
     reference: str = DEFAULT_POWER_REFERENCE
+    # Range dependence of the returned clutter power, as an exponent: power ~ R^-range_exponent.
+    # 3.0 is the surface-clutter law -- the two-way radar equation gives R^-4, and the
+    # illuminated ground patch's AREA grows as R, leaving R^-3. Until 2026-08-29 this
+    # was effectively 0: scatterers were drawn uniformly in range and given equal mean
+    # power, so the injected field was FLAT (measured flat to 1.71 dB over 6-96 m, where
+    # R^-3 spans 35.7 dB). That made near clutter far too weak and far clutter far too
+    # strong, which is the opposite of what a CFAR sees on a road.
+    #
+    # The weight is applied as a REDISTRIBUTION: total injected power is renormalised
+    # afterwards, so `total_relative_db` keeps meaning exactly what it meant before and
+    # the two knobs stay independent. Set 0.0 to recover the flat legacy field.
+    range_exponent: float = 3.0
+    # Near-field clamp for the law above; R^-3 diverges at the origin and the first
+    # range cells are not resolvable clutter anyway. None -> one range-resolution cell,
+    # floored at 1 m. Only ever raises the weight's cap, never changes the total.
+    range_ref_m: Optional[float] = None
 
 
 def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
@@ -723,6 +739,19 @@ def apply_clutter(adc: torch.Tensor, cfg, params: ClutterParams, *, seed: int,
     tx_power = float(cfg.n_tx) if str(cfg.mimo).lower() == "ddma" else 1.0
     mean_power = target_total / (n_scat * tx_power)
     gain = gain * math.sqrt(mean_power)
+
+    # Surface-clutter range law (see ClutterParams.range_exponent). Uses the ALREADY
+    # DRAWN `ranges` -- no new RNG draw, so the public draw-order contract above is
+    # untouched and every replay helper still works. Renormalised to unit mean power so
+    # this only redistributes the field in range and leaves `total_relative_db` exact.
+    if float(params.range_exponent) != 0.0:
+        r_ref = params.range_ref_m
+        if r_ref is None:
+            r_ref = max(float(cfg.range_resolution_m), 1.0)
+        r_ref = float(r_ref)
+        w = (r_ref / torch.clamp(ranges, min=r_ref)) ** (float(params.range_exponent) / 2.0)
+        w = w / torch.sqrt(torch.mean(w ** 2))
+        gain = gain * w.to(gain.dtype)
 
     if frame_idx:
         # Deterministic phase advance from the scatterer's OWN drawn velocity -- the

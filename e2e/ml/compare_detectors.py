@@ -58,7 +58,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -401,6 +401,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="comma-separated Doppler reductions to score the classical "
                         "baseline under, one arm each, on identical frames (see "
                         "e2e.ml.baseline's DOPPLER_* constants). Default: the shipped one")
+    # The two halves of the TDM Doppler fix, ON by default in `classical_detection_map`
+    # since 2026-08-29 (+28.7% AP together; neither works alone). Exposed so a scored
+    # comparison can turn them OFF from the CLI -- which is how the +28.7% is reproduced,
+    # and how a pre-2026-08-29 number is regenerated.
+    p.add_argument("--classical-no-tdm-doppler-comp", action="store_true",
+                   help="disable the classical arm's per-Doppler-bin TDM phase "
+                        "compensation (default: on for TDM configs). Only defined for "
+                        "TDM, and invalid above the unambiguous velocity")
+    p.add_argument("--classical-doppler-notch-bins", type=int, default=None,
+                   metavar="N",
+                   help="width of the classical arm's zero-Doppler notch, in bins "
+                        "(default 1). 0 disables it")
     p.add_argument("--recall", type=float, default=DEFAULT_TARGET_RECALL,
                    help=f"recall to hold every arm at (default {DEFAULT_TARGET_RECALL})")
     p.add_argument("--decode-threshold", type=float, default=DEFAULT_DECODE_THRESHOLD,
@@ -434,11 +446,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     reductions = ([r.strip() for r in args.classical_doppler_reduce.split(",") if r.strip()]
                   if args.classical_doppler_reduce else None)
+    # Only set what was explicitly asked for: an unset flag must leave
+    # `classical_detection_map`'s own default in place rather than restating it here,
+    # so the default lives in exactly one file.
+    classical_kwargs: Dict[str, Any] = {}
+    if args.classical_no_tdm_doppler_comp:
+        classical_kwargs["tdm_doppler_comp"] = False
+    if args.classical_doppler_notch_bins is not None:
+        classical_kwargs["doppler_notch_bins"] = int(args.classical_doppler_notch_bins)
     result = compare(args.manifest, split=args.split, checkpoints=checkpoints,
                      classical=args.classical, target_recall=args.recall,
                      decode_threshold=args.decode_threshold, device=device,
                      batch_size=args.batch_size, ssm_chunk_size=args.ssm_chunk_size,
                      limit=args.limit, classical_doppler_reduce=reductions,
+                     classical_kwargs=classical_kwargs or None,
                      null_baseline=not args.no_null,
                      use_ignore_regions=args.use_ignore_regions)
     print(format_table(result))

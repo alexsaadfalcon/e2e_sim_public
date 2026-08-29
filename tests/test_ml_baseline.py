@@ -122,8 +122,13 @@ def test_classical_map_localizes_a_synthesized_target_in_range(torch_device):
     # about detection sensitivity. At 30 dB a 12-element array's own sidelobes inflate the
     # CFAR training cells enough that noise can take the peak -- a real property of the
     # baseline, covered by the corpus-level AP rather than pinned here.
+    # doppler_notch_bins=0 EXPLICITLY. The target above is stationary, and the shipped
+    # default notches the zero-Doppler bin, which is exactly where a stationary target
+    # lives -- see test_default_notch_suppresses_a_stationary_target for that trade,
+    # pinned deliberately. This test is about the chain being wired to the right RANGE
+    # bin, so it measures the un-notched map.
     adc = synthesize_adc(cfg, [target], RadarPose(), snr_db=40.0, seed=0)
-    out = classical_detection_map(cfg, adc, grid)
+    out = classical_detection_map(cfg, adc, grid, doppler_notch_bins=0)
 
     assert out.shape == (3, grid.n_range, grid.n_azimuth)
     assert torch.all(out[1:] == 0.0)               # no sub-cell regression, by design
@@ -385,10 +390,51 @@ def test_classical_map_localizes_a_point_target_at_every_fine_bin_offset(offset_
     range_m = (160 + offset_bins) * float(cfg.range_resolution_m)
     target = Scatterer(position=(range_m, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
                        rcs_dbsm=20.0, object_class="vehicle")
+    # doppler_notch_bins=0: the target is stationary and the shipped notch would
+    # remove it (see test_default_notch_suppresses_a_stationary_target). What is
+    # regressed here is the range decimation, which the notch is irrelevant to.
     adc = synthesize_adc(cfg, [target], RadarPose(), snr_db=40.0, seed=0)
-    out = classical_detection_map(cfg, adc, grid)
+    out = classical_detection_map(cfg, adc, grid, doppler_notch_bins=0)
     peak_range_bin = int(torch.argmax(out[0].max(dim=1).values))
     assert abs(peak_range_bin * grid.range_bin_m - range_m) <= 2.0 * grid.range_bin_m
+
+
+def test_default_notch_suppresses_a_stationary_target(torch_device):
+    """PINS THE COST of the 2026-08-29 default flip, so it can never go silent.
+
+    `classical_detection_map` now notches the zero-Doppler bin by default, which is
+    worth +28.7% AP on a corpus of MOVING targets. The price is structural and not a
+    bug: a genuinely stationary target -- a parked car -- sits in the notched bin and
+    is suppressed. Ego-motion-compensated MTI is what buys the rejection back without
+    the blind spot, and until it lands this is the shipped trade.
+
+    Asserted as a COMPARISON rather than an absolute, so it measures the notch and
+    not the CFAR's sensitivity on any one synthetic frame.
+    """
+    from e2e.environment.scatterers import RadarPose, Scatterer
+    from e2e.chain.rd_synth import synthesize_adc
+
+    cfg = PRESETS["ti_iwr1443"]
+    grid = LabelGrid.for_config(cfg)
+    range_m = 12.0
+    target = Scatterer(position=(range_m, 0.0, 0.0), velocity=(0.0, 0.0, 0.0),
+                       rcs_dbsm=20.0, object_class="vehicle")
+    adc = synthesize_adc(cfg, [target], RadarPose(), snr_db=40.0, seed=0)
+
+    def peak_error_m(**kw):
+        out = classical_detection_map(cfg, adc, grid, **kw)
+        peak_bin = int(torch.argmax(out[0].max(dim=1).values))
+        return abs(peak_bin * grid.range_bin_m - range_m)
+
+    assert peak_error_m(doppler_notch_bins=0) <= 2.0 * grid.range_bin_m, (
+        "un-notched, the stationary target must still be found -- otherwise this "
+        "test is measuring something other than the notch"
+    )
+    assert peak_error_m() > 4.0 * grid.range_bin_m, (
+        "the default notch is expected to suppress a stationary target; if it no "
+        "longer does, the default changed or ego-motion compensation landed -- "
+        "update this test deliberately rather than deleting it"
+    )
 
 
 
