@@ -1,6 +1,10 @@
 # Tessera TSV interconnect transfer function (single signal line, center signal + ground ring).
 # geometry: radius=5um pitch=60um height=100um liner=0.5um. See README.md for provenance/caveats.
 # columns: freq_hz, s21_re, s21_im, s21_abs_db, s21_phase_deg, s11_re, s11_im, s11_abs_db
+# ATTRIBUTION: the interconnect itself was simulated by Mohamed Gharib and
+#   Prof. Inna Partin-Vaisband (University of Illinois Chicago). The simulation
+#   code is NOT distributed with this repository and is available on request to
+#   those authors. This file is their simulation's output, not a measurement.
 freq_hz,s21_re,s21_im,s21_abs_db,s21_phase_deg,s11_re,s11_im,s11_abs_db
 1.000000e+09,9.75312831e-01,5.70321776e-02,-0.2023,3.3466,1.24537097e-02,-2.12972104e-01,-13.4187
 1.250000e+09,9.75890835e-01,7.27904366e-02,-0.1879,4.2657,1.53051202e-02,-2.05193528e-01,-13.7326

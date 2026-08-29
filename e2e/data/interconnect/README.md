@@ -4,9 +4,20 @@ Seven derived datasets ship here: one Ka-band TSV line, and six 77 GHz automotiv
 All are DATA. No collaborator source code, model, or HFSS project is reproduced anywhere in
 this repository.
 
+## Attribution
+
+The interconnects were **simulated by Mohamed Gharib and Prof. Inna Partin-Vaisband
+(University of Illinois Chicago)**. These `.csv` files are the output of their
+simulations — they are *simulated interconnects*, not laboratory measurements, and
+nothing here should be described as measured data.
+
+**The simulation code is not distributed with this repository and is available on request
+to those authors.** That is deliberate: this repository ships their results so the
+pipeline can be exercised against realistic hardware, not their models.
+
 ## `tessera_case{1..6}_s21_77ghz.csv` — the six 77 GHz automotive designs
 
-Six measured interconnect designs from the Tessera collaborator's HFSS export, cleared by
+Six simulated interconnect designs from the Tessera collaborator's HFSS export, cleared by
 the owner for this repository on 2026-08-19. Each file is 401 rows spanning **70–90 GHz**
 with columns `freq_hz, s21_re, s21_im, s21_abs_db, s21_phase_deg`, and each carries its own
 provenance in `#` header comments.
@@ -59,17 +70,21 @@ height 100 µm, liner 0.5 µm. Over the pipeline's 28.5–31.5 GHz band the inse
 
 ### TSV provenance and caveats
 
-- These numbers were produced by a collaborator's **physics-informed GNN surrogate for TSV
+- These numbers were produced by the authors' **physics-informed GNN surrogate for TSV
   networks** (an HFSS-finetuned model that predicts the S-matrix from array layout +
-  geometry). **The model/source code is intentionally NOT included in this repository** —
-  only this derived `.csv` result is committed, for use in tests and tutorials.
+  geometry) — a different instrument from the direct HFSS export behind the six 77 GHz
+  cases, though the same group. **The model/source code is intentionally NOT included in
+  this repository** — only this derived `.csv` result is committed, for use in tests and
+  tutorials.
 - **Frequency-validity caveat:** the surrogate's documented demo point is ~15 GHz. It
   produces smooth, well-behaved output across the full 1–40 GHz sweep (no extrapolation
   artifacts), but whether it is *validated* at the pipeline's 28.5–31.5 GHz band is a
   question for the model's authors. Treat the >~20 GHz region as indicative pending
   confirmation.
-- **TODO (attribution):** confirm the citation / acknowledgement wording with the
-  collaborator before any public release (the associated paper is under review).
+- **Attribution:** settled 2026-08-29 — see the Attribution section at the top of this
+  file. One item remains open and is not a blocker: the associated paper was under review
+  at the time of writing, so this file cites no publication. When it appears, add the
+  formal citation here and in `docs/PHYSICS.md` §6.
 
 ### Regenerating the TSV
 

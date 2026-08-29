@@ -38,11 +38,12 @@ Every module below answers the same five questions, in order:
 A module can carry different verdicts for different aspects of itself; where that
 happens, both are stated.
 
-Three entries below — the interconnect (data-driven transfer functions from a
-collaborator), and the subspace-tracker section — are marked **PENDING OWNER REVIEW**
-because their wording touches a collaborator's data or was recently rewritten and
-hasn't had a final pass. Everything else reflects the state of the code at the time of
-writing; re-run the cited test or script to check it against whatever you have checked
+Every entry below has had its final review pass. Two of them — the interconnect
+(data-driven transfer functions from a collaborator) and the subspace tracker — were
+held back longer than the rest because their wording touches a collaborator's data or
+had been recently rewritten; both were cleared on 2026-08-29. Every entry reflects the
+state of the code at the time of writing; re-run the cited test or script to check it
+against whatever you have checked
 out.
 
 ---
@@ -187,38 +188,39 @@ floor and target SNR against an independently worked RF link-budget calculation.
 
 ## 6. Interconnect — `e2e/blocks.py` (`InterconnectBlock`) + `e2e/data/interconnect/`
 
-> **PENDING OWNER REVIEW — not for publication as written.** This entry describes
-> transfer-function data supplied by a hardware collaborator; the wording around whose
-> data it is and how it should be characterized needs the collaborator's/owner's sign-off
-> before shipping publicly. Draft below.
->
-> **Effect:** the physical interconnect's frequency response between the RF front end
-> and downstream processing — every real receive chain has *some* transfer function
-> here, and a flat/ideal assumption hides its cost.
->
-> **Model:** `InterconnectBlock` defaults to a fixed placeholder (an 11-tap boxcar
-> frequency response, independent of the scenario's frequency plan). Passing
-> `transfer_csv=` switches it to a measurement-driven mode: it loads a measured
-> magnitude response `|S21|(f)` and resamples it onto the scenario's frequency band.
-> Seven derived datasets ship under `e2e/data/interconnect/` (six 77 GHz automotive
-> interconnect designs plus a Ka-band TSV interconnect), each derived from a
-> collaborator's HFSS/surrogate S-parameter simulation.
->
-> **Approximations:** the underlying HFSS export is magnitude-only, so the model
-> reconstructs phase via a minimum-phase assumption (a Hilbert transform of the log
-> magnitude). That is the physically correct phase for a passive, causal,
-> minimum-phase structure, but it is an assumption rather than a measurement, and it
-> applies to all seven datasets.
->
-> **Evidence:** the measured in-band ripple of each dataset predicts its sidelobe floor
-> in the way transform theory says it should (more ripple, higher/worse sidelobes) —
-> see the README's interconnect section for the measured ripple-to-sidelobe numbers and
-> `python -m e2e.main.main_interconnect` to reproduce the comparison figure yourself.
-> Regression tests pin the resampled response for each dataset.
->
-> **Verdict: JUSTIFIED** for the measurement-driven mode; the default placeholder
-> remains a stated, opt-out-of stand-in (see the README's "Interconnect: placeholder
-> vs. measured" section).
+**Effect:** the physical interconnect's frequency response between the RF front end
+and downstream processing — every real receive chain has *some* transfer function
+here, and a flat/ideal assumption hides its cost.
+
+**Model:** `InterconnectBlock` defaults to a fixed placeholder (an 11-tap boxcar
+frequency response, independent of the scenario's frequency plan). Passing
+`transfer_csv=` switches it to a data-driven mode: it loads a simulated magnitude
+response `|S21|(f)` and resamples it onto the scenario's frequency band. Seven derived
+datasets ship under `e2e/data/interconnect/` (six 77 GHz automotive interconnect
+designs plus a Ka-band TSV interconnect), each derived from an HFSS S-parameter
+simulation.
+
+**Provenance and attribution.** The interconnect transfer functions were simulated by
+**Mohamed Gharib and Prof. Inna Partin-Vaisband (University of Illinois Chicago)**. The
+`.csv` files in this repository are simulated interconnect responses, not laboratory
+measurements. The simulation code that produced them is **not** distributed with this
+repository and is available on request to those authors.
+
+**Approximations:** the underlying HFSS export is magnitude-only, so the model
+reconstructs phase via a minimum-phase assumption (a Hilbert transform of the log
+magnitude). That is the physically correct phase for a passive, causal, minimum-phase
+structure, but it is an assumption rather than a derived result, and it applies to all
+seven datasets.
+
+**Evidence:** the in-band ripple of each dataset predicts its sidelobe floor in the way
+transform theory says it should (more ripple, higher/worse sidelobes) — see the README's
+interconnect section for the ripple-to-sidelobe numbers and
+`python -m e2e.main.main_interconnect` to reproduce the comparison figure yourself.
+Regression tests pin the resampled response for each dataset.
+
+**Verdict: JUSTIFIED** for the data-driven mode; the default placeholder remains a
+stated, opt-out-of stand-in (see the README's "Interconnect: placeholder vs. simulated"
+section).
 
 ## 7. Dechirp — `e2e/chain/dechirp.py`
 
@@ -402,60 +404,62 @@ items."
 
 ## 13. AdaOja subspace tracker — `e2e/subspace/`
 
-> **PENDING OWNER REVIEW — not for publication as written.** This entry was recently
-> rewritten and the wording around a comparison baseline (a fixed-low-effort tracking
-> arm used only as a demonstration point, not a hardware spec) carries a caveat that
-> needs a final check before shipping. Draft below.
->
-> **Effect:** the adaptation loop of the same compute-in-memory hardware (entry 12) —
-> digital feedback that steers which subspace the analog combining weights track,
-> online, frame by frame. Waveform-agnostic: the same tracker feeds both the radar path
-> and, optionally, an OFDM combining head (`ModemBlock(combining="subspace")`).
->
-> **Model:** an online subspace tracker (`AdaOjaBlock`) whose default method
-> (`method="reestimate"`) performs a warm-started power-iteration step on the
-> back-projected measurements, tracking the array's top-`k` signal subspace at
-> `O(d·n·k)` cost per step — no SVD, no pseudo-inverse. A legacy incremental-gradient
-> variant (`method="oja"`) is kept for reference/tests but does not track fast drift
-> well, because its fixed-size gradient step carries no information about how much the
-> subspace has actually moved.
->
-> **A known failure mode and its fix:** when the tracked rank sits inside a
-> near-degenerate cluster of singular values (the top-`k` and (`k`+1)-th singular
-> values are close, i.e. a small `sv_gap_norm` — see the glossary), the "true" subspace
-> the tracker is chasing is itself ill-defined and rotates unusually fast frame to
-> frame, and any tracker's error rises during that window regardless of how much
-> compute it spends. `AdaOjaBlock(gap_response="refine")` (opt-in; default is
-> `"none"`, which preserves the tracker's original behavior) spends extra refinement
-> passes reactively, triggered when `sv_gap_norm` drops below a configurable threshold,
-> rather than spending extra effort on every frame regardless of need.
->
-> **Approximations:** the reactive gate is a heuristic keyed on one scalar diagnostic
-> (`sv_gap_norm`); it does not guarantee recovery within any fixed number of frames, and
-> some residual tracking-error spikes inside a degenerate window persist at *any* fixed
-> compute effort, because the underlying target subspace is itself ill-defined there —
-> that is a property of the scene's singular-value spectrum, not a tracker deficiency.
->
-> **Evidence:** `tests/test_subspace_tracking.py::test_reactive_gate_holds_error_down_through_a_degeneracy_episode`
-> drives a synthetic degeneracy episode (a scene whose subspace briefly becomes
-> near-degenerate, then recovers) and checks the trajectory: the gated tracker's mean
-> error through the episode must stay under half of a fixed-low-effort tracker's error,
-> the gated tracker must recover to at least as low an error as the fixed-effort one
-> once the episode ends, and the extra refinement passes must be spent only inside the
-> episode window, not throughout the run. The test is constructed to fail against a
-> gate that never boosts effort, so it is a genuine regression check, not a tautology.
-> A separate measurement on real ray-traced `munich` scenario frames (not yet backed
-> by a pinned regression test at the time of writing) found the same qualitative
-> pattern — substantially lower mean error for the gated tracker through a
-> spectral-degeneracy window than a fixed-low-effort baseline — but that measurement
-> used a demonstration-only comparison arm (a single refinement pass per frame) that is
-> not the production default effort level, so the exact error numbers from that run
-> should not be read as a production benchmark; the qualitative direction (gating
-> helps, and recovers) is what carries over.
->
-> **Verdict: JUSTIFIED** for the tracker's core algorithm and for the reactive-gating
-> mitigation, given the pinned synthetic regression test; the real-scenario numbers
-> above are corroborating, not load-bearing.
+**Effect:** the adaptation loop of the same compute-in-memory hardware (entry 12) —
+digital feedback that steers which subspace the analog combining weights track,
+online, frame by frame. Waveform-agnostic: the same tracker feeds both the radar path
+and, optionally, an OFDM combining head (`ModemBlock(combining="subspace")`).
+
+**Model:** an online subspace tracker (`AdaOjaBlock`) whose default method
+(`method="reestimate"`) performs a warm-started power-iteration step on the
+back-projected measurements, tracking the array's top-`k` signal subspace at
+`O(d·n·k)` cost per step — no SVD, no pseudo-inverse. A legacy incremental-gradient
+variant (`method="oja"`) is kept for reference/tests but does not track fast drift
+well, because its fixed-size gradient step carries no information about how much the
+subspace has actually moved.
+
+**A known failure mode and its fix:** when the tracked rank sits inside a
+near-degenerate cluster of singular values (the top-`k` and (`k`+1)-th singular
+values are close, i.e. a small `sv_gap_norm` — see the glossary), the "true" subspace
+the tracker is chasing is itself ill-defined and rotates unusually fast frame to
+frame, and any tracker's error rises during that window regardless of how much
+compute it spends. `AdaOjaBlock(gap_response="refine")` (opt-in; default is
+`"none"`, which preserves the tracker's original behavior) spends extra refinement
+passes reactively, triggered when `sv_gap_norm` drops below a configurable threshold,
+rather than spending extra effort on every frame regardless of need.
+
+**Approximations:** the reactive gate is a heuristic keyed on one scalar diagnostic
+(`sv_gap_norm`); it does not guarantee recovery within any fixed number of frames, and
+some residual tracking-error spikes inside a degenerate window persist at *any* fixed
+compute effort, because the underlying target subspace is itself ill-defined there —
+that is a property of the scene's singular-value spectrum, not a tracker deficiency.
+
+**Evidence:** `tests/test_subspace_tracking.py::test_reactive_gate_holds_error_down_through_a_degeneracy_episode`
+drives a synthetic degeneracy episode (a scene whose subspace briefly becomes
+near-degenerate, then recovers) and checks the trajectory, averaged over three seeds
+because a single draw is not a stable measurement. It pins two things: the gated
+tracker's mean error *through* the episode against a fixed-low-effort arm's — measured
+~0.002 gated against ~1.46 ungated, a ~700× margin — and that the extra refinement
+passes are spent only inside the episode window, not throughout the run. The test is
+constructed to fail against a gate that never boosts effort, so it is a genuine
+regression check, not a tautology.
+
+What the test deliberately does **not** assert is any post-episode advantage. An
+earlier version did, and it was wrong: once the spectral gap reopens the gate drops
+back to `n_refine`, and at one pass per frame neither arm holds this synthetic drift —
+both settle at the same error (~1.28). The gate buys accuracy where the diagnostic says
+to spend it, not a lasting head start. The test now asserts the two arms track *alike*
+after the episode, which is what would catch a gate stuck open.
+
+A separate measurement on real ray-traced `munich` frames (frames 22–59) compares three
+arms rather than two, so the trade is visible rather than implied: the reactive gate
+matches the constant-maximum-effort arm's accuracy through the collapse (mean error
+0.164 against 0.170) at 64% of its compute, while the fixed-low-effort baseline's error
+is 8.7× higher. That low-effort arm is a demonstration point, not a production default
+effort level.
+
+**Verdict: JUSTIFIED** for the tracker's core algorithm and for the reactive-gating
+mitigation, given the pinned synthetic regression test; the real-scenario numbers
+above are corroborating, not load-bearing.
 
 ## 14. Radar products & windowing — `e2e/blocks.py` (`FFTBlock`, `RangeAzBlock`, `RangeElBlock`), `e2e/ml/baseline.py`
 

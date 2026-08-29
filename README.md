@@ -4,7 +4,7 @@
 
 Simulate a large antenna array **end to end**: a ray-traced RF environment
 ([Sionna RT](https://nvlabs.github.io/sionna/)) → analog RF front-end distortion →
-a measurement-driven interconnect → adaptive feature extraction → online subspace
+a simulation-driven interconnect → adaptive feature extraction → online subspace
 tracking → radar maps, target scenes, and OFDM communications. Every stage is a
 swappable **block**, configurable from Python or from the browser. Every figure below
 comes from this simulator; each caption names the command that regenerates it, and
@@ -24,8 +24,8 @@ ray-traced frames through the full receive chain, and inspect the radar products
 | *The scene and what the radar sees: a Sionna RT render of a Munich scene (left) and the pipeline's range-azimuth map for that same scene, with ground-truth markers (right). Every one of the seven objects appears as its own return — the 192-element virtual array resolves them individually. Regenerate with `python -m e2e.main.main_sionna_blocks` (the figure's own generator lives in the maintainers' private notes repo, so it is not in this tree).* | *Seeing is believing for comms too: a photo's bits through the same array's OFDM link — clean, noisy, and with TX power-amplifier distortion.* |
 | ![One frame traced through every pipeline stage, from raw channel response to the final azimuth-elevation map](docs/media/signal_journey.png) | ![Moving tier-D2 scene: bird's-eye view, ideal-front-end radar returns, and non-ideal-front-end radar returns](docs/media/scene_D2.gif) |
 | *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
-| ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the measurement-driven model](docs/media/interconnect_before_after.png) |
-| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied: the reactive gate reaches the 60-pass accuracy floor for 37% of its compute, which is compute bought, not accuracy. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborator's measured 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every measured arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the worst of the six (−0.541 dB median loss and 0.113 dB ripple, against −0.249 to −0.291 dB and ≤0.030 dB for the rest). TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
+| ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the simulated model](docs/media/interconnect_before_after.png) |
+| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied: the reactive gate reaches the 60-pass accuracy floor for 37% of its compute, which is compute bought, not accuracy. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the worst of the six (−0.541 dB median loss and 0.113 dB ripple, against −0.249 to −0.291 dB and ≤0.030 dB for the rest). TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
 
 ![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
 *Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
@@ -282,14 +282,19 @@ approximations -> evidence breakdown, see [`docs/PHYSICS.md`](docs/PHYSICS.md).
   frequency response, independent of the scenario's `FrequencyPlan`. Measurement-driven
   transfer functions are available and shipped (see below) but are opt-in.
 
-### Interconnect: placeholder vs. measured
+### Interconnect: placeholder vs. simulated
 
 Pass `transfer_csv=` to `InterconnectBlock` and the interconnect stops being a stand-in:
-the block loads a measured |S21|(f) and resamples it onto the scenario's band. Seven
+the block loads a simulated |S21|(f) and resamples it onto the scenario's band. Seven
 derived datasets ship in `e2e/data/interconnect/` — a Ka-band TSV plus all six 77 GHz
-automotive designs — every one of them from collaborator HFSS/surrogate S-parameter data.
+automotive designs — every one of them from HFSS/surrogate S-parameter simulation.
 The figure below deliberately plots only Case3 of the six, so the comparison stays
 readable; `main_interconnect` draws all six in its own figure.
+
+The interconnects were simulated by **Mohamed Gharib and Prof. Inna Partin-Vaisband
+(University of Illinois Chicago)**. What ships here is their simulation output; the
+simulation code is not distributed with this repository and is available on request to
+those authors. See `e2e/data/interconnect/README.md` for per-dataset provenance.
 
 ```bash
 python -m e2e.main.main_interconnect     # writes the gallery figure above plus both figures below
@@ -297,7 +302,7 @@ python -m e2e.main.main_interconnect     # writes the gallery figure above plus 
 
 ![Interconnect transfer functions and the range profiles they produce, with the sidelobe skirt zoomed](docs/media/interconnect_range_profiles.png)
 
-*What a real interconnect costs you.* Top row: the two measured transfer functions, each
+*What a real interconnect costs you.* Top row: the two simulated transfer functions, each
 against its own band. Bottom left: all four range profiles at native resolution — every
 data-driven arm keeps a 1-bin mainlobe, while the legacy boxcar smears it to 11 bins.
 Bottom right: the same data with the y-axis stretched over the sidelobe skirt, where the
@@ -306,7 +311,7 @@ differences actually live. In-band ripple sets the skirt height, exactly as it s
 
 Two honesty notes, because this figure is easy to over-read. The two models sit in
 **different bands** (Ka-band and 77 GHz automotive), so this is not a head-to-head ranking
-of designs. And the 77 GHz case shown is deliberately the **worst of six** measured
+of designs. And the 77 GHz case shown is deliberately the **worst of six** simulated
 designs — it is a conservative bound, not a typical part. Sidelobe numbers are measured at
 **native resolution**: zero-padding the transform contributes sidelobes of its own and
 would swamp the effect being shown.

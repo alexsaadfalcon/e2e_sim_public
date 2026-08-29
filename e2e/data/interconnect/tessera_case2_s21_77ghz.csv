@@ -10,6 +10,10 @@
 #   convention). Not taken: dB(S(Port_Top_13_13,Port_Bot_13_13)) []
 # In-band 75-81 GHz: -0.288 to -0.279 dB.
 # generated 2026-08-18 by notes/tools/derive_interconnect_csv.py
+# ATTRIBUTION: the interconnect itself was simulated by Mohamed Gharib and
+#   Prof. Inna Partin-Vaisband (University of Illinois Chicago). The simulation
+#   code is NOT distributed with this repository and is available on request to
+#   those authors. This file is their simulation's output, not a measurement.
 freq_hz,s21_re,s21_im,s21_abs_db,s21_phase_deg
 7.000000e+10,0.969196028,0.005780589,-0.271613,0.341726
 7.005000e+10,0.969198531,0.003651985,-0.271683,0.215892

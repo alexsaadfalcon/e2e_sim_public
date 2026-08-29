@@ -6,6 +6,10 @@
 #   code is reproduced here or anywhere in this repository -- this file is data.
 # In-band 75-81 GHz: -0.547 to -0.513 dB (passive, mild tilt).
 # generated 2026-08-10 by e2e maintainers.
+# ATTRIBUTION: the interconnect itself was simulated by Mohamed Gharib and
+#   Prof. Inna Partin-Vaisband (University of Illinois Chicago). The simulation
+#   code is NOT distributed with this repository and is available on request to
+#   those authors. This file is their simulation's output, not a measurement.
 freq_hz,s21_re,s21_im,s21_abs_db,s21_phase_deg
 7.000000e+10,0.945331630,0.021363915,-0.486099,1.294629
 7.005000e+10,0.945447947,0.013498811,-0.486362,0.817996

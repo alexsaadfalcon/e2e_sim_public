@@ -3,7 +3,7 @@
 The pipeline's ``InterconnectBlock`` filters the aperture frame by an interconnect
 frequency response. By default that response is a placeholder 11-tap boxcar (a fixed
 shape, no physical units). This example shows how to instead drive it from simulated/
-measured interconnect transfer functions S21(f) that ship as CSV data
+simulated interconnect transfer functions S21(f) that ship as CSV data
 (``e2e/data/interconnect/*.csv``), and how they behave over their respective bands --
 both as a raw |S21|(f) response and as a radar RANGE PROFILE (what actually reaches a
 downstream detector).
@@ -58,7 +58,7 @@ def case_csv(n):
     return _INTERCONNECT_DATA / f"tessera_case{int(n)}_s21_77ghz.csv"
 
 
-#: All six of the collaborator's HFSS-measured designs. As of 2026-08-19 the owner
+#: All six of the collaborator's HFSS-simulated designs. As of 2026-08-19 the owner
 #: cleared the derived CSVs for this repository, so the "other five are private, not even
 #: their numbers" restriction above no longer holds and the figures show the whole set.
 #: Derived by `notes/tools/derive_interconnect_csv.py`, which re-derives Case3 and checks
@@ -209,7 +209,7 @@ def _interconnect_arms(all_cases=False):
     boxcar placeholder) -- see `range_profile_comparison`'s docstring for what each one is
     and is not. `all_cases=True` swaps the single Case3 arm for all SIX 77 GHz designs,
     which is what the before/after figure wants: the interesting question there is how the
-    measured designs differ from EACH OTHER, and one of them cannot answer it.
+    simulated designs differ from EACH OTHER, and one of them cannot answer it.
     """
     arms = {
         "ideal": ("ideal (no interconnect)",
@@ -267,7 +267,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
     - **ideal**: `case='case3'` identity pass-through -- no interconnect at all.
     - **Tessera TSV**: the Ka-band (28.5-31.5 GHz) TSV surrogate (`TESSERA_INTERCONNECT_CSV`).
     - **Tessera Case3**: the 76-81 GHz automotive-band export (`CASE3_INTERCONNECT_CSV`)
-      -- deliberately the WORST of six HFSS-measured designs the collaborator supplied
+      -- deliberately the WORST of six HFSS-simulated designs the collaborator supplied
       (see the module-level comment by `CASE3_INTERCONNECT_CSV`); this is a conservative
       validation bound, not a best case, and no other of the six is referenced anywhere.
     - **legacy boxcar**: `InterconnectBlock()`'s default 11-tap placeholder.
@@ -340,7 +340,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
         ax_s21_c3.axvspan(CASE3_BAND[0] / 1e9, CASE3_BAND[1] / 1e9, color="tab:orange",
                            alpha=0.25, label="77 GHz auto band (pipeline)")
         ax_s21_c3.set_title("Tessera Case3: |S21| (70-90 GHz sweep)\n"
-                             "worst of 6 measured designs -- conservative pick",
+                             "worst of 6 simulated designs -- conservative pick",
                              fontsize=fs_title)
         ax_s21_c3.set_xlabel("frequency (GHz)", fontsize=fs_label)
         ax_s21_c3.set_ylabel("|S21| (dB)", fontsize=fs_label)
@@ -400,7 +400,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
 
         fig.suptitle(
             "Interconnect models vs. radar range profile\n"
-            "TSV (Ka-band) and Case3 (77 GHz, the worst of 6 measured designs) are each "
+            "TSV (Ka-band) and Case3 (77 GHz, the worst of 6 simulated designs) are each "
             "shown only against their OWN band -- not a head-to-head ranking",
             fontsize=fs_annot + 1.5, y=1.04)
         fig.tight_layout()
@@ -416,7 +416,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
 def before_after_comparison(show=True, n_freqs=N_FREQS):
     """Compact "before/after" range-profile figure for the README's top-of-page
     gallery (`BEFORE_AFTER_FIG_PATH`): the legacy placeholder against the
-    measurement-driven arms, all 4 at once.
+    simulation-driven arms, all 4 at once.
 
     This is deliberately a smaller figure than `range_profile_comparison` (no raw
     |S21|(f) sweeps, just the range-profile story), but it hits the same
@@ -432,7 +432,7 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
     ALL SIX 77 GHz cases are drawn here, not just Case3. The owner's note was
     "multiple interconnects shown, with y axis scaled to correctly distinguish them --
     use Case1-Case6", and the derived CSVs for the other five landed 2026-08-19. This is
-    the figure where that matters: the interesting question is how the measured designs
+    the figure where that matters: the interesting question is how the simulated designs
     differ from EACH OTHER, and a single case cannot answer it. It also turns the
     collaborator's "Case3 is the worst of the six" from a statement into something the
     reader can see -- Case3's skirt sits visibly above the other five.
@@ -469,7 +469,7 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
         ax_top.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
         ax_top.set_title("BEFORE vs. AFTER: mainlobe width\n"
                           "the legacy placeholder smears 1 bin -> 11; all seven "
-                          "measurement-driven arms stay at native resolution",
+                          "simulation-driven arms stay at native resolution",
                           fontsize=fs_title)
         ax_top.grid(True, alpha=0.3)
         # No per-panel legend: with nine arms it filled a third of the axes and sat on the
@@ -483,7 +483,7 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
         ax_bot.set_xlabel(f"range bin (native, n_freqs={n_freqs})", fontsize=fs_label)
         ax_bot.set_ylabel("range profile (dB, rel. peak)", fontsize=fs_label)
         ax_bot.set_title("Same data, y-axis broken and zoomed to the skirt\n"
-                          "the ONLY place the measurement-driven arms separate -- and "
+                          "the ONLY place the simulation-driven arms separate -- and "
                           "they order exactly as their in-band ripple does",
                           fontsize=fs_title)
         ax_bot.grid(True, alpha=0.3)
@@ -499,7 +499,7 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
 
         fig.suptitle(
             "Interconnect range response: legacy placeholder vs. the "
-            "measurement-driven models\n"
+            "simulation-driven models\n"
             "All six 77 GHz Tessera designs, plus the Ka-band TSV -- which is a "
             "DIFFERENT band, so it is not ranked against them",
             fontsize=fs_annot + 1.5, y=1.02)

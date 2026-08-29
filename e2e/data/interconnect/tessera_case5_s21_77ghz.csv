@@ -7,6 +7,10 @@
 #   code is reproduced here or anywhere in this repository -- this file is data.
 # In-band 75-81 GHz: -0.249 to -0.248 dB.
 # generated 2026-08-18 by notes/tools/derive_interconnect_csv.py
+# ATTRIBUTION: the interconnect itself was simulated by Mohamed Gharib and
+#   Prof. Inna Partin-Vaisband (University of Illinois Chicago). The simulation
+#   code is NOT distributed with this repository and is available on request to
+#   those authors. This file is their simulation's output, not a measurement.
 freq_hz,s21_re,s21_im,s21_abs_db,s21_phase_deg
 7.000000e+10,0.971966522,0.000867735,-0.246970,0.051152
 7.005000e+10,0.971965401,0.000547386,-0.246983,0.032268
