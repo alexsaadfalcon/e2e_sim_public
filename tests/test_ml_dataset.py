@@ -705,3 +705,50 @@ def test_measuring_twice_is_refused(tmp_path, torch_device):
     ml_dataset.finalize_input_scale(manifest_path, n_sample=3)
     with pytest.raises(ValueError, match="already records input_scale"):
         ml_dataset.measure_input_scale(manifest_path, n_sample=3)
+
+
+def test_input_scale_is_recorded_per_input_format(tmp_path, torch_device):
+    """The RD cube and the raw ADC differ by two FFTs of processing gain, so ONE constant
+    cannot serve both.
+
+    `measure_input_scale` calibrates by loading frames, and it used to load them as "rd"
+    unconditionally while `_load` applied the result to whatever format the instance
+    actually used. An `input_format="adc"` dataset therefore divided ADC-domain data by an
+    RD-domain constant -- the same class of error as F80 (1842x), on the sibling path,
+    with nothing covering it.
+    """
+    manifest_path = ml_dataset.generate_dataset(
+        "ti_iwr1443", TIER, 4, out_dir=tmp_path, seed=31, device=torch_device)
+    ml_dataset.finalize_input_scale(manifest_path, n_sample=4)
+    manifest = json.loads(Path(manifest_path).read_text())
+
+    by_format = manifest["input_scale_by_format"]
+    assert set(by_format) == {"rd", "adc"}
+    # They must actually DIFFER -- if they were equal the whole guard would be pointless.
+    assert by_format["rd"] != pytest.approx(by_format["adc"], rel=0.05), by_format
+    # Back-compat: the bare scalar remains the "rd" value.
+    assert manifest["input_scale"] == pytest.approx(by_format["rd"])
+
+    for fmt in ("rd", "adc"):
+        ds = ml_dataset.RadarFrameDataset(manifest_path, split="train", input_format=fmt)
+        assert ds.input_scale == pytest.approx(by_format[fmt])
+        x, _y = ds[0]
+        rms = float((x.double() ** 2).mean().sqrt())
+        assert 0.2 < rms < 5.0, f"{fmt} input RMS {rms:.4g} is not O(1)"
+
+
+def test_a_legacy_single_input_scale_refuses_the_adc_format(tmp_path, torch_device):
+    """A manifest written before the per-format split carries one constant, measured on
+    "rd". Opening it as "adc" must REFUSE rather than quietly mis-scale by orders of
+    magnitude -- silence is what made F80 cost thirteen epochs."""
+    manifest_path = ml_dataset.generate_dataset(
+        "ti_iwr1443", TIER, 3, out_dir=tmp_path, seed=33, device=torch_device)
+    ml_dataset.finalize_input_scale(manifest_path, n_sample=3)
+
+    manifest = json.loads(Path(manifest_path).read_text())
+    del manifest["input_scale_by_format"]              # simulate the older schema
+    Path(manifest_path).write_text(json.dumps(manifest))
+
+    ml_dataset.RadarFrameDataset(manifest_path, split="train", input_format="rd")
+    with pytest.raises(ValueError, match="input_format='rd'"):
+        ml_dataset.RadarFrameDataset(manifest_path, split="train", input_format="adc")

@@ -484,7 +484,7 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
 
 
 def measure_input_scale(manifest_path, *, n_sample: int = 32,
-                        split: str = "train") -> float:
+                        split: str = "train", input_format: str = "rd") -> float:
     """The ONE constant every consumer divides the network input by (F63, piece 2).
 
     MEASURED IN THE RANGE-DOPPLER DOMAIN, through the production load path, because the
@@ -516,7 +516,7 @@ def measure_input_scale(manifest_path, *, n_sample: int = 32,
     re-training resolve the SAME number rather than each recomputing it -- the divergence
     that F52 was.
     """
-    ds = RadarFrameDataset(manifest_path, split=split)
+    ds = RadarFrameDataset(manifest_path, split=split, input_format=input_format)
     if len(ds) == 0:
         raise ValueError(f"{manifest_path} has no frames in split {split!r}")
     if ds.input_scale != 1.0:
@@ -548,12 +548,27 @@ def finalize_input_scale(manifest_path, *, n_sample: int = 32) -> float:
     unnormalised cube, which is the failure this whole mechanism exists to prevent.
     """
     manifest_path = Path(manifest_path)
-    scale = measure_input_scale(manifest_path, n_sample=n_sample)
+    # One constant PER input_format. The RD cube and the raw ADC differ by two FFTs of
+    # coherent processing gain, so a single number cannot serve both -- applying the RD
+    # constant to ADC data is the same magnitude error F80 fixed, one path over.
+    by_format = {}
+    for fmt in ("rd", "adc"):
+        try:
+            by_format[fmt] = measure_input_scale(manifest_path, n_sample=n_sample,
+                                                 input_format=fmt)
+        except Exception:
+            # A manifest_version-1 corpus has no raw ADC to load; "rd" is all it can offer.
+            # Failing to measure a format simply means that format is not available here.
+            continue
+    if "rd" not in by_format:
+        raise ValueError(f"could not measure an input scale for {manifest_path}")
+    scale = by_format["rd"]
     manifest = json.loads(manifest_path.read_text())
-    manifest["input_scale"] = scale
+    manifest["input_scale"] = scale                 # back-compat: the "rd" value
+    manifest["input_scale_by_format"] = by_format
     manifest["input_scale_source"] = (
-        f"measured RMS of the network input over {n_sample} train frames "
-        "(see dataset.measure_input_scale)")
+        f"measured RMS of the network input over {n_sample} train frames, PER "
+        "input_format (see dataset.measure_input_scale)")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2, default=_json_default)
     return scale
@@ -708,7 +723,27 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         # `input_scale` and was written in the normalised regime, where dividing by the
         # thermal RMS would be wrong -- those get 1.0, i.e. the behaviour they were
         # trained and scored under. See `measure_input_scale`.
-        self.input_scale = float(self.manifest.get("input_scale") or 1.0)
+        by_format = self.manifest.get("input_scale_by_format") or {}
+        if by_format:
+            if input_format not in by_format:
+                raise ValueError(
+                    f"{self.manifest_path} records input scales for "
+                    f"{sorted(by_format)} but not for input_format={input_format!r}. "
+                    "Applying another format's constant would rescale the input by orders "
+                    "of magnitude (see F80); re-run dataset.finalize_input_scale.")
+            self.input_scale = float(by_format[input_format])
+        elif self.manifest.get("input_scale"):
+            # A manifest written before the per-format split. Its single constant was
+            # measured on "rd"; using it for "adc" is exactly the defect this guard exists
+            # for, so refuse rather than silently mis-scale.
+            if input_format != "rd":
+                raise ValueError(
+                    f"{self.manifest_path} records a single input_scale measured for "
+                    f"input_format='rd', but this dataset was opened as {input_format!r}. "
+                    "Re-run dataset.finalize_input_scale to record both.")
+            self.input_scale = float(self.manifest["input_scale"])
+        else:
+            self.input_scale = 1.0
         if self.input_scale <= 0.0:
             raise ValueError(
                 f"{self.manifest_path} records a non-positive input_scale "

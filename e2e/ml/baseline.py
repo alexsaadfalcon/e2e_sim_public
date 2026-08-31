@@ -164,6 +164,17 @@ def resolution_report(cfg, grid: LabelGrid, criterion: Optional[MatchCriterion] 
     }
 
 
+#: Minimum unambiguous velocity (m/s) at which `classical_detection_map` will switch the
+#: zero-Doppler notch on by itself. Below this a scene's own targets alias into the notched
+#: bin and the notch deletes them rather than the clutter (measured Pd 0.098 -> 0.000 on
+#: `radial_like`, v_max 1.06). Automotive scenes in this repo draw 0-30 m/s and clamp to
+#: 80% of v_max, so a config at or above this can still alias in principle -- the threshold
+#: buys a margin, it does not prove safety, and an explicit `doppler_notch_bins=` overrides
+#: it either way. `benchmark_v1` (9.69) and `ti_iwr1443` (12.81) clear it; `radial_like`
+#: (1.06) does not.
+NOTCH_MIN_VMAX_MPS = 5.0
+
+
 def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = None,
                         angle_window: bool = True,
                         doppler_notch_bins: int = 0,
@@ -251,11 +262,12 @@ def range_azimuth_power(cfg, adc: torch.Tensor, *, n_angle_fft: Optional[int] = 
     # it is why collapsing Doppler before detection throws away the strongest discriminant
     # the sensor has.
     #
-    # OFF BY DEFAULT, and the reason matters: it only works when the targets are NOT
-    # aliased. On `radial_like` (DDMA over 12 TX, v_max +-1.06 m/s) targets moving 0-8 m/s
-    # wrap around the Doppler axis and land anywhere INCLUDING zero, so notching removes
-    # the targets rather than the clutter -- MEASURED, Pd 0.098 -> 0.000. Use it on a
-    # config whose v_max exceeds the scene's speeds (see `benchmark_v1`).
+    # AUTO-GATED ON THE CONFIG (see `NOTCH_MIN_VMAX_MPS`), and the reason matters: it
+    # only works when the targets are NOT aliased. On `radial_like` (DDMA over 12 TX,
+    # v_max +-1.06 m/s) targets moving 0-8 m/s wrap around the Doppler axis and land
+    # anywhere INCLUDING zero, so notching removes the targets rather than the clutter --
+    # MEASURED, Pd 0.098 -> 0.000. It is applied only on a config whose v_max exceeds the
+    # scene's speeds (see `benchmark_v1`); an explicit value always wins over the gate.
     if doppler_notch_bins > 0:
         c = power.shape[2] // 2          # adc_to_rd fftshifts Doppler; zero is the centre
         power = power.clone()
@@ -417,11 +429,18 @@ def classical_detection_map(cfg, adc: torch.Tensor, grid: LabelGrid, *,
     tdm_comp = kwargs.pop("tdm_doppler_comp", None)
     if tdm_comp is None:
         tdm_comp = (cfg.mimo == "tdm")
+    # Same AUTO treatment for the notch, and for the same reason: a default that is right
+    # for one config and destroys detection on another must be a function of the config,
+    # not a constant. `None` -> on when the config's unambiguous velocity clears
+    # NOTCH_MIN_VMAX_MPS. An explicit 0 or N still wins.
+    notch = kwargs.pop("doppler_notch_bins", None)
+    if notch is None:
+        notch = 1 if float(cfg.max_velocity_mps) >= NOTCH_MIN_VMAX_MPS else 0
     power = range_azimuth_power(
         cfg, adc,
         n_angle_fft=kwargs.pop("n_angle_fft", None),
         angle_window=kwargs.pop("angle_window", True),
-        doppler_notch_bins=kwargs.pop("doppler_notch_bins", 1),
+        doppler_notch_bins=notch,
         tdm_doppler_comp=tdm_comp,
         keep_doppler=doppler_reduce != DOPPLER_MAX,
     )

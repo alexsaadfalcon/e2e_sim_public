@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_ml_chain_generate import _CFG, _FakeRTEnvironment  # noqa: E402
@@ -142,3 +143,71 @@ def test_physical_scale_is_reachable_and_changes_the_output(torch_device):
         f"physical_scale made no difference ({a:.2f} vs {b:.2f} dB) -- it is supposed "
         f"to be the switch between an arbitrary and an absolute amplitude scale."
     )
+
+
+def _noise_floor_db(tx_power_dbm=12.0, noise_figure_db=None, *, use_rffe=True, device=None):
+    """Mean power of the cube with the CHANNEL ZEROED -- i.e. instrument noise alone."""
+    cfg = dataclasses.replace(_CFG, tx_power_dbm=float(tx_power_dbm))
+    if noise_figure_db is not None:
+        cfg = dataclasses.replace(cfg, noise_figure_db=float(noise_figure_db))
+    grid = LabelGrid.for_config(cfg, range_stride=1, n_azimuth=8)
+    env = _FakeRTEnvironment(cfg, grid, n_frames=1, device=device, seed=0)
+    inner = env.get_S_pars
+
+    def zeroed(*a, **k):
+        out = inner(*a, **k)
+        if isinstance(out, tuple):
+            return (torch.zeros_like(out[0]),) + tuple(out[1:])
+        return torch.zeros_like(out)
+
+    env.get_S_pars = zeroed
+    with tempfile.TemporaryDirectory() as out_dir:
+        sim = chain_generate.build_chain_simulation(
+            scenario=None, cfg=cfg, out_dir=out_dir, environment_block=env,
+            use_rffe=use_rffe, device=device)
+        sim.run(n_steps=1)
+        cube = sim.get_outputs()["radar_cube"][0]
+    x = cube.detach().cpu().numpy()
+    return 10.0 * np.log10(float(np.mean(np.abs(x) ** 2)) + 1e-300)
+
+
+def test_link_budget_alone_gives_a_transmit_power_independent_noise_floor(torch_device):
+    """With no front end, the floor is the kTBF floor and does not move with P_tx."""
+    lo = _noise_floor_db(0.0, use_rffe=False, device=torch_device)
+    hi = _noise_floor_db(24.0, use_rffe=False, device=torch_device)
+    assert abs(hi - lo) < 0.5, (
+        f"link-budget-only noise floor moved {hi - lo:+.2f} dB for +24 dB of transmit "
+        f"power; receiver noise cannot depend on how hard you transmit")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN DEFECT (F81, measured 2026-08-31). ThermalNoiseBlock applies sqrt(P_tx) "
+    "DOWNSTREAM of the RF front end, so it multiplies the front end's own 4kTR noise by "
+    "transmit power: the noise-only floor rises ~+20.8 dB for +24 dB of P_tx. Delete the "
+    "xfail when the scaling moves to the correct node."))
+def test_front_end_noise_floor_does_not_track_transmit_power(torch_device):
+    """The claim F63 was landed to deliver, stated as a test that currently fails.
+
+    `tests/test_composed_chain_scales_with_transmit_power` passes today and does NOT
+    catch this: it measures TOTAL cube power, which scales uniformly whether the scaling
+    is applied at the right node or the wrong one. The inverted defect test in this file
+    says as much in its own docstring -- "it did not stop the cube scaling ... that is why
+    the guard has to be structural" -- and I shipped a power test anyway. Zeroing the
+    channel is what separates the two.
+    """
+    lo = _noise_floor_db(0.0, device=torch_device)
+    hi = _noise_floor_db(24.0, device=torch_device)
+    assert abs(hi - lo) < 1.0, (
+        f"noise-only floor moved {hi - lo:+.2f} dB for +24 dB of transmit power")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN DEFECT (F81). The kTBF floor is added at the front end's OUTPUT rather than "
+    "input-referred, so it sits below the RFFE's own noise and noise_figure_db -- "
+    "documented as 'THE DIFFICULTY DIAL for every generated corpus' -- moves the floor "
+    "by ~0.06 dB over a 20 dB sweep."))
+def test_noise_figure_moves_the_corpus_noise_floor(torch_device):
+    lo = _noise_floor_db(noise_figure_db=5.0, device=torch_device)
+    hi = _noise_floor_db(noise_figure_db=25.0, device=torch_device)
+    assert hi - lo > 10.0, (
+        f"+20 dB of noise figure moved the floor {hi - lo:+.2f} dB; the dial does nothing")
