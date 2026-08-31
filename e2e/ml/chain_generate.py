@@ -53,7 +53,7 @@ from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
                                RadarCubeBlock)
 from e2e.environment.blocks import RTEnvironmentBlock
 from e2e.ml.blocks import SinkBlock
-from e2e.ml.dataset import DATASETS_DIR, _input_scale
+from e2e.ml.dataset import DATASETS_DIR, finalize_input_scale
 from e2e.simulation import Simulation
 
 DEFAULT_LABEL_CLASSES = ("vehicle", "pedestrian")
@@ -387,17 +387,16 @@ def generate_chain_corpus(
         scene_files = [f"{tag}_frame_{t:05d}.npz" for t in range(frames_per_scene)]
         sequences.append(scene_files)
 
-    # F63 piece 2: this producer -- and only this one -- puts the cube on an absolute
-    # scale, so it is the only one entitled to record the constant consumers divide by.
-    # It never disables the link budget (it does not expose the flag; `build_chain_
-    # simulation`'s default is on), so the constant always applies here. If a
-    # `use_link_budget` parameter is ever added to this function, this must become
-    # conditional on it -- with the floor off there is nothing to reference.
-    input_scale = _input_scale(cfg)
-    return write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
-                          snr_db=None, frames_per_scene=frames_per_scene, splits=splits,
-                          label_classes=label_classes or (), corpus_tag=corpus_tag,
-                          input_scale=input_scale)
+    # F63 piece 2. The manifest is written first WITHOUT input_scale, then completed:
+    # the constant is MEASURED through the production load path, which needs a manifest
+    # to read. See `dataset.measure_input_scale` for why an analytic ADC-domain constant
+    # was wrong by ~6600x and produced val_AP 0.0000 for thirteen epochs.
+    manifest_path = write_manifest(dataset_dir, cfg, tier, sequences, grid=grid, seed=seed,
+                                   snr_db=None, frames_per_scene=frames_per_scene,
+                                   splits=splits, label_classes=label_classes or (),
+                                   corpus_tag=corpus_tag)
+    finalize_input_scale(manifest_path)
+    return manifest_path
 
 
 # --------------------------------------------------------------------------------

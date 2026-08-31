@@ -112,6 +112,9 @@ def _score_arm(pred_maps, target_lists, grid, *, n_frames: int,
         "n_detections": metrics["n_detections"],
         "decode_threshold": decode_threshold,
         "max_range_m": metrics.get("max_range_m"),
+        # Needed by e2e.ml.bootstrap_ci: a scene-level resample changes the recall
+        # denominator, so the per-frame ground-truth counts must travel with the curve.
+        "gt_per_frame": metrics.get("gt_per_frame"),
         "operating_point": op,
         # The FULL curve, kept (B2 review, 2026-08-25): metrics.py's own docstring
         # promises the curve is stored so numbers can be audited or re-plotted

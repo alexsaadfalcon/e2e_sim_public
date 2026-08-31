@@ -11,6 +11,8 @@ import math
 import subprocess
 import sys
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -626,3 +628,80 @@ def test_cli_unknown_tier_exits_nonzero():
         capture_output=True, text=True,
     )
     assert proc.returncode != 0
+
+
+# --------------------------------------------------------------------------------
+# input_scale (F63 piece 2) -- the regression that would have caught a 6600x error
+# --------------------------------------------------------------------------------
+def test_finalize_input_scale_puts_the_network_input_at_unit_rms(tmp_path, torch_device):
+    """The constant must be measured where it is APPLIED: the range-Doppler domain.
+
+    The first implementation returned the ADC-domain thermal RMS, forgetting that two FFTs
+    of coherent processing gain and the RF chain's own gain sit between the ADC and the
+    network. On a real corpus that left the input at std 702 with excursions to 8e4, and
+    FFTRadNet scored val_AP 0.0000 for thirteen straight epochs before anyone looked.
+
+    Unit RMS is the whole contract, so it is asserted directly rather than via a proxy.
+    """
+    manifest_path = ml_dataset.generate_dataset(
+        "ti_iwr1443", TIER, 4, out_dir=tmp_path, seed=3, device=torch_device)
+    manifest = json.loads(Path(manifest_path).read_text())
+    assert "input_scale" not in manifest, (
+        "the analytic generator must not record an input_scale -- it never puts the cube "
+        "on an absolute scale, so there is nothing to normalise against")
+
+    scale = ml_dataset.finalize_input_scale(manifest_path, n_sample=4)
+    assert scale > 0.0
+
+    ds = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    total_sq = total_n = 0
+    for i in range(len(ds)):
+        x, _y = ds[i]
+        total_sq += float((x.double() ** 2).sum())
+        total_n += x.numel()
+    rms = (total_sq / total_n) ** 0.5
+    assert rms == pytest.approx(1.0, rel=0.35), (
+        f"network input RMS is {rms:.4g}, not O(1) -- input_scale is measured in the "
+        f"wrong domain")
+
+
+def test_input_scale_is_one_constant_and_preserves_relative_loudness(tmp_path, torch_device):
+    """What separates this normalisation from the F63 defect it replaced.
+
+    F63 divided EACH FRAME by its own mean, which destroys relative loudness and with it
+    any dependence of SNR on transmit power, range or noise figure. This divides every
+    frame by the SAME number, so a louder frame still arrives louder. Pinned by checking
+    that the ratio between two frames is identical before and after normalising.
+    """
+    manifest_path = ml_dataset.generate_dataset(
+        "ti_iwr1443", TIER, 4, out_dir=tmp_path, seed=11, device=torch_device)
+
+    raw = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert raw.input_scale == 1.0                      # no field yet -> no normalisation
+    a0, _ = raw[0]
+    b0, _ = raw[1]
+    ratio_before = float(a0.abs().mean() / b0.abs().mean())
+
+    ml_dataset.finalize_input_scale(manifest_path, n_sample=4)
+    norm = ml_dataset.RadarFrameDataset(manifest_path, split="train")
+    assert norm.input_scale != 1.0
+    a1, _ = norm[0]
+    b1, _ = norm[1]
+    ratio_after = float(a1.abs().mean() / b1.abs().mean())
+
+    # rel=1e-5, not tighter: the inputs are float32, so dividing by a scalar perturbs the
+    # ratio by ~1e-7. The defect this guards against is not subtle -- a per-frame
+    # normalisation drives this ratio toward 1.0, a ~5x move on these frames.
+    assert ratio_after == pytest.approx(ratio_before, rel=1e-5), (
+        "normalisation changed the ratio between two frames, i.e. it is acting per-frame "
+        "-- that is exactly the F63 defect, one layer further down")
+
+
+def test_measuring_twice_is_refused(tmp_path, torch_device):
+    """Measuring through a dataset that is already normalising would compound the two
+    scales and silently shrink the input by the square."""
+    manifest_path = ml_dataset.generate_dataset(
+        "ti_iwr1443", TIER, 3, out_dir=tmp_path, seed=5, device=torch_device)
+    ml_dataset.finalize_input_scale(manifest_path, n_sample=3)
+    with pytest.raises(ValueError, match="already records input_scale"):
+        ml_dataset.measure_input_scale(manifest_path, n_sample=3)

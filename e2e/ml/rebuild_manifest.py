@@ -45,7 +45,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from e2e.ml.dataset import _input_scale, write_manifest
+from e2e.ml.dataset import finalize_input_scale, write_manifest
 from e2e.ml.labels import LabelGrid
 from e2e.radar_config import PRESETS
 
@@ -97,7 +97,8 @@ def group_frames(corpus_dir: Path) -> List[List[str]]:
 def rebuild(corpus_dir, cfg_name: str, tier: str, seed: int, *,
             range_stride: int = 4, n_azimuth: int = 192,
             label_classes=("vehicle", "pedestrian"),
-            expect_commit: Optional[str] = None, write: bool = False) -> Dict:
+            expect_commit: Optional[str] = None, write: bool = False,
+            measure_scale: bool = True) -> Dict:
     corpus_dir = Path(corpus_dir)
     if (corpus_dir / "manifest.json").exists():
         raise FileExistsError(
@@ -117,7 +118,6 @@ def rebuild(corpus_dir, cfg_name: str, tier: str, seed: int, *,
         "frames_per_scene": len(sequences[0]),
         "total_frames": sum(len(s) for s in sequences),
         "corpus_tag": corpus_tag,
-        "input_scale": _input_scale(cfg),
     }
     if not write:
         summary["written"] = False
@@ -125,8 +125,11 @@ def rebuild(corpus_dir, cfg_name: str, tier: str, seed: int, *,
 
     path = write_manifest(corpus_dir, cfg, tier, sequences, grid=grid, seed=seed,
                           snr_db=None, frames_per_scene=len(sequences[0]),
-                          label_classes=label_classes, corpus_tag=corpus_tag,
-                          input_scale=_input_scale(cfg))
+                          label_classes=label_classes, corpus_tag=corpus_tag)
+    if measure_scale:
+        # Without this the manifest has no input_scale and every consumer silently
+        # falls back to 1.0 -- i.e. trains on an unnormalised cube.
+        summary["input_scale"] = finalize_input_scale(path)
     manifest = json.loads(Path(path).read_text())
     recorded = str(manifest.get("generator_git_commit", ""))
     if expect_commit and not recorded.startswith(expect_commit):

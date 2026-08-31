@@ -483,34 +483,79 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
                           corpus_tag=corpus_tag)
 
 
-def _input_scale(cfg) -> float:
+def measure_input_scale(manifest_path, *, n_sample: int = 32,
+                        split: str = "train") -> float:
     """The ONE constant every consumer divides the network input by (F63, piece 2).
 
-    Under `physical_scale=True` the cube reaching the network is in absolute volts, and
-    its magnitude drops by ~74 dB relative to the old normalised regime -- small enough
-    that training on it raw goes badly. It therefore needs a normalisation, and the
-    choice of normalisation is the whole point of this function.
+    MEASURED IN THE RANGE-DOPPLER DOMAIN, through the production load path, because the
+    obvious analytic constant is wrong by orders of magnitude and was measured to be so.
 
-    It is deliberately NOT computed from the data. A per-frame (or even per-corpus,
-    data-derived) statistic would re-erase the absolute scale one layer further down --
-    inside the training path, where it is even harder to see than F63 was. This constant
-    comes from the RADAR CONFIG alone: the RMS voltage of the thermal floor the chain
-    installed. Dividing by it expresses the cube in units of its own noise floor, so a
-    frame generated at higher transmit power still arrives at the network louder, which
-    is exactly the information `physical_scale=True` exists to preserve.
+    The first version of this function returned `sqrt(thermal_noise_power_w(cfg))` -- the
+    ADC-domain thermal RMS -- on the reasoning that dividing by the noise floor expresses
+    the cube in units of its own noise. That reasoning is right about the ADC and wrong
+    about the NETWORK INPUT, which is the range-Doppler transform of the ADC: two FFTs of
+    coherent processing gain, plus the RF front end's own chain gain, sit between them.
+    Measured on `b1_bench_v3`, that constant left the network input at std 702 with
+    excursions to 8e4, against std 0.107 for the corpus that trained successfully.
+    Thirteen epochs of FFTRadNet on it scored val_AP 0.0000 at every epoch.
+
+    So the constant is measured where it is applied. `n_sample` frames of `split` are
+    loaded through `RadarFrameDataset` itself -- not a reimplementation of the transform
+    chain, so the measured quantity is exactly what the network receives -- and the
+    returned scale sets their pooled RMS to 1.
+
+    WHY THIS IS NOT THE DEFECT F63 FIXED. F63 was a PER-FRAME normalisation: each frame
+    divided by its own mean, which destroys the relative loudness of frames and hence any
+    dependence of SNR on transmit power, range or noise figure. This is ONE constant for a
+    whole corpus. Every frame is divided by the same number, so a louder frame arrives at
+    the network louder, which is the property `physical_scale=True` exists to preserve.
+    The `notes/F63_FIX_PLAN.md` sketch called for a config-derived constant; that is the
+    one part of the plan the measurement overruled, and the deviation is deliberate.
 
     Stored in the manifest at generation time so scoring, visualisation and any later
-    re-training resolve the SAME number instead of each recomputing it -- the divergence
+    re-training resolve the SAME number rather than each recomputing it -- the divergence
     that F52 was.
     """
-    from e2e.chain.link_budget import thermal_noise_power_w
-
-    scale = float(np.sqrt(thermal_noise_power_w(cfg)))
-    if not np.isfinite(scale) or scale <= 0.0:
+    ds = RadarFrameDataset(manifest_path, split=split)
+    if len(ds) == 0:
+        raise ValueError(f"{manifest_path} has no frames in split {split!r}")
+    if ds.input_scale != 1.0:
         raise ValueError(
-            f"input_scale must be finite and positive, got {scale!r} for config "
-            f"{getattr(cfg, 'name', cfg)!r} -- check noise_figure_db / bandwidth."
-        )
+            f"{manifest_path} already records input_scale={ds.input_scale!r}; measuring "
+            "through a dataset that is already normalising would compound the two. "
+            "Measure on a manifest written without the field.")
+
+    total_sq, total_n = 0.0, 0
+    for i in range(min(int(n_sample), len(ds))):
+        x, _y = ds[i]
+        total_sq += float((x.to(torch.float64) ** 2).sum())
+        total_n += x.numel()
+    rms = float(np.sqrt(total_sq / total_n))
+    if not np.isfinite(rms) or rms <= 0.0:
+        raise ValueError(
+            f"measured input RMS is {rms!r} over {total_n} values -- the corpus is empty, "
+            "constant, or corrupt; refusing to write a scale that would divide by it.")
+    return rms
+
+
+def finalize_input_scale(manifest_path, *, n_sample: int = 32) -> float:
+    """Measure the corpus's input scale and write it INTO its own manifest.
+
+    Two-phase by necessity: the scale is measured through `RadarFrameDataset`, which needs
+    a manifest to exist, so the manifest is written first WITHOUT the field and completed
+    here. Callers that generate a corpus should always run this -- a manifest with no
+    `input_scale` makes every consumer silently fall back to 1.0 and train on an
+    unnormalised cube, which is the failure this whole mechanism exists to prevent.
+    """
+    manifest_path = Path(manifest_path)
+    scale = measure_input_scale(manifest_path, n_sample=n_sample)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["input_scale"] = scale
+    manifest["input_scale_source"] = (
+        f"measured RMS of the network input over {n_sample} train frames "
+        "(see dataset.measure_input_scale)")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2, default=_json_default)
     return scale
 
 
@@ -577,7 +622,7 @@ def write_manifest(dataset_dir, cfg, tier: str, sequences: List[List[str]], *,
         # thermal RMS would be a rescale with no physical meaning.
         **({} if input_scale is None else {
             "input_scale": float(input_scale),
-            "input_scale_source": "sqrt(thermal_noise_power_w(cfg)) -- see _input_scale",
+            "input_scale_source": "measured -- see dataset.measure_input_scale",
         }),
         "files": files,
         "sequences": sequences,
@@ -662,7 +707,7 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         # consumer resolves the same number. A corpus generated BEFORE the fix carries no
         # `input_scale` and was written in the normalised regime, where dividing by the
         # thermal RMS would be wrong -- those get 1.0, i.e. the behaviour they were
-        # trained and scored under. See `_input_scale`.
+        # trained and scored under. See `measure_input_scale`.
         self.input_scale = float(self.manifest.get("input_scale") or 1.0)
         if self.input_scale <= 0.0:
             raise ValueError(

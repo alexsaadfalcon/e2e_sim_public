@@ -44,7 +44,7 @@ def test_rebuilt_manifest_records_the_two_component_salt(tmp_path):
     corpus where the geometry happens not to diverge.
     """
     d = _touch_corpus(tmp_path, n_scenes=4)
-    out = rebuild(d, "benchmark_v1", "D2", seed=123, write=True)
+    out = rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=123, write=True)
     manifest = json.loads((d / "manifest.json").read_text())
     assert manifest["corpus_tag"] == "b1_fake_v9/benchmark_v1_D2"
     assert out["corpus_tag"] == manifest["corpus_tag"]
@@ -53,17 +53,15 @@ def test_rebuilt_manifest_records_the_two_component_salt(tmp_path):
 def test_rebuilt_manifest_matches_the_generators_own_schema(tmp_path):
     """It must be indistinguishable from a normally-written manifest, not a lookalike."""
     d = _touch_corpus(tmp_path, n_scenes=10)
-    rebuild(d, "benchmark_v1", "D2", seed=7, write=True)
+    rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=7, write=True)
     m = json.loads((d / "manifest.json").read_text())
     assert m["manifest_version"] == 2
     assert m["config"]["name"] == "benchmark_v1"
     assert m["tier"] == "D2" and m["seed"] == 7
     assert sum(len(v) for v in m["files"].values()) == 10
     assert len(m["sequences"]) == 10
-    # The absolute-scale constant must be present, or a consumer silently falls back to
-    # 1.0 and trains on an unnormalised cube (F63).
-    from e2e.ml.dataset import _input_scale
-    assert m["input_scale"] == pytest.approx(_input_scale(PRESETS["benchmark_v1"]))
+    # input_scale is MEASURED from real frames, and these fixtures are empty files, so
+    # it is skipped here (measure_scale=False below) and covered in test_ml_dataset.
 
 
 def test_refuses_a_non_contiguous_scene_range(tmp_path):
@@ -85,9 +83,9 @@ def test_refuses_a_torn_final_scene(tmp_path):
 
 def test_refuses_to_overwrite_an_existing_manifest(tmp_path):
     d = _touch_corpus(tmp_path, n_scenes=2)
-    rebuild(d, "benchmark_v1", "D2", seed=1, write=True)
+    rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=1, write=True)
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        rebuild(d, "benchmark_v1", "D2", seed=1, write=True)
+        rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=1, write=True)
 
 
 def test_expect_commit_mismatch_is_loud(tmp_path):
@@ -95,12 +93,12 @@ def test_expect_commit_mismatch_is_loud(tmp_path):
     HEAD *now*, which is only the truth if HEAD has not moved since the run."""
     d = _touch_corpus(tmp_path, n_scenes=2)
     with pytest.raises(ValueError, match="does not match the expected"):
-        rebuild(d, "benchmark_v1", "D2", seed=1, expect_commit="0000000", write=True)
+        rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=1, expect_commit="0000000", write=True)
 
 
 def test_dry_run_writes_nothing(tmp_path):
     d = _touch_corpus(tmp_path, n_scenes=3)
-    out = rebuild(d, "benchmark_v1", "D2", seed=1)
+    out = rebuild(d, "benchmark_v1", "D2", measure_scale=False, seed=1)
     assert out["written"] is False
     assert not (d / "manifest.json").exists()
 
