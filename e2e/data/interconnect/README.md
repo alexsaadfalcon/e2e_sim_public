@@ -40,7 +40,7 @@ provenance in `#` header comments.
 | ---- | ----------------------- |
 | `tessera_case1_s21_77ghz.csv` | −0.292 … −0.289 dB |
 | `tessera_case2_s21_77ghz.csv` | −0.288 … −0.279 dB |
-| **`tessera_case3_s21_77ghz.csv`** | **−0.547 … −0.513 dB — the worst of the six** |
+| **`tessera_case3_s21_77ghz.csv`** | **−0.547 … −0.513 dB — the most demanding of the six for this pipeline** |
 | `tessera_case4_s21_77ghz.csv` | −0.260 … −0.259 dB |
 | `tessera_case5_s21_77ghz.csv` | −0.249 … −0.248 dB |
 | `tessera_case6_s21_77ghz.csv` | −0.249 … −0.248 dB |

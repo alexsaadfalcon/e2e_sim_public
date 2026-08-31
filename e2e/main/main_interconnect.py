@@ -49,7 +49,8 @@ N_FREQS = 512
 # representative one. With all six now derived, that statement is MEASURED rather than
 # taken on trust: Case3's median in-band insertion loss is -0.541 dB with 0.113 dB of
 # ripple, against -0.249 to -0.291 dB and <=0.030 dB ripple for the other five. It is
-# indeed the worst, by roughly a factor of two in loss and four in ripple.
+# indeed the most demanding in our band, by roughly a factor of two in loss and four
+# in ripple. Ranked by what THIS pipeline's range response is sensitive to.
 _INTERCONNECT_DATA = Path(__file__).resolve().parent.parent / "data" / "interconnect"
 
 
@@ -225,7 +226,7 @@ def _interconnect_arms(all_cases=False):
                 InterconnectBlock(transfer_csv=case_csv(n), band_hz=CASE3_BAND))
     else:
         arms["tessera_case3"] = (
-            "Tessera Case3 (77 GHz auto, worst of 6 simulated)",
+            "Tessera Case3 (77 GHz auto, most demanding of 6 here)",
             InterconnectBlock(transfer_csv=CASE3_INTERCONNECT_CSV, band_hz=CASE3_BAND))
     arms["legacy_boxcar"] = ("legacy 11-tap boxcar (placeholder)", InterconnectBlock())
     return arms
@@ -309,7 +310,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
                   f"peak sidelobe {m['peak_sidelobe_db']:.1f} dB")
         print(f"Tessera TSV: insertion loss {il_tsv:.2f} dB, ripple {ripple_tsv:.2f} dB p-p "
               f"over {BAND[0]/1e9:.1f}-{BAND[1]/1e9:.1f} GHz")
-        print(f"Tessera Case3 (worst of 6 simulated): insertion loss {il_c3:.2f} dB, "
+        print(f"Tessera Case3 (most demanding of 6 in our band): insertion loss {il_c3:.2f} dB, "
               f"ripple {ripple_c3:.2f} dB p-p over {CASE3_BAND[0]/1e9:.1f}-"
               f"{CASE3_BAND[1]/1e9:.1f} GHz")
 
@@ -335,13 +336,13 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
         ax_s21_tsv.grid(True, alpha=0.3)
         ax_s21_tsv.tick_params(labelsize=fs_tick)
 
-        # (a2) Case3 |S21|(f), band shaded, IL/ripple annotated, worst-of-6 caveat.
+        # (a2) Case3 |S21|(f), band shaded, IL/ripple annotated, most-demanding caveat.
         db_c3_full = 20 * np.log10(np.abs(s21_c3) + 1e-12)
         ax_s21_c3.plot(freq_c3 / 1e9, db_c3_full, color="tab:red", lw=2)
         ax_s21_c3.axvspan(CASE3_BAND[0] / 1e9, CASE3_BAND[1] / 1e9, color="tab:orange",
                            alpha=0.25, label="77 GHz auto band (pipeline)")
         ax_s21_c3.set_title("Tessera Case3: |S21| (70-90 GHz sweep)\n"
-                             "worst of 6 simulated designs -- conservative pick",
+                             "most demanding of 6 in our band -- conservative pick",
                              fontsize=fs_title)
         ax_s21_c3.set_xlabel("frequency (GHz)", fontsize=fs_label)
         ax_s21_c3.set_ylabel("|S21| (dB)", fontsize=fs_label)
@@ -401,7 +402,7 @@ def range_profile_comparison(show=True, n_freqs=N_FREQS):
 
         fig.suptitle(
             "Interconnect models vs. radar range profile\n"
-            "TSV (Ka-band) and Case3 (77 GHz, the worst of 6 simulated designs) are each "
+            "TSV (Ka-band) and Case3 (77 GHz, the most demanding of 6 in our band) are each "
             "shown only against their OWN band -- not a head-to-head ranking",
             fontsize=fs_annot + 1.5, y=1.04)
         fig.tight_layout()
@@ -435,7 +436,7 @@ def before_after_comparison(show=True, n_freqs=N_FREQS):
     use Case1-Case6", and the derived CSVs for the other five landed 2026-08-19. This is
     the figure where that matters: the interesting question is how the simulated designs
     differ from EACH OTHER, and a single case cannot answer it. It also turns the
-    collaborator's "Case3 is the worst of the six" from a statement into something the
+    collaborator's "Case3 is the most demanding of the six" from a statement into something the
     reader can see -- Case3's skirt sits visibly above the other five.
 
     Same caveats as `range_profile_comparison` apply and are stated on the figure: TSV is

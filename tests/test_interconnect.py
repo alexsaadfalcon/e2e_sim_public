@@ -126,7 +126,7 @@ def test_range_profile_comparison_insertion_loss_and_ripple():
     assert ripple["tessera_tsv"] == pytest.approx(0.80, abs=0.05)
     assert il["tessera_case3"] == pytest.approx(-0.53, abs=0.05)
     assert ripple["tessera_case3"] == pytest.approx(0.03, abs=0.02)
-    # Case3 is the collaborator's worst-of-six pick, not necessarily better than TSV --
+    # Case3 is the most demanding of the six IN OUR BAND, not necessarily better than TSV --
     # this module must never rank them; just sanity-check both are passive (loss <= 0).
     assert il["tessera_tsv"] < 0.0 and il["tessera_case3"] < 0.0
 
@@ -195,11 +195,11 @@ def test_before_after_comparison_smoke_runs_without_disk(tmp_path, monkeypatch):
     assert m["legacy_boxcar"]["width_3db_bins"] > m["ideal"]["width_3db_bins"]
 
     # Case3 is the WORST of the six, which the project had been asserting on the
-    # collaborator's word. With all six present it is checkable, so check it: the worst
+    # collaborator's word. With all six present it is checkable, so check it: the most demanding
     # in-band ripple shows up as the highest (least negative) sidelobe floor.
     sidelobes = {n: m[f"tessera_case{n}"]["peak_sidelobe_db"] for n in mi.CASE_NUMBERS}
     assert max(sidelobes, key=sidelobes.get) == 3, (
-        f"Case3 should have the worst (highest) sidelobe floor of the six: {sidelobes}")
+        f"Case3 should have the highest sidelobe floor of the six in our band: {sidelobes}")
 
 
 def test_arm_styling_covers_every_arm_with_distinct_colors():
