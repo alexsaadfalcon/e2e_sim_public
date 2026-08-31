@@ -15,6 +15,27 @@ nothing here should be described as measured data.
 to those authors.** That is deliberate: this repository ships their results so the
 pipeline can be exercised against realistic hardware, not their models.
 
+### How the shipped `.csv` files were derived
+
+`derive_interconnect_csv.py`, in this directory, is the script that turns a raw HFSS
+export into a file here. It is OURS, not the authors', and it is public so the derivation
+can be audited rather than taken on trust: the 70–90 GHz / 50 MHz interpolation grid, the
+minimum-phase reconstruction of the missing phase, and the provenance header are all
+readable in it.
+
+It cannot be run end to end from a clean clone, and that limit is honest rather than
+incidental: its input is a raw export belonging to the authors, which is not ours to
+redistribute. What you can do without one is read the method; what you can do with one is
+run the oracle:
+
+```bash
+python e2e/data/interconnect/derive_interconnect_csv.py --check /path/to/Case3.csv
+```
+
+That re-derives Case3 and diffs it against the shipped file. It currently agrees to
+**5e-7 dB max deviation** — a file produced independently, on a different day, by a
+different person, reproduced by this script. That is the evidence the method is right.
+
 ## `tessera_case{1..6}_s21_77ghz.csv` — the six 77 GHz automotive designs
 
 Six simulated interconnect designs from the Tessera collaborator's HFSS export, cleared by

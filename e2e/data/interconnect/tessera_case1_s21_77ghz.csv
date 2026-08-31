@@ -6,7 +6,7 @@
 #   ln|H|); the source export carries magnitude only. No collaborator source
 #   code is reproduced here or anywhere in this repository -- this file is data.
 # In-band 75-81 GHz: -0.292 to -0.289 dB.
-# generated 2026-08-18 by notes/tools/derive_interconnect_csv.py
+# generated 2026-08-18 by e2e/data/interconnect/derive_interconnect_csv.py
 # ATTRIBUTION: the interconnect itself was simulated by Mohamed Gharib and
 #   Prof. Inna Partin-Vaisband (University of Illinois Chicago). The simulation
 #   code is NOT distributed with this repository and is available on request to
