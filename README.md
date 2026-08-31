@@ -7,12 +7,19 @@ Simulate a large antenna array **end to end**: a ray-traced RF environment
 a simulation-driven interconnect → adaptive feature extraction → online subspace
 tracking → radar maps, target scenes, and OFDM communications. Every stage is a
 swappable **block**, configurable from Python or from the browser. Every figure below
-comes from this simulator. Where a caption names a command, that command regenerates the
-figure from a clean clone. Three of them — the scene/range-azimuth pair, the signal
-journey, and the difficulty ladder — are plotted by scripts that live in the maintainers'
-private notes repository rather than in this tree, so the *pipeline* behind them is here
-but the plotting is not; those captions say so. `ui_walkthrough.gif` is a screen
-recording with no generator at all.
+comes from this simulator. What a clean clone can and cannot regenerate, stated exactly:
+
+- The **interconnect** figures regenerate from a clean clone with no extra steps —
+  `python -m e2e.main.main_interconnect`, CPU only.
+- The **subspace-tracker** figure and the **scene/range-azimuth** pair name a command, but
+  those commands consume ray-traced `munich.pkl` frames, which are **gitignored and not
+  shipped**. Generate them first (see
+  [Sionna RT frame generation](#advanced-sionna-rt-frame-generation-gpu)) — that needs a
+  GPU and hours. Without it both commands fail immediately with `FileNotFoundError`.
+- Three figures — the scene/range-azimuth pair, the signal journey, and the difficulty
+  ladder — are *plotted* by scripts in the maintainers' private notes repository. The
+  pipeline behind them is here; the plotting is not.
+- `ui_walkthrough.gif` is a screen recording with no generator at all.
 
 <p align="center">
   <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">

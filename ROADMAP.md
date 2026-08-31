@@ -114,8 +114,10 @@ contract **self-describing and general** so blocks compose freely and the geomet
   tiers D0–D3, `.npz` + manifest, `RadarFrameDataset`) and two ported detection models
   (`FFTRadNet` from valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) sharing one
   train/eval CLI (`e2e.ml.train`); CUDA-smoke-tested end to end (see `e2e/ml/README.md`
-  and the changelog). Both model ports are pending explicit upstream license
-  confirmation before public redistribution.
+  and the changelog). Both model ports are **licence-cleared for redistribution**:
+  SSMRadNet's authors gave written approval 2026-08-07, and RADIal's publishing author
+  confirmed 2026-08-10 that the missing LICENSE was an oversight and granted reuse. Used
+  with attribution on that basis -- see `e2e/ml/README.md`'s "Attribution & licensing".
   - **Loss-balance / hyperparameter tuning for honest AP. ✅ DONE 2026-08**
     (`e2e.ml.sweep`): a 10-trial sweep picked `lr=3e-4`/`gamma=2`/`reg_weight=100`
     (kept); `gamma=0`'s apparently-better validation AP was traced to a near-zero-recall

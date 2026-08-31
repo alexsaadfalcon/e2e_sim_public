@@ -1,9 +1,11 @@
 # Your first scenario
 
-A copy-pasteable walkthrough from a clean clone to a running pipeline and a live web
-UI — entirely on CPU, with no GPU and no Sionna install required. Every command below
-was run against this repo to produce the output shown; if your output differs
-materially, that's a bug report, not user error.
+A copy-pasteable walkthrough from a clean clone to a running pipeline and a live web UI.
+**Steps 1–3 are entirely on CPU, with no GPU and no Sionna install required. Step 4 is
+not** — it consumes ray-traced frames that are gitignored and not shipped, and it says so
+where it starts. Every command below was run against this repo to produce the output
+shown; if your output differs materially on steps 1–3, that's a bug report, not user
+error.
 
 Unfamiliar term? Check [`docs/GLOSSARY.md`](GLOSSARY.md). For the deeper "why", see
 [`CLAUDE.md`](../CLAUDE.md) and [`CONTRIBUTING.md`](../CONTRIBUTING.md).
@@ -138,6 +140,17 @@ p = subprocess.run([sys.executable, '-c', \
 **Expected:** `rc 0`.
 
 ## 4. Swap a block and see the output change
+
+> **This step needs ray-traced frames, which are NOT shipped.** Unlike steps 1–3, it is
+> not CPU-only-from-a-clean-clone. `default_block_state()`'s environment block is
+> `scenario_name="munich"`, and `e2e/environment/sionna_sims/` is gitignored — so on a
+> fresh clone this raises
+> `PipelineError: No precomputed frames found for scenario 'munich'`.
+>
+> Generate them first (GPU + Sionna RT + LLVM, and it takes a while — see the README's
+> [Sionna RT frame generation](../README.md#advanced-sionna-rt-frame-generation-gpu)
+> section), or read this step as a worked example rather than running it. The numbers
+> below came from a machine that had those frames.
 
 The webapp's "Run" button builds blocks from a `{block_id: {"enabled", "params"}}`
 state dict and calls `webapp.pipeline_runner.run_pipeline(state)` — the same
