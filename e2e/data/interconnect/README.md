@@ -17,24 +17,17 @@ pipeline can be exercised against realistic hardware, not their models.
 
 ### How the shipped `.csv` files were derived
 
-`derive_interconnect_csv.py`, in this directory, is the script that turns a raw HFSS
-export into a file here. It is OURS, not the authors', and it is public so the derivation
-can be audited rather than taken on trust: the 70–90 GHz / 50 MHz interpolation grid, the
-minimum-phase reconstruction of the missing phase, and the provenance header are all
-readable in it.
+Each file here was produced by the e2e maintainers from a raw HFSS export supplied by the
+authors. The export carries **magnitude only**, on a coarse grid; the shipped file is that
+magnitude interpolated onto a uniform 70–90 GHz / 50 MHz grid (401 points), with **phase
+reconstructed as minimum phase** (`arg H = −Hilbert(ln|H|)`). The phase is therefore an
+assumption, not data — see the caveat below.
 
-It cannot be run end to end from a clean clone, and that limit is honest rather than
-incidental: its input is a raw export belonging to the authors, which is not ours to
-redistribute. What you can do without one is read the method; what you can do with one is
-run the oracle:
-
-```bash
-python e2e/data/interconnect/derive_interconnect_csv.py --check /path/to/Case3.csv
-```
-
-That re-derives Case3 and diffs it against the shipped file. It currently agrees to
-**5e-7 dB max deviation** — a file produced independently, on a different day, by a
-different person, reproduced by this script. That is the evidence the method is right.
+The derivation script itself is **not distributed with this repository**, and neither are
+the raw exports. Both are available from the maintainers on request. The method has been
+validated against an independently produced file: re-deriving Case3 from its raw export
+reproduces the `tessera_case3_s21_77ghz.csv` shipped here — made on a different day, by a
+different person — to **5e-7 dB** maximum deviation.
 
 ## `tessera_case{1..6}_s21_77ghz.csv` — the six 77 GHz automotive designs
 

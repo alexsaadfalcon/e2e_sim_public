@@ -61,7 +61,8 @@ def case_csv(n):
 #: All six of the collaborator's HFSS-simulated designs. As of 2026-08-19 the owner
 #: cleared the derived CSVs for this repository, so the "other five are private, not even
 #: their numbers" restriction above no longer holds and the figures show the whole set.
-#: Derived by `notes/tools/derive_interconnect_csv.py`, which re-derives Case3 and checks
+#: Derived by the maintainers from the authors' raw HFSS exports (script not shipped;
+#: the method re-derives Case3 and checks
 #: it against the file shipped on 2026-08-10 (max deviation 5.0e-07 dB) before it is
 #: trusted on a new case.
 CASE_NUMBERS = (1, 2, 3, 4, 5, 6)
