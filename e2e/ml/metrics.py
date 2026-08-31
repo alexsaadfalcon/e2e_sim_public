@@ -396,11 +396,18 @@ def _rank_detections(scored_flags: Sequence[Tuple[float, bool]]) -> List[int]:
                   key=lambda i: (-scored_flags[i][0], scored_flags[i][1]))
 
 
-def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int) -> Dict[str, List]:
+def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int,
+              scored_frames: Sequence[int] = None) -> Dict[str, List]:
     """Precision/recall down the pooled score ranking, plus the interpolated precision.
 
     Returns parallel lists `score`, `is_tp`, `precision`, `recall`, `precision_interp`,
-    one entry per detection, in ranked order. `precision_interp[k] = max(precision[k:])`
+    one entry per detection, in ranked order -- plus `frame` when `scored_frames` is
+    given, carrying each detection's source frame THROUGH the ranking permutation so
+    `frame[k]` still belongs to `score[k]`. That is what makes a paired, scene-level
+    bootstrap possible from a stored curve; without it the pooled curve cannot be
+    resampled by scene at all (the reason two README CIs were withdrawn in 0efb7e4).
+
+    `precision_interp[k] = max(precision[k:])`
     (the right-to-left running max), i.e. precision forced monotonically non-increasing
     in recall, which is what the VOC2010+/COCO AP integrates. Requires `n_gt > 0`.
     """
@@ -409,6 +416,7 @@ def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int) -> Dict[str
     is_tp: List[bool] = []
     precision: List[float] = []
     recall: List[float] = []
+    frames: List[int] = []
     tp_cum = 0
     for rank, i in enumerate(order, start=1):
         score, hit = scored_flags[i]
@@ -416,6 +424,8 @@ def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int) -> Dict[str
             tp_cum += 1
         scores.append(float(score))
         is_tp.append(bool(hit))
+        if scored_frames is not None:
+            frames.append(int(scored_frames[i]))
         precision.append(tp_cum / rank)
         recall.append(tp_cum / n_gt)
 
@@ -424,8 +434,11 @@ def _pr_curve(scored_flags: Sequence[Tuple[float, bool]], n_gt: int) -> Dict[str
         if interp[k] < interp[k + 1]:
             interp[k] = interp[k + 1]
 
-    return {"score": scores, "is_tp": is_tp, "precision": precision, "recall": recall,
-            "precision_interp": interp}
+    out = {"score": scores, "is_tp": is_tp, "precision": precision, "recall": recall,
+           "precision_interp": interp}
+    if scored_frames is not None:
+        out["frame"] = frames
+    return out
 
 
 def _interpolated_ap(curve: Dict[str, List], n_gt: int) -> float:
@@ -566,11 +579,19 @@ def _score_detections(
     if ignore_per_frame is None:
         ignore_per_frame = [None] * len(detections_per_frame)
     scored_flags: List[Tuple[float, bool]] = []
+    # Parallel to `scored_flags`: the frame each scored detection came from, and the
+    # per-frame ground-truth count. Both are what a PAIRED, SCENE-LEVEL bootstrap
+    # needs -- resampling frames with replacement and recomputing AP requires knowing
+    # which detections and how much ground truth move together. Pooling without this
+    # is what made the withdrawn README CIs unreproducible (commit 0efb7e4).
+    scored_frames: List[int] = []
+    gt_per_frame: List[int] = []
     range_errs: List[float] = []
     sin_az_errs: List[float] = []
     tp = fp = fn = 0
 
-    for detections, targets, ignore in zip(detections_per_frame, target_lists, ignore_per_frame):
+    for frame_idx, (detections, targets, ignore) in enumerate(
+            zip(detections_per_frame, target_lists, ignore_per_frame)):
         matches, unmatched_det, unmatched_gt = match_detections(detections, targets, criterion,
                                                                  ignore=ignore)
         matched_det = {di for di, _gi in matches}
@@ -579,6 +600,8 @@ def _score_detections(
         # not enter the pooled PR curve at all (see `match_detections`' docstring).
         for di in sorted(matched_det | set(unmatched_det)):
             scored_flags.append((detections[di][2], di in matched_det))
+            scored_frames.append(frame_idx)
+        gt_per_frame.append(len(targets))
         range_errs.extend(abs(detections[di][0] - targets[gi][0]) for di, gi in matches)
         sin_az_errs.extend(abs(detections[di][1] - targets[gi][1]) for di, gi in matches)
         tp += len(matches)
@@ -596,7 +619,7 @@ def _score_detections(
         curve = None
         ap = 1.0 if n_det == 0 else 0.0
     else:
-        curve = _pr_curve(scored_flags, n_gt)
+        curve = _pr_curve(scored_flags, n_gt, scored_frames)
         ap = _interpolated_ap(curve, n_gt)
 
     # Precision is UNDEFINED, not a vacuous 1.0, when the detector emitted nothing while
@@ -612,6 +635,10 @@ def _score_detections(
         "tp": tp, "fp": fp, "fn": fn,
         "n_detections": n_det, "n_targets": n_gt,
         "pr_curve": curve,
+        # Per-frame ground-truth counts, parallel to the input frame order. A scene-level
+        # bootstrap needs these: resampling frames with replacement changes the recall
+        # denominator, and AP is not recomputable from the curve alone without them.
+        "gt_per_frame": gt_per_frame,
         "range_errs": range_errs, "sin_az_errs": sin_az_errs,
     }
 
@@ -727,6 +754,10 @@ def evaluate_dataset(
         "n_detections": pooled["n_detections"],
         "n_targets": pooled["n_targets"],
         "pr_curve": pooled["pr_curve"],
+        # Parallel to the (post-crop) frame order, so a scene-level bootstrap can resample
+        # frames and recompute the recall denominator. Together with pr_curve["frame"]
+        # this is everything a paired CI needs from a stored artifact.
+        "gt_per_frame": pooled["gt_per_frame"],
         "range_rmse_m": _rmse(pooled["range_errs"]),
         "sin_az_rmse": _rmse(pooled["sin_az_errs"]),
     }

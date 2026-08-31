@@ -7,8 +7,12 @@ Simulate a large antenna array **end to end**: a ray-traced RF environment
 a simulation-driven interconnect → adaptive feature extraction → online subspace
 tracking → radar maps, target scenes, and OFDM communications. Every stage is a
 swappable **block**, configurable from Python or from the browser. Every figure below
-comes from this simulator; each caption names the command that regenerates it, and
-flags the one whose plotting script is not in this tree.
+comes from this simulator. Where a caption names a command, that command regenerates the
+figure from a clean clone. Three of them — the scene/range-azimuth pair, the signal
+journey, and the difficulty ladder — are plotted by scripts that live in the maintainers'
+private notes repository rather than in this tree, so the *pipeline* behind them is here
+but the plotting is not; those captions say so. `ui_walkthrough.gif` is a screen
+recording with no generator at all.
 
 <p align="center">
   <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">
@@ -23,12 +27,12 @@ ray-traced frames through the full receive chain, and inspect the radar products
 | ![Ray-traced city scene next to the range-azimuth map the pipeline computes from it, at two input SNRs](docs/media/scene_vs_ra.png) | ![A photo's raw bits sent through the OFDM comms link at four operating points](docs/media/image_link.png) |
 | *The scene and what the radar sees: a Sionna RT render of a Munich scene (left) and the pipeline's range-azimuth map for that same scene, with ground-truth markers (right). Every one of the seven objects appears as its own return — the 192-element virtual array resolves them individually. Regenerate with `python -m e2e.main.main_sionna_blocks` (the figure's own generator lives in the maintainers' private notes repo, so it is not in this tree).* | *Seeing is believing for comms too: a photo's bits through the same array's OFDM link — clean, noisy, and with TX power-amplifier distortion.* |
 | ![One frame traced through every pipeline stage, from raw channel response to the final azimuth-elevation map](docs/media/signal_journey.png) | ![Moving tier-D2 scene: bird's-eye view, ideal-front-end radar returns, and non-ideal-front-end radar returns](docs/media/scene_D2.gif) |
-| *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
+| *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map. Every stage shown is in this tree; the script that assembles them into this panel is in the maintainers' private notes repo, so this figure has no in-repo regenerate command.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
 | ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the simulated model](docs/media/interconnect_before_after.png) |
-| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied: the reactive gate reaches the 60-pass accuracy floor for 37% of its compute, which is compute bought, not accuracy. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the worst of the six (−0.541 dB median loss and 0.113 dB ripple, against −0.249 to −0.291 dB and ≤0.030 dB for the rest). TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
+| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied. The gate matches the 60-pass arm's accuracy inside the collapse — and inside the collapse it is also spending 60 passes, so it buys that accuracy with the same compute, not less. What it saves is averaged over the whole run: a mean 22.4 passes/frame against a constant 60, about 37%, earned outside the collapse where it idles at one pass and its error is ~15x worse than constant effort. It is a compute-saving heuristic that spends where a diagnostic tells it to, not a free accuracy win. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the worst of the six (−0.541 dB median loss and 0.113 dB ripple, against −0.249 to −0.291 dB and ≤0.030 dB for the rest). TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
 
 ![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
-*Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
+*Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). (Panel assembled by a private plotting script; the scenes themselves regenerate from `e2e/environment/rt_scenes.py`.) Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
 
 ## Getting Started
 
@@ -368,19 +372,52 @@ pipeline, two heads" point concrete. The web UI exposes the same head as an opti
 
 ## Machine learning: FMCW radar dataset + perception models
 
-`e2e/ml/` generates labeled FMCW MIMO radar training data (range-Doppler tensors +
-FFTRadNet-style detection labels) from declarative scenarios, analytically — no Sionna
-and no GPU required for generation — plus two ported detection models (`FFTRadNet` from
-valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) and a reference train/eval CLI:
+`e2e/ml/` builds labeled FMCW MIMO radar training data (range-Doppler tensors +
+FFTRadNet-style detection labels) and ships two ported detection models (`FFTRadNet` from
+valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) plus a reference train/eval CLI.
+
+**There are two generators, and they are not interchangeable.** Reach for the right one:
 
 ```bash
-python -m e2e.ml.dataset --config ti_iwr1443 --tier D1 --n 200 --seed 0   # generate
+# A. Plumbing check — analytic, CPU-only, no Sionna. Fast, and NOT a benchmark corpus.
+python -m e2e.ml.dataset --config ti_iwr1443 --tier D1 --n 200 --seed 0
 python -m e2e.ml.train --manifest e2e/ml/datasets/ti_iwr1443_D1/manifest.json \
-    --model fftradnet --epochs 25                                        # train/evaluate
+    --model fftradnet --epochs 25
 ```
 
+`ti_iwr1443` has 12 virtual elements, so its Rayleigh azimuth resolution is coarser than
+the evaluation's own match tolerance by about 2.8×: a perfect detector, localising to the
+diffraction limit, still scores as a miss. That path exercises the code, not the science.
+
+```bash
+# B. The benchmark corpus — real Sionna RT, GPU, ~10 s/scene. This is what the table
+#    below is measured on. See "GPU / driver / LLVM" for the toolchain it needs.
+python -m e2e.ml.chain_generate --config benchmark_v1 --tier D2 --n 1700 --seed 20260829 \
+    --no-local-assets --out e2e/ml/datasets/bench
+
+python -m e2e.ml.train --manifest e2e/ml/datasets/bench/benchmark_v1_D2/manifest.json \
+    --model fftradnet --epochs 30 --seed 0 --out e2e/ml/runs/fft
+python -m e2e.ml.train --manifest e2e/ml/datasets/bench/benchmark_v1_D2/manifest.json \
+    --model ssmradnet --epochs 120 --batch-size 2 --accum-steps 4 --seed 0 \
+    --out e2e/ml/runs/ssm
+```
+
+`benchmark_v1` (4×16 = 64 virtual elements, v_max 9.69 m/s) is the only shipped preset
+valid on both axes at once — azimuth resolvable within the match tolerance AND targets
+that do not alias in Doppler. `--no-local-assets` restricts scene meshes to the
+licence-cleared pool. Run `e2e.ml.baseline.resolution_report` before trusting an AP on any
+preset you have changed.
+
+> **Known bug:** generation hangs somewhere around scene ~1720, holding a GPU at 100%
+> without writing further frames. Both of our corpora stopped there. Ask for `--n 1700`,
+> or watch the output directory and kill the job when the frame count stops advancing —
+> then recover the manifest, which is only written after the final scene, with
+> `python -m e2e.ml.rebuild_manifest --corpus <dir> --config benchmark_v1 --tier D2
+> --seed <yours> --write`. The frames themselves are fine.
+
 See [`e2e/ml/README.md`](e2e/ml/README.md) for the difficulty-tier/preset tables, data
-format, smoke-test results, and model attribution/licensing notes.
+format, smoke-test results, and model attribution/licensing notes, and
+[`e2e/ml/DATA_FORMAT.md`](e2e/ml/DATA_FORMAT.md) to decode a corpus with numpy alone.
 
 ### The detection benchmark measures its own chance floor
 

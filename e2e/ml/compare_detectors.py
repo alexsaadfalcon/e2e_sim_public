@@ -370,6 +370,13 @@ def format_table(result: Dict) -> str:
         f"corpus : {result['manifest']}   split={result['split']}",
         f"held at recall = {r:.2f}   (frames decoded at score > "
         f"{result['decode_threshold']:g}, a floor, not the operating point)",
+        # Which columns the matched recall governs, spelled out. FA/frame, recall and
+        # thresh are read off each arm at that recall; AP and max recall are properties
+        # of the whole PR curve and do NOT move with --recall. A header that says only
+        # "held at recall = 0.50" over all six columns invites reading AP as a
+        # recall-0.5 quantity, which it is not.
+        "  (FA/frame, recall, thresh are AT that recall; AP and max recall are "
+        "whole-curve and do not depend on it)",
         "",
         f"{'detector':<34}{'FA/frame':>10}{'recall':>9}{'thresh':>9}{'AP':>8}"
         f"{'max recall':>12}",

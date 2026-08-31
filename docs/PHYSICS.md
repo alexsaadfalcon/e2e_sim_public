@@ -117,11 +117,23 @@ specifically to fill the resulting gap.
 
 **Verdict: JUSTIFIED for propagation** (geometry, occlusion, multipath, diffuse
 return) — **the monostatic-backscatter gap is real and is handled by entry 4, not
-here.** See also the README's "Physical modeling scope & limitations" section: diffuse
-scattering from rough surfaces/foliage is currently disabled in the ray-tracing call
-(`max_depth=5`, specular/LOS/refraction paths only), so clutter from those surfaces is
-absent from ray-traced frames — the separate `apply_clutter` impairment (entry 10)
-stands in for road/ground clutter statistically instead.
+here.**
+
+**Why ray-traced frames carry no ground clutter — and it is not the same reason for the
+two generators.** The `munich.pkl` frames shipped with the repo come from the legacy
+`e2e/environment/sionna_simple_channel.py`, which traces with `max_depth=5` and diffuse
+reflection OFF, so rough-surface scattering is genuinely not traced at all. The ML corpora
+do NOT go through that path: they use `RTEnvironmentBlock`, which defaults to
+`max_depth=2` with **`diffuse_reflection=True`** (`e2e/environment/blocks.py:82-83`) —
+diffuse scattering is enabled. Their ground is silent for a different reason:
+`DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0` (`e2e/environment/rt_scene_build.py`), a
+deliberate cost choice, since a rough ground is physically right but roughly 37× the
+per-frame CFR cost.
+
+Either way the consequence is the same — no traced ground return — and the separate
+`apply_clutter` impairment (entry 10) stands in for road/ground clutter statistically.
+This entry previously gave the legacy generator's settings as the reason for both, which
+was the right conclusion from the wrong mechanism for the corpora that actually matter.
 
 ## 4. Coherent point-scatterer hybrid — `e2e/environment/rt_signal_chain.py` (`coherent_target_cfr`)
 
@@ -450,12 +462,22 @@ both settle at the same error (~1.28). The gate buys accuracy where the diagnost
 to spend it, not a lasting head start. The test now asserts the two arms track *alike*
 after the episode, which is what would catch a gate stuck open.
 
-A separate measurement on real ray-traced `munich` frames (frames 22–59) compares three
-arms rather than two, so the trade is visible rather than implied: the reactive gate
-matches the constant-maximum-effort arm's accuracy through the collapse (mean error
-0.164 against 0.170) at 64% of its compute, while the fixed-low-effort baseline's error
-is 8.7× higher. That low-effort arm is a demonstration point, not a production default
-effort level.
+A separate measurement on real ray-traced `munich` frames compares three arms rather than
+two, so the trade is visible rather than implied. Through the collapse window (frames
+22–59) the reactive gate matches the constant-maximum-effort arm's accuracy — mean error
+0.164 against 0.170 — while the fixed-low-effort baseline's error is 8.7× higher. That
+low-effort arm is a demonstration point, not a production default effort level.
+
+**On that window the gate spends the same compute as the constant arm, not less.** It has
+detected the degeneracy and is refining at full effort on every frame of it, 60 passes per
+frame for both arms. What the gate saves is measured over the whole 60-frame run — 2302
+passes against 3600, i.e. 64% — and that saving is earned entirely on frames 0–21, BEFORE
+the degeneracy, where the gate sits at one pass per frame and no accuracy comparison is
+made. Both numbers are individually correct, and pairing them in one sentence as
+"this accuracy at 64% of that compute" describes two disjoint frame sets; it reads as a
+simultaneous accuracy-and-compute win that the measurement does not show. The honest
+statement of the result is that the gate spends effort where the diagnostic says to and
+idles where it does not.
 
 **Verdict: JUSTIFIED** for the tracker's core algorithm and for the reactive-gating
 mitigation, given the pinned synthetic regression test; the real-scenario numbers
