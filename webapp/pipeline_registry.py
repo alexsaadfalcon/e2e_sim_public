@@ -100,9 +100,20 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=False,
         params=[
+            # NAME COLLISION, deliberately spelled out. "case3" here is a LEGACY alias
+            # for an identity pass-through -- it is NOT the Tessera/UIC Case3 transfer
+            # function that the README, e2e/data/interconnect/ and the corpus generator
+            # all mean by that name. Picking it turns the interconnect OFF, which a user
+            # reading the README's Case3 caption would not expect. "passthrough" is the
+            # honest label; the alias is kept so old saved states still load.
             ParamSpec("case", "Case", "choice", "default",
-                      choices=["default", "case3"],
-                      help="'case3' passes the frame through untouched."),
+                      choices=["default", "passthrough", "case3"],
+                      help="'default' = the 11-tap boxcar PLACEHOLDER (smears a target "
+                           "across 11 range bins -- not a real interconnect). "
+                           "'passthrough' = no interconnect at all. 'case3' is a legacy "
+                           "alias for 'passthrough' and does NOT load the simulated "
+                           "Case3 hardware response of the same name; that is not yet "
+                           "reachable from this UI."),
         ],
         blurb="Interconnect filtering applied in the frequency domain.",
     ),

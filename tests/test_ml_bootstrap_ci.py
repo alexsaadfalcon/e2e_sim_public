@@ -147,3 +147,39 @@ def test_result_is_deterministic_for_a_fixed_seed():
     r1 = paired_bootstrap(payload, n_boot=120, seed=42)
     r2 = paired_bootstrap(payload, n_boot=120, seed=42)
     assert json.dumps(r1["comparisons"]) == json.dumps(r2["comparisons"])
+
+
+def test_refuses_a_corpus_whose_rows_are_not_scenes():
+    """A dataset ROW is a scene only when `frames_per_scene == 1`.
+
+    This module resamples rows and calls the result a scene-level bootstrap. On a corpus
+    with several frames per scene those rows are correlated -- consecutive frames of one
+    motion track -- and resampling them independently reproduces exactly the too-narrow
+    failure the module rejects per-detection bootstrapping for, one level up. Measured by
+    a reviewer on a synthetic two-frame-per-scene corpus under a true null: 16% false
+    exclusion of zero at a nominal 5%, a 3x inflation.
+
+    So the claim is enforced rather than assumed. The shipped corpus is 1:1, which is
+    exactly why this needs a test -- nothing in normal use would ever trip it.
+    """
+    preds, targets, grid = _frames(12, hit_prob=0.6, seed=21)
+    arm, gt = _arm("a", preds, targets, grid)
+    payload = {"arms": [arm, dict(arm, name="b")], "gt_per_frame": gt,
+               "frames_per_scene": 2}
+
+    with pytest.raises(ValueError, match="frames_per_scene"):
+        paired_bootstrap(payload, n_boot=20)
+
+    # The override exists, and says so, for a caller who has a reason.
+    out = paired_bootstrap(payload, n_boot=20, allow_multi_frame_scenes=True)
+    assert out["comparisons"][0]["delta_AP"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_frames_per_scene_absent_is_treated_as_one():
+    """Artifacts written before the field existed must still work -- they all came from
+    1:1 corpora, which is why the default is 1 rather than a refusal."""
+    preds, targets, grid = _frames(10, hit_prob=0.5, seed=23)
+    arm, gt = _arm("a", preds, targets, grid)
+    out = paired_bootstrap({"arms": [arm, dict(arm, name="b")], "gt_per_frame": gt},
+                           n_boot=20)
+    assert out["comparisons"][0]["excludes_zero"] is False

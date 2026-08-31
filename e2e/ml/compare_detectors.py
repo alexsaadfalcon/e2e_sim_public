@@ -359,6 +359,11 @@ def compare(manifest_path, *, split: str = "test",
         **({"null_skipped": null_skipped} if null_skipped else {}),
         "manifest": str(manifest_path),
         "split": split,
+        # Whether a dataset row IS a scene. e2e.ml.bootstrap_ci resamples rows and calls
+        # that a scene-level bootstrap; that is only true at 1. Recorded so the claim can
+        # be CHECKED downstream instead of assumed.
+        "frames_per_scene": int(json.loads(Path(manifest_path).read_text())
+                                .get("frames_per_scene", 1)),
         "target_recall": target_recall,
         "decode_threshold": decode_threshold,
         "use_ignore_regions": use_ignore_regions,

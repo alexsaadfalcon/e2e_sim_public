@@ -154,8 +154,18 @@ def verify_against_stored(arms: Sequence[Dict], gt_per_frame: Sequence[int],
 
 def paired_bootstrap(compare: Dict, *, baseline: Optional[str] = None,
                      n_boot: int = 2000, seed: int = 0,
-                     alpha: float = 0.05) -> Dict:
-    """Paired scene-level bootstrap of `AP(arm) - AP(baseline)` for every other arm."""
+                     alpha: float = 0.05,
+                     allow_multi_frame_scenes: bool = False) -> Dict:
+    """Paired scene-level bootstrap of `AP(arm) - AP(baseline)` for every other arm.
+
+    Resamples the DATASET ROW index, which is a scene only when `frames_per_scene == 1`.
+    That is enforced here rather than assumed: a corpus with several frames per scene has
+    correlated rows, and resampling them independently reproduces exactly the too-narrow
+    failure this module rejects per-detection bootstrapping for. Measured on a synthetic
+    two-frame-per-scene corpus under a true null: **16% false exclusion of zero at a
+    nominal 5%**, a 3x inflation. `allow_multi_frame_scenes=True` overrides the refusal
+    for a caller who has some other reason to want it; nothing in this repo should.
+    """
     arms = compare["arms"]
     if len(arms) < 2:
         raise ValueError("need at least two arms to form a difference")
@@ -164,6 +174,15 @@ def paired_bootstrap(compare: Dict, *, baseline: Optional[str] = None,
         raise MissingFrameProvenance(
             "no gt_per_frame recorded; the recall denominator cannot be resampled. "
             "Re-score with a current compare_detectors.")
+
+    fps = int(compare.get("frames_per_scene", 1) or 1)
+    if fps != 1 and not allow_multi_frame_scenes:
+        raise ValueError(
+            f"this comparison was scored on a corpus with frames_per_scene={fps}, so a "
+            "dataset row is NOT a scene and resampling rows would treat correlated frames "
+            "as independent. Measured cost of doing so anyway: 16% false exclusion of "
+            "zero at a nominal 5%. Resample by scene, or pass "
+            "allow_multi_frame_scenes=True if you have a reason to accept it.")
 
     names = [a.get("name", f"arm{i}") for i, a in enumerate(arms)]
     base_i = 0 if baseline is None else names.index(baseline)
@@ -189,6 +208,12 @@ def paired_bootstrap(compare: Dict, *, baseline: Optional[str] = None,
             continue
         diff = draws[:, j] - draws[:, base_i]
         finite = diff[np.isfinite(diff)]
+        if finite.size == 0:
+            raise ValueError(
+                f"every one of {n_boot} resamples produced a non-finite AP difference for "
+                f"arm {name!r}; this happens when the split is small enough that a "
+                "plausible resample contains no ground truth at all. Score more frames, "
+                "or drop --limit.")
         lo, hi = np.percentile(finite, [lo_q, hi_q])
         results.append({
             "arm": name,
@@ -222,7 +247,9 @@ def format_report(result: Dict) -> str:
         f"{'sig':>6}",
     ]
     for c in result["comparisons"]:
-        ci = f"[{c['ci_low']:+.4f}, {c['ci_high']:+.4f}]"
+        # 3 decimals, not 4: measured Monte-Carlo std on the interval edges is
+        # ~0.001 at the default n_boot=2000, so a 4th decimal prints noise as signal.
+        ci = f"[{c['ci_low']:+.3f}, {c['ci_high']:+.3f}]"
         lines.append(f"{c['arm']:<28}{c['delta_AP']:>+9.4f}{ci:>20}"
                      f"{('yes' if c['excludes_zero'] else 'no'):>6}")
     lines += ["", "'sig' = the interval excludes zero. Resampling unit is the SCENE, "
