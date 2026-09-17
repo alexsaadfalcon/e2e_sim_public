@@ -82,6 +82,100 @@ def test_case3_identity_ignores_transfer_csv():
     assert torch.equal(blk.apply_interconnect(frame), frame)
 
 
+@pytest.mark.parametrize("case", ["passthrough", "case3"])
+def test_passthrough_spellings_are_identity_not_the_boxcar(case):
+    """REGRESSION (133f97f): the webapp renamed this option to 'passthrough' but
+    `apply_interconnect` only ever special-cased the literal 'case3', so picking
+    "no interconnect at all" in the GUI silently ran the 11-tap boxcar placeholder --
+    byte-identical to leaving the block on its default. Both spellings must be exact
+    identities, and neither may equal the boxcar.
+
+    Only the `passthrough` parametrization catches the regression; `case3` already
+    worked and is pinned here as PRESERVATION, because docs/FIRST_SCENARIO.md and
+    several e2e/main/ scripts publish numbers that depend on it staying an identity.
+    """
+    n_freqs = 32
+    frame = _ones_frame(n_freqs)
+    out = InterconnectBlock(case=case).apply_interconnect(frame)
+    assert torch.equal(out, frame), f"case={case!r} is not an identity pass-through"
+    boxcar = InterconnectBlock().apply_interconnect(frame)
+    assert not torch.equal(out, boxcar), (
+        f"case={case!r} produced the boxcar placeholder's output -- this is the "
+        f"exact 133f97f regression"
+    )
+
+
+def test_unknown_case_raises_instead_of_silently_running_the_boxcar():
+    """The shape of the 133f97f bug was a silent fall-through: an unrecognized case
+    name quietly became the placeholder filter. A typo must be loud."""
+    with pytest.raises(ValueError, match="case must be one of"):
+        InterconnectBlock(case="passthru")     # plausible near-miss spelling
+    with pytest.raises(ValueError, match="case must be one of"):
+        InterconnectBlock(case="tessera_case3")  # an arm name, not a case name
+
+
+@pytest.mark.parametrize("case", [None, "synthetic"])
+def test_boxcar_spellings_still_select_the_placeholder(case):
+    """The guard above must not change what the boxcar spellings mean. `None` is the
+    default; `'synthetic'` is a pre-existing alias that e2e/main/main_sionna_blocks.py
+    passes -- it was nearly broken by the first version of this validation, which only
+    knew the pass-through names. The published numbers in docs/ and e2e/main/ depend
+    on both staying the boxcar."""
+    from e2e.blocks import INTERCONNECT_BOXCAR_CASES
+
+    assert case in INTERCONNECT_BOXCAR_CASES
+    frame = _ones_frame(32)
+    out = InterconnectBlock(case=case).apply_interconnect(frame)
+    assert not torch.equal(out, frame), f"case={case!r} should filter, not pass through"
+    assert torch.equal(out, InterconnectBlock().apply_interconnect(frame))
+
+
+def test_case_sets_partition_the_vocabulary_BY_BEHAVIOUR():
+    """Each declared name must BEHAVE as its set claims -- a pass-through name that
+    filters (or a boxcar name that passes through) is the 133f97f bug in a new
+    spelling. Asserting behaviour, not just set membership: a test that only compared
+    the constants to each other would pass even if `apply_interconnect` ignored them
+    entirely, which is exactly how the original bug survived."""
+    from e2e.blocks import (
+        INTERCONNECT_BOXCAR_CASES,
+        INTERCONNECT_CASES,
+        INTERCONNECT_PASSTHROUGH_CASES,
+    )
+
+    assert not (INTERCONNECT_PASSTHROUGH_CASES & INTERCONNECT_BOXCAR_CASES)
+    assert INTERCONNECT_CASES == INTERCONNECT_PASSTHROUGH_CASES | INTERCONNECT_BOXCAR_CASES
+
+    frame = _ones_frame(32)
+    for case in INTERCONNECT_CASES:
+        out = InterconnectBlock(case=case).apply_interconnect(frame)
+        is_identity = torch.equal(out, frame)
+        assert is_identity == (case in INTERCONNECT_PASSTHROUGH_CASES), (
+            f"case={case!r} is declared "
+            f"{'a pass-through' if case in INTERCONNECT_PASSTHROUGH_CASES else 'a boxcar'} "
+            f"but identity={is_identity}"
+        )
+
+
+def test_webapp_case_choices_all_reach_the_backend_intact():
+    """Pins the seam the regression actually lived in: every `case` the GUI offers
+    must be constructible, and the two the help text calls pass-throughs must really
+    be pass-throughs. A future rename of the dropdown that forgets the backend fails
+    here instead of in front of a sponsor."""
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+
+    spec = next(p for p in BLOCKS_BY_ID["interconnect"].params if p.key == "case")
+    frame = _ones_frame(16)
+    for choice in spec.choices:
+        # webapp/pipeline_runner maps the UI's "default" to case=None.
+        case = None if choice == "default" else choice
+        out = InterconnectBlock(case=case).apply_interconnect(frame)
+        is_identity = torch.equal(out, frame)
+        assert is_identity == (choice != "default"), (
+            f"GUI choice {choice!r}: identity={is_identity}, which contradicts the "
+            f"dropdown's help text"
+        )
+
+
 def test_missing_transfer_csv_raises():
     with pytest.raises((OSError, IOError, ValueError)):
         InterconnectBlock(transfer_csv="does_not_exist_interconnect.csv")

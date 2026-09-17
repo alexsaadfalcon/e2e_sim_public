@@ -156,8 +156,13 @@ The webapp's "Run" button builds blocks from a `{block_id: {"enabled", "params"}
 state dict and calls `webapp.pipeline_runner.run_pipeline(state)` — the same
 function whether you click it in the browser or call it from a script. We'll swap
 the **Interconnect** block's `case` param exactly as the UI's dropdown does: from
-the default 11-tap boxcar placeholder to `case3` (an identity pass-through, see
+the default 11-tap boxcar placeholder to `passthrough` (an identity pass-through, see
 `InterconnectBlock`'s docstring in `e2e/blocks.py`), and watch `subspace_err` move.
+
+> `case3` is a legacy alias for the same identity pass-through and behaves
+> identically. Prefer `passthrough`: `case3` collides with the *Case3* transfer
+> function in `e2e/data/interconnect/`, which is a real filter and the opposite of a
+> pass-through.
 
 ```bash
 python - <<'PY'
@@ -171,11 +176,11 @@ state["interconnect"]["params"]["case"] = "default"   # boxcar placeholder
 out_default = run_pipeline(state, n_steps=2)
 
 state2 = copy.deepcopy(state)
-state2["interconnect"]["params"]["case"] = "case3"     # identity pass-through
-out_case3 = run_pipeline(state2, n_steps=2)
+state2["interconnect"]["params"]["case"] = "passthrough"   # identity pass-through
+out_passthrough = run_pipeline(state2, n_steps=2)
 
 print("subspace_err (default boxcar):  ", [float(x) for x in out_default["subspace_err"]])
-print("subspace_err (case3 pass-through):", [float(x) for x in out_case3["subspace_err"]])
+print("subspace_err (passthrough):     ", [float(x) for x in out_passthrough["subspace_err"]])
 PY
 ```
 
@@ -184,15 +189,15 @@ the qualitative gap is consistent):**
 
 ```
 subspace_err (default boxcar):   [1.547, 1.759]
-subspace_err (case3 pass-through): [0.041, 0.059]
+subspace_err (passthrough):      [0.041, 0.059]
 ```
 
 The boxcar placeholder's frequency-domain ripple visibly degrades subspace tracking
 relative to the identity pass-through — the same comparison the README's
-"Interconnect: placeholder vs. measured" section makes with real measured transfer
-functions instead of the toy `case3` identity. To do the equivalent thing in the
+"Interconnect: placeholder vs. simulated" section makes with the collaborators'
+simulated transfer functions instead of this toy identity. To do the equivalent thing in the
 browser: open the **Block Diagram** tab, toggle **Interconnect** on, change its
-**Case** dropdown from `default` to `case3`, click **Run**, and compare the
+**Case** dropdown from `default` to `passthrough`, click **Run**, and compare the
 **Results** tab's subspace-error curve before and after.
 
 ## Where to go next

@@ -120,9 +120,51 @@ def test_registry_subspace_k_has_min_one():
     assert k_spec.min == 1
 
 
-def test_param_editor_k_input_has_min():
+def test_registry_subspace_k_has_max_below_m():
+    """REGRESSION: k had a floor but no ceiling, so the GUI happily accepted k=512.
+    AdaOjaBlock refuses k >= m, and it refuses at CONSTRUCTION -- which run_pipeline
+    does outside its try/except -- so the ValueError bypassed every PipelineError
+    handler and reached the user as a raw 'Unexpected error'. The bound must be tied
+    to the same SUBSPACE_M the tracker is built with, so the two cannot drift."""
+    from webapp.pipeline_registry import BLOCKS_BY_ID, SUBSPACE_M
+    k_spec = next(p for p in BLOCKS_BY_ID["subspace"].params if p.key == "k")
+    assert k_spec.max == SUBSPACE_M - 1
+
+
+def test_subspace_m_is_the_value_the_tracker_is_actually_built_with(monkeypatch):
+    """The UI's k ceiling is only honest if the tracker's real measurement count
+    matches it. Checked BEHAVIOURALLY -- we capture the m that run_pipeline actually
+    passes to AdaOjaBlock -- rather than by grepping the source for 'm=SUBSPACE_M',
+    which a rename or a shadowing local could satisfy while the bug came back."""
+    pytest.importorskip("torch")
+    import e2e.blocks as blocks
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state, SUBSPACE_M
+
+    seen = {}
+    real = blocks.AdaOjaBlock
+
+    def spy(d, k, *args, **kwargs):
+        seen["m"] = kwargs.get("m")
+        seen["k"] = k
+        return real(d, k, *args, **kwargs)
+
+    monkeypatch.setattr(blocks, "AdaOjaBlock", spy)
+    try:
+        pipeline_runner.run_pipeline(default_block_state(), n_steps=1)
+    except pipeline_runner.PipelineError:
+        pass  # no frames on this machine is fine -- construction happens first
+
+    assert seen.get("m") == SUBSPACE_M, (
+        f"run_pipeline built the tracker with m={seen.get('m')}, but the UI bounds k "
+        f"against SUBSPACE_M={SUBSPACE_M}; they have drifted apart"
+    )
+    assert seen["k"] < seen["m"], "the default k must satisfy the constraint it advertises"
+
+
+def test_param_editor_k_input_has_min_and_max():
     from webapp import block_diagram
-    from webapp.pipeline_registry import default_block_state
+    from webapp.pipeline_registry import default_block_state, SUBSPACE_M
     from dash import dcc
 
     state = default_block_state()
@@ -131,6 +173,7 @@ def test_param_editor_k_input_has_min():
                 if isinstance(c, dcc.Input) and c.id.get("param") == "k"]
     assert len(k_inputs) == 1
     assert k_inputs[0].min == 1
+    assert k_inputs[0].max == SUBSPACE_M - 1
 
 
 def test_default_block_state_covers_every_block():
@@ -555,6 +598,39 @@ def test_run_pipeline_wires_every_classic_product_block(monkeypatch, make_env_bl
     figs = pipeline_runner.figures_from_outputs(outputs)
     for fig_key in ("fft", "range_az", "range_el", "range_profile", "subspace_err"):
         assert fig_key in figs, f"figures_from_outputs has no figure for {fig_key!r}"
+
+
+@pytest.mark.parametrize("k", [512, 600])
+def test_run_pipeline_rejects_k_at_or_above_m_as_a_pipeline_error(k):
+    """REGRESSION: the dcc.Input `max` is only a browser hint -- a typed value or a
+    saved state can still carry k >= m. run_pipeline must reject it as a friendly
+    PipelineError (which webapp/app.py renders in the diagram view) rather than
+    letting AdaOjaBlock's construction-time ValueError escape. Deliberately checked
+    WITHOUT frames or monkeypatching: the guard has to fire before any heavy work,
+    which is also why a sponsor never waits 30 s to see this message."""
+    from webapp.pipeline_runner import PipelineError, run_pipeline
+    from webapp.pipeline_registry import default_block_state
+
+    state = default_block_state()
+    state["subspace"]["params"]["k"] = k
+    with pytest.raises(PipelineError, match=r"Subspace dim k must be <"):
+        run_pipeline(state, n_steps=1)
+
+
+def test_run_pipeline_still_accepts_the_largest_valid_k():
+    """The ceiling must be off-by-one correct: k = m-1 is legal (AdaOjaBlock only
+    refuses k >= m), so the guard must not fire there."""
+    from webapp.pipeline_runner import PipelineError, run_pipeline
+    from webapp.pipeline_registry import default_block_state, SUBSPACE_M
+
+    state = default_block_state()
+    state["subspace"]["params"]["k"] = SUBSPACE_M - 1
+    try:
+        run_pipeline(state, n_steps=1)
+    except PipelineError as e:
+        assert "Subspace dim k must be <" not in str(e), (
+            f"k={SUBSPACE_M - 1} is valid but the ceiling guard rejected it: {e}"
+        )
 
 
 def test_run_pipeline_no_longer_errors_when_rffe_disabled():

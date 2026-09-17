@@ -155,6 +155,27 @@ def load_interconnect_transfer(path):
     return freq[order], s[order]
 
 
+# Case names that mean "apply no interconnect at all". Two spellings, deliberately:
+# 'case3' is the LEGACY one and cannot be dropped -- e2e/main/main_sionna_blocks.py,
+# main_comms_head.py, main_subspace_refine.py, main_interconnect.py and
+# docs/FIRST_SCENARIO.md all pass it, and its published numbers depend on it. It is
+# also a NAME COLLISION with the Tessera/UIC "Case3" transfer function in
+# e2e/data/interconnect/, which is a real filter and the opposite of a pass-through
+# (see webapp/pipeline_registry.py's note on the same dropdown). 'passthrough' is the
+# honest name the UI offers; both must land here, or picking it silently runs the
+# boxcar placeholder instead -- which is exactly what happened in 133f97f.
+INTERCONNECT_PASSTHROUGH_CASES = frozenset({'passthrough', 'case3'})
+
+# Case names that select the 11-tap boxcar PLACEHOLDER. `None` is the default spelling;
+# 'synthetic' is an existing alias meaning "the synthetic placeholder filter" and is
+# passed by e2e/main/main_sionna_blocks.py (pinned by tests/test_blocks.py). Note it is
+# NOT related to a synthetic *transfer function* loaded via transfer_csv -- the
+# placeholder models no particular physical interconnect at all.
+INTERCONNECT_BOXCAR_CASES = frozenset({None, 'synthetic'})
+
+INTERCONNECT_CASES = INTERCONNECT_PASSTHROUGH_CASES | INTERCONNECT_BOXCAR_CASES
+
+
 # RF Interconnect Model Block
 class InterconnectBlock:
     """Interconnect filtering, applied multiplicatively across the frequency axis.
@@ -174,7 +195,17 @@ class InterconnectBlock:
       band); when omitted the CSV's own frequency span is mapped across the frame's samples
       (band-agnostic). Grid points outside the CSV's frequency range clamp to its endpoints.
 
-    `case='case3'` is an identity pass-through in either mode.
+    `case` names which of those to use, and only the names in `INTERCONNECT_CASES` are
+    accepted:
+
+    - `INTERCONNECT_PASSTHROUGH_CASES` -- `'passthrough'`, or its legacy alias
+      `'case3'` -- return the frame untouched, in either mode.
+    - `INTERCONNECT_BOXCAR_CASES` -- `None` (the default) or `'synthetic'` -- select
+      the boxcar placeholder, or defer to a loaded `transfer_csv`.
+
+    Anything else is a ValueError rather than a silent fall-through to the boxcar: an
+    unrecognized name quietly becoming the placeholder filter is exactly the bug this
+    guard exists to prevent (see the note on the case sets above).
 
     The filter multiplies along the frequency axis and broadcasts over every leading
     axis, so MIMO and multi-chirp frames pass through natively (declared below).
@@ -183,6 +214,15 @@ class InterconnectBlock:
     frame_capabilities = _ELEMENTWISE
 
     def __init__(self, case=None, transfer_csv=None, band_hz=None):
+        if case not in INTERCONNECT_CASES:
+            raise ValueError(
+                f"case must be one of "
+                f"{sorted(INTERCONNECT_CASES, key=lambda c: (c is not None, c))}, "
+                f"got {case!r}. {sorted(INTERCONNECT_PASSTHROUGH_CASES)} pass the frame "
+                f"through untouched; None/'synthetic' select the 11-tap boxcar "
+                f"placeholder. To apply a real interconnect response pass "
+                f"transfer_csv=<path> (see e2e/data/interconnect/), not a case name."
+            )
         self.case = case
         self.transfer_csv = transfer_csv
         self.band_hz = band_hz
@@ -204,7 +244,7 @@ class InterconnectBlock:
         return torch.tensor(re + 1j * im, dtype=torch.complex64, device=dev)
 
     def apply_interconnect(self, frame):
-        if self.case == 'case3':
+        if self.case in INTERCONNECT_PASSTHROUGH_CASES:
             return frame
         if self.transfer_csv is not None:
             H = self._resampled_response(frame.shape[-1], frame.device)

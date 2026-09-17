@@ -320,6 +320,8 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
             input_kwargs = {}
             if ps.min is not None:
                 input_kwargs["min"] = ps.min
+            if ps.max is not None:
+                input_kwargs["max"] = ps.max
             children.append(dcc.Input(
                 id=cid, type="number", value=val, step=step,
                 debounce=True, style={"width": "100%", "marginBottom": "4px"},

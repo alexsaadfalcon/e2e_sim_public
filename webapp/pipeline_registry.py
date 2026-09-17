@@ -31,6 +31,10 @@ class ParamSpec:
     # downstream (e.g. subspace k=0 crashes e2e.simulation.rank_diagnostic); None
     # means "no floor", the pre-existing behavior for every other param.
     min: Optional[float] = None
+    # dcc.Input's `max` -- same rule as `min`: declared only where a larger value is
+    # genuinely invalid downstream (e.g. subspace k >= the tracker's measurement count
+    # m makes the sensing matrix unobservable and AdaOjaBlock refuses to construct).
+    max: Optional[float] = None
     help: str = ""
 
 
@@ -47,6 +51,15 @@ class BlockSpec:
     category: str = "stage"         # "source" | "stage" | "product"
     params: List[ParamSpec] = field(default_factory=list)
     blurb: str = ""
+
+
+# Measurement count (rows of the adaptive sensing matrix A) the webapp builds its
+# AdaOja tracker with. It lives HERE, not next to the AdaOjaBlock construction in
+# pipeline_runner, so the UI's bound on k and the value k is actually checked against
+# cannot drift apart: AdaOjaBlock refuses k >= m, and before this constant existed the
+# ParamSpec had no max at all, so the GUI happily offered k=512 and the resulting
+# ValueError escaped run_pipeline's error handling entirely.
+SUBSPACE_M = 512
 
 
 # --------------------------------------------------------------------------------
@@ -123,8 +136,25 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,  # required by the current backend's subspace path
         params=[
-            ParamSpec("exp", "FP exponent bits", "int", 5, step=1),
-            ParamSpec("mantissa", "FP mantissa bits", "int", 6, step=1),
+            # min=4: at exp<=3 every combining weight underflows to zero and the radar
+            # image is exactly blank (measured on this default state). The backend now
+            # raises rather than returning that blank silently, but there is no reason
+            # to let the spinner walk into a guaranteed error -- 4 is the last value
+            # that still produces a real, if badly degraded, image. The backend guard
+            # remains the real backstop, since the underflow point moves with the
+            # weight scale and this floor is only a UI convenience.
+            ParamSpec("exp", "FP exponent bits", "int", 5, step=1, min=4,
+                      help="Exponent bits in the AFE's low-precision float weight "
+                           "format. 4 is heavily degraded but still images; the "
+                           "default 5 is clean."),
+            # min=0: measured -- mantissa=0 still quantizes cleanly (no underflow, ~26%
+            # max relative weight error), so 0 is a legitimate, very coarse setting and
+            # not a floor to forbid. A NEGATIVE mantissa is what breaks (it drives a
+            # negative bit-shift inside the format's packing).
+            ParamSpec("mantissa", "FP mantissa bits", "int", 6, step=1, min=0,
+                      help="Mantissa bits in the same format. This is the knob that "
+                           "moves the subspace-error plot; the range-azimuth image "
+                           "barely responds to it."),
         ],
         blurb=("Quantized matmul / adaptive feature extraction. Pairs with the "
                "subspace block; required to run with the current backend."),
@@ -135,8 +165,13 @@ BLOCKS: List[BlockSpec] = [
         toggleable=True,
         enabled_default=True,
         params=[
-            ParamSpec("k", "Subspace dim k", "int", 8, step=1, min=1,
-                      help="Tracked subspace rank k; also used for U_true."),
+            ParamSpec("k", "Subspace dim k", "int", 8, step=1,
+                      min=1, max=SUBSPACE_M - 1,
+                      help=f"Tracked subspace rank k; also used for U_true. Must stay "
+                           f"below the tracker's measurement count "
+                           f"m={SUBSPACE_M}: at k == m the adaptive sensing matrix is "
+                           f"nothing but the anchor rows and the estimate can never "
+                           f"update."),
         ],
         blurb="Online subspace tracking via Oja's algorithm. Required by AFE.",
     ),

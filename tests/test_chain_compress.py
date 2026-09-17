@@ -511,3 +511,85 @@ def test_measurement_stage_can_stay_in_reduced_dimension(make_env_block):
 
     assert seen["dim"] == DIMENSION_REDUCED
     assert seen["shape"][0] == 8            # measurements, not the 1024-ish aperture
+
+
+# --------------------------------------------------------------------------------
+# The float weight model's silent-blank failure mode (GUI bug, 2026-09-17).
+# --------------------------------------------------------------------------------
+
+def _afe_scale_weights(m=32, n=256, seed=3):
+    """Complex weights at the scale gen_A_ada actually produces in the webapp run
+    (|A| max ~0.11, smallest nonzero ~3e-5, measured on the default block state)."""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    a = torch.complex(torch.randn(m, n, generator=g), torch.randn(m, n, generator=g))
+    return a * (0.11 / a.abs().max())
+
+
+@pytest.mark.parametrize("exp", [2, 3])
+def test_float_quantizer_refuses_to_return_all_zero_weights(exp):
+    """REGRESSION: with too few exponent bits every weight underflows to zero, and
+    the failure was completely silent -- combine returns zeros, the reconstructed
+    aperture is zeros, and the webapp's range-azimuth heatmap comes back exactly
+    all-zero with no NaN and no exception. Worse, subspace_err still printed a
+    healthy-looking ~0.13, so both on-screen readouts looked plausible while the
+    image was blank. Measured on the webapp default state: exp<=3 -> 100% zeros.
+    """
+    from e2e.chain.compress import WEIGHT_FLOAT, quantize_weights
+
+    a = _afe_scale_weights()
+    with pytest.raises(ValueError, match="flushed every"):
+        quantize_weights(a, model=WEIGHT_FLOAT, exp=exp, mantissa=6)
+
+
+@pytest.mark.parametrize("exp", [4, 5, 6])
+def test_float_quantizer_allows_merely_degraded_formats(exp):
+    """The guard's threshold is "every weight died", not "quality dropped". exp=4 is
+    badly degraded (27% of weights zeroed, subspace_err ~1.16 vs ~0.04) but produces
+    a real image, so it must still run -- a demo knob that shows degradation is the
+    whole point of the AFE preset."""
+    from e2e.chain.compress import WEIGHT_FLOAT, quantize_weights
+
+    q = quantize_weights(_afe_scale_weights(), model=WEIGHT_FLOAT, exp=exp, mantissa=6)
+    assert torch.any(q), f"exp={exp} should still produce usable weights"
+
+
+def test_float_quantizer_passes_an_all_zero_input_through():
+    """The guard must fire on "the format destroyed the weights", never on "the
+    caller handed us zeros" -- otherwise a legitimately empty matrix becomes an
+    error."""
+    from e2e.chain.compress import WEIGHT_FLOAT, quantize_weights
+
+    zeros = torch.zeros(4, 8, dtype=torch.complex64)
+    assert not torch.any(quantize_weights(zeros, model=WEIGHT_FLOAT, exp=5, mantissa=6))
+
+
+def test_afe_block_surfaces_the_blank_image_guard():
+    """The knob the GUI exposes is AFEBlock(exp=...), so the guard must reach a
+    caller going through the block rather than quantize_weights directly."""
+    from e2e.blocks import AFEBlock
+
+    a = _afe_scale_weights()
+    v = torch.complex(torch.zeros(a.shape[1], 2), torch.zeros(a.shape[1], 2)) + 1
+    with pytest.raises(ValueError, match="flushed every"):
+        AFEBlock(exp=3, mantissa=6).apply_mat_mul(a, v)
+
+
+@pytest.mark.parametrize("part", ["imag", "real"])
+def test_float_quantizer_guard_fires_for_single_component_weights(part):
+    """REGRESSION in the guard itself (found by adversarial review, 2026-09-17): the
+    first version tested `torch.any(a)`, and `torch.any` on a COMPLEX tensor casts to
+    real and drops the imaginary part. For a purely-imaginary weight matrix that made
+    `torch.any(a)` False, the guard's `and` short-circuited, and an all-zero result
+    sailed through -- the exact failure the guard exists to catch. The UserWarning the
+    cast emits is suppressed by pytest.ini, so nothing else would have caught it.
+    """
+    from e2e.chain.compress import WEIGHT_FLOAT, quantize_weights
+
+    g = torch.Generator(device="cpu").manual_seed(11)
+    vals = torch.randn(8, 64, generator=g) * 0.11
+    zero = torch.zeros_like(vals)
+    a = torch.complex(zero, vals) if part == "imag" else torch.complex(vals, zero)
+    assert torch.any(a.abs() > 0), "fixture must be nonzero"
+
+    with pytest.raises(ValueError, match="flushed every"):
+        quantize_weights(a, model=WEIGHT_FLOAT, exp=2, mantissa=6)

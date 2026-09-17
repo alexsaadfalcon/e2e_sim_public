@@ -193,8 +193,40 @@ def quantize_weights(a: torch.Tensor, bits: int = None, *, model: str = WEIGHT_U
         # scope would tie this chain module to it for a branch most callers never take.
         from e2e.afe.afe_utils import quantizer_fp
 
-        return torch.complex(quantizer_fp(a.real, exp, mantissa),
-                             quantizer_fp(a.imag, exp, mantissa))
+        q = torch.complex(quantizer_fp(a.real, exp, mantissa),
+                          quantizer_fp(a.imag, exp, mantissa))
+        # A format too narrow for the weights' exponent range flushes EVERY weight to
+        # zero, and the failure is otherwise completely silent: the combined
+        # measurements are zero, the reconstructed aperture is zero, and the radar
+        # image comes back exactly all-zero with no NaN and no exception -- while the
+        # subspace-error readout still prints a healthy-looking number, because a
+        # frozen tracker tracks its own frozen estimate. Measured on the webapp's
+        # default state: exp<=3 is 100% zeros and blanks the image, exp=4 is 27% zeros
+        # and merely degraded, exp>=5 is clean. So "all weights died" is the honest
+        # threshold -- it fires on exactly the blank cases and never on a usable one.
+        #
+        # That threshold is calibrated to `gen_A_ada`, the only caller that reaches this
+        # branch today, whose rows are unit-norm by construction (U orthonormal, B's
+        # columns unit-norm) so the weights share one scale and die together. It is NOT
+        # a general invariant: a matrix with wildly non-uniform row scales can lose most
+        # of its measurement channels while a few weights survive, and this guard stays
+        # silent. Detecting that needs a rank/row-norm check, which is deliberately not
+        # attempted here -- no wired path produces such a matrix.
+        # MAGNITUDE, not truthiness: `torch.any` on a COMPLEX tensor implicitly casts to
+        # real and silently ignores the imaginary part, so `torch.any(a)` is False for a
+        # purely-imaginary matrix. Written the obvious way, this guard short-circuits and
+        # never fires on exactly the input it exists to catch. (The UserWarning that cast
+        # emits is suppressed globally by pytest.ini, so the suite would not have caught
+        # it either.) Do not "simplify" these back to `torch.any(a)`.
+        if torch.any(a.abs() > 0) and not torch.any(q.abs() > 0):
+            raise ValueError(
+                f"weight quantization with exp={exp} exponent bits flushed every "
+                f"combining weight to zero (largest input weight {float(a.abs().max()):.3g} "
+                f"underflows this format), which would silently produce an all-zero "
+                f"output. Increase exp (>=5 is the shipped default) or rescale the "
+                f"weights."
+            )
+        return q
     if model != WEIGHT_UNIFORM:
         raise ValueError(
             f"model must be {WEIGHT_UNIFORM!r} or {WEIGHT_FLOAT!r}, got {model!r}")

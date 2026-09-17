@@ -27,7 +27,7 @@ from typing import Any, Dict, List
 import numpy as np
 import plotly.graph_objects as go
 
-from webapp.pipeline_registry import BLOCKS_BY_ID
+from webapp.pipeline_registry import BLOCKS_BY_ID, SUBSPACE_M
 
 # Speed of light (m/s), used to convert the frequency-FFT axis to physical range.
 _C = 2.99792458e8
@@ -166,6 +166,18 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
 
     scenario_name = _p(state, "environment", "scenario_name")
     k = int(_p(state, "subspace", "k"))
+    # AdaOjaBlock raises ValueError for k >= m, and it does so at CONSTRUCTION -- which
+    # happens below, outside the try/except that wraps the run. So without this check
+    # the exception bypasses every PipelineError handler and reaches the UI as a raw
+    # "Unexpected error: m must exceed k ...". The ParamSpec's `max` is only a browser
+    # hint; a typed value or a saved state can still arrive out of range, so the floor
+    # and the ceiling are both enforced here as well.
+    if k >= SUBSPACE_M:
+        raise PipelineError(
+            f"Subspace dim k must be < {SUBSPACE_M} (the tracker's measurement count "
+            f"m); got k={k}. At k >= m the adaptive sensing matrix is nothing but the "
+            f"anchor rows, so the estimate can never update."
+        )
 
     # The simulation backend now handles RFFE-off (PRX is initialized to None),
     # AFE-off (the no-AFE subspace branch calls subspace.update(X, A) with two args),
@@ -266,7 +278,8 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # rank-deficiency divergence, wired at the ENTRY POINT (the class default stays
     # "none" for bit-compat) -- adversarial-panel finding: the fix existed but no
     # shipped path used it, so default runs past ~frame 22 still diverged.
-    subspace_block = AdaOjaBlock(N_RX, k, m=512, n_refine=10, gap_response="refine")
+    subspace_block = AdaOjaBlock(N_RX, k, m=SUBSPACE_M, n_refine=10,
+                                 gap_response="refine")
 
     # --- downstream product blocks (always present unless the ADC-cube chain is --
     # active -- see below) --------------------------------------------------------
@@ -547,6 +560,14 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # actually fix.
         if "rank_diagnostic" in str(e):
             raise PipelineError("Subspace dim k must be >= 1.")
+        # compress.quantize_weights raises when the AFE's float format is too narrow
+        # to represent ANY combining weight. Untranslated, that run "succeeds" into a
+        # blank heatmap (see that guard's comment); translated, it names the knob.
+        if "flushed every" in str(e):
+            raise PipelineError(
+                f"AFE 'FP exponent bits' is too small: {e} "
+                f"(the radar image would be blank)."
+            )
         raise PipelineError(f"Pipeline run failed: ValueError: {e}")
     except Exception as e:  # surface anything else cleanly to the UI
         raise PipelineError(f"Pipeline run failed: {type(e).__name__}: {e}")
