@@ -142,9 +142,23 @@ def detection_loss(pred: Tensor, target: Tensor, *, gamma: float = 2.0,
     positive/negative imbalance. Measured head-to-head on identical data and seed:
     `"none"` reached best val_AP 0.00835, `"positives"` 0.00827, and BOTH pinned
     `val_AR` at 0.1111 with an empty detection set at 9 of 10 epochs. A dead heat.
-    The actual cause of the low AP was elsewhere entirely -- the evaluation harness
-    demanded finer azimuth accuracy than the modelled array can resolve; see
-    `e2e.ml.baseline.resolution_report`.
+    The actual cause of the low AP was elsewhere entirely -- but NOT where this comment
+    used to say. RETRACTED 2026-09-20: it claimed "the evaluation harness demanded finer
+    azimuth accuracy than the modelled array can resolve". That is false, and measurably
+    so -- `e2e.ml.baseline.resolution_report` reports `tolerance_over_resolution = 1.92`
+    and `answerable = True`, and the classical CFAR baseline reaches AP 0.30 under the
+    SAME 0.06 sin-azimuth tolerance the nets are scored at. The harness is answerable.
+
+    The measured cause is that both detectors never learn azimuth at all. Their objectness
+    map is near-separable `f(range) * g(azimuth)` -- rank-1 energy fraction 0.89
+    (FFTRadNet) / 0.76 (SSMRadNet) against 0.31 for the ground-truth map -- i.e. a
+    full-field-of-view stripe at every true range rather than a peak. Under azimuth-only
+    matching a trained model scores 0.421 against 0.423 for a constant frame-independent
+    mean map: the azimuth axis carries NO frame-specific information. Range is learned;
+    azimuth is a memorized prior whose edges sit exactly on the corpus's azimuth support.
+    Mechanism: azimuth reaches the network only as virtual-channel phase in the
+    `[128 channel, 512 range, 64 Doppler]` input, and neither head converts channel phase
+    into an angle bin. See notes/ESTABLISHED_FACTS.md (2026-09-20 ML diagnosis).
 
     Returns `(total, {"cls": float, "reg": float})` -- the dict values are
     detached scalars for logging, not part of the autograd graph. The reported
