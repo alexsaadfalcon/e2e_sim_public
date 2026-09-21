@@ -26,4 +26,7 @@ from e2e.ml.models.fftradnet import FFTRadNet
 from e2e.ml.models.ssm import MambaBlock, SelectiveSSM
 from e2e.ml.models.ssmradnet import SSMRadNet
 
-__all__ = ["FFTRadNet", "MambaBlock", "SelectiveSSM", "SSMRadNet"]
+__all__ = [
+    "RADDetNet","FFTRadNet", "MambaBlock", "SelectiveSSM", "SSMRadNet"]
+
+from e2e.ml.models.raddetnet import RADDetNet  # noqa: E402

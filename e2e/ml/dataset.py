@@ -702,8 +702,9 @@ class RadarFrameDataset(torch.utils.data.Dataset):
 
     def __init__(self, manifest_path, split: str = "train", input_format: str = "rd",
                 in_memory_cache: bool = False):
-        if input_format not in ("rd", "adc"):
-            raise ValueError(f"input_format must be 'rd' or 'adc', got {input_format!r}")
+        if input_format not in ("rd", "adc", "rad"):
+            raise ValueError(
+                f"input_format must be 'rd', 'adc' or 'rad', got {input_format!r}")
         self.manifest_path = Path(manifest_path)
         with open(self.manifest_path) as f:
             self.manifest = json.load(f)
@@ -724,7 +725,15 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         # thermal RMS would be wrong -- those get 1.0, i.e. the behaviour they were
         # trained and scored under. See `measure_input_scale`.
         by_format = self.manifest.get("input_scale_by_format") or {}
-        if by_format:
+        if input_format == "rad":
+            # SELF-NORMALISING BY CONSTRUCTION: `_derive_input` returns dB relative to
+            # each frame's own median power, so there is no global constant to divide by
+            # and applying one would be a second, contradictory normalisation. Pinned at
+            # 1.0 rather than left absent so `_load`'s `x / self.input_scale` stays a
+            # single code path. This is also the point of the format -- see F83 and the
+            # note in `_derive_input`.
+            self.input_scale = 1.0
+        elif by_format:
             if input_format not in by_format:
                 raise ValueError(
                     f"{self.manifest_path} records input scales for "
@@ -788,6 +797,58 @@ class RadarFrameDataset(torch.utils.data.Dataset):
             return torch.from_numpy(array).to(torch.float32)
 
         adc = torch.from_numpy(array).to(torch.complex64)  # [n_rx, n_chirps, n_samples]
+
+        if self.input_format == "rad":
+            # RANGE-AZIMUTH-DOPPLER (added 2026-09-21, F83). The "rd" format hands the
+            # network `[2*n_virtual, R, D]`, where azimuth exists ONLY as phase across the
+            # virtual-channel axis. Neither shipped head converts that to an angle bin, so
+            # both learn a fixed azimuth prior instead: objectness rank-1 energy fraction
+            # 0.89/0.76 against 0.31 for ground truth, and azimuth-only AP no better than
+            # a constant map. The information is present -- the classical beamformer
+            # reaches AP 0.30 from the same ADC -- it is just never made SPATIAL.
+            #
+            # So reuse the classical arm's own front end, the one already known to be
+            # sufficient, and give the network an axis aligned with the label grid.
+            # Deliberately the same transform the CFAR baseline runs, so the comparison
+            # is "what does learning add on top of the beamformer", not "can a network
+            # rediscover beamforming from phase".
+            #
+            # FRONT-END PARITY, and an earlier version of this comment LIED about it.
+            # It claimed "tdm_doppler_comp is left on AUTO to match the classical arm".
+            # There is no AUTO at this level: `range_azimuth_power` defaults to
+            # `doppler_notch_bins=0, tdm_doppler_comp=False`, and the AUTO logic lives one
+            # level up in `classical_detection_map`. Passing neither meant the network was
+            # fed a STRICTLY WEAKER front end than the baseline it was being compared to --
+            # measured at 0.053 AP of the gap (CFAR scores 0.3006 with both steps and
+            # 0.2473 with neither), 72% of it the zero-Doppler notch.
+            #
+            # So replicate the classical arm's AUTO decisions here rather than hardcoding,
+            # keeping the two in step if either default is ever retuned.
+            #
+            # Separately: the TDM compensation is NOT why this format exists. Measured on
+            # 88 real targets it moves target-vs-range-ring contrast by 0.15 dB (16.99 vs
+            # 16.85 dB median). That hypothesis was tested and refuted; do not re-open it.
+            # The notch is the part that carries weight.
+            from e2e.ml.baseline import NOTCH_MIN_VMAX_MPS, range_azimuth_power
+
+            cfg = self._radar_config()
+            pw = range_azimuth_power(
+                cfg, adc, keep_doppler=True,
+                tdm_doppler_comp=(cfg.mimo == "tdm"),
+                doppler_notch_bins=(1 if float(cfg.max_velocity_mps) >= NOTCH_MIN_VMAX_MPS
+                                    else 0),
+            )   # [A, R, D] real power
+            # LOG-POWER, PER-FRAME REFERENCED. The linear cube spans ~40 dB frame to frame
+            # (measured: per-frame RMS p5 0.243 / p95 5.155 after the single global
+            # `input_scale`, crest factor ~130), so a handful of frames dominate every
+            # gradient step. CFAR is immune to this by construction -- it is a CONSTANT
+            # FALSE ALARM RATE detector, normalised against local background -- and that
+            # is part of why it wins. Give the network the same scale-invariance instead
+            # of a global constant it cannot adapt to.
+            ref = torch.median(pw) + 1e-30
+            x = 10.0 * torch.log10(torch.clamp(pw / ref, min=1e-12))
+            return x.to(torch.float32)
+
         if self.input_format == "adc":
             # Raw physical channels, no deinterleave (see class docstring): transpose
             # to [n_rx, n_samples, n_chirps] first so the stacked-channel axis order

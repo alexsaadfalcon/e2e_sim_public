@@ -433,6 +433,19 @@ format, smoke-test results, and model attribution/licensing notes, and
 training-set targets live, seeing no input at all. That arm is the benchmark's chance
 floor: measured on the same frames and the same metric, rather than assumed to be zero.
 
+> **⚠ PENDING REGENERATION (2026-09-21).** The table below is **superseded and not
+> reproducible from this commit.** It was measured on the `b1_bench_v2` corpus with a
+> pre-2026-08-29 classical-detector default; re-running the command shown below against
+> HEAD does not reproduce it, and the current corpus (`b1_bench_v3`) gives materially
+> different numbers — classical **0.301**, FFTRadNet **0.127**, SSMRadNet **0.123**, null
+> **0.081** — in which the two learned arms also swap order. The numbers are retained
+> here rather than deleted so the change is visible, but **do not cite them.** A
+> regenerated table is tracked for v1.1.
+>
+> The cause of the learned arms' weakness is now diagnosed and is **not** a property of
+> this corpus: both detectors never learn azimuth, emitting a separable
+> range × azimuth-prior stripe rather than peaks. See the retraction note below the table.
+
 Measured on the **173-scene test split** (1,022 labelled targets) of a 1,721-scene
 ray-traced corpus (`benchmark_v1`, tier D2):
 
@@ -461,13 +474,25 @@ an assumption.
 against classical's 0.87, at 1.6× the false-alarm rate. The learned/classical gap is a
 precision gap, not a detection gap.
 
-**Every arm is close to the floor**, and that is the honest headline: the best of them is
-about 2× chance. That is not an artifact of the scorer — correcting the metric's known
-defects lifts the detector *and* the floor together — nor of the models: given five frames
-it is allowed to memorise, FFTRadNet drives training loss down by three orders of
-magnitude (259 → 0.26) and separates positive from negative cells 12×, so the model and
-its label plumbing work. It is a property of this corpus, and the known defects described
-below are being worked.
+**Every arm is close to the floor**, and that is the honest headline for this run: the
+best of them is about 2× chance. That is not an artifact of the scorer — correcting the
+metric's known defects lifts the detector *and* the floor together — nor of the models'
+ability to fit: given five frames it is allowed to memorise, FFTRadNet drives training
+loss down by three orders of magnitude (259 → 0.26) and separates positive from negative
+cells 12×, so the label plumbing works.
+
+> **RETRACTED 2026-09-21.** This paragraph used to conclude "It is a property of this
+> corpus." That is false. The corpus is sound — feeding its own ground-truth label maps
+> through the scorer returns **AP 1.0000** with 0.0 m range RMSE, labels cross-correlate
+> with the data at zero offset, and median target SNR is 32 dB. The measured cause is in
+> the learned detectors: their objectness map is near-separable `f(range)·g(azimuth)` —
+> rank-1 energy fraction **0.89** (FFTRadNet) / **0.76** (SSMRadNet) against **0.31** for
+> ground truth — i.e. a full-field-of-view stripe at every true range instead of a peak.
+> Under azimuth-only matching a trained model scores 0.421 against 0.423 for a constant
+> map carrying no frame information at all: **range is learned, azimuth is a memorized
+> prior.** Azimuth reaches these networks only as virtual-channel phase and neither head
+> converts it into an angle bin. Pairing predictions with a deranged frame's labels
+> retains ~50% of their AP, against 10.5% for classical CFAR.
 
 The null arm is *random*, so a single run is a draw, not a constant: over seeds
 0/1000/2000/3000/4000 it scores 0.0645, 0.0604, 0.0608, 0.0638, 0.0643 — mean 0.0628,

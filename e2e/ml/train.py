@@ -66,7 +66,7 @@ CLI
 ---
     python -m e2e.ml.train --manifest PATH --model fftradnet|ssmradnet [--epochs 10]
         [--batch-size 8] [--lr 1e-4] [--seed 0] [--reg-weight 100.0] [--gamma 2.0]
-        [--input-format rd|adc] [--amp auto|on|off] [--accum-steps 1] [--ssm-chunk N]
+        [--input-format rd|adc|rad] [--amp auto|on|off] [--accum-steps 1] [--ssm-chunk N]
         [--out DIR] [--eval-only CKPT] [--split test]
 """
 
@@ -89,7 +89,7 @@ from e2e.ml.losses import detection_loss
 from e2e.ml.metrics import evaluate_dataset
 from e2e.radar_config import RadarConfig
 
-_MODEL_NAMES = ("fftradnet", "ssmradnet")
+_MODEL_NAMES = ("fftradnet", "ssmradnet", "raddetnet")
 
 
 def _autocast(enabled: bool):
@@ -126,6 +126,16 @@ def _input_dims(cfg: RadarConfig, input_format: str = "rd"):
     Deriving this from the manifest's own `RadarConfig` avoids loading a dataset sample
     just to read off its shape.
     """
+    if input_format == "rad":
+        # Range-azimuth-Doppler (F83): the classical beamformer's own output cube,
+        # `[n_angle, n_range, n_doppler]`, REAL log-power -- so the channel axis is
+        # azimuth and is spatially ordered, not arbitrary virtual-element phase, and it
+        # is not doubled for re/im. `range_azimuth_power` defaults its angle FFT to the
+        # virtual-channel count (no zero-padding: interpolating the angle axis places
+        # peaks between resolution cells without adding information).
+        n_angle = cfg.n_virtual if cfg.mimo == "tdm" else cfg.n_rx
+        n_dop = cfg.n_chirps_per_tx if cfg.mimo == "tdm" else cfg.n_chirps
+        return n_angle, cfg.n_samples, n_dop
     if input_format == "adc":
         return 2 * cfg.n_rx, cfg.n_samples, cfg.n_chirps
     if cfg.mimo == "tdm":
@@ -165,8 +175,9 @@ def build_model(name: str, manifest: Dict, *, device=None, ssm_chunk_size=None) 
     """
     cfg = RadarConfig.from_dict(manifest["config"])
     input_format = manifest.get("input_format", "rd")
-    if input_format not in ("rd", "adc"):
-        raise ValueError(f"input_format must be 'rd' or 'adc', got {input_format!r}")
+    if input_format not in ("rd", "adc", "rad"):
+        raise ValueError(
+            f"input_format must be 'rd', 'adc' or 'rad', got {input_format!r}")
     in_channels, n_range_in, n_doppler_in = _input_dims(cfg, input_format)
     grid = manifest["grid"]
     n_range_out, n_azimuth_out = int(grid["n_range"]), int(grid["n_azimuth"])
@@ -190,6 +201,18 @@ def build_model(name: str, manifest: Dict, *, device=None, ssm_chunk_size=None) 
 
         model = SSMRadNet(in_channels, n_range_in, n_doppler_in, n_range_out, n_azimuth_out,
                           input_mode=input_format, ssm_chunk_size=ssm_chunk_size)
+    elif name == "raddetnet":
+        # Range-azimuth-Doppler detector (F83). Needs input_format="rad": its whole
+        # premise is that the spatial plane IS (range, azimuth), which the "rd" and
+        # "adc" layouts do not provide.
+        if input_format != "rad":
+            raise ValueError(
+                f"raddetnet requires input_format='rad' (it convolves over the "
+                f"range-azimuth plane); got {input_format!r}")
+        from e2e.ml.models import RADDetNet
+
+        model = RADDetNet(in_channels, n_range_in, n_doppler_in,
+                          n_range_out, n_azimuth_out)
     else:
         raise ValueError(f"unknown model {name!r}; choices: {_MODEL_NAMES}")
 
@@ -579,7 +602,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--input-format", choices=("rd", "adc"), default="rd",
+    p.add_argument("--input-format", choices=("rd", "adc", "rad"), default="rd",
                    help="network input contract: range-Doppler (default) or raw ADC "
                         "(see e2e.ml.models.ssmradnet's 'Raw-ADC input mode'; fftradnet "
                         "has no adc path)")
