@@ -1,0 +1,284 @@
+"""Reproducible runner for the "beat CFAR" experiment (owner directive, 2026-09-21).
+
+THE GOAL, stated so a cold reader knows what success is
+--------------------------------------------------------
+Classical CA-CFAR scores **AP 0.301** on `benchmark_v1_D2` test under the protocol below.
+The owner's directive is to train a learned detector that beats it. This module trains the
+candidate arms and scores every one of them against CFAR and against two controls, in one
+command, so the claim is never assembled by hand from separate runs.
+
+WHY A SCRIPT AND NOT A COMMAND IN A DOC
+---------------------------------------
+Every number this project has had to retract was quoted from a run somebody reconstructed
+from memory. The arms here are scored on the SAME frames, at the SAME matched recall, with
+the SAME decode floor and range crop, because they are produced by one invocation.
+
+THE TWO CONTROLS ARE NOT OPTIONAL
+---------------------------------
+* `classical CFAR` -- the full shipped front end (zero-Doppler notch + TDM Doppler
+  compensation). This is the number to beat.
+* `null (random-in-GT-box)` -- the data-blind chance floor. An AP quoted without it is
+  uninterpretable: ground truth occupies ~16% of the map, so chance is ~0.08, not 0.
+A third control worth running by hand when a claim is being made (see
+`notes/ML_DETECTION_BRIEF.md`): a fixed global threshold on the exact tensor the network
+is fed, which scored 0.169. The learning is only worth the difference from THAT.
+
+WHAT "DETERMINISTIC" HONESTLY MEANS HERE
+-----------------------------------------
+Determinism is ON BY DEFAULT here, because this script's whole purpose is producing a
+number somebody will quote. `--seed` (default 42) and the `--deterministic` flag are passed
+to `e2e.ml.train`, whose `set_determinism` seeds torch/CUDA/numpy/random AND pins
+`cudnn.deterministic`, disables `cudnn.benchmark` autotuning, and calls
+`torch.use_deterministic_algorithms(True)`. With that, a rerun on THIS machine and software
+stack is bit-identical -- not merely close.
+
+Two honest limits remain, and no API removes them:
+  * NOT identical across different GPU architectures, CUDA/cuDNN versions or torch builds
+    -- those change kernel selection and floating-point reduction order beneath any seed.
+    Record the hardware next to any number you intend to reproduce exactly.
+  * `use_deterministic_algorithms(True)` RAISES on an op with no deterministic kernel. That
+    is intended: it fails loudly instead of varying quietly. If it fires, use `--no-strict`
+    and SAY SO wherever the number is quoted, because the run is then only
+    seed-reproducible (same-machine agreement to a few 1e-3 in AP, the scale of this
+    pipeline's own noise). Quote AP to three decimals, never more.
+
+USAGE
+-----
+    python -m e2e.ml.beat_cfar                      # both arms, seed 42, deterministic
+    python -m e2e.ml.beat_cfar --arms fftradnet_rad # one arm
+    python -m e2e.ml.beat_cfar --skip-train         # score existing checkpoints only
+    python -m e2e.ml.beat_cfar --no-strict          # faster, only seed-reproducible
+    python -m e2e.ml.beat_cfar --force              # retrain even if epochs are recorded
+
+Training is IDEMPOTENT: an arm whose `history.json` already records the requested epoch
+count is skipped unless `--force`. That makes re-running this to regenerate the table cheap
+and safe, which is the only way a "reproducible" script actually gets re-run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import subprocess
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+MANIFEST = "e2e/ml/datasets/b1_bench_v3/benchmark_v1_D2/manifest.json"
+
+#: The scoring protocol. These are the values every recorded number in
+#: `notes/ML_DETECTION_BRIEF.md` and `ESTABLISHED_FACTS.md` F83 used; changing one
+#: invalidates the comparison against them, so they live here as named constants rather
+#: than as flags with defaults scattered across a docs command line.
+SPLIT = "test"
+TARGET_RECALL = 0.5
+DECODE_THRESHOLD = 0.01
+MAX_RANGE_M = 40.0
+
+#: The number to beat, measured under exactly the protocol above.
+CFAR_AP = 0.301
+
+#: Candidate arms. `input_format="rad"` hands the network the classical beamformer's own
+#: range-azimuth-Doppler cube (see `e2e.ml.dataset._derive_input`); "rd" is the legacy
+#: layout in which azimuth exists only as virtual-channel phase and is never learned.
+ARMS: Dict[str, Dict] = {
+    "fftradnet_rad": {
+        "model": "fftradnet", "input_format": "rad", "epochs": 30,
+        "out": "e2e/ml/runs/b8_fftradnet_rad_frontend",
+        "why": "FFTRadNet on the corrected front end. Its decoder builds output azimuth "
+               "from the BACKBONE CHANNEL axis, which the rad layout fills with azimuth "
+               "-- so it mixes azimuth away in layer one. Expected to improve but to keep "
+               "emitting a stripe.",
+    },
+    "raddetnet": {
+        "model": "raddetnet", "input_format": "rad", "epochs": 40,
+        "out": "e2e/ml/runs/b7_raddetnet",
+        "why": "Doppler as channels, (range, azimuth) as the spatial plane -- the "
+               "architecture matched to the representation. This is the arm that should "
+               "break the stripe if the F83 diagnosis is right.",
+    },
+}
+
+
+def _seed_everything(seed: int, strict: bool) -> None:
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    if strict:
+        # Must be set BEFORE the first CUDA context; cuBLAS reads it at init.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+
+def _completed_epochs(out_dir: str) -> int:
+    """Epochs actually finished, from `history.json`.
+
+    `train.py` writes its artifacts INCREMENTALLY on every validation improvement, so the
+    presence of `best.pt`/`history.json` does NOT mean a run finished -- a 120-epoch run
+    once lost ~9 GPU-hours to that assumption. Count the epochs instead.
+    """
+    h = Path(out_dir) / "history.json"
+    if not h.exists():
+        return 0
+    try:
+        return len(json.loads(h.read_text())["epoch"])
+    except Exception:
+        return 0
+
+
+def _train(name: str, spec: Dict, seed: int, strict: bool, force: bool) -> bool:
+    done = _completed_epochs(spec["out"])
+    if done >= spec["epochs"] and not force:
+        print(f"[{name}] SKIP -- {done}/{spec['epochs']} epochs already recorded "
+              f"in {spec['out']}/history.json (use --force to retrain)")
+        return True
+    cmd = [
+        sys.executable, "-u", "-m", "e2e.ml.train",
+        "--manifest", MANIFEST,
+        "--model", spec["model"],
+        "--input-format", spec["input_format"],
+        "--epochs", str(spec["epochs"]),
+        "--batch-size", "8",
+        "--seed", str(seed),
+        "--out", spec["out"],
+    ]
+    if strict:
+        # Pins cuDNN/cuBLAS inside the CHILD, which is where training actually runs --
+        # setting torch flags in this parent process would never reach it.
+        cmd.append("--deterministic")
+    print(f"\n[{name}] TRAIN ({done}/{spec['epochs']} done) :: {' '.join(cmd)}")
+    env = dict(os.environ, MPLBACKEND="Agg")
+    if strict:
+        # cuBLAS reads this at CUDA init, so it must be in the child's environment before
+        # it starts -- the --deterministic flag above cannot set it late enough itself.
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    rc = subprocess.run(cmd, env=env).returncode
+    if rc != 0:
+        print(f"[{name}] TRAIN FAILED rc={rc}")
+        return False
+    return True
+
+
+def _stripe_statistic(checkpoint: str, limit: int = 40) -> Optional[float]:
+    """Median rank-1 energy fraction of the objectness map.
+
+    THE diagnostic for this experiment, and the reason AP alone is not enough. A map that
+    is near-separable `f(range) * g(azimuth)` -- a full-field-of-view stripe rather than
+    peaks -- scores ~0.85-0.89; ground truth scores **0.312**. AP can rise substantially
+    while this does not move, which is exactly what happened going from the `rd` to the
+    `rad` input (0.894 -> 0.853 while AP doubled). If a new arm improves AP without moving
+    this toward 0.31, azimuth is still not being learned and the headline must say so.
+    """
+    try:
+        import numpy as np
+        import torch
+        from e2e.ml.compare_detectors import _default_device
+        from e2e.ml.train import _make_dataset, _predict_split, load_model_for_eval
+    except ImportError as e:
+        print(f"  (stripe statistic unavailable: {e})")
+        return None
+
+    dev = _default_device()
+    model, _man, _grid, fmt = load_model_for_eval(MANIFEST, checkpoint, device=dev)
+    ds = _make_dataset(MANIFEST, SPLIT, fmt)
+    preds = _predict_split(model, ds, device=dev, batch_size=8)
+    vals = []
+    for p in preds[:limit]:
+        m = p[0].detach().cpu().numpy().astype(np.float64)
+        s = np.linalg.svd(m, compute_uv=False)
+        vals.append(float(s[0] ** 2 / (s ** 2).sum()))
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return float(np.median(vals))
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--arms", default=",".join(ARMS),
+                   help=f"comma-separated subset of {sorted(ARMS)}")
+    p.add_argument("--skip-train", action="store_true", help="score existing checkpoints only")
+    p.add_argument("--force", action="store_true", help="retrain even if epochs are recorded")
+    p.add_argument("--no-strict", dest="strict", action="store_false",
+                   help="skip deterministic kernels (faster, but the run is only "
+                        "seed-reproducible, not bit-identical). Default is STRICT, because "
+                        "this script exists to produce quotable numbers")
+    p.set_defaults(strict=True)
+    p.add_argument("--out", default="e2e/ml/runs/beat_cfar.json")
+    args = p.parse_args(argv)
+
+    names = [a.strip() for a in args.arms.split(",") if a.strip()]
+    unknown = [n for n in names if n not in ARMS]
+    if unknown:
+        p.error(f"unknown arm(s) {unknown}; choices: {sorted(ARMS)}")
+
+    _seed_everything(args.seed, args.strict)
+    print(f"seed={args.seed}  strict={args.strict}  arms={names}")
+    print(f"protocol: split={SPLIT} recall={TARGET_RECALL} decode={DECODE_THRESHOLD} "
+          f"max_range_m={MAX_RANGE_M}   target to beat: CFAR AP {CFAR_AP}")
+
+    if not args.skip_train:
+        for n in names:
+            if not _train(n, ARMS[n], args.seed, args.strict, args.force):
+                return 1
+
+    scored = [n for n in names if _completed_epochs(ARMS[n]["out"]) > 0]
+    if not scored:
+        print("nothing to score -- no arm has a checkpoint")
+        return 1
+
+    cmd = [sys.executable, "-m", "e2e.ml.compare_detectors",
+           "--manifest", MANIFEST, "--split", SPLIT, "--classical",
+           "--recall", str(TARGET_RECALL),
+           "--decode-threshold", str(DECODE_THRESHOLD),
+           "--max-range-m", str(MAX_RANGE_M),
+           "--out", args.out]
+    for n in scored:
+        cmd += ["--checkpoint", f"{n}={ARMS[n]['out']}/best.pt"]
+    print(f"\nSCORE :: {' '.join(cmd)}")
+    if subprocess.run(cmd, env=dict(os.environ, MPLBACKEND="Agg")).returncode != 0:
+        return 1
+
+    # AP alone cannot say whether azimuth was learned -- see _stripe_statistic.
+    print("\nSTRIPE STATISTIC (median rank-1 energy fraction; ground truth = 0.312)")
+    stripes = {}
+    for n in scored:
+        v = _stripe_statistic(f"{ARMS[n]['out']}/best.pt")
+        stripes[n] = v
+        if v is not None:
+            verdict = ("azimuth LEARNED" if v < 0.55 else
+                       "still a STRIPE -- azimuth NOT learned")
+            print(f"  {n:20s} {v:.3f}   {verdict}")
+
+    # Fold the diagnostic into the same JSON as the AP table so the two can never be
+    # quoted from different runs.
+    try:
+        res = json.loads(Path(args.out).read_text())
+        res["beat_cfar"] = {
+            "seed": args.seed, "strict": bool(args.strict),
+            "cfar_ap_target": CFAR_AP, "stripe_rank1": stripes,
+            "stripe_ground_truth": 0.312,
+            "protocol": {"split": SPLIT, "target_recall": TARGET_RECALL,
+                         "decode_threshold": DECODE_THRESHOLD,
+                         "max_range_m": MAX_RANGE_M},
+        }
+        Path(args.out).write_text(json.dumps(res, indent=2))
+        print(f"\nwrote {args.out}")
+        for arm in res.get("arms", []):
+            if arm.get("AP", 0) > CFAR_AP:
+                print(f"\n*** {arm['name']} AP {arm['AP']:.3f} BEATS CFAR {CFAR_AP} ***")
+                print("    Before quoting it: check the stripe statistic above, and see")
+                print("    notes/ML_DETECTION_BRIEF.md for the controls a reviewer will ask for.")
+    except Exception as e:
+        print(f"(could not annotate {args.out}: {e})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -107,6 +107,67 @@ def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def set_determinism(seed: int, *, strict: bool = True) -> None:
+    """Seed every RNG this training path touches, and pin the kernels.
+
+    `torch.manual_seed` alone is NOT enough for a repeatable run. Three other things vary:
+    Python's and numpy's RNGs (used by dataset/label code), cuDNN's autotuner (which
+    benchmarks algorithms on first sight of a shape and may pick a different one run to
+    run), and the nondeterministic reduction order of some CUDA kernels.
+
+    With `strict=True` (the default) this pins all of them, and a run on the SAME machine
+    and software stack is bit-identical. What it still does NOT promise -- and no API
+    can -- is identity ACROSS different GPU architectures, CUDA/cuDNN versions, or torch
+    builds: those change kernel selection and floating-point reduction order beneath any
+    seed. Record the hardware alongside any number you intend to reproduce exactly.
+
+    `torch.use_deterministic_algorithms(True)` RAISES on an op with no deterministic
+    implementation. That is the point: it fails loudly rather than varying quietly. Pass
+    `strict=False` to fall back to seeding only, and say so wherever the number is quoted.
+
+    NOTE `CUBLAS_WORKSPACE_CONFIG` is read by cuBLAS when it initializes, so it must be set
+    before the first CUDA op. Setting it here is early enough for this module's CLI; a
+    caller that has already run CUDA work should set it in the environment instead.
+    """
+    import random as _random
+
+    _random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import numpy as _np
+        _np.random.seed(seed)
+    except ImportError:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if not strict:
+        return
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False      # autotuning is itself a source of variance
+    torch.use_deterministic_algorithms(True, warn_only=False)
+
+
+def _seed_worker(worker_id: int) -> None:
+    """Per-DataLoader-worker seeding.
+
+    Each worker process re-seeds numpy/random from torch's per-worker seed; without this
+    every worker inherits the parent's RNG state and any numpy randomness in the dataset
+    is correlated across workers (and varies with `num_workers`). Harmless on the
+    `num_workers=0` Windows default, load-bearing everywhere else.
+    """
+    import random as _random
+
+    s = torch.initial_seed() % 2 ** 32
+    try:
+        import numpy as _np
+        _np.random.seed(s)
+    except ImportError:
+        pass
+    _random.seed(s)
+
+
 def _input_dims(cfg: RadarConfig, input_format: str = "rd"):
     """`(in_channels, n_range_in, n_doppler_in)` for `cfg` / `input_format`.
 
@@ -309,6 +370,7 @@ def _accum_group_len(i: int, n_batches: int, accum: int) -> int:
 
 def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int = 8,
           lr: float = 1e-4, device=None, out_dir=None, seed: int = 0,
+          deterministic: bool = False,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
           cls_normalize: str = "positives", amp="auto", accum_steps: int = 1,
           num_workers: Optional[int] = None, ssm_chunk: Optional[int] = None) -> Dict:
@@ -353,7 +415,9 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     release_gpu_memory()
     manifest_path = Path(manifest_path)
     device = device if device is not None else _default_device()
-    torch.manual_seed(seed)
+    # Seeds torch/numpy/random, and with deterministic=True also pins cuDNN and
+    # cuBLAS so a same-machine rerun is bit-identical. See set_determinism.
+    set_determinism(seed, strict=deterministic)
 
     with open(manifest_path) as f:
         manifest = json.load(f)
@@ -376,7 +440,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     gen = torch.Generator()
     gen.manual_seed(seed)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False,
-                               generator=gen, num_workers=num_workers)
+                               generator=gen, num_workers=num_workers,
+                               worker_init_fn=_seed_worker)
 
     manifest_for_model = dict(manifest)
     manifest_for_model["input_format"] = input_format
@@ -423,7 +488,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
             # one. `epochs_completed` distinguishes a finished run from a killed one.
             "train_config": {
                 "epochs": int(epochs), "batch_size": int(batch_size), "lr": float(lr),
-                "seed": int(seed), "reg_weight": float(reg_weight), "gamma": float(gamma),
+                "seed": int(seed), "deterministic": bool(deterministic),
+                "reg_weight": float(reg_weight), "gamma": float(gamma),
                 "cls_normalize": cls_normalize, "amp": str(amp),
                 "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
             },
@@ -602,6 +668,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--deterministic", action="store_true",
+                   help="pin cuDNN/cuBLAS kernels so a rerun on THIS machine is "
+                        "bit-identical (see set_determinism). Raises on any op "
+                        "lacking a deterministic implementation, deliberately")
     p.add_argument("--input-format", choices=("rd", "adc", "rad"), default="rd",
                    help="network input contract: range-Doppler (default) or raw ADC "
                         "(see e2e.ml.models.ssmradnet's 'Raw-ADC input mode'; fftradnet "
@@ -651,7 +721,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.model is None:
         parser.error("--model is required when training (omit it only with --eval-only)")
     train(args.manifest, args.model, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
-          seed=args.seed, out_dir=args.out, input_format=args.input_format,
+          seed=args.seed, deterministic=args.deterministic,
+          out_dir=args.out, input_format=args.input_format,
           reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize,
           amp={"auto": "auto", "on": True, "off": False}[args.amp], accum_steps=args.accum_steps,
           ssm_chunk=args.ssm_chunk)
