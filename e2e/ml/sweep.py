@@ -90,12 +90,26 @@ READ THIS BEFORE RUNNING IT (added 2026-08-11). The low-AP diagnosis this module
 built around -- a loss/class-imbalance problem to be swept out -- was investigated and
 RETRACTED by the same campaign. Normalizing the focal term changed nothing measurable
 (best val_AP 0.00835 vs 0.00827, both collapsing identically); see
-`e2e.ml.losses.detection_loss`'s "WHAT THIS IS NOT". The actual cause was the evaluation
-harness demanding finer azimuth accuracy than the modelled array can resolve --
-`e2e.ml.baseline.resolution_report` reports it in one call, for free, and should be your
-FIRST check on any new config. Sweeping hyperparameters against an unanswerable harness
-burns GPU-hours to measure the harness. This module remains useful for sweeps on a config
-that `resolution_report` says is answerable.
+`e2e.ml.losses.detection_loss`'s "WHAT THIS IS NOT".
+
+RETRACTED AGAIN 2026-09-21. This paragraph used to continue "the actual cause was the
+evaluation harness demanding finer azimuth accuracy than the modelled array can resolve".
+That replacement explanation is ALSO false, and it is worth noting that it was retracted
+in `losses.py` one day before this copy was found: the sentence existed twice and only one
+copy got fixed. On `benchmark_v1` the harness is answerable --
+`resolution_report` gives `tolerance_over_resolution = 1.92`, `answerable = True` -- and a
+classical CFAR baseline reaches AP 0.30 at that same 0.06 sin-azimuth tolerance.
+
+The measured cause (ESTABLISHED_FACTS F83): both detectors never learn azimuth at all.
+Their objectness map is near-separable `f(range) * g(azimuth)` -- rank-1 energy fraction
+0.89 (FFTRadNet) / 0.76 (SSMRadNet) against 0.31 for ground truth, i.e. a full-field-of-view
+stripe at every true range rather than a peak. Azimuth reaches the network only as
+virtual-channel phase and neither head converts it to an angle bin.
+
+`resolution_report` is still worth running first on any NEW config -- an unanswerable
+harness does waste GPU-hours, and `ti_iwr1443` genuinely is unanswerable
+(`tolerance_over_resolution = 0.36`). Just do not read a low AP on an ANSWERABLE config as
+evidence of it. This module remains useful for sweeps once the harness is known answerable.
 """
 
 from __future__ import annotations
