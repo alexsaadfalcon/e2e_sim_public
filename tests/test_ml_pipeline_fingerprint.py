@@ -29,11 +29,57 @@ from e2e.ml.train import INPUT_PIPELINE_SOURCES, pipeline_fingerprint
 def _fake_tree(root, dataset_body="X = 1\n"):
     """A minimal stand-in for the real source tree, laid out at the same relative paths."""
     (root / "e2e" / "ml" / "models").mkdir(parents=True)
+    (root / "e2e" / "chain").mkdir(parents=True)
     (root / "e2e" / "ml" / "dataset.py").write_text(dataset_body)
+    (root / "e2e" / "ml" / "baseline.py").write_text("def range_azimuth_power(): return 1\n")
+    (root / "e2e" / "chain" / "transforms.py").write_text("# transforms\n")
+    (root / "e2e" / "ml" / "labels.py").write_text("# labels\n")
     (root / "e2e" / "ml" / "train.py").write_text("# train\n")
     (root / "e2e" / "ml" / "metrics.py").write_text("# metrics\n")
     (root / "e2e" / "ml" / "models" / "m.py").write_text("# model\n")
     return root
+
+
+def test_fingerprint_covers_the_classical_front_end(tmp_path):
+    """`baseline.range_azimuth_power` is the function that actually caused the incident.
+
+    The first version of the source list omitted it and caught the 2026-09-21 failure only
+    because the call site in `dataset.py` moved as well. A change confined to the front end
+    must move the digest on its own (reviewed finding, same day).
+    """
+    root = _fake_tree(tmp_path)
+    before = pipeline_fingerprint(root)
+    (root / "e2e" / "ml" / "baseline.py").write_text(
+        "def range_azimuth_power(): return 2  # notch default retuned\n")
+    assert pipeline_fingerprint(root) != before
+
+
+def test_docstring_and_comment_edits_do_not_invalidate_a_run(tmp_path):
+    """Prose is not behaviour.
+
+    A guard that forces a multi-hour retrain because a docstring was fixed gets switched
+    off, and then it protects nothing. Hashing the AST with docstrings stripped keeps the
+    guard sensitive to what can move a number and blind to what cannot.
+    """
+    root = _fake_tree(tmp_path, dataset_body='"""Old prose."""\nX = 1  # a comment\n')
+    before = pipeline_fingerprint(root)
+    (root / "e2e" / "ml" / "dataset.py").write_text(
+        '"""Completely rewritten prose, several paragraphs of it."""\nX = 1  # reworded\n')
+    assert pipeline_fingerprint(root) == before, "a prose-only edit must not invalidate"
+
+    # ...but the very next character of real code must.
+    (root / "e2e" / "ml" / "dataset.py").write_text('"""Old prose."""\nX = 2\n')
+    assert pipeline_fingerprint(root) != before
+
+
+def test_unparseable_source_falls_back_to_raw_bytes(tmp_path):
+    """Be conservative exactly when the clever path is unavailable."""
+    root = _fake_tree(tmp_path)
+    (root / "e2e" / "ml" / "dataset.py").write_text("def broken( :\n")
+    before = pipeline_fingerprint(root)
+    assert before is not None
+    (root / "e2e" / "ml" / "dataset.py").write_text("def broken( :  # changed\n")
+    assert pipeline_fingerprint(root) != before
 
 
 def test_fingerprint_is_stable_for_unchanged_sources(tmp_path):
@@ -53,9 +99,12 @@ def test_fingerprint_covers_every_declared_source(tmp_path):
     """Each declared source must actually contribute, or the guard has a blind spot."""
     edits = {
         "e2e/ml/dataset.py": "X = 99\n",
-        "e2e/ml/train.py": "# edited\n",
-        "e2e/ml/metrics.py": "# edited\n",
-        "e2e/ml/models": "# edited model\n",
+        "e2e/ml/baseline.py": "def range_azimuth_power(): return 99\n",
+        "e2e/chain/transforms.py": "Y = 1\n",
+        "e2e/ml/labels.py": "Z = 1\n",
+        "e2e/ml/train.py": "W = 1\n",
+        "e2e/ml/metrics.py": "V = 1\n",
+        "e2e/ml/models": "U = 1\n",
     }
     assert set(edits) == set(INPUT_PIPELINE_SOURCES), "source list changed; update this test"
     for src, body in edits.items():

@@ -188,9 +188,15 @@ def _stale_reason(out_dir: str) -> Optional[str]:
         return None
 
     try:
-        recorded = torch.load(ck, map_location="cpu").get("pipeline_fingerprint")
+        # `weights_only=True` reads the metadata without unpickling arbitrary objects; this
+        # is a 12 MB file being opened to read one string, per arm, per run.
+        recorded = torch.load(ck, map_location="cpu",
+                              weights_only=True).get("pipeline_fingerprint")
     except Exception:
-        recorded = None
+        try:
+            recorded = torch.load(ck, map_location="cpu").get("pipeline_fingerprint")
+        except Exception:
+            recorded = None
 
     if recorded is not None:
         now = pipeline_fingerprint()

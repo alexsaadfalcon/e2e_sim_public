@@ -107,32 +107,80 @@ def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-#: Sources whose CONTENT decides what a checkpoint was trained on: the input tensor it was
-#: fed, the loop that fed it, the architecture, and the metric. Canonical list -- readers
-#: (`e2e.ml.beat_cfar`) import it rather than keeping their own copy.
+#: Sources whose BEHAVIOUR decides what a checkpoint was trained on: the input tensor it
+#: was fed, the loop that fed it, the architecture, and the metric. Canonical list --
+#: readers (`e2e.ml.beat_cfar`) import it rather than keeping their own copy.
+#:
+#: `baseline.py` and `chain/transforms.py` are here because of a reviewed near-miss
+#: (2026-09-21): the incident in `pipeline_fingerprint`'s docstring was CAUSED by
+#: `range_azimuth_power`'s front-end arguments, which live in `baseline.py`, and the first
+#: version of this list omitted it. It caught that incident only because the call site in
+#: `dataset.py` happened to move too. Retune a default inside `range_azimuth_power` and the
+#: identical bug would have recurred with an unchanged fingerprint.
 INPUT_PIPELINE_SOURCES = (
-    "e2e/ml/dataset.py",
-    "e2e/ml/train.py",
-    "e2e/ml/models",
-    "e2e/ml/metrics.py",
+    "e2e/ml/dataset.py",        # assembles the input tensor
+    "e2e/ml/baseline.py",       # range_azimuth_power + the front-end constants it applies
+    "e2e/chain/transforms.py",  # adc_to_rd / tdm_deinterleave beneath it
+    "e2e/ml/labels.py",         # the targets and the grid they live on
+    "e2e/ml/train.py",          # the training loop and its per-epoch validation
+    "e2e/ml/models",            # architectures
+    "e2e/ml/metrics.py",        # the AP definition
 )
 
 
+def _semantic_source(path: Path) -> bytes:
+    """A module's code with comments and docstrings removed, as a stable byte string.
+
+    Hashing raw bytes makes the fingerprint trip on every typo fix in a docstring, and a
+    guard that forces a 5-hour retrain to punish a comment gets switched off by the next
+    person -- which is the real failure. Parsing to an AST drops comments, and dropping
+    docstring nodes leaves only what can change a number.
+
+    Falls back to the raw bytes if the file does not parse, because an unparseable source is
+    exactly when you want to be conservative rather than clever.
+    """
+    import ast
+
+    raw = path.read_bytes()
+    try:
+        tree = ast.parse(raw)
+    except SyntaxError:
+        return raw
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+            continue
+        body = node.body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    return ast.dump(tree).encode()
+
+
 def pipeline_fingerprint(root=None) -> Optional[str]:
-    """SHA-256 over the text of `INPUT_PIPELINE_SOURCES`, or None if they are not found.
+    """SHA-256 over the CODE of `INPUT_PIPELINE_SOURCES`, or None if none are found.
 
     Recorded in every checkpoint AT TRAINING START, which is the only moment that describes
     what the process actually imported. A reader comparing this against its own current
-    fingerprint learns whether the checkpoint is interchangeable with a rerun.
+    fingerprint learns whether the checkpoint is interchangeable with a rerun. Comments and
+    docstrings are excluded (see `_semantic_source`), so prose edits during a long run do
+    not invalidate it; anything that can move a number does.
 
     WHY NOT FILE MTIMES (measured, 2026-09-21): `dataset.py` was edited at 17:19 while a run
     trained 16:36-19:36. The checkpoint's final write stamps 19:36, so it is NEWER than the
     edit and an mtime check calls it fresh -- while the running process still held the code
     from 16:36. That run reported val_AP 0.484 and reloaded at 0.023 against the edited
-    file. Content hashed at start-of-run is immune to that; mtimes are not.
+    file; independently confirmed by re-scoring it with only the two changed front-end
+    arguments reverted, which reproduces 0.4843. Content hashed at start-of-run is immune to
+    that; mtimes are not.
 
     WHY NOT THE GIT SHA ALONE: the edit above was uncommitted when the run began. A SHA
     describes the last commit, not the working tree that was imported.
+
+    WHAT IT STILL CANNOT SEE: anything these files import from outside the list, the torch /
+    cuDNN / driver versions, and the corpus itself. It answers "was this trained by the code
+    that is here now", not "will this reproduce anywhere".
     """
     import hashlib
 
@@ -148,7 +196,7 @@ def pipeline_fingerprint(root=None) -> Optional[str]:
         for f in files:
             try:
                 h.update(f.relative_to(base).as_posix().encode())
-                h.update(f.read_bytes())
+                h.update(_semantic_source(f))
                 found = True
             except OSError:
                 continue

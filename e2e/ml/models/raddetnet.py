@@ -10,10 +10,24 @@ under azimuth-only matching they score no better than a constant frame-independe
 They never learn azimuth.
 
 The first cause was the INPUT: azimuth reached them only as phase across a virtual-channel
-axis. Fixing that (`input_format="rad"`, which hands the network the classical
-beamformer's own range-azimuth-Doppler cube) raised FFTRadNet's test AP 0.127 -> 0.229 and
-halved its false alarms, 26.3 -> 12.4 per frame. But the stripe barely moved: rank-1
-0.894 -> 0.853. The gain came from range behaviour and normalization, not azimuth.
+axis. Fixing that means `input_format="rad"`, which hands the network the classical
+beamformer's own range-azimuth-Doppler cube.
+
+  !! NUMBERS PENDING REGENERATION (2026-09-21). This paragraph used to report that the
+  !! `rad` input raised FFTRadNet's test AP 0.127 -> 0.229, halved false alarms 26.3 ->
+  !! 12.4 per frame, and moved the stripe 0.894 -> 0.853. RETRACTED: the run behind them
+  !! (`b6_fftradnet_rad`, trained 13:41-15:58) was overtaken by the front-end parity fix to
+  !! `e2e/ml/dataset.py` at 17:19 the same day, so its weights no longer match the inputs
+  !! they are scored on -- re-scored against current code it gives AP 0.054, below the
+  !! 0.081 null floor. The numbers were real when measured and are not reproducible from
+  !! HEAD, which is what makes them unusable. Regenerate with
+  !! `python -m e2e.ml.beat_cfar` and quote only what that writes to
+  !! `e2e/ml/runs/beat_cfar.json`. The staleness guard added in `beat_cfar._stale_reason`
+  !! exists to stop this recurring.
+
+Whether the `rad` input helps at all is therefore currently UNMEASURED, and the paragraph
+below -- which argues a second, architectural cause -- rests on reasoning about the
+decoder's shape, not on a surviving measurement.
 
 The second cause is ARCHITECTURAL, and it is why this module exists.
 `fftradnet._RangeAngleDecoder` inherits upstream RADIal's "transpose trick": it builds the
