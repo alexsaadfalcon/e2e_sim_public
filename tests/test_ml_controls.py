@@ -54,7 +54,9 @@ def test_constant_map_is_identical_for_every_frame(trained_run, tiny_manifest_pa
     ctl.controls_for(str(trained_run / "best.pt"), manifest=tiny_manifest_path,
                      split="val", max_range_m=None)
     constant_calls = [p for p in seen if all(torch.equal(p[0], q) for q in p[1:])]
-    assert len(constant_calls) == 2, "az-only and range-only constant-map scores"
+    # az-only and range-only against the model's own mean, then (when the manifest has a
+    # train split) az-only / range-only / full against the train-label prior.
+    assert len(constant_calls) in (2, 5), len(constant_calls)
     assert torch.allclose(constant_calls[0][0], torch.stack(seen[0]).mean(dim=0))
 
 

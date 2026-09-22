@@ -123,9 +123,14 @@ CFAR_MAX_DB = 20.0
 #: `DOPPLER_SUM` (the shipped default since v1.1) -- non-coherent integration. Erlang(K),
 #:   whose coefficient of variation is 1/sqrt(K), so the noise ratio concentrates and the
 #:   threshold behaves. Pays for it by diluting a single-bin target across K bins.
-#:   MEASURED better than `max` at matched recall on both corpora it was tried on
-#:   (F48, F50: e.g. classical FA/frame 154.0 -> 119.8 on the radial test split);
-#:   default flipped for v1.1 (owner-approved, release-plan A4).
+#:   MEASURED better than `max` at matched recall on the two corpora it was tried on at
+#:   the time (F48, F50: e.g. classical FA/frame 154.0 -> 119.8 on the radial test split);
+#:   default flipped for v1.1 (owner-approved, release-plan A4). SCOPE (2026-09-22, an
+#:   independent verifier, F85 addendum): on `b1_bench_v3/benchmark_v1_D2` test under the
+#:   beat_cfar protocol `max` scores AP 0.3116 / 4.94 FA/frame against `sum`'s
+#:   0.3006 / 6.24, and `cfar_first` with an unclamped score 0.328. The default is kept
+#:   because every published number was scored with it; it is not the strongest
+#:   classical readout on every corpus, and a claim that it is would be false here.
 #: `DOPPLER_CFAR_FIRST` -- CFAR each Doppler slice, then take the max of the OBJECTNESS.
 #:   Detect first, collapse second. Every CFAR sees exponential cells, so the threshold is
 #:   calibrated, AND a target that lives in one Doppler bin is tested against that bin's

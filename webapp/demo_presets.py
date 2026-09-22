@@ -320,11 +320,10 @@ PRESETS: List[DemoPreset] = [
             "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant frame-independent map.",
             "F83's mechanism, verbatim: neither head converts channel phase into an angle "
-            "bin. Two things are in flight to test it: a fixed angle FFT in front of the "
-            "network (the 'rad' input; first valid result 0.138 vs 0.127 for 'rd'), and a "
-            "detector where CFAR proposes and a small learned head rescores (owner "
-            "directive 2026-09-22; design in HANDOFF-2026-09-22.md section 5). Neither is a "
-            "result yet.",
+            "bin. Tested two ways (F85): the same beamformed input into this decoder is "
+            "worth +0.011 (0.138); an architecture with range x azimuth as its spatial "
+            "plane, on that input, scores 0.476 and passes the same controls this one "
+            "fails. Load the RADDetNet preset for that -- and read its caveats first.",
             "How two results died this week and what stops it recurring: every checkpoint "
             "trained since 2026-09-21 records a fingerprint of the code that built its "
             "inputs (F84). The checkpoint on screen predates the field; it is trusted "
@@ -339,7 +338,7 @@ PRESETS: List[DemoPreset] = [
     ),
     DemoPreset(
         id="thrust5_detector_raddetnet",
-        label="Thrust 5 - detector on benchmark frames: RADDetNet (0.476 vs CFAR 0.301, VERIFICATION PENDING)",
+        label="Thrust 5 - detector on benchmark frames: RADDetNet (0.476 vs CFAR 0.301, verified in-distribution; owner decision pending)",
         thrust=5,
         n_steps=5,
         overrides=_merge(
@@ -356,34 +355,55 @@ PRESETS: List[DemoPreset] = [
                "front end. Test AP 0.476 against CFAR's 0.301 under the same protocol, 3.0 "
                "false alarms per frame at recall 0.5 against CFAR's 6.2, and the F83 "
                "controls say it reads the frame (deranged-label retention 12%, azimuth-only "
-               "0.657 vs 0.285 for its own constant map). Threshold pinned at its recall-0.5 "
-               "operating point (0.44). DO NOT PRESENT until ESTABLISHED_FACTS F85's "
-               "independent-verification addendum says it survived, and the owner has "
+               "0.657 vs 0.472 for a train-density prior). Threshold pinned at its recall-0.5 "
+               "operating point (0.44). Independently verified 2026-09-22 (F85 addendum): "
+               "reproduces bit-identically, splits scene-disjoint, baseline fair -- and on an "
+               "UNSEEN corpus from an earlier generator the lead falls to +0.03 with a WORSE "
+               "matched-recall false-alarm rate than CFAR. Present only after the owner has "
                "re-decided Thrust 5 on that basis."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         say=[
-            "Every number here comes from one file, e2e/ml/runs/beat_cfar.json, regenerated "
-            "2026-09-22 with seed 42 and deterministic kernels; the checkpoint records the "
-            "fingerprint of the code that built its inputs and reproduces its own "
-            "validation number under current code (0.4753 -> 0.4753).",
-            "The controls are the ones F83 defined and the shipped nets FAILED: retention of "
-            "AP under deranged labels 12% (CFAR 10%; the FFTRadNets 48-51%), and azimuth-only "
-            "AP 0.657 against 0.285 for a frame-independent map (the FFTRadNets could not "
-            "beat their own average). Calibration: the same tool reproduces F83's numbers "
-            "for the old checkpoint to the digit.",
-            "What changed is the architecture, not the input: the same beamformed input "
-            "into the RADIal-style decoder (b8) scores 0.138 and keeps 47% under deranged "
-            "labels. Range x azimuth had to be the spatial plane.",
-            "The stripe statistic is 0.62 against 0.31 for ground truth: the map is still "
-            "partly separable. Quote it beside the AP.",
+            "The defensible sentence, verbatim from the verifier: a learned head on the "
+            "classical front end beats a CFAR threshold on the same cube, in-distribution. "
+            "The network is fed CFAR's own beamformed cube, notch and TDM compensation "
+            "included; the ladder on that identical cube is global threshold 0.18-0.22, "
+            "CFAR 0.30, this 0.48. Say that, not 'beats CFAR'.",
+            "Every number comes from one file, e2e/ml/runs/beat_cfar.json (seed 42, "
+            "deterministic kernels); the checkpoint records the fingerprint of the code that "
+            "built its inputs and reproduces its own validation number under current code. "
+            "An independent verifier re-scored it bit-identically and re-implemented the "
+            "controls to 1e-6. Paired scene-level bootstrap: +0.176 AP, 95% CI [+0.145, +0.206].",
+            "The controls are the ones F83 defined and the shipped nets FAILED: AP retention "
+            "under deranged labels 12% (CFAR 10%; the FFTRadNets 48-51%; stable across random "
+            "derangements), and azimuth-only AP 0.657 against 0.472 for the strongest "
+            "frame-independent prior (the mean of all training label maps) -- which the "
+            "shipped nets could not beat (0.421).",
+            "The baseline is honest: nine classical configurations were scored, the best "
+            "reaches 0.328 (Doppler-resolved CFAR, unclamped score), and the shipped "
+            "guard/train beats every alternative tried. The 40 m crop, the score floor and "
+            "the unlabelled clutter move nothing.",
+            "Where the gain is: pedestrians. Hit rate at the floor 0.945 vs CFAR's 0.798; on "
+            "vehicles 0.983 vs 0.929. Physically sensible, not suspicious.",
+            "What changed is the architecture, not the input: the same beamformed input into "
+            "the RADIal-style decoder (b8) scores 0.138 and keeps 47% under deranged labels. "
+            "Range x azimuth had to be the spatial plane.",
+            "THE CAVEAT, volunteered: on b1_bench_v2 test -- 173 unseen scenes, same radar and "
+            "grid, an earlier generator with a different impairment model -- CFAR scores "
+            "0.179 at 13.2 FA/frame and this network 0.208 at 15.1 FA/frame. The lead is "
+            "+0.03, and at matched recall the network is worse. One seed, one corpus, one "
+            "tier; nothing here shows learning buys robustness.",
+            "The stripe statistic is 0.62 (0.60 over all frames) against 0.31 for ground "
+            "truth: the map is still partly separable. Quote it beside the AP.",
         ],
         do_not_say=[
-            "'Beats CFAR' before F85's addendum records that an independent verifier could "
-            "not break it (leakage, protocol parity, its own re-implementation of the "
-            "controls).",
-            "Anything about generalisation: one seed, one corpus, one tier (D2). Unmeasured.",
+            "'Beats CFAR', unqualified. The verified claim is in-distribution and on CFAR's "
+            "own front end; the first radar person in the room will ask about both.",
+            "Anything about generalisation or robustness: the one out-of-distribution "
+            "measurement went the other way at matched recall.",
             "That this is what the professor asked for in the ML thrust: it is a detector "
             "we designed to the diagnosis, not a port of the collaborators' architectures.",
+            "That the model converged: val AP peaks at epoch 14 of 40 and decays to 0.35-0.41 "
+            "while train loss keeps falling. Early stopping on val is load-bearing.",
         ],
     ),
 ]
