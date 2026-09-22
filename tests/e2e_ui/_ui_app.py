@@ -31,6 +31,11 @@ SEL = {
     "nsteps": "#run-nsteps",
     "run_button": "#run-button",
     "run_status": "#run-status",
+    "cancel_button": "#cancel-button",
+    # demo presets (webapp/block_diagram.py)
+    "preset_select": "#preset-select",
+    "preset_load": "#preset-load",
+    "preset_notes": "#preset-notes",
     # scenario tab
     "ref_dropdown": "#ref-scenario-dropdown",
     "load_button": "#load-ref-button",
@@ -244,24 +249,83 @@ def set_frames_to_run(n: int) -> Task:
                       lambda a: _fill(a, SEL["nsteps"], str(n)))
 
 
+def _click_run_and_settle(a: Actor, timeout: int = 90000) -> None:
+    # A successful run switches to the Results tab (unmounting run-status), so we
+    # key completion on the results graphs appearing; a failed run leaves a message
+    # in run-status instead. The failure branch waits for the status text to CHANGE
+    # from what it showed before the click -- not for a regex on "error": the
+    # Thrust 2 preset's own label ("... (AFE) error vs end result") sits in that
+    # line after a preset load and matched instantly (rehearsal, 2026-09-22).
+    # "Cancelling..." is the cancel button's interim text, not a settled state.
+    before = a.page.text_content(SEL["run_status"]) or ""
+    _click(a, SEL["run_button"])
+    a.page.wait_for_function(
+        """(prev) => {
+            const g = document.querySelector('#results-tab-content .js-plotly-plot');
+            if (g) return true;
+            const s = document.querySelector('#run-status');
+            return !!(s && s.innerText !== prev && !/Cancelling/.test(s.innerText));
+        }""",
+        arg=before, timeout=timeout,
+    )
+
+
 def run_pipeline() -> Task:
+    # Generous timeout: the first run pays a cold torch-import cost in the server.
+    return Task.where("run the pipeline and wait for it to settle",
+                      lambda a: _click_run_and_settle(a))
+
+
+def select_preset(label: str) -> Task:
+    return Task.where(f"pick the demo preset {label!r}",
+                      lambda a: _select_dropdown_option(a, SEL["preset_select"], label))
+
+
+def load_preset() -> Task:
     def _do(a: Actor) -> None:
-        _click(a, SEL["run_button"])
-        # A successful run switches to the Results tab (unmounting run-status), so we
-        # key completion on the results graphs appearing; a failed run leaves an error
-        # in run-status instead. Wait for whichever happens. Generous timeout: the
-        # first run pays a cold torch-import cost inside the server thread.
+        before = a.page.text_content(SEL["preset_notes"]) or ""
+        _click(a, SEL["preset_load"])
         a.page.wait_for_function(
-            """() => {
-                const g = document.querySelector(
-                    '#results-tab-content .js-plotly-plot');
-                if (g) return true;
-                const s = document.querySelector('#run-status');
-                return !!(s && /error|failed/i.test(s.innerText));
-            }""",
-            timeout=90000,
+            """([s, prev]) => { const e = document.querySelector(s);
+                return e && e.innerText.trim().length > 0 && e.innerText !== prev; }""",
+            arg=[SEL["preset_notes"], before], timeout=_DEFAULT_TIMEOUT,
         )
-    return Task.where("run the pipeline and wait for it to settle", _do)
+    return Task.where("load the selected preset (card appears)", _do)
+
+
+def start_run_then_cancel(settle_ms: int = 2500) -> Task:
+    """Press Run, wait until Cancel becomes clickable (the callback's `running=`
+    flips it), give the run a moment so a frame or two completes, press Cancel, and
+    wait for the run to settle on the Results tab with the frames that ran."""
+    def _do(a: Actor) -> None:
+        page = a.page
+        _click(a, SEL["run_button"])
+        page.wait_for_function(
+            "(s) => { const b = document.querySelector(s); return b && !b.disabled; }",
+            arg=SEL["cancel_button"], timeout=_DEFAULT_TIMEOUT,
+        )
+        page.wait_for_timeout(settle_ms)
+        _click(a, SEL["cancel_button"])
+        page.wait_for_function(
+            """(s) => { const e = document.querySelector(s);
+                return !!(e && /Cancelling/.test(e.innerText)); }""",
+            arg=SEL["run_status"], timeout=_DEFAULT_TIMEOUT,
+        )
+        page.wait_for_function(
+            """() => !!document.querySelector('#results-tab-content .js-plotly-plot')""",
+            timeout=120000,
+        )
+    return Task.where("start a run and cancel it part-way", _do)
+
+
+def return_to_block_diagram() -> Task:
+    """After a run lands on Results, the diagram tab is unmounted; re-mounting it
+    restores the last callback outputs, including the run-status line."""
+    def _do(a: Actor) -> None:
+        _open_tab(a, "blocks")
+        a.page.wait_for_selector(SEL["run_status"], state="attached",
+                                 timeout=_DEFAULT_TIMEOUT)
+    return Task.where("go back to the Block Diagram tab", _do)
 
 
 # --------------------------------------------------------------------------- Questions
@@ -322,6 +386,25 @@ def open_block_number_value() -> Question:
         "the open block's first number param value",
         lambda a: a.page.locator(_param_editor_number_input()).first.input_value(),
     )
+
+
+def preset_notes_text() -> Question:
+    return Question("the loaded preset's operator card",
+                    lambda a: a.page.inner_text(SEL["preset_notes"]))
+
+
+def frames_to_run_value() -> Question:
+    return Question("the frames-to-run spinner",
+                    lambda a: a.page.input_value(SEL["nsteps"]))
+
+
+def results_titles() -> Question:
+    def _titles(a: Actor) -> list:
+        return a.page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                '#results-tab-content .js-plotly-plot .gtitle')).map(e => e.textContent)"""
+        )
+    return Question("the titles of the result figures", _titles)
 
 
 def results_text() -> Question:

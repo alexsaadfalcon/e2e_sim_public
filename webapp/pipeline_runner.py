@@ -1070,6 +1070,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         peak = max(float(prof.max()), 1e-12)
         prof_db = 10 * np.log10(prof / peak + 1e-12)
         fig = go.Figure(data=go.Scatter(x=np.asarray(x), y=prof_db, mode="lines"))
+        # Fixed display floor, like the heatmaps' -40 dB: an exactly-zero bin
+        # (the notched DC bin) otherwise drops to -120 dB and autoscale hangs the
+        # whole profile off that one cliff (seen on the Thrust 4 preset, 2026-09-22).
+        fig.update_yaxes(range=[-60.0, 2.0])
         fig.update_layout(
             title="Range profile (non-coherent over channels)",
             xaxis_title=xlabel,
@@ -1147,6 +1151,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
         fig = go.Figure(data=go.Scatter(y=errs, mode="lines+markers"))
+        # Anchor the axis at zero: a before/after pair (Thrust 2: 0.06 -> 0.63) is
+        # read across two autoscaled plots, and autoscale draws a flat 0.06 line as
+        # a full-height curve.
+        fig.update_yaxes(rangemode="tozero")
         fig.update_layout(
             title="Subspace error (Frobenius) per frame",
             xaxis_title="Frame",

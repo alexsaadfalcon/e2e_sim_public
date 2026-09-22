@@ -117,6 +117,12 @@ app.layout = _app_layout
 # refresh) must always get its first render. A module-level cache is shared across
 # sessions/refreshes, so the second client's first callback would compare equal and
 # no_update into a permanently blank diagram.
+def _enabled_source_is_rt(block_state: Dict[str, Any]) -> bool:
+    """True when the live ray-tracing source is the one feeding the run, i.e. the
+    Scenario editor's JSON describes the frames on screen."""
+    return bool((block_state or {}).get("rt_environment", {}).get("enabled"))
+
+
 def _enabled_signature(block_state: Dict[str, Any]) -> list:
     """Canonical, JSON-safe enabled-set signature (dcc.Store round-trips JSON,
     so use lists -- tuples would come back as lists and never compare equal)."""
@@ -230,8 +236,12 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
     # pipeline_runner.scenario_topdown_figure). Best-effort by design -- the editor
     # may hold half-typed JSON, and a results tab must never be lost to a preview
     # panel, so an unparseable or unrenderable scenario just omits the panel.
+    # Only when the RT Environment source ray-traced that scenario: the precomputed
+    # .pkl frames and the corpus replay carry their own (unrelated) geometry, and a
+    # plan view of whatever the editor happens to hold -- a lone radar triangle, on
+    # every preset -- was the first card on screen in the 2026-09-22 rehearsal.
     scene_fig = None
-    if scenario_json:
+    if scenario_json and _enabled_source_is_rt(block_state):
         sc, _err = scenario_from_json_safe(scenario_json)
         if sc is not None:
             try:

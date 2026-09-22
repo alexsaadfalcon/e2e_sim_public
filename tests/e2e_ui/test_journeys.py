@@ -151,3 +151,82 @@ def test_journey_comms_head_via_ui(actor, base_url, run_capable):
         Ensure.that(ui.results_text(), contains("BER"),
                     "enabling the comms head produces a BER figure in the results"),
     )
+
+
+# ------------------------------------------------ journey 8: load every demo preset
+def _preset_ids():
+    from webapp.demo_presets import PRESETS
+    return [p.id for p in PRESETS]
+
+
+@pytest.mark.parametrize("preset_id", _preset_ids())
+def test_journey_load_demo_preset(actor, base_url, preset_id):
+    """The presenter picks a demo preset and loads it: the operator card appears,
+    the frame count becomes the preset's, and the status line says what to do next.
+    (No torch needed -- loading only rewrites the block-state store.)"""
+    from webapp.demo_presets import PRESETS_BY_ID
+    preset = PRESETS_BY_ID[preset_id]
+    actor.attempts_to(
+        ui.open_app(base_url),
+        ui.select_preset(preset.label),
+        ui.load_preset(),
+        Ensure.that(ui.preset_notes_text(), contains(preset.label),
+                    "the operator card names the loaded preset"),
+        Ensure.that(ui.preset_notes_text(), contains("Do NOT say"),
+                    "the card carries its do-not-say list"),
+        Ensure.that(ui.frames_to_run_value(), equals(str(preset.n_steps)),
+                    "the frame count is the preset's"),
+        Ensure.that(ui.run_status_text(), contains("Preset loaded"),
+                    "the status line tells the presenter to press Run"),
+    )
+
+
+# --------------------------------------- journey 9: a Thrust 5 preset end to end
+def test_journey_run_cfar_preset(actor, base_url, corpus_capable):
+    """The presenter loads the classical-CFAR preset and runs it: the Results tab
+    shows the radar cube and the CFAR objectness map -- and NOT the Scenario plan
+    view, which describes the editor's scene, not the replayed corpus (2026-09-22
+    rehearsal: a lone radar triangle led every preset's results)."""
+    if not corpus_capable:
+        pytest.skip("Thrust 5 presets need torch + the benchmark corpus")
+    from webapp.demo_presets import PRESETS_BY_ID
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
+    actor.attempts_to(
+        ui.open_app(base_url),
+        ui.select_preset(preset.label),
+        ui.load_preset(),
+        ui.run_pipeline(),
+        Ensure.that(ui.results_text(), contains("CFAR objectness"),
+                    "the CFAR objectness map is on screen"),
+        Ensure.that(ui.results_text(), contains("Range-Doppler"),
+                    "the radar cube is on screen"),
+    )
+    titles = actor.asks(ui.results_titles())
+    assert not any("plan view" in t for t in titles), titles
+
+
+# ------------------------------------------------------- journey 10: Cancel
+def test_journey_cancel_a_long_run(actor, base_url, run_capable):
+    """The presenter starts a 20-frame run, presses Cancel a moment later, and gets
+    the frames that ran as partial results with a status line saying so; the app
+    then runs normally again."""
+    if not run_capable:
+        pytest.skip("a pipeline run needs torch + munich.pkl frames")
+    from webapp.demo_presets import PRESETS_BY_ID
+    preset = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    actor.attempts_to(
+        ui.open_app(base_url),
+        ui.select_preset(preset.label),
+        ui.load_preset(),
+        ui.set_frames_to_run(20),
+        ui.start_run_then_cancel(),
+        Ensure.that(ui.results_graph_count(), at_least(1),
+                    "the frames that ran still produce figures"),
+        ui.return_to_block_diagram(),
+        Ensure.that(ui.run_status_text(), contains("Cancelled after"),
+                    "the status line reports the cancel and the frame count"),
+        ui.set_frames_to_run(2),
+        ui.run_pipeline(),
+        Ensure.that(ui.results_graph_count(), at_least(1),
+                    "a run after a cancel completes normally"),
+    )

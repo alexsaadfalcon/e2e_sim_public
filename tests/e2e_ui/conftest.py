@@ -92,6 +92,17 @@ def base_url(dash_server):
 
 
 @pytest.fixture
+def corpus_capable(run_capable):
+    """True if the Thrust 5 presets can run here: torch plus the benchmark corpus the
+    presets replay (its manifest path is the presets' own DEFAULT_CORPUS)."""
+    if not run_capable:
+        return False
+    from webapp.demo_presets import DEFAULT_CORPUS
+    root = pathlib.Path(__file__).resolve().parents[2]
+    return (root / DEFAULT_CORPUS).exists()
+
+
+@pytest.fixture
 def run_capable():
     """True if the heavy pipeline-Run journey can actually execute here (needs torch
     and the precomputed munich frames). Lighter journeys don't need either."""

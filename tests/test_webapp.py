@@ -1461,10 +1461,18 @@ def test_run_pipeline_dechirp_with_no_product_raises(monkeypatch, make_env_block
 # --------------------------------------------------------------------------------
 # D2: scenario geometry leads the Results tab
 # --------------------------------------------------------------------------------
+def _rt_source_state():
+    from webapp.pipeline_registry import default_block_state
+    state = default_block_state()
+    state["rt_environment"]["enabled"] = True
+    return state
+
+
 def test_results_lead_with_scene_geometry_when_the_scenario_parses(monkeypatch):
     import plotly.graph_objects as go
     """A stripe in sin(azimuth) is only interpretable next to the geometry that made
-    it, so a parseable Scenario renders as the FIRST results card (D2)."""
+    it, so when the RT Environment source ray-traced the Scenario editor's scene, that
+    scene renders as the FIRST results card (D2)."""
     from webapp import app as webapp_app
     from e2e.scenario import REFERENCE_SCENARIOS
 
@@ -1473,10 +1481,34 @@ def test_results_lead_with_scene_geometry_when_the_scenario_parses(monkeypatch):
                         lambda outputs: {"fft": go.Figure()})
 
     scenario_json = REFERENCE_SCENARIOS["munich_radar"]().to_json()
-    data, _status, _tab, _sink = webapp_app._run_pipeline(1, None, 2, scenario_json)
+    data, _status, _tab, _sink = webapp_app._run_pipeline(
+        1, _rt_source_state(), 2, scenario_json)
 
     assert list(data)[0] == "scene_topdown", "geometry must come before signal plots"
     assert "fft" in data  # and it does not displace the products
+
+
+@pytest.mark.parametrize("source", ["environment", "corpus_environment"])
+def test_no_scene_panel_unless_the_rt_source_made_the_frames(monkeypatch, source):
+    import plotly.graph_objects as go
+    """Precomputed .pkl frames and corpus replay carry their own geometry; the
+    Scenario editor's JSON says nothing about them. The 2026-09-22 rehearsal had a
+    plan view of a lone radar triangle as the first card of every demo preset."""
+    from webapp import app as webapp_app
+    from webapp.pipeline_registry import default_block_state
+    from e2e.scenario import REFERENCE_SCENARIOS
+
+    monkeypatch.setattr(webapp_app, "run_pipeline", lambda *a, **k: {"fft": []})
+    monkeypatch.setattr(webapp_app, "figures_from_outputs",
+                        lambda outputs: {"fft": go.Figure()})
+
+    state = default_block_state()
+    state["rt_environment"]["enabled"] = False
+    state[source]["enabled"] = True
+    scenario_json = REFERENCE_SCENARIOS["munich_radar"]().to_json()
+    data, *_ = webapp_app._run_pipeline(1, state, 2, scenario_json)
+
+    assert "scene_topdown" not in data and "fft" in data
 
 
 @pytest.mark.parametrize("scenario_json", ["", "{not json", None])
@@ -1490,7 +1522,8 @@ def test_results_survive_an_unparseable_scenario(monkeypatch, scenario_json):
     monkeypatch.setattr(webapp_app, "figures_from_outputs",
                         lambda outputs: {"fft": go.Figure()})
 
-    data, _status, _tab, _sink = webapp_app._run_pipeline(1, None, 2, scenario_json)
+    data, _status, _tab, _sink = webapp_app._run_pipeline(
+        1, _rt_source_state(), 2, scenario_json)
 
     assert "scene_topdown" not in data
     assert "fft" in data
@@ -1510,7 +1543,7 @@ def test_results_survive_a_topdown_figure_that_raises(monkeypatch):
         raise RuntimeError("exotic scenario")
 
     monkeypatch.setattr(webapp_app, "scenario_topdown_figure", _boom)
-    data, *_ = webapp_app._run_pipeline(1, None, 2,
+    data, *_ = webapp_app._run_pipeline(1, _rt_source_state(), 2,
                                         REFERENCE_SCENARIOS["munich_radar"]().to_json())
 
     assert "scene_topdown" not in data and "fft" in data
