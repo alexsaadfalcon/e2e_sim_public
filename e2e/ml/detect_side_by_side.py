@@ -36,7 +36,14 @@ _LABELS = {"classical CFAR": "classical CA-CFAR", "fftradnet_rd_b5": "FFTRadNet 
 def load_arms(beat_cfar_path: Path, names: Sequence[str]) -> List[Dict]:
     """The arms the figure draws, with checkpoint, AP and recall-0.5 threshold from the
     authority file. Raises on an unknown arm name rather than guessing."""
-    doc = json.loads(Path(beat_cfar_path).read_text())
+    beat_cfar_path = Path(beat_cfar_path)
+    if not beat_cfar_path.is_file():
+        raise SystemExit(
+            f"{beat_cfar_path} not found. This figure needs the benchmark corpus, the trained "
+            "checkpoints and the beat_cfar.json that scores them -- none are shipped "
+            "(e2e/ml/datasets/ and e2e/ml/runs/ are gitignored). Produce them with the "
+            "commands in the README's ML section, or ask the maintainers.")
+    doc = json.loads(beat_cfar_path.read_text())
     by_name = {a["name"]: a for a in doc["arms"]}
     out = []
     for n in names:

@@ -14,9 +14,18 @@ runner's `--dry-run` mode.
 On top of the dataset layer sit two ported detection models — `FFTRadNet` (from
 valeoai/RADIal) and `SSMRadNet` (a Mamba-style selective-state-space detector, from
 AnuvabSen1/SSMRadNet) — plus a shared loss, evaluation metrics, and a reference
-train/eval CLI (`e2e.ml.train`). Both models consume the exact same `[2*C, R, D]`
-range-Doppler input and predict the same `[3, n_range, n_azimuth]` detection map, so they
-are interchangeable on any dataset this package produces.
+train/eval CLI (`e2e.ml.train`). Both ported models consume the same `[2*C, R, D]`
+range-Doppler input and predict the same `[3, n_range, n_azimuth]` detection map. A
+third, repo-native model, `RADDetNet` (`--model raddetnet --input-format rad`), consumes
+the beamformed range-azimuth-Doppler cube instead and is the benchmark's lead arm.
+
+**The benchmark numbers live in the top-level README**, not here: the benchmark corpus is
+ray-traced (`python -m e2e.ml.chain_generate`, GPU), scored by `e2e.ml.compare_detectors`
+at matched recall against a data-blind null arm, with `e2e.ml.beat_cfar` as the one
+authority file and `e2e.ml.controls` as the reviewer's controls. The analytic generator
+described below is the plumbing check, not the benchmark. Pointers of the form
+`notes/...` in this file refer to the maintainers' private notes repository, which is not
+in this tree.
 
 This package is a sibling of `e2e/comms/`, and is the consumer, not the owner, of the core
 radar/RT modules it builds on: `e2e.radar_config` (dependency-free radar timing, sibling of
@@ -94,11 +103,12 @@ a dense, fast, tightly-packed multi-target scene.
 
 **Use `benchmark_v1` for detection work.** It is the only preset on which the benchmark is
 valid on both axes at once: azimuth resolvable within the match tolerance AND targets that
-do not alias in Doppler. See `notes/ESTABLISHED_FACTS.md` F43 for why the other two are
-not, and the withdrawn-results caveat below.
+do not alias in Doppler (the maintainers' private ledger, F43, holds the measurement; the
+withdrawn-results caveat below is the short version). `radial_like` aliases every moving
+target in Doppler at its 1.06 m/s v_max.
 
-**`radial_like` is the default preset for detection work**, and the choice is forced by
-geometry rather than taste. The detection label grid
+**`radial_like` WAS the default preset for detection work** before that finding; the
+paragraph below is kept as the record of why its azimuth geometry made it look forced. The detection label grid
 (`LabelGrid.for_config`) has 192 azimuth bins and `metrics.MatchCriterion` matches a
 detection to a target within 0.06 in sin(azimuth). An array of `n_virtual` elements
 resolves no finer than ~`2 / n_virtual`: that is 0.0104 for `radial_like`'s 192 virtual

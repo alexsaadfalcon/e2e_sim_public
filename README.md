@@ -7,24 +7,36 @@ Simulate a large antenna array **end to end**: a ray-traced RF environment
 a simulation-driven interconnect → adaptive feature extraction → online subspace
 tracking → radar maps, target scenes, and OFDM communications. Every stage is a
 swappable **block**, configurable from Python or from the browser. Every figure below
-comes from this simulator. What a clean clone can and cannot regenerate, stated exactly:
+comes from this simulator. (Pointers of the form `notes/...` anywhere in this tree refer
+to the maintainers' private notes repository, which is not shipped; the finding they
+point at is summarised where it is used.) What a clean clone can and cannot regenerate,
+stated exactly:
 
 - The **interconnect** figures regenerate from a clean clone with no extra steps —
   `python -m e2e.main.main_interconnect`, CPU only.
-- The **subspace-tracker** figure and the **scene/range-azimuth** pair name a command, but
-  those commands consume ray-traced `munich.pkl` frames, which are **gitignored and not
-  shipped**. Generate them first (see
+- The **subspace-tracker** figure names a command, but that command consumes ray-traced
+  `munich.pkl` frames, which are **gitignored and not shipped**. Generate them first (see
   [Sionna RT frame generation](#advanced-sionna-rt-frame-generation-gpu)) — that needs a
-  GPU and hours. Without it both commands fail immediately with `FileNotFoundError`.
+  GPU and hours. Without it the command fails immediately with `FileNotFoundError` —
+  though `scenario_runner --dry-run --out e2e/environment/sionna_sims/munich.pkl` gives
+  synthetic frames that exercise the same pipeline on a CPU (the figure still needs the
+  real ones).
+- The four **scene GIFs** (`scene_D0`–`scene_D3`) regenerate on a CPU from the analytic
+  scene sampler — `python -m e2e.render_scene --tier D2 --config benchmark_v1 --out
+  scene_D2.gif` (the tier picks the file).
 - Three figures — the scene/range-azimuth pair, the signal journey, and the difficulty
   ladder — are *plotted* by scripts in the maintainers' private notes repository. The
   pipeline behind them is here; the plotting is not.
 - `ui_walkthrough.gif` regenerates from the app itself — `python -m webapp.walkthrough`
-  drives the web UI in a headless browser (Playwright + Chromium, plus the munich frames
-  the preset replays) through load-preset → run → turn the knob → run again.
-- The **detection side-by-side** figure regenerates from the benchmark checkpoints —
-  `python -m e2e.ml.detect_side_by_side` — which are gitignored (train them with the
-  commands in the ML section, or ask the maintainers).
+  drives the web UI in a headless browser through load-preset → run → turn the knob → run
+  again. Needs `pip install -e ".[dev,webapp]" && playwright install chromium`, torch, and
+  the munich frames the preset replays.
+- The **detection side-by-side** figure — `python -m e2e.ml.detect_side_by_side` — needs
+  three things a clean clone does not have: the `b1_bench_v3` corpus, the trained
+  checkpoints, and `e2e/ml/runs/beat_cfar.json` that scores them (all under gitignored
+  `e2e/ml/datasets/` and `e2e/ml/runs/`; the ML section's commands produce them).
+- The **image-through-the-comms-link** figure regenerates on a CPU —
+  `python -m e2e.main.main_image_link` (synthetic channel when no frames are present).
 
 <p align="center">
   <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">
@@ -38,11 +50,11 @@ the before/after on one screen. Every run carries a banner saying what produced 
 | | |
 |---|---|
 | ![Ray-traced city scene next to the range-azimuth map the pipeline computes from it, at two input SNRs](docs/media/scene_vs_ra.png) | ![A photo's raw bits sent through the OFDM comms link at four operating points](docs/media/image_link.png) |
-| *The scene and what the radar sees: a Sionna RT render of a Munich scene (left) and the pipeline's range-azimuth map for that same scene, with ground-truth markers (right). Every one of the seven objects appears as its own return — the 192-element virtual array resolves them individually. Regenerate with `python -m e2e.main.main_sionna_blocks` (the figure's own generator lives in the maintainers' private notes repo, so it is not in this tree).* | *Seeing is believing for comms too: a photo's bits through the same array's OFDM link — clean, noisy, and with TX power-amplifier distortion.* |
+| *The scene and what the radar sees: a Sionna RT render of a Munich scene (left) and the pipeline's range-azimuth map for that same scene, with ground-truth markers (right). At the higher SNR the resolved targets appear as separate returns; at the lower one the weakest sit below the display window (off the bottom of the colour scale, not absent). The right-hand panel is an analytic point-target synthesis of the ray-traced tier-D4 scene (`e2e.ml.rd_synth`, `radial_like` preset), not a `munich.pkl` run; the figure's generator lives in the maintainers' private notes repo, so it has no in-repo regenerate command.* | *Seeing is believing for comms too: a photo's bits through the OFDM link on one spatial channel of the munich channel response (SISO by design; array combining lives in `ModemBlock`) — clean, noisy, and with TX power-amplifier distortion. Regenerate with `python -m e2e.main.main_image_link`.* |
 | ![One frame traced through every pipeline stage, from raw channel response to the final azimuth-elevation map](docs/media/signal_journey.png) | ![Moving tier-D2 scene: bird's-eye view, ideal-front-end radar returns, and non-ideal-front-end radar returns](docs/media/scene_D2.gif) |
-| *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map. Every stage shown is in this tree; the script that assembles them into this panel is in the maintainers' private notes repo, so this figure has no in-repo regenerate command.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
+| *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect (the 11-tap placeholder boxcar, not a simulated design — its nulls are what the lower panels show) → adaptive compression → azimuth-elevation map. Every stage shown is in this tree; the script that assembles them into this panel is in the maintainers' private notes repo, so this figure has no in-repo regenerate command.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
 | ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the simulated model](docs/media/interconnect_before_after.png) |
-| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied. The gate matches the 60-pass arm's accuracy inside the collapse — and inside the collapse it is also spending 60 passes, so it buys that accuracy with the same compute, not less. What it saves is averaged over the whole run: a mean 22.4 passes/frame against a constant 60, about 37%, earned outside the collapse where it idles at one pass and its error is ~15x worse than constant effort. It is a compute-saving heuristic that spends where a diagnostic tells it to, not a free accuracy win. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the most demanding of the six FOR THIS PIPELINE — highest in-band loss and ripple across 75–81 GHz, at −0.53 dB median loss and 0.034 dB peak-to-peak ripple against −0.25 to −0.29 dB and ≤0.009 dB for the rest (measured from the shipped CSVs at HEAD; an earlier caption quoted the 70–90 GHz full-sweep ripple, 0.113 dB, as if it were in-band). That is a ranking by what OUR range response is sensitive to, not a verdict on the designs, which were not drawn for this band or this use. TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
+| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: mean error rises ×2.4 at one refinement pass per frame; at sixty passes the median rises only ×1.8 but 8 of 25 collapsed frames blow out (worst ×17; the mean is ×4.6, and the mean alone misreads as a uniform degradation), and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied. The gate matches the 60-pass arm's accuracy inside the collapse — and inside the collapse it is also spending 60 passes, so it buys that accuracy with the same compute, not less. What it saves is averaged over the whole run: a mean 22.4 passes/frame against a constant 60 — the gate uses about 37% of the constant-effort compute, a 63% saving — earned outside the collapse where it idles at one pass and its error is ~15x worse than constant effort. It is a compute-saving heuristic that spends where a diagnostic tells it to, not a free accuracy win. Two disclosures the figure itself carries: the frame ORDER is constructed, not observed (clean frames forward into the collapse, then the same frames reversed as the recovery — the tracker's response is real, the sequence is not), and the gate's trigger, `sv_gap_norm`, is simulator instrumentation a deployed receiver could not measure. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the most demanding of the six FOR THIS PIPELINE — highest in-band loss and ripple across 75–81 GHz (from the CSVs; the regenerate command evaluates 76–81 GHz and prints the same −0.53 dB / 0.03 dB), at −0.53 dB median loss and 0.034 dB peak-to-peak ripple against −0.25 to −0.29 dB and ≤0.009 dB for the rest (measured from the shipped CSVs at HEAD; an earlier caption quoted the 70–90 GHz full-sweep ripple, 0.113 dB, as if it were in-band). That is a ranking by what OUR range response is sensitive to, not a verdict on the designs, which were not drawn for this band or this use. TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
 
 ![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
 *Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). (Panel assembled by a private plotting script; the scenes themselves regenerate from `e2e/environment/rt_scenes.py`.) Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
@@ -79,7 +91,8 @@ all scheduling / motion / serialization logic and emits *synthetic* frames, so i
 needs neither Sionna nor a GPU:
 
 ```bash
-python -m e2e.environment.scenario_runner --scenario munich_radar --dry-run     --out scratch/munich_radar_dryrun.pkl
+python -m e2e.environment.scenario_runner --scenario munich_radar --dry-run --frames 5 \
+    --out scratch/munich_radar_dryrun.pkl     # the full 100-frame scenario is 3.9 GB
 ```
 
 Pass `--out`: without it the runner writes to the scenario's default path under
@@ -184,10 +197,18 @@ It has three tabs:
 - **Block Diagram** — a drag/connect node graph of the pipeline blocks (environment →
   RFFE → interconnect → AFE → subspace → FFT / range-az / range-el / subspace-error).
   Toggle blocks on/off, edit their parameters, and run the pipeline to view results.
+  A **demo preset** dropdown loads a complete configuration in one click — every block's
+  state, the frame count, and an operator's card saying what to show, which knob to turn
+  and what not to claim (`webapp/demo_presets.py`); loading one opens the editor on that
+  knob. Two alternative sources sit beside the precomputed frames: live ray tracing of a
+  Scenario, and replay of a stored benchmark corpus into a radar-cube + detector chain
+  (CFAR or a trained checkpoint).
 - **Scenario** — place and edit antenna nodes (radar / comm TX / comm RX) and objects on
   a 2D map, set the base scene, frequency plan, and frame count, then validate, save/load,
   or **generate frames** for the scenario.
-- **Results** — FFT / range-az / range-el heatmaps and the subspace-error curve.
+- **Results** — the product figures of the last run under a banner saying what produced
+  them (run number, time, source, frames run, detector operating point), with the
+  previous run of the same preset kept underneath for before/after.
 
 The UI shell and scenario editor run without `torch`/Sionna; only *running* a pipeline
 needs precomputed frames + `torch`.
@@ -261,7 +282,8 @@ when loading:
 
 ```python
 from e2e.environment.sionna_iterator import SionnaIterator
-it = SionnaIterator("sionna_sims/munich_isac.pkl", link="building_comm_tx__car_comm_rx")
+it = SionnaIterator("e2e/environment/sionna_sims/munich_isac.pkl",
+                    link="building_comm_tx__car_comm_rx")   # path relative to the repo root
 ```
 
 ### Physical modeling scope & limitations
@@ -270,9 +292,18 @@ Honesty contract for this release: what's physically modeled, and what's a place
 or a link-level abstraction. For the full per-stage real-world-effect -> model ->
 approximations -> evidence breakdown, see [`docs/PHYSICS.md`](docs/PHYSICS.md).
 
-- **Diffuse reflection is off.** Ray tracing runs specular/LOS/refraction paths only
-  (`max_depth=5`); diffuse scattering from rough surfaces or foliage is not represented,
-  so clutter from those surfaces is absent from generated frames.
+- **Diffuse reflection is off in the legacy generator only.** `sionna_simple_channel.py`,
+  which produced `munich.pkl`, runs specular/LOS/refraction paths only (`max_depth=5`).
+  The scenario runner and the RT environment block behind the ML corpora solve with
+  `diffuse_reflection=True` (`max_depth=2`); the ground is silent there because
+  `DEFAULT_GROUND_SCATTERING_COEFFICIENT = 0.0`, not because diffuse is off. Details in
+  [`docs/PHYSICS.md`](docs/PHYSICS.md).
+- **The composed link budget's noise floor is not yet physical.** In the RFFE +
+  link-budget chain the floor moves with transmit power (+20.8 dB for 0 → 24 dBm on a
+  zeroed channel, where it should not move) and `noise_figure_db` is effectively inert
+  (−0.06 dB for 5 → 25 dB, where it should add 20 dB). The absolute-scale statement under
+  "Physical signal levels" holds for the RFFE's own 4kTR floor; the composition is pinned
+  by two `xfail` tests in `tests/test_ml_link_budget.py` and is an open maintainer item.
 - **Comms SNR is enforced post-hoc at the receiver.** Noise is added to hit a target SNR
   directly, decoupled from the ray-traced path loss; the radar leg of the same scenarios
   *does* use the physical channel gain from the ray-traced/analytic path. The **pipeline
@@ -314,7 +345,8 @@ simulation code is not distributed with this repository and is available on requ
 those authors. See `e2e/data/interconnect/README.md` for per-dataset provenance.
 
 ```bash
-python -m e2e.main.main_interconnect     # writes the gallery figure above plus both figures below
+python -m e2e.main.main_interconnect     # writes the two README figures (gallery + below) and a
+                                         # transfer-function figure under e2e/main/figures/
 ```
 
 ![Interconnect transfer functions and the range profiles they produce, with the sidelobe skirt zoomed](docs/media/interconnect_range_profiles.png)
@@ -386,7 +418,7 @@ pipeline, two heads" point concrete. The web UI exposes the same head as an opti
 ## Machine learning: FMCW radar dataset + perception models
 
 `e2e/ml/` builds labeled FMCW MIMO radar training data (range-Doppler tensors +
-FFTRadNet-style detection labels) and ships two ported detection models (`FFTRadNet` from
+FFTRadNet-style detection labels) and ships two ported detection models plus the repo-native `RADDetNet` (`FFTRadNet` from
 valeoai/RADIal, `SSMRadNet` from AnuvabSen1/SSMRadNet) plus a reference train/eval CLI.
 
 **There are two generators, and they are not interchangeable.** Reach for the right one:
@@ -406,17 +438,23 @@ diffraction limit, still scores as a miss. That path exercises the code, not the
 # B. The benchmark corpus — real Sionna RT, GPU, ~10 s/scene. This is what the table
 #    below is measured on. See "GPU / driver / LLVM" for the toolchain it needs.
 python -m e2e.ml.chain_generate --config benchmark_v1 --tier D2 --n 1700 --seed 20260829 \
-    --no-local-assets --out e2e/ml/datasets/bench
+    --no-local-assets --out e2e/ml/datasets/b1_bench_v3     # the corpus the table is scored on
 
-python -m e2e.ml.train --manifest e2e/ml/datasets/bench/benchmark_v1_D2/manifest.json \
-    --model fftradnet --epochs 30 --seed 0 --out e2e/ml/runs/fft
-python -m e2e.ml.train --manifest e2e/ml/datasets/bench/benchmark_v1_D2/manifest.json \
-    --model ssmradnet --epochs 120 --batch-size 2 --accum-steps 4 --seed 0 \
-    --out e2e/ml/runs/ssm
+M=e2e/ml/datasets/b1_bench_v3/benchmark_v1_D2/manifest.json
+python -m e2e.ml.train --manifest $M --model fftradnet --epochs 30 --seed 0 \
+    --out e2e/ml/runs/b5_fftradnet_v3
+python -m e2e.ml.train --manifest $M --model ssmradnet --epochs 120 --batch-size 2 \
+    --accum-steps 4 --seed 0 --out e2e/ml/runs/b5_ssmradnet_v3
+python -m e2e.ml.train --manifest $M --model raddetnet --input-format rad --epochs 40 \
+    --batch-size 8 --seed 42 --deterministic --out e2e/ml/runs/b7_raddetnet   # the table's lead arm
 ```
 
-`benchmark_v1` (4×16 = 64 virtual elements, v_max 9.69 m/s) is the only shipped preset
-valid on both axes at once — azimuth resolvable within the match tolerance AND targets
+`e2e/ml/datasets/` and `e2e/ml/runs/` are gitignored: a clean clone has neither the corpus
+nor the checkpoints, and every number below was produced from them by the commands shown.
+
+`benchmark_v1` (4×16 = 64 virtual elements, v_max 9.69 m/s) is the preset the benchmark
+was measured on, and is valid on both axes at once (`ddma_wide_v1`, 4×48 = 192 virtual at
+the same v_max, is also valid; no published result uses it) — azimuth resolvable within the match tolerance AND targets
 that do not alias in Doppler. `--no-local-assets` restricts scene meshes to the
 licence-cleared pool. Run `e2e.ml.baseline.resolution_report` before trusting an AP on any
 preset you have changed.
@@ -434,15 +472,17 @@ format, smoke-test results, and model attribution/licensing notes, and
 
 ### The detection benchmark measures its own chance floor
 
-`e2e.ml.compare_detectors` scores every arm at **matched recall** and always includes a
-**data-blind null arm** — a detector that places boxes at random inside the region where
+`e2e.ml.compare_detectors` scores every arm at **matched recall** and includes by default
+(`--no-null` omits it) a **data-blind null arm** — a detector that places boxes at random inside the region where
 training-set targets live, seeing no input at all. That arm is the benchmark's chance
 floor: measured on the same frames and the same metric, rather than assumed to be zero.
 
 Measured on the **172-frame test split** (1,026 labelled targets) of the `benchmark_v1`
 tier-D2 ray-traced corpus `b1_bench_v3`, recall 0.5, decode floor 0.01, scored within
 40 m. Every number in this table is read from one file, `e2e/ml/runs/beat_cfar.json`,
-written by `python -m e2e.ml.beat_cfar` (seed 42, deterministic kernels):
+written by `python -m e2e.ml.beat_cfar` (seed 42, deterministic kernels; the file lives
+under the gitignored `e2e/ml/runs/`, so regenerate it with the commands below or ask the
+maintainers for it):
 
 | arm | average precision | false alarms / frame at recall 0.5 | max recall | × chance |
 |---|---|---|---|---|
@@ -451,6 +491,10 @@ written by `python -m e2e.ml.beat_cfar` (seed 42, deterministic kernels):
 | FFTRadNet (ported, range-Doppler input) | 0.127 | 26.3 | 0.977 | 1.6× |
 | SSMRadNet (ported, range-Doppler input) | 0.123 | 27.5 | 0.989 | 1.5× |
 | **data-blind null (chance floor)** | **0.081** | 33.2 | 1.000 | 1.0× |
+
+RADDetNet's row is the seed-42 checkpoint; a seed-43 replicate of the same recipe scores
+0.436 AP at 3.6 false alarms per frame in distribution — both far above CFAR, with a
+seed-to-seed spread of 0.040.
 
 ![Same four test frames through CFAR, the ported FFTRadNet and RADDetNet, each at its own recall-0.5 threshold](docs/media/detect_side_by_side.png)
 *The table, drawn: the same four test frames through three detectors, each at the objectness
@@ -514,8 +558,8 @@ points (a single shared threshold shows whichever arm is calibrated near it).
 `compare_detectors` records the operating point and PR curve for every arm so these are
 checkable rather than taken on trust.
 
-`python -m e2e.render_scene` renders a sampled scene to an animated GIF with three
-panels: the bird's-eye view, an **ideal front end** (receiver noise disabled, so the
+`python -m e2e.render_scene --tier D2 --config benchmark_v1 --out scene_D2.gif` renders a
+sampled scene to an animated GIF with three panels: the bird's-eye view, an **ideal front end** (receiver noise disabled, so the
 only content is the scene's own targets, auxiliary scatterers, and clutter), and the
 **non-ideal front end** (the same frame through the noisy receiver) -- e.g. a busy D2
 scene with several moving vehicles/pedestrians crossing the field of view:
@@ -535,7 +579,7 @@ Where to look when you want to...
 | Goal | Start here |
 | ---- | ---------- |
 | **Run an example** | `e2e/main/` — e.g. `main_sionna_blocks.py` (radar pipeline), `main_comms_link.py`, `main_channel_estimation.py`, `main_isac.py`. Run via `python -m e2e.main.<name>`. |
-| **Add a pipeline block** | `e2e/blocks.py` — implement an `apply(state_dict) -> dict` block class (see `RFFEBlock` / `FFTBlock`), then wire it into the feed-forward order in `e2e/simulation.py` (`Simulation`). Comms blocks live in `e2e/comms/blocks.py`. The web UI registry is `webapp/pipeline_registry.py`. |
+| **Add a pipeline block** | `e2e/blocks.py` — two contracts: a downstream *product* block implements `apply(state_dict) -> dict` (see `FFTBlock`); a *slot* block for the circuit or interconnect stage implements `apply_circuit` / `apply_interconnect` (see `RFFEBlock`, `InterconnectBlock`) and is wrapped by the `CircuitStage` / `InterconnectStage` classes. Wire it into the feed-forward order in `e2e/simulation.py` (`Simulation`). Comms blocks live in `e2e/comms/blocks.py`. The web UI registry is `webapp/pipeline_registry.py`. |
 | **Define a scenario** | `e2e/scenario.py` — build a `Scenario` (nodes, objects, `FrequencyPlan`, motion) or add an entry to `REFERENCE_SCENARIOS`. Generate frames with `e2e/environment/scenario_runner.py`. |
 | **Extend the comms / ISAC layer** | `e2e/comms/` — `ofdm.py` (modem), `channel.py` (estimation/equalization/metrics + synthetic fallback), `isac.py` (sensing/comm split), `blocks.py` (pipeline blocks). |
 | **Generate radar ML training data / train a model** | `e2e/ml/` — see [`e2e/ml/README.md`](e2e/ml/README.md); `python -m e2e.ml.dataset` (generate) and `python -m e2e.ml.train` (train/evaluate). |
@@ -552,7 +596,8 @@ pytest
 
 Tests that need hardware or a human are skipped by default and opt-in via env vars:
 `RUN_SIONNA=1` (real Sionna RT generation), `RUN_SLOW=1` (full RF chain / sweeps),
-`RUN_GUI=1` (live server). CI runs the default suite on every push/PR
+`RUN_GUI=1` (live server), `RUN_BROWSER=1` (the web UI driven in a real headless browser
+via Playwright — `playwright install chromium` first). CI runs the default suite on every push/PR
 (`.github/workflows/tests.yml`). See `tests/README.md` for details, and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow (device
 conventions, the block/frame API contract, PR etiquette).

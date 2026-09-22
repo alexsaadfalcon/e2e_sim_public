@@ -324,6 +324,7 @@ def _stripe_statistic(checkpoint: str, limit: int = 40) -> Optional[float]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    global MANIFEST  # the CLI may point every train/score call at another corpus
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--arms", default=",".join(ARMS),
@@ -335,8 +336,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "seed-reproducible, not bit-identical). Default is STRICT, because "
                         "this script exists to produce quotable numbers")
     p.set_defaults(strict=True)
+    p.add_argument("--manifest", default=MANIFEST,
+                   help="manifest.json of the corpus to train on and score (default: the "
+                        "maintainers' b1_bench_v3 path)")
     p.add_argument("--out", default="e2e/ml/runs/beat_cfar.json")
     args = p.parse_args(argv)
+    MANIFEST = args.manifest  # every train/score call below reads the module constant
 
     names = [a.strip() for a in args.arms.split(",") if a.strip()]
     unknown = [n for n in names if n not in ARMS]
