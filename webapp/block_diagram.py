@@ -222,6 +222,23 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
 ]
 
 
+_ALT_SOURCES = ("rt_environment", "corpus_environment")
+
+
+def _block_active(block_state: Dict[str, Dict[str, Any]], block_id: str) -> bool:
+    """Whether a block takes part in the run the diagram describes. The .pkl source
+    ("environment") is not toggleable, but the runner ignores it whenever an
+    alternative source is enabled -- so it is drawn inactive then, instead of lit
+    beside Corpus Replay as if both fed the run (rehearsal 2026-09-22)."""
+    spec = BLOCKS_BY_ID.get(block_id)
+    default = spec.enabled_default if spec is not None else True
+    if block_id == "environment":
+        return not any(block_state.get(a, {}).get("enabled", False) for a in _ALT_SOURCES)
+    if spec is not None and not spec.toggleable:
+        return True
+    return bool(block_state.get(block_id, {}).get("enabled", default))
+
+
 def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build cytoscape elements (nodes + edges) reflecting enabled/disabled state."""
     elements: List[Dict[str, Any]] = []
@@ -232,9 +249,9 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
         elements.append({"data": {"id": gid, "label": spec["label"]}, "classes": "group"})
 
     for b in BLOCKS:
-        enabled = block_state.get(b.id, {}).get("enabled", b.enabled_default)
+        enabled = _block_active(block_state, b.id)
         classes = [b.category]
-        if b.toggleable and not enabled:
+        if not enabled:
             classes.append("disabled")
         if b.id in _ENTRY_IDS:
             classes.append("entry")
@@ -250,8 +267,8 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
 
     for edge in EDGES:
         src, dst, kind = normalize_edge(edge)
-        src_on = block_state.get(src, {}).get("enabled", True)
-        dst_on = block_state.get(dst, {}).get("enabled", True)
+        src_on = _block_active(block_state, src)
+        dst_on = _block_active(block_state, dst)
         classes = [] if (src_on and dst_on) else ["inactive"]
         if kind == "alt":
             classes.append("alt-path")
@@ -354,7 +371,13 @@ def preset_notes(preset: DemoPreset) -> Any:
                     style={"marginTop": "2px", "paddingLeft": "20px"}),
         ])
 
-    knobs = [f"{BLOCKS_BY_ID[b].label} -> {k}: {how}" for b, k, how in preset.live_knobs]
+    # Name the knob the way the editor labels it ("LNA bias current (mA)"), not by
+    # its param key ("lna_bias_ma"), which appears nowhere on screen.
+    def _param_label(bid: str, key: str) -> str:
+        return next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
+
+    knobs = [f"{BLOCKS_BY_ID[b].label} -> {_param_label(b, k)}: {how}"
+             for b, k, how in preset.live_knobs]
     return html.Div([
         html.Div(f"Loaded: {preset.label}  (Thrust {preset.thrust}, {preset.n_steps} frames)",
                  style={"fontWeight": "bold"}),
@@ -422,7 +445,7 @@ def layout() -> Any:
                 id="preset-select",
                 options=[{"label": p.label, "value": p.id} for p in PRESETS],
                 value=PRESETS[0].id if PRESETS else None, clearable=False,
-                style={"width": "460px", "display": "inline-block",
+                style={"width": "620px", "display": "inline-block",
                        "verticalAlign": "middle"},
             ),
             html.Button("Load preset", id="preset-load", n_clicks=0,

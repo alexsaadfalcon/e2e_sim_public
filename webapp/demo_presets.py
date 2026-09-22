@@ -38,11 +38,17 @@ ML_CHECKPOINT = "e2e/ml/runs/b5_fftradnet_v3/best.pt"
 RADDETNET_CHECKPOINT = "e2e/ml/runs/b7_raddetnet/best.pt"
 RADDETNET_THRESHOLD = 0.44
 
-#: Decode threshold for that checkpoint. Its recall-0.5 operating point is objectness
-#: 0.22 (compare_detectors, 2026-09-22); at the registry default of 0.5 it draws ZERO
-#: detections -- the "demo landmine" in DEMO_DEFENSE.md, measured again today on the
-#: real frames. Pinned here so the figure is never blank.
-ML_THRESHOLD = 0.2
+#: Classical CA-CFAR's recall-0.5 operating point on the same split (`beat_cfar.json`,
+#: `operating_point.score_threshold` 0.661). All three Thrust 5 presets sit at their
+#: recall-0.5 points so the cross counts on screen are the false-alarm comparison the
+#: cards quote (6.2 / 26 / 3.0 per frame), not three arbitrary thresholds.
+CFAR_THRESHOLD = 0.66
+
+#: Decode threshold for that checkpoint: its recall-0.5 operating point, objectness
+#: 0.22 (`beat_cfar.json`). At the registry default 0.5 the checkpoint draws NO
+#: detections on the test frames -- the "demo landmine" in DEMO_DEFENSE.md, measured
+#: again on the real frames. Pinned here so the figure is never blank.
+ML_THRESHOLD = 0.22
 
 
 @dataclass(frozen=True)
@@ -157,6 +163,10 @@ PRESETS: List[DemoPreset] = [
                "FFT az-el panel is deliberately off (it contradicts this framing)."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
         say=[
+            "As loaded the curve starts at 0.04 and settles at 0.06 within two frames: "
+            "the tracker is warm-started from a perturbed copy of the true subspace and "
+            "relaxes to its steady tracking error. The knob compares the SETTLED level, "
+            "0.06 against 0.63, and the previous run stays on the Results tab for that.",
             "Say the headline in ANGLES: subspace error 0.63 -> 0.06 (measured on this preset "
             "2026-09-22: 0.626 -> 0.062) is an unnormalized distance bounded by sqrt(k); "
             "converted, the average principal angle goes 12.8 deg -> 1.3 deg.",
@@ -199,6 +209,11 @@ PRESETS: List[DemoPreset] = [
                "copy of the true subspace."),
         live_knobs=[("subspace", "warm_start", "cold <-> warm")],
         say=[
+            "The range-azimuth panel is the end product the tracker feeds; it does not "
+            "change visibly during acquisition on the displayed 40 dB range, and that is "
+            "the point of the error curve: the picture cannot show you what the tracker "
+            "has not yet learned. If asked what the image would look like without the AFE, "
+            "the answer is 'the same at this compression' -- do not toggle it.",
             "Three frames to converge, at ten refinement passes per frame (n_refine=10 -- "
             "say it before someone reads it).",
             "This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 a cold start does not "
@@ -232,9 +247,11 @@ PRESETS: List[DemoPreset] = [
         blurb=("A SYNTHETIC bad interconnect: the 11-tap boxcar placeholder, normalized to a "
                "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
                "of in-band ripple. Run as loaded, then set Case -> passthrough and run "
-               "again: the range profile's floor drops ~14 dB and the smearing disappears "
-               "(11 NATIVE range cells; about 3 gates on the 256-bin display, which pools 4 "
-               "cells per gate). Lead with the range profile, not the heatmap."),
+               "again: the range profile's floor drops ~14 dB (the visible effect; the "
+               "previous run stays on the Results tab for the comparison). The range "
+               "smearing is 11 NATIVE cells = 0.55 m, about 3 gates on the 256-gate axis "
+               "that spans 50 m -- sub-pixel at full scale, so drag-zoom to +-3 m around "
+               "the peak if you want to show it. Lead with the floor, not the heatmap."),
         live_knobs=[("interconnect", "case", "default (synthetic boxcar) -> passthrough")],
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
@@ -266,20 +283,32 @@ PRESETS: List[DemoPreset] = [
             {"corpus_environment": {"enabled": True, "params": {
                 "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
             {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}},
+             "afe": {"enabled": False}, "subspace": {"enabled": False}},
             _only_products("radar_cube", "detector"),
-            {"detector": {"params": {"mode": "cfar", "threshold": 0.5,
+            {"detector": {"params": {"mode": "cfar", "threshold": CFAR_THRESHOLD,
                                      "cfar_guard": 2, "cfar_train": 6}}},
         ),
         blurb=("Replays the held-out TEST frames every published number was scored on, "
                "labels included, and runs the classical CA-CFAR baseline on them: the "
-               "range-Doppler cube, then the objectness map with detections (x) over ground "
-               "truth (o). Run this first, then load the ML preset on the same frames."),
+               "range-Doppler cube, then the objectness map with detections (red x) over "
+               "ground truth (white o). The threshold is CFAR's recall-0.5 operating point "
+               "(0.66), the same operating point the two network presets sit at, so the "
+               "cross counts across the three screens ARE the false-alarm comparison. Run "
+               "this first, then load the RADDetNet preset on the same frames: the previous "
+               "run stays on the Results tab underneath."),
         live_knobs=[("detector", "cfar_train", "6 -> 2 cells (noisier estimate, more false alarms)"),
-                    ("detector", "threshold", "0.5 -> 0.8 (fewer detections)")],
+                    ("detector", "threshold", "0.66 -> 0.8 (fewer detections)")],
         say=[
             "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
             "0.081. Both numbers reproduced today from the public repo.",
+            "At this operating point CFAR averages 6.2 false alarms per frame over the 172 "
+            "test frames; a single frame can show more or fewer. The objectness map is a "
+            "clipped CFAR ratio, so away from detections it is genuinely near zero -- the "
+            "map looks dark because CFAR is a threshold test, not a probability field.",
+            "The top 60 m of the map is empty because the labels stop at 40 m, which is "
+            "also the scoring crop; say it before someone asks what is up there.",
+            "Range-azimuth heatmaps elsewhere in the demo show a signed range axis; this "
+            "panel is one-sided because the ADC cube is dechirped -- different pipeline.",
             "Ground truth omits about 3 real strongly-scattering objects per frame inside "
             "40 m, so any detector that fires on every real object has a precision ceiling "
             "of 0.64. Some of the 'false alarms' are real objects.",
@@ -298,7 +327,7 @@ PRESETS: List[DemoPreset] = [
             {"corpus_environment": {"enabled": True, "params": {
                 "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
             {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}},
+             "afe": {"enabled": False}, "subspace": {"enabled": False}},
             _only_products("radar_cube", "detector"),
             {"detector": {"params": {"mode": "ml", "checkpoint": ML_CHECKPOINT,
                                      "threshold": ML_THRESHOLD}}},
@@ -306,16 +335,16 @@ PRESETS: List[DemoPreset] = [
         blurb=("The same frames, through the ported FFTRadNet checkpoint (rd input; test AP "
                "0.127 against CFAR's 0.301 under the same protocol). Its objectness map is "
                "a range-profile x fixed-azimuth-prior STRIPE, not peaks: the network never "
-               "learns azimuth (F83). The decode threshold is pinned at 0.2 because at the "
+               "learns azimuth (F83). The decode threshold is pinned at its recall-0.5 "
+               "operating point (0.22), matching the CFAR and RADDetNet presets; at the "
                "default 0.5 this checkpoint draws nothing."),
-        live_knobs=[("detector", "threshold", "0.2 -> 0.5 (the figure goes blank -- that is the point)")],
+        live_knobs=[("detector", "threshold", "0.22 -> 0.5 (the figure goes blank -- that is the point)")],
         say=[
             "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
             "first; the diagnosis is the result.",
-            "At threshold 0.2 expect roughly 2-70 crosses per frame (mean ~38 over 30 test "
-            "frames, 2026-09-22), ALL inside 40 m: the network never fires beyond the "
-            "labelled range. At the scored operating point (0.22) it is ~27 per frame = 26 "
-            "false alarms + ~3 hits, which is the published number; CFAR's is 6.2.",
+            "At this operating point (0.22) expect ~27 crosses per frame = 26 false alarms "
+            "+ ~3 hits, which is the published number; CFAR's is 6.2 and RADDetNet's 3.0. "
+            "ALL inside 40 m: the network never fires beyond the labelled range.",
             "Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1 "
             "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant frame-independent map.",
@@ -338,14 +367,14 @@ PRESETS: List[DemoPreset] = [
     ),
     DemoPreset(
         id="thrust5_detector_raddetnet",
-        label="Thrust 5 (LEAD) - RADDetNet on benchmark frames: 0.476 vs CFAR 0.301, verified in-distribution",
+        label="Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476 vs 0.301, in-distribution",
         thrust=5,
         n_steps=5,
         overrides=_merge(
             {"corpus_environment": {"enabled": True, "params": {
                 "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
             {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}},
+             "afe": {"enabled": False}, "subspace": {"enabled": False}},
             _only_products("radar_cube", "detector"),
             {"detector": {"params": {"mode": "ml", "checkpoint": RADDETNET_CHECKPOINT,
                                      "threshold": RADDETNET_THRESHOLD}}},
@@ -384,8 +413,14 @@ PRESETS: List[DemoPreset] = [
             "reaches 0.328 (Doppler-resolved CFAR, unclamped score), and the shipped "
             "guard/train beats every alternative tried. The 40 m crop, the score floor and "
             "the unlabelled clutter move nothing.",
-            "Where the gain is: pedestrians. Hit rate at the floor 0.945 vs CFAR's 0.798; on "
-            "vehicles 0.983 vs 0.929. Physically sensible, not suspicious.",
+            "Where the gain is: pedestrians. Hit rate at the decode floor (threshold 0.01) "
+            "0.945 vs CFAR's 0.798; on vehicles 0.983 vs 0.929. Physically sensible, not "
+            "suspicious. On THIS screen the threshold is 0.44 -- the recall-0.5 point by "
+            "construction -- so about half the white circles carry a red cross; the "
+            "comparison at this point is the cross count against CFAR's (3.0 vs 6.2 false "
+            "alarms per frame on average), not the hit rate.",
+            "Same threshold convention as the CFAR screen: both sit at their recall-0.5 "
+            "operating point, so fewer crosses here is fewer false alarms, not fewer hits.",
             "What changed is the architecture, not the input: the same beamformed input into "
             "the RADIal-style decoder (b8) scores 0.138 and keeps 47% under deranged labels. "
             "Range x azimuth had to be the spatial plane.",

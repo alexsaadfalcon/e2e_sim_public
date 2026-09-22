@@ -101,9 +101,13 @@ BLOCKS: List[BlockSpec] = [
                            "straight into the front-end (for frames generated with "
                            "tx_power_dbm set); 'legacy' forces renormalizing to the "
                            "signal-scaling level below."),
+            # step="any": the Thrust 1 preset sets 1e-7, and a browser number input
+            # with step=1e-6 reports that as a stepMismatch -> null on blur, even
+            # unedited; the runner then fell back to 1e-5 while the field still
+            # displayed 1e-7 (rehearsal 2026-09-22). The store also refuses nulls now.
             ParamSpec("signal_scaling", "Signal scaling", "number", 1e-5,
-                      step=1e-6, help="Drive level into the analog front-end "
-                                      "(legacy scale mode only; ignored in physical)."),
+                      step="any", help="Drive level into the analog front-end "
+                                       "(legacy scale mode only; ignored in physical)."),
             ParamSpec("freq_span_hz", "Frequency span (Hz)", "number", 3e9,
                       step=1e8, help="Frequency-plan span of the frames; sets the "
                                      "buffer's true sample rate for the noise model."),
@@ -517,7 +521,10 @@ BLOCKS: List[BlockSpec] = [
                       help="ML mode only. Path to a best.pt written by e2e.ml.train, "
                            "e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Checkpoints are "
                            "not tracked by git; the demo machine needs the file."),
-            ParamSpec("threshold", "Decode threshold", "number", 0.5, step=0.05,
+            # step 0.01: the presets pin each detector at its recall-0.5 operating
+            # point (0.66 / 0.22 / 0.44, from e2e/ml/runs/beat_cfar.json), which a
+            # 0.05 grid could not hold -- typing 0.44 became null, then 0.5.
+            ParamSpec("threshold", "Decode threshold", "number", 0.5, step=0.01,
                       min=0.0, max=1.0,
                       help="Objectness above which a local peak is reported as a "
                            "detection. This is an operating point, not the metric: AP "

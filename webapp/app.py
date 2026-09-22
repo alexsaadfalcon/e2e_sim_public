@@ -188,8 +188,19 @@ def _update_block_state(enabled_values, param_values, block_state):
         for inp, val in zip(callback_context.inputs_list[1], param_values):
             cid = inp["id"]
             if cid["block"] == bid and cid["param"] == pkey:
-                block_state.setdefault(bid, {}).setdefault("params", {})[pkey] = val
-                break
+                return _with_param(block_state, bid, pkey, val)
+    return block_state
+
+
+def _with_param(block_state, bid, pkey, val):
+    """The store after one param edit. A number input reports ``None`` for an empty
+    or out-of-step field (a browser stepMismatch fires on blur even when nothing was
+    typed); writing that null through let the runner fall back to the registry default
+    while the field still displayed the preset's value (rehearsal 2026-09-22). Keep
+    the last valid value instead."""
+    if val is None:
+        return no_update
+    block_state.setdefault(bid, {}).setdefault("params", {})[pkey] = val
     return block_state
 
 
@@ -202,6 +213,7 @@ def _update_block_state(enabled_values, param_values, block_state):
     State("block-state-store", "data"),
     State("run-nsteps", "value"),
     State("scenario-json", "value"),
+    State("results-store", "data"),
     prevent_initial_call=True,
     # dash>=2.9 supports `running` on plain (non-background) callbacks: the
     # renderer flips these properties synchronously around the request, so the
@@ -212,8 +224,16 @@ def _update_block_state(enabled_values, param_values, block_state):
     running=[(Output("run-button", "disabled"), True, False),
              (Output("cancel-button", "disabled"), False, True)],
 )
-def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
-    """Run the pipeline (lazy heavy imports inside) and stash result figures."""
+def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=None):
+    """Run the pipeline (lazy heavy imports inside) and stash result figures.
+
+    The store holds the figures under their product keys plus two reserved entries:
+    ``_banner`` (what produced these figures: run number, time, source, frames, the
+    detector's operating point) and ``_previous`` (the last run's figures and banner),
+    so the Results tab can show a before/after -- every demo card says "run, turn one
+    knob, run again", and until 2026-09-22 the comparison lived only in the audience's
+    memory of a screen that had been replaced.
+    """
     block_state = block_state or default_block_state()
     # Unique per-invocation value so "run-sink" always changes -- dcc.Loading only
     # needs this Output to belong to a pending callback to spin, but a changing
@@ -252,6 +272,11 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
         figs = {"scene_topdown": scene_fig, **figs}
     # store as plain dicts (Plotly figures are JSON-serializable via to_dict)
     data = {k: f.to_dict() for k, f in figs.items()}
+    n_products = len(data)
+    axis_meta = outputs.get("_axis_meta") or {}
+    data["_banner"] = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
+    if prev_results:
+        data["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
     note = ""
     # Physical scale mode trusts the frames to BE volts; nothing in a bare .pkl can
     # verify that (no metadata until the frames-carry-metadata refactor), so surface
@@ -265,7 +290,6 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
         # In auto mode the frames declare their own convention (v2 metadata), so no
         # assumption warning is needed -- but say what was detected, for transparency.
         note = "  [auto scale mode: following the frames' own metadata]"
-    axis_meta = outputs.get("_axis_meta") or {}
     # Run notes (blocks a source could not apply, a checkpoint without a provenance
     # stamp, ...) belong next to the result, not in a server log nobody reads on stage.
     if axis_meta.get("notes"):
@@ -273,13 +297,29 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
     if axis_meta.get("cancelled"):
         # Partial results are still shown, labelled as partial.
         msg = html.Span(f"Cancelled after {axis_meta.get('n_steps_run', '?')} of "
-                        f"{int(n_steps or 10)} frames: {len(data)} product(s) from the "
+                        f"{int(n_steps or 10)} frames: {n_products} product(s) from the "
                         f"frames that ran. See Results tab.{note}",
                         style={"color": "#f39c12"})
     else:
-        msg = html.Span(f"Run complete: {len(data)} product(s). See Results tab.{note}",
+        msg = html.Span(f"Run complete: {n_products} product(s). See Results tab.{note}",
                         style={"color": "#20bf6b"})
     return data, msg, "tab-results", sink
+
+
+def _run_banner(n_clicks, axis_meta, n_steps: int) -> str:
+    """One line saying what produced the figures on screen (see _run_pipeline)."""
+    import time as _time
+    n_run = axis_meta.get("n_steps_run", n_steps)
+    frames = f"{n_run} of {n_steps} frames"
+    if axis_meta.get("cancelled"):
+        frames += " -- CANCELLED, partial"
+    parts = [f"run #{n_clicks}", _time.strftime("%H:%M:%S"),
+             axis_meta.get("source") or "", frames]
+    det = axis_meta.get("detector") or {}
+    if det:
+        parts.append(f"detector: {det.get('label', '?')}, detections at objectness >= "
+                     f"{float(det.get('threshold', 0.0)):.2f}")
+    return "  |  ".join(p for p in parts if p)
 
 
 # =================================================================================
@@ -313,7 +353,12 @@ def _load_preset(n_clicks, preset_id, node_data):
         # rather than loading half of it.
         return (no_update, no_update, html.Span(str(e), style={"color": "#eb3b5a"}),
                 no_update, no_update)
-    block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
+    # Open the editor on the block whose knob the card says to turn, so the operator
+    # is one click from the live demo; fall back to the tapped node.
+    if preset.live_knobs:
+        block_id = preset.live_knobs[0][0]
+    else:
+        block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
     return (state, preset.n_steps, block_diagram.preset_notes(preset),
             block_diagram.param_editor(block_id, state),
             html.Span(f"Preset loaded: {preset.label}. Press Run pipeline.",
@@ -357,20 +402,40 @@ def _render_results(results_data, active_tab):
     # That already keeps Range Profile grouped with its FFT/range siblings, so no
     # re-sort is needed here; each figure carries its own title (set where it is
     # built) rather than a second, easily-stale title map duplicated in this tab.
-    cards = []
-    for key, fig_dict in results_data.items():
-        cards.append(html.Div(
-            # No modebar: the zoom/export toolbar overlaps each card's title at
-            # this card width, and none of its tools matter for read-only results.
-            dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
-            style={"flex": "1 1 45%", "minWidth": "420px", "margin": "6px",
-                   "border": "1px solid #dfe4ea", "borderRadius": "6px",
-                   "padding": "4px"},
-        ))
-    return html.Div([
-        html.H3("Results"),
-        html.Div(cards, style={"display": "flex", "flexWrap": "wrap"}),
-    ])
+    def _grid(figs):
+        cards = []
+        for key, fig_dict in figs.items():
+            cards.append(html.Div(
+                # No modebar: the zoom/export toolbar overlaps each card's title at
+                # this card width, and none of its tools matter for read-only results.
+                dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
+                style={"flex": "1 1 45%", "minWidth": "420px", "margin": "6px",
+                       "border": "1px solid #dfe4ea", "borderRadius": "6px",
+                       "padding": "4px"},
+            ))
+        return html.Div(cards, style={"display": "flex", "flexWrap": "wrap"})
+
+    figs = {k: v for k, v in results_data.items() if not k.startswith("_")}
+    children = [html.H3("Results")]
+    banner = results_data.get("_banner")
+    if banner:
+        children.append(html.Div(f"This run: {banner}",
+                                 style={"color": "#2d3a4a", "fontWeight": "bold",
+                                        "marginBottom": "4px"}))
+    children.append(_grid(figs))
+    prev = results_data.get("_previous") or {}
+    prev_figs = {k: v for k, v in prev.items() if not k.startswith("_")}
+    if prev_figs:
+        # The before/after every card asks for: the previous run stays on screen
+        # under its own banner, so "turn one knob and run again" is a comparison
+        # the audience can see rather than remember.
+        children.append(html.Hr())
+        children.append(html.Div(
+            f"Previous run (for before/after): {prev.get('_banner') or 'unlabelled'}",
+            style={"color": "#576574", "fontWeight": "bold", "marginTop": "6px",
+                   "marginBottom": "4px"}))
+        children.append(_grid(prev_figs))
+    return html.Div(children)
 
 
 # =================================================================================

@@ -173,6 +173,19 @@ def _corpus_source(state: Dict[str, Dict[str, Any]]):
     return src, src.cfg, src.grid
 
 
+def _detector_meta(state: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Mode, operating point and a short label for the detector on screen."""
+    mode = str(_p(state, "detector", "mode"))
+    threshold = float(_p(state, "detector", "threshold"))
+    if mode == "cfar":
+        label = (f"CA-CFAR (guard {int(_p_positive(state, 'detector', 'cfar_guard'))}, "
+                 f"train {int(_p_positive(state, 'detector', 'cfar_train'))})")
+    else:
+        ckpt_text = str(_p(state, "detector", "checkpoint") or "").strip()
+        label = _resolve_repo_path(ckpt_text).parent.name if ckpt_text else "ML"
+    return {"mode": mode, "threshold": threshold, "label": label}
+
+
 def _build_detector(state: Dict[str, Dict[str, Any]], cfg, grid):
     """The Detector product in either mode. `cfg`/`grid` describe the ADC cube it
     consumes -- from the corpus manifest, or from the dechirp preset for a live chain."""
@@ -782,6 +795,20 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     outputs["_axis_meta"]["notes"] = list(run_notes)
     outputs["_axis_meta"]["n_steps_run"] = int(getattr(sim, "n_steps_run", n_steps))
     outputs["_axis_meta"]["cancelled"] = bool(getattr(sim, "cancelled", False))
+    # Provenance for the Results banner: which source fed the run, and the
+    # detector's operating point (its cross count depends on it).
+    if corpus_mode:
+        outputs["_axis_meta"]["source"] = (
+            f"Corpus Replay: {_p(state, 'corpus_environment', 'split')} split from frame "
+            f"{_p(state, 'corpus_environment', 'start_frame')}")
+    elif _enabled(state, "rt_environment"):
+        outputs["_axis_meta"]["source"] = (
+            f"RT Environment: {_p(state, 'rt_environment', 'scenario_name')}")
+    else:
+        outputs["_axis_meta"]["source"] = (
+            f"Sionna frames: {_p(state, 'environment', 'scenario_name')}")
+    if rx_cfg is not None and _enabled(state, "detector"):
+        outputs["_axis_meta"]["detector"] = _detector_meta(state)
     if rx_cfg is not None:
         # Geometry of the ADC cube the RX-time products were built on, so their
         # figures carry physical axes (range in m, radial velocity in m/s, sin(az)).
@@ -875,7 +902,10 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
              xlabel: str = "Bin", ylabel: str = "Bin") -> go.Figure:
     fig = go.Figure(
         data=go.Heatmap(
-            z=data_db, x=x, y=y, colorbar=dict(title="power (dB)"), zmin=-40, zmax=0
+            # Peak-relative, and -40 is a display clip, not the data floor; the
+            # title says both so the colorbar is not read as absolute dB.
+            z=data_db, x=x, y=y, zmin=-40, zmax=0,
+            colorbar=dict(title="dB rel. peak<br>(clipped at -40)")
         )
     )
     fig.update_layout(
@@ -1106,10 +1136,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                      x=x, y=y, xlabel=xlabel, ylabel=ylabel),
             [_rd_db(c) for c in outputs["radar_cube"]])
 
+    det_meta = meta.get("detector") or {}
     for key, title in (("cfar_detection", "CFAR objectness"),
                        ("ml_detection", "Neural detector objectness")):
         if not outputs.get(key):
             continue
+        if det_meta:
+            # Name the detector and its operating point ON the figure: the three
+            # Thrust 5 presets are compared across screens, and their cross counts
+            # are set by the threshold as much as by the detector.
+            title = (f"{title} -- {det_meta.get('label', '')}<br><sup>detections at "
+                     f"objectness >= {float(det_meta.get('threshold', 0.0)):.2f}</sup>")
         det = outputs[key][-1]
         if hasattr(det, "detach"):
             det = det.detach().cpu().numpy()
@@ -1144,20 +1181,28 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(
             title=title, xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
             margin=dict(l=40, r=20, t=40, b=40), height=420,
-            legend=dict(orientation="h", y=-0.2),
+            # Dark legend: the ground-truth marker is a white open circle (visible
+            # on the Viridis map) and had no visible swatch on a white legend.
+            legend=dict(orientation="h", y=-0.2, bgcolor="#2d3436",
+                        font=dict(color="#ffffff")),
         )
         figs[key] = fig
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
-        fig = go.Figure(data=go.Scatter(y=errs, mode="lines+markers"))
+        # Frames are numbered 1..n, matching the heatmap animation slider (which
+        # labels its steps 1-based); an implicit 0-based x autoticked at 0.5 on
+        # short runs ("Frame 0.5" after a Cancel, rehearsal 2026-09-22).
+        fig = go.Figure(data=go.Scatter(x=list(range(1, len(errs) + 1)), y=errs,
+                                        mode="lines+markers"))
         # Anchor the axis at zero: a before/after pair (Thrust 2: 0.06 -> 0.63) is
         # read across two autoscaled plots, and autoscale draws a flat 0.06 line as
         # a full-height curve.
         fig.update_yaxes(rangemode="tozero")
+        fig.update_xaxes(dtick=1)
         fig.update_layout(
             title="Subspace error (Frobenius) per frame",
-            xaxis_title="Frame",
+            xaxis_title="frame",
             yaxis_title="Error",
             margin=dict(l=40, r=20, t=40, b=40),
             height=360,

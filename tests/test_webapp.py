@@ -753,7 +753,8 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     np.testing.assert_allclose(figs["fft"].data[0].y, expected_u)
     assert figs["fft"].layout.xaxis.title.text == "azimuth sin(θ)"
     assert figs["fft"].layout.yaxis.title.text == "elevation sin(θ)"
-    assert figs["fft"].data[0].colorbar.title.text == "power (dB)"
+    # Peak-relative with a stated clip; a bare "power (dB)" read as absolute dB.
+    assert figs["fft"].data[0].colorbar.title.text == "dB rel. peak<br>(clipped at -40)"
 
     # Negated: the range blocks use a FORWARD fft over frequency, so a physical
     # delay +tau lands on the negative fftshifted side; the axis flips sign so
