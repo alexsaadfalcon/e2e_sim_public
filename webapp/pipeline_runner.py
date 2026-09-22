@@ -57,6 +57,8 @@ def _p(state: Dict[str, Dict[str, Any]], block_id: str, key: str) -> Any:
 _POSITIVE_PARAMS = {
     ("rffe", "signal_scaling"),
     ("rffe", "freq_span_hz"),
+    ("rffe", "lna_bias_ma"),
+    ("rffe", "if_bw_mhz"),
     ("fft", "bins"),
     ("range_az", "bins"),
     ("range_el", "bins"),
@@ -251,12 +253,19 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             physical_scale=_resolve_physical_scale(
                 _p(state, "rffe", "scale_mode"), environment_block
             ),
+            # Thrust 1's circuit knobs. Non-positive values fall back to the registry
+            # defaults via _p_positive: both are divisors inside the circuit model.
+            lna_bias_ma=float(_p_positive(state, "rffe", "lna_bias_ma")),
+            if_bw_mhz=float(_p_positive(state, "rffe", "if_bw_mhz")),
         )
 
     interconnect_block = None
     if _enabled(state, "interconnect"):
         case = _p(state, "interconnect", "case")
-        interconnect_block = InterconnectBlock(case=None if case == "default" else case)
+        interconnect_block = InterconnectBlock(
+            case=None if case == "default" else case,
+            normalize_gain=bool(_p(state, "interconnect", "normalize_gain")),
+        )
 
     afe_block = None
     if _enabled(state, "afe"):
@@ -540,6 +549,9 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         subspace_block,
         array_shape=array_shape,
         serial_stages=serial_stages_override,
+        # "cold" leaves Oja's random basis untouched -- the honest acquisition run
+        # (Thrust 3 Demo B). The registry default "warm" keeps the historical numbers.
+        warm_start=(_p(state, "subspace", "warm_start") != "cold"),
     )
 
     try:

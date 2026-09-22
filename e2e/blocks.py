@@ -80,8 +80,14 @@ class RFFEBlock:
     # pass through natively, one independent noise realization per trace.
     frame_capabilities = _ELEMENTWISE
 
+    #: Column indices into `get_RX_config`'s `[nRx, 7]` table. The circuit model reads
+    #: the table positionally (`RX_config[0]` is `Ibias_LNA`, ... `RX_config[6]` is the
+    #: IF bandwidth), so these names are the only place the layout is spelled out.
+    RX_CONFIG_IBIAS_LNA = 0     # A
+    RX_CONFIG_IF_BW = 6         # Hz
+
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
-                 physical_scale=False, chirp_dur=None):
+                 physical_scale=False, chirp_dur=None, lna_bias_ma=None, if_bw_mhz=None):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
         # still pass it don't break.
         # fs (= freq_span_hz) is the complex-baseband buffer's true sample rate (the
@@ -90,6 +96,21 @@ class RFFEBlock:
         # is band-referenced to the receiver's IF bandwidth inside the circuit model
         # (stepped-frequency measurement semantics), not to fs.
         self.rx_config = get_RX_config(n).to(device)
+        # The two circuit knobs the conference demo turns (Thrust 1). They override
+        # single columns of the per-element config table -- the same override the
+        # measurements in notes/DEMO_DEFENSE.md were taken with, previously done by
+        # monkeypatching `get_RX_config` from a scratch script. None keeps the table's
+        # own defaults (8 mA, 15 MHz), so every existing caller is bit-identical.
+        # Both are validated because the circuit model divides by them: a zero bias
+        # is 0/0 in the gm cascade, and a zero bandwidth zeroes the noise variance.
+        if lna_bias_ma is not None:
+            if not lna_bias_ma > 0:
+                raise ValueError(f"lna_bias_ma must be > 0, got {lna_bias_ma!r}")
+            self.rx_config[:, self.RX_CONFIG_IBIAS_LNA] = float(lna_bias_ma) * 1e-3
+        if if_bw_mhz is not None:
+            if not if_bw_mhz > 0:
+                raise ValueError(f"if_bw_mhz must be > 0, got {if_bw_mhz!r}")
+            self.rx_config[:, self.RX_CONFIG_IF_BW] = float(if_bw_mhz) * 1e6
         self.fs = freq_span_hz
         self.signal_scaling = signal_scaling
         self.if_filter = if_filter
@@ -213,7 +234,7 @@ class InterconnectBlock:
 
     frame_capabilities = _ELEMENTWISE
 
-    def __init__(self, case=None, transfer_csv=None, band_hz=None):
+    def __init__(self, case=None, transfer_csv=None, band_hz=None, normalize_gain=False):
         if case not in INTERCONNECT_CASES:
             raise ValueError(
                 f"case must be one of "
@@ -226,10 +247,41 @@ class InterconnectBlock:
         self.case = case
         self.transfer_csv = transfer_csv
         self.band_hz = band_hz
+        # Scale the applied response so its peak magnitude is exactly 1 (0 dB). The
+        # boxcar placeholder has a peak gain of 11 (+20.8 dB), which no passive
+        # interconnect can have; on a peak-normalized display the flat gain divides
+        # out anyway, but the absolute level reaches the AFE quantizer's exponent
+        # range and the tracker's error metric, so the default stays False for
+        # bit-compatibility and the demo opts in (Thrust 4, notes/DEMO_DEFENSE.md).
+        # Applies to the CSV mode too, where it removes flat insertion loss and
+        # leaves only the in-band shape. Passthrough is untouched by definition.
+        self.normalize_gain = bool(normalize_gain)
         self._csv_freq = None
         self._csv_s21 = None
         if transfer_csv is not None:
             self._csv_freq, self._csv_s21 = load_interconnect_transfer(transfer_csv)
+
+    def frequency_response(self, n_freqs, dev):
+        """The complex response `H[f]` this block multiplies a frame by, `[n_freqs]`.
+
+        Exposed so callers (tests, the interconnect tutorial, the demo captions) can
+        state the filter's peak gain and ripple from the same array `apply_interconnect`
+        uses, instead of re-deriving the boxcar's FFT by hand.
+        """
+        if self.case in INTERCONNECT_PASSTHROUGH_CASES:
+            return torch.ones(n_freqs, dtype=torch.complex64, device=dev)
+        if self.transfer_csv is not None:
+            H = self._resampled_response(n_freqs, dev)
+        else:
+            window = torch.ones(11, device=dev)
+            window_padded = torch.nn.functional.pad(window, (0, n_freqs - window.shape[0]))
+            # This is a forward FFT of the (zero-padded) impulse response, i.e. the
+            # interconnect's frequency response -- despite the historical name, it is
+            # not an inverse FFT. Do not "fix" the direction; that would change the filter.
+            H = torch.fft.fft(window_padded)
+        if self.normalize_gain:
+            H = H / torch.abs(H).max().clamp_min(1e-30)
+        return H
 
     def _resampled_response(self, n_freqs, dev):
         """Interpolate the loaded S21(f) onto the frame's `n_freqs`-point grid."""
@@ -246,19 +298,8 @@ class InterconnectBlock:
     def apply_interconnect(self, frame):
         if self.case in INTERCONNECT_PASSTHROUGH_CASES:
             return frame
-        if self.transfer_csv is not None:
-            H = self._resampled_response(frame.shape[-1], frame.device)
-            return frame * H.view(1, 1, 1, -1)
-        window = torch.ones(11)
-        window = window.to(device)
-        window_padded = torch.nn.functional.pad(window, (0, frame.shape[-1] - window.shape[0]))
-        window_padded = window_padded.to(device)
-        # This is a forward FFT of the (zero-padded) impulse response, i.e. the
-        # interconnect's frequency response -- despite the historical name, it is not
-        # an inverse FFT. Do not "fix" the direction; that would change the filter.
-        window_freq_response = torch.fft.fft(window_padded)
-        frame = frame * window_freq_response.view(1, 1, 1, -1)
-        return frame
+        H = self.frequency_response(frame.shape[-1], frame.device)
+        return frame * H.view(1, 1, 1, -1)
 
 
 # Adaptive Feature Extraction Block

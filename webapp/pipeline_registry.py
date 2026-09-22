@@ -103,6 +103,23 @@ BLOCKS: List[BlockSpec] = [
             ParamSpec("freq_span_hz", "Frequency span (Hz)", "number", 3e9,
                       step=1e8, help="Frequency-plan span of the frames; sets the "
                                      "buffer's true sample rate for the noise model."),
+            # The two circuit knobs Thrust 1 turns (notes/DEMO_DEFENSE.md). Bounds are
+            # the ranges the circuit model was parameterised over (rffe_model.py quotes
+            # 0.5-10 mA from the design email); the defaults are the table's own values,
+            # so a fresh state is bit-identical to the pre-knob backend. They only move
+            # the image near the input-referred noise (signal_scaling ~1e-7); at the
+            # 1e-5 default they correctly do nothing, and the help text says so.
+            ParamSpec("lna_bias_ma", "LNA bias current (mA)", "number", 8.0,
+                      step=0.5, min=0.5, max=10.0,
+                      help="Per-element LNA bias. Raises LNA gain and lowers its noise "
+                           "contribution; visible only when the signal sits near the "
+                           "front-end's own noise (signal scaling ~1e-7). Below ~4 mA "
+                           "the modelled LNA is an attenuator."),
+            ParamSpec("if_bw_mhz", "IF bandwidth (MHz)", "number", 15.0,
+                      step=1.0, min=1.0, max=50.0,
+                      help="Receiver IF bandwidth the thermal-noise floor is referenced "
+                           "to (noise power scales with it: 1 -> 50 MHz is 17 dB). Does "
+                           "not band-limit the signal in this model."),
         ],
         blurb=("Analog RF front-end circuit distortion (e2e/circuit/rffe_model.py). "
                "Required to run with the current backend."),
@@ -127,6 +144,13 @@ BLOCKS: List[BlockSpec] = [
                            "alias for 'passthrough' and does NOT load the simulated "
                            "Case3 hardware response of the same name; that is not yet "
                            "reachable from this UI."),
+            ParamSpec("normalize_gain", "Normalize peak gain to 0 dB", "choice", False,
+                      choices=[False, True],
+                      help="Scale the filter so its peak magnitude is 1. The boxcar "
+                           "placeholder otherwise has +20.8 dB of gain, which no passive "
+                           "interconnect can have; with this on, only its in-band shape "
+                           "(59.7 dB ripple) reaches the chain. Off by default so "
+                           "existing runs are unchanged."),
         ],
         blurb="Interconnect filtering applied in the frequency domain.",
     ),
@@ -172,6 +196,16 @@ BLOCKS: List[BlockSpec] = [
                            f"m={SUBSPACE_M}: at k == m the adaptive sensing matrix is "
                            f"nothing but the anchor rows and the estimate can never "
                            f"update."),
+            # Thrust 3 Demo B (notes/DEMO_DEFENSE.md): the shipped tracker is warm-started
+            # from the TRUE subspace, so every curve begins ~1e-3 from the answer. A cold
+            # start is the honest run and the more impressive one -- it reaches the warm
+            # floor by frame 3 at 2:1 compression -- but it was never reachable from the UI.
+            ParamSpec("warm_start", "Tracker initialisation", "choice", "warm",
+                      choices=["warm", "cold"],
+                      help="'warm': start from a perturbed copy of the true subspace "
+                           "(the historical default; the error curve then shows tracking "
+                           "lag only). 'cold': start from a random basis with no peek at "
+                           "ground truth, so the curve shows acquisition from scratch."),
         ],
         blurb="Online subspace tracking via Oja's algorithm. Required by AFE.",
     ),
