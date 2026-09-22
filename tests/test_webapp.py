@@ -92,10 +92,14 @@ def test_registry_param_defaults_match_kind():
         pkeys = [p.key for p in b.params]
         assert len(pkeys) == len(set(pkeys)), f"{b.id} has duplicate param keys"
         for p in b.params:
-            assert p.kind in {"number", "int", "choice"}, (
+            assert p.kind in {"number", "int", "choice", "text"}, (
                 f"{b.id}.{p.key} has unknown kind {p.kind!r}"
             )
             assert p.default is not None, f"{b.id}.{p.key} has no default"
+            if p.kind == "text":
+                assert isinstance(p.default, str), (
+                    f"{b.id}.{p.key} kind=text but default {p.default!r} is not a str"
+                )
             if p.kind == "int":
                 assert isinstance(p.default, int) and not isinstance(p.default, bool), (
                     f"{b.id}.{p.key} kind=int but default {p.default!r} is not an int"
@@ -1378,11 +1382,14 @@ def test_run_pipeline_dechirp_and_comms_mutually_exclusive(monkeypatch, make_env
         pipeline_runner.run_pipeline(state, n_steps=1)
 
 
-def test_run_pipeline_detector_enabled_raises_clear_checkpoint_error(
+def test_run_pipeline_detector_on_single_chirp_source_names_the_fix(
         monkeypatch, make_env_block):
-    """NeuralDetectorBlock needs a trained checkpoint the UI cannot yet supply (no
-    text/path ParamSpec kind); enabling it must fail with a clear, actionable
-    message instead of a raw ValueError from deep inside the block."""
+    """The detector consumes an ADC cube, which the precomputed .pkl source cannot
+    provide (single-chirp frames). Enabling it there must fail with a message naming
+    the two sources that CAN feed it -- RT Environment or Corpus Replay -- rather than
+    a shape mismatch from inside adc_to_rd. (Until 2026-09-22 this test pinned the
+    detector's old behaviour of always raising for want of a checkpoint path; the
+    block now runs in CFAR or ML mode, see tests/test_webapp_detector.py.)"""
     torch = pytest.importorskip("torch")
     from webapp import pipeline_runner
     from webapp.pipeline_registry import default_block_state
@@ -1394,7 +1401,7 @@ def test_run_pipeline_detector_enabled_raises_clear_checkpoint_error(
     state = default_block_state()
     state["dechirp"]["enabled"] = True
     state["detector"]["enabled"] = True
-    with pytest.raises(pipeline_runner.PipelineError, match="checkpoint"):
+    with pytest.raises(pipeline_runner.PipelineError, match="Corpus Replay"):
         pipeline_runner.run_pipeline(state, n_steps=1)
 
 

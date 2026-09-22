@@ -68,6 +68,9 @@ _POSITIONS = {
     "radar_cube": (1460, 700),
     "detector": (1460, 780),
     "sink": (1460, 860),
+    # Corpus replay: a source that enters the chain already digitized, so it sits on
+    # the ADC band and feeds only the RX-time products (one row below quantizer).
+    "corpus_environment": (1110, 860),
 }
 
 # Compound region groups (Cytoscape native `data.parent`; see build_elements).
@@ -91,7 +94,7 @@ _GROUPS: Dict[str, Dict[str, Any]] = {
     "grp_adc": {
         "members": ["dechirp", "thermal_noise", "impairment", "if_hpf",
                     "quantizer", "radar_cube",
-                    "detector", "sink"],
+                    "detector", "sink", "corpus_environment"],
         "label": "ADC-cube chain - mutually exclusive with the products above",
     },
 }
@@ -314,6 +317,13 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
                 id=cid,
                 options=[{"label": str(c), "value": c} for c in (ps.choices or [])],
                 value=val, clearable=False, style={"marginBottom": "4px"},
+            ))
+        elif ps.kind == "text":
+            # Free-form string (a path). Debounced like the numbers so the store is
+            # not rewritten on every keystroke.
+            children.append(dcc.Input(
+                id=cid, type="text", value="" if val is None else str(val),
+                debounce=True, style={"width": "100%", "marginBottom": "4px"},
             ))
         else:
             step = ps.step if ps.step is not None else (1 if ps.kind == "int" else "any")

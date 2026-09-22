@@ -18,12 +18,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+from webapp.corpus_catalog import CORPUS_MANIFESTS, DEFAULT_CORPUS
+
+
 @dataclass
 class ParamSpec:
     """An editable parameter on a block."""
     key: str
     label: str
-    kind: str            # "number" | "int" | "choice"
+    kind: str            # "number" | "int" | "choice" | "text" (a free-form string, e.g. a path)
     default: Any
     choices: Optional[List[Any]] = None
     step: Optional[float] = None
@@ -316,6 +319,33 @@ BLOCKS: List[BlockSpec] = [
                "reflects the exact scene/target geometry configured below."),
     ),
     BlockSpec(
+        id="corpus_environment",
+        label="Corpus Replay (stored ADC frames)",
+        toggleable=True,
+        enabled_default=False,
+        category="source",
+        params=[
+            ParamSpec("manifest", "Corpus manifest (path)", "text", DEFAULT_CORPUS,
+                      help="Repo-relative or absolute path to a generated corpus's "
+                           "manifest.json. Found on this machine: "
+                           + (", ".join(CORPUS_MANIFESTS) if CORPUS_MANIFESTS
+                              else "none -- corpora are generated locally, not tracked")),
+            ParamSpec("split", "Split", "choice", "test",
+                      choices=["test", "val", "train"],
+                      help="'test' is the held-out split every published detection "
+                           "number was scored on."),
+            ParamSpec("start_frame", "First frame index", "int", 0, step=1, min=0,
+                      help="Frames are replayed in manifest order from this index; "
+                           "each run step advances one frame."),
+        ],
+        blurb=("Replays the digitized frames of a generated ML corpus -- with their "
+               "stored ground-truth labels -- as the source, starting the chain at the "
+               "ADC cube. The frequency-domain stages and products do not apply "
+               "(the frame is already past them); use Radar Cube and the Detector. "
+               "This is how the Thrust 5 demo shows a detector on the exact frames it "
+               "was scored on."),
+    ),
+    BlockSpec(
         id="waveform",
         label="TX Waveform",
         toggleable=True,
@@ -466,20 +496,40 @@ BLOCKS: List[BlockSpec] = [
     ),
     BlockSpec(
         id="detector",
-        label="Neural Detector",
+        label="Detector (CFAR | ML)",
         toggleable=True,
         enabled_default=False,
         category="product",
         params=[
-            ParamSpec("input_format", "Model input", "choice", "rd",
-                      choices=["rd", "adc"],
-                      help="'rd': range-Doppler cube input. 'adc': raw digitized "
-                           "samples input."),
-            ParamSpec("threshold", "Detection threshold", "number", 0.5, step=0.05),
+            # ONE detection block with two modes (owner ballot, 2026-09-17): CFAR with its
+            # own tunable knobs, or a pretrained network loaded from a checkpoint path.
+            # No training happens in the GUI.
+            ParamSpec("mode", "Detector", "choice", "cfar",
+                      choices=["cfar", "ml"],
+                      help="'cfar': classical cell-averaging CFAR on the range-azimuth "
+                           "power map (the baseline every published number is compared "
+                           "against). 'ml': a trained FFTRadNet/SSMRadNet/RADDetNet "
+                           "checkpoint; its input format is read from the checkpoint."),
+            ParamSpec("checkpoint", "ML checkpoint (path)", "text", "",
+                      help="ML mode only. Path to a best.pt written by e2e.ml.train, "
+                           "e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Checkpoints are "
+                           "not tracked by git; the demo machine needs the file."),
+            ParamSpec("threshold", "Decode threshold", "number", 0.5, step=0.05,
+                      min=0.0, max=1.0,
+                      help="Objectness above which a local peak is reported as a "
+                           "detection. This is an operating point, not the metric: AP "
+                           "in the notes integrates the whole curve."),
+            ParamSpec("cfar_guard", "CFAR guard cells", "int", 2, step=1, min=1,
+                      help="CFAR mode only. Half-width of the guard ring excluded "
+                           "around the cell under test."),
+            ParamSpec("cfar_train", "CFAR training cells", "int", 6, step=1, min=1,
+                      help="CFAR mode only. Half-width of the annulus the noise level "
+                           "is averaged over."),
         ],
-        blurb=("Runs a trained neural network (FFTRadNet/SSMRadNet) on the "
-               "digitized signal to find targets directly. Needs a trained model "
-               "checkpoint, which is not yet selectable from this screen."),
+        blurb=("Finds targets in the digitized signal and draws an objectness map with "
+               "decoded detections -- and the stored ground truth, when the frame came "
+               "from the Corpus Replay source. CFAR mode is the shipped baseline "
+               "(e2e.ml.baseline); ML mode runs a pretrained network."),
     ),
     BlockSpec(
         id="sink",
@@ -532,6 +582,10 @@ EDGES: List[tuple] = [
     ("quantizer", "radar_cube"),
     ("quantizer", "detector"),
     ("quantizer", "sink"),
+    # A replayed corpus frame enters the chain already digitized, so its only
+    # consumers are the RX-time products.
+    ("corpus_environment", "radar_cube", "alt"),
+    ("corpus_environment", "detector", "alt"),
 ]
 
 

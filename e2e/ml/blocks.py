@@ -272,6 +272,11 @@ class SourceBlock:
                 f"no {tag!r}-tagged artifacts found in {self.in_dir} (expected "
                 f"files matching '{tag}_frame_?????.npz' -- see SinkBlock)"
             )
+        self._finish_init()
+
+    def _finish_init(self):
+        """Shared tail of construction once `self._files` is known (subclasses that
+        pick their files some other way -- `CorpusSourceBlock` -- call this)."""
         self.frame_counter = 0
         self._cache = None   # (frame_counter, payload, meta, extra) of the last load
         # Peek the first artifact so signal_domain is known before the first
@@ -330,6 +335,114 @@ class SourceBlock:
         wrote the current frame (see the class docstring's handoff note)."""
         _payload, _meta, extra = self._current()
         return dict(extra)
+
+
+class CorpusSourceBlock(SourceBlock):
+    """Replay the frames of a generated ML corpus, in manifest order, as the environment.
+
+    A corpus sample IS a `SinkBlock` artifact (the generator writes them with one), so
+    `SourceBlock` already knows how to read one; what it lacks is the manifest's notion of
+    a split and an order. This subclass takes `files[split]` from the manifest instead of
+    globbing a tag, and carries the manifest's `RadarConfig` (`.cfg`) and `LabelGrid`
+    (`.grid`) so the products downstream -- the radar cube and either detector -- are
+    built for exactly the geometry the frames were generated with.
+
+    Why the demo replays the corpus rather than ray-tracing live (Thrust 5): these are
+    the held-out TEST frames every published number was scored on, with their labels
+    riding along (`get_state_updates`), and they load in milliseconds. A live trace would
+    show a frame no detector was ever evaluated against, at a cost per frame nobody has
+    measured on the demo machine.
+    """
+
+    def __init__(self, manifest_path, split: str = "test", start: int = 0,
+                 limit: Optional[int] = None):
+        from e2e.ml.labels import LabelGrid
+        from e2e.radar_config import RadarConfig
+
+        self.manifest_path = Path(manifest_path)
+        manifest = json.loads(self.manifest_path.read_text())
+        if split not in manifest.get("files", {}):
+            raise KeyError(f"manifest has no split {split!r}; has {sorted(manifest.get('files', {}))}")
+        names = list(manifest["files"][split])
+        if start < 0 or start >= len(names):
+            raise IndexError(f"start={start} outside the {len(names)} frames of split {split!r}")
+        names = names[start:] if limit is None else names[start:start + limit]
+        self.in_dir = self.manifest_path.parent
+        self.tag = f"{self.manifest_path.parent.name}:{split}"
+        self.split = split
+        self.start = start
+        self._files = [self.in_dir / n for n in names]
+        missing = [str(p) for p in self._files if not p.exists()]
+        if missing:
+            raise FileNotFoundError(f"{len(missing)} corpus frame(s) missing, first: {missing[0]}")
+        self.cfg = RadarConfig.from_dict(manifest["config"])
+        g = manifest["grid"]
+        self.grid = LabelGrid(n_range=int(g["n_range"]), n_azimuth=int(g["n_azimuth"]),
+                              max_range_m=float(g["max_range_m"]))
+        self._finish_init()
+
+
+def ground_truth_detections(state: Dict[str, Any], grid) -> Optional[list]:
+    """Decode the stored label map riding with a replayed frame, if there is one.
+
+    Returns None when the frame carries no `labels` (a live-traced or synthetic frame),
+    so a detector block can attach ground truth to its output only when it is real.
+    """
+    labels = state.get("labels")
+    if labels is None or grid is None:
+        return None
+    from e2e.ml.labels import decode_detections
+
+    return decode_detections(grid, torch.as_tensor(labels), threshold=0.5)
+
+
+class CFARDetectorBlock:
+    """The classical CA-CFAR detector as a pipeline product, the peer of `NeuralDetectorBlock`.
+
+    Wraps `e2e.ml.baseline.classical_detection_map` -- the SAME function
+    `e2e.ml.compare_detectors --classical` scores, with the same defaults (Doppler-sum
+    reduction, the shipped front end) -- so the objectness map this block draws in the GUI
+    is the arm that scores AP 0.301 on `benchmark_v1_D2` test, not a lookalike. The only
+    knobs exposed are the ones a CFAR genuinely has: the guard and training annulus
+    widths and the decode threshold; `**kwargs` reach `classical_detection_map` for the
+    rest (see its docstring).
+
+    Emits `cfar_detection` (`[3, n_range, n_azimuth]`, channel 0 the objectness in
+    [0, 1]; the regression channels are zero because a CFAR has no sub-cell estimate),
+    `cfar_detections` (decoded `(range_m, sin_azimuth, score, surface_range_m)` tuples),
+    and, when the frame carries stored labels, `gt_detections` decoded the same way.
+    """
+
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=True, chirps=frames.CHIRP_NATIVE, domain=frames.DOMAIN_RX_TIME,
+    )
+
+    def __init__(self, cfg, grid, *, guard: int = 2, train: int = 6,
+                 threshold: float = 0.5, **kwargs):
+        if guard < 1 or train < 1:
+            raise ValueError(f"guard and train must be >= 1 cells, got {guard}, {train}")
+        self.cfg = cfg
+        self.grid = grid
+        self.guard = int(guard)
+        self.train = int(train)
+        self.threshold = float(threshold)
+        self.kwargs = dict(kwargs)
+
+    def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        from e2e.ml.baseline import classical_detection_map
+        from e2e.ml.labels import decode_detections
+
+        adc = state[frames.DOMAIN_PAYLOAD_KEY[frames.DOMAIN_RX_TIME]]
+        det = classical_detection_map(self.cfg, adc, self.grid, guard=self.guard,
+                                      train=self.train, **self.kwargs).cpu()
+        out: Dict[str, Any] = {
+            "cfar_detection": det,
+            "cfar_detections": decode_detections(self.grid, det, threshold=self.threshold),
+        }
+        gt = ground_truth_detections(state, self.grid)
+        if gt is not None:
+            out["gt_detections"] = gt
+        return out
 
 
 # --------------------------------------------------------------------------------
@@ -500,6 +613,9 @@ class NeuralDetectorBlock:
             from e2e.ml.labels import decode_detections
 
             out["ml_detections"] = decode_detections(self.grid, detection, threshold=self.threshold)
+            gt = ground_truth_detections(state, self.grid)
+            if gt is not None:
+                out["gt_detections"] = gt
         return out   # deliberately does not touch 'adc' -- a product block, like FFTBlock
 
     def fit(self, **override_kwargs):

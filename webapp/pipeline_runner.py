@@ -132,6 +132,89 @@ def _comms_freqs(state: Dict[str, Dict[str, Any]], env_block: Any) -> np.ndarray
     return np.linspace(carrier - span / 2.0, carrier + span / 2.0, n_freqs)
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_repo_path(text: Any) -> Path:
+    """A path typed into the UI: absolute as given, otherwise relative to the repo root
+    (NOT the process CWD, which for a Dash server is wherever it was launched from)."""
+    p = Path(str(text or "").strip())
+    return p if p.is_absolute() else _REPO_ROOT / p
+
+
+def _corpus_source(state: Dict[str, Dict[str, Any]]):
+    """Build the Corpus Replay source; returns `(block, cfg, grid)`."""
+    manifest_text = str(_p(state, "corpus_environment", "manifest") or "").strip()
+    if not manifest_text:
+        raise PipelineError(
+            "The Corpus Replay source needs a corpus manifest path (Corpus Replay -> "
+            "'Corpus manifest'). Corpora are generated locally and are not tracked by "
+            "git; none was found under e2e/ml/datasets/ on this machine."
+        )
+    manifest = _resolve_repo_path(manifest_text)
+    if not manifest.is_file():
+        raise PipelineError(f"Corpus manifest not found: {manifest}")
+    try:
+        from e2e.ml.blocks import CorpusSourceBlock
+    except ImportError as e:
+        raise PipelineError(
+            "Could not import the corpus replay source (e2e.ml.blocks). "
+            "Underlying error: " + str(e)
+        )
+    try:
+        src = CorpusSourceBlock(
+            manifest,
+            split=str(_p(state, "corpus_environment", "split")),
+            start=int(_p(state, "corpus_environment", "start_frame") or 0),
+        )
+    except (KeyError, IndexError, FileNotFoundError, ValueError) as e:
+        raise PipelineError(f"Could not open the corpus: {e}")
+    return src, src.cfg, src.grid
+
+
+def _build_detector(state: Dict[str, Dict[str, Any]], cfg, grid):
+    """The Detector product in either mode. `cfg`/`grid` describe the ADC cube it
+    consumes -- from the corpus manifest, or from the dechirp preset for a live chain."""
+    mode = str(_p(state, "detector", "mode"))
+    threshold = float(_p(state, "detector", "threshold"))
+    if mode == "cfar":
+        try:
+            from e2e.ml.blocks import CFARDetectorBlock
+        except ImportError as e:
+            raise PipelineError("Could not import the CFAR detector (e2e.ml.blocks). "
+                                "Underlying error: " + str(e))
+        try:
+            return CFARDetectorBlock(
+                cfg, grid, threshold=threshold,
+                guard=int(_p_positive(state, "detector", "cfar_guard")),
+                train=int(_p_positive(state, "detector", "cfar_train")),
+            )
+        except ValueError as e:
+            raise PipelineError(f"Detector: {e}")
+    if mode != "ml":
+        raise PipelineError(f"Unknown detector mode {mode!r}; choose 'cfar' or 'ml'")
+    ckpt_text = str(_p(state, "detector", "checkpoint") or "").strip()
+    if not ckpt_text:
+        raise PipelineError(
+            "Detector in ML mode needs a trained checkpoint path (Detector -> "
+            "'ML checkpoint'), e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Switch the "
+            "mode to 'cfar' to run the classical detector instead."
+        )
+    ckpt = _resolve_repo_path(ckpt_text)
+    if not ckpt.is_file():
+        raise PipelineError(f"ML checkpoint not found: {ckpt}")
+    try:
+        from e2e.ml.blocks import NeuralDetectorBlock
+    except ImportError as e:
+        raise PipelineError("Could not import the neural detector (e2e.ml.blocks). "
+                            "Underlying error: " + str(e))
+    try:
+        return NeuralDetectorBlock(str(ckpt), mode="infer", cfg=cfg, grid=grid,
+                                   threshold=threshold)
+    except Exception as e:
+        raise PipelineError(f"Could not load the ML checkpoint {ckpt.name}: {e}")
+
+
 def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[str, Any]:
     """
     Build blocks from ``state`` and run ``n_steps`` of the simulation.
@@ -193,7 +276,17 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # e2e.environment.blocks.RTEnvironmentBlock (needs Sionna/DrJit -- guarded behind
     # its own lazy import, same per-feature pattern as the comms head below, so a
     # machine without Sionna can still run every pipeline that leaves this off).
-    if _enabled(state, "rt_environment"):
+    # Corpus replay: the frame enters the chain already digitized, so it is an
+    # alternative to BOTH frequency-domain sources and to the whole dechirp chain.
+    corpus_mode = _enabled(state, "corpus_environment")
+    corpus_cfg = corpus_grid = None
+    if corpus_mode and _enabled(state, "rt_environment"):
+        raise PipelineError(
+            "Corpus Replay and RT Environment are both sources -- enable one, not both."
+        )
+    if corpus_mode:
+        environment_block, corpus_cfg, corpus_grid = _corpus_source(state)
+    elif _enabled(state, "rt_environment"):
         try:
             from e2e.environment.blocks import RTEnvironmentBlock
             from e2e.radar_config import PRESETS
@@ -303,6 +396,13 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         RangeProfileBlock(bins=range_profile_bins),
         SubspaceErrorBlock(),
     ]
+    # `rx_cfg`/`rx_grid` describe the ADC cube the RX-time products consume, when there
+    # is one: set by the corpus source, or by the dechirp chain below.
+    rx_cfg, rx_grid = corpus_cfg, corpus_grid
+    if corpus_mode:
+        # A replayed frame is already past every frequency-domain stage and product;
+        # Simulation would refuse them at the frame contract. Run none of them.
+        downstream_blocks = []
 
     # --- optional ADC-cube chain (e2e/chain/dechirp.py, e2e/chain/receive.py) ----
     # "dechirp" is this chain's activation toggle: it BRIDGES the frequency-domain
@@ -315,7 +415,12 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     # exclusive within one run. (The TX-time trio -- waveform/tx_pa/modulate -- is
     # NOT wired in here: see this module's docstring.)
     serial_stages_override = None
-    if _enabled(state, "dechirp"):
+    if corpus_mode:
+        # No serial stages at all: the corpus frame was generated by this very chain
+        # (dechirp -> thermal floor -> impairments -> IF HPF -> quantizer) and stored
+        # AFTER it. Re-running any of it here would impair an already-impaired frame.
+        serial_stages_override = []
+    elif _enabled(state, "dechirp"):
         try:
             from e2e.chain.dechirp import DechirpBlock
             from e2e.radar_config import PRESETS
@@ -443,7 +548,18 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # None of the frequency-domain products above apply once the chain has
         # crossed into RX time; replace them with the RX-time products instead.
         downstream_blocks = []
-        if _enabled(state, "radar_cube"):
+        # The RX-time products (radar cube, detector) are built in the shared section
+        # below, from this chain's cube geometry. The label grid mirrors the corpus
+        # generator's convention (e2e.ml.labels.LabelGrid.for_config) so a live chain
+        # and a replayed corpus frame draw on the same axes.
+        rx_cfg = adc_cfg
+        try:
+            from e2e.ml.labels import LabelGrid
+            rx_grid = LabelGrid.for_config(adc_cfg)
+        except ImportError:
+            rx_grid = None
+        if (_enabled(state, "radar_cube") or _enabled(state, "detector")) \
+                and not _enabled(state, "rt_environment"):
             # The radar cube folds the chirp axis, so it needs a frame carrying the
             # preset's full chirp count. Precomputed .pkl frames are always SINGLE-chirp,
             # so this pairing fails deep inside adc_to_rd with a bare shape mismatch
@@ -451,33 +567,13 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
             # a configuration error. Say what is actually wrong, as the comms-head guard
             # below does. Not caused by the preset default -- it failed identically at
             # the old preset's 192 chirps.
-            if not _enabled(state, "rt_environment"):
-                raise PipelineError(
-                    "The Radar Cube product needs a multi-chirp frame, but the "
-                    "Environment source replays precomputed .pkl frames, which are "
-                    "single-chirp. Enable the RT Environment source (it ray-traces "
-                    f"{adc_cfg.n_chirps} chirps to match the '{_p(state, 'dechirp', 'preset')}' "
-                    "preset), or turn off Radar Cube and use the frequency-domain "
-                    "products instead."
-                )
-            try:
-                from e2e.chain.receive import RadarCubeBlock
-            except ImportError as e:
-                raise PipelineError(
-                    "Could not import the radar-cube product (e2e.chain.receive). "
-                    "Underlying error: " + str(e)
-                )
-            downstream_blocks.append(RadarCubeBlock(adc_cfg))
-        if _enabled(state, "detector"):
-            # NeuralDetectorBlock needs a trained model checkpoint (a file path);
-            # the registry's ParamSpec model has no text/path parameter kind yet
-            # (see webapp/pipeline_registry.py / webapp/block_diagram.py), so there
-            # is no way for this screen to collect one. Fail clearly rather than
-            # silently skip the block the user asked for.
             raise PipelineError(
-                "The Neural Detector block needs a trained model checkpoint, which "
-                "this screen does not yet let you choose -- disable it to run the "
-                "rest of the ADC-cube chain."
+                "The Radar Cube and Detector products need a multi-chirp frame, but "
+                "the Environment source replays precomputed .pkl frames, which are "
+                "single-chirp. Enable the RT Environment source (it ray-traces "
+                f"{adc_cfg.n_chirps} chirps to match the '{_p(state, 'dechirp', 'preset')}' "
+                "preset), replay a generated corpus with the Corpus Replay source, or "
+                "turn them off and use the frequency-domain products instead."
             )
         if _enabled(state, "sink"):
             try:
@@ -490,6 +586,29 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
                 )
             sink_dir = Path(__file__).resolve().parent / "_sink_output"
             downstream_blocks.append(SinkBlock(sink_dir, tag="webapp", domain=DOMAIN_RX_TIME))
+
+    # --- RX-time products, shared by the live dechirp chain and corpus replay ------
+    if rx_cfg is not None:
+        if _enabled(state, "radar_cube"):
+            try:
+                from e2e.chain.receive import RadarCubeBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the radar-cube product (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            downstream_blocks.append(RadarCubeBlock(rx_cfg))
+        if _enabled(state, "detector"):
+            if rx_grid is None:
+                raise PipelineError("The Detector needs the label grid (e2e.ml.labels), "
+                                    "which could not be imported.")
+            downstream_blocks.append(_build_detector(state, rx_cfg, rx_grid))
+    elif _enabled(state, "radar_cube") or _enabled(state, "detector"):
+        raise PipelineError(
+            "The Radar Cube and Detector products consume a digitized ADC cube. Enable "
+            "the Dechirp chain (with the RT Environment source) or the Corpus Replay "
+            "source to produce one."
+        )
 
     # --- optional comms head (swappable "product": OFDM demod instead of / -------
     # alongside the radar products above). Appended AFTER the radar products so it
@@ -616,6 +735,18 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # block freq_plan), not from UI params/fallbacks -- lets the UI say so.
         "from_meta": bool(getattr(environment_block, "freq_plan", None)),
     }
+    if rx_cfg is not None:
+        # Geometry of the ADC cube the RX-time products were built on, so their
+        # figures carry physical axes (range in m, radial velocity in m/s, sin(az)).
+        outputs["_axis_meta"]["rx"] = {
+            "range_resolution_m": float(rx_cfg.range_resolution_m),
+            "velocity_resolution_mps": float(rx_cfg.velocity_resolution_mps),
+            "max_range_m": float(rx_cfg.max_range_m),
+            "grid": (None if rx_grid is None else {
+                "n_range": int(rx_grid.n_range), "n_azimuth": int(rx_grid.n_azimuth),
+                "max_range_m": float(rx_grid.max_range_m),
+            }),
+        }
     if comms_combining is not None:
         # Small metadata dict figures_from_outputs reads to label the BER figure
         # (mirrors "_axis_meta" above); leading underscore keeps it out of the
@@ -900,6 +1031,71 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             height=360,
         )
         figs["range_profile"] = fig
+
+    rx = meta.get("rx") or {}
+    if outputs.get("radar_cube"):
+        # [n_channels, range, doppler] complex -> non-coherent power over channels, dB
+        # relative to the frame's peak (same display convention as the range products).
+        def _rd_db(cube):
+            if hasattr(cube, "detach"):
+                cube = cube.detach().cpu().numpy()
+            p = np.mean(np.abs(np.asarray(cube)) ** 2, axis=0)
+            return 10 * np.log10(p / max(float(p.max()), 1e-30) + 1e-12)
+        first = _rd_db(outputs["radar_cube"][-1])
+        n_r, n_d = first.shape
+        if rx.get("range_resolution_m") and rx.get("velocity_resolution_mps"):
+            y = np.arange(n_r) * rx["range_resolution_m"]
+            # adc_to_rd fftshifts the Doppler axis: zero Doppler sits at bin n_d // 2.
+            x = (np.arange(n_d) - n_d // 2) * rx["velocity_resolution_mps"]
+            xlabel, ylabel = "radial velocity (m/s)", "range (m)"
+        else:
+            x, y, xlabel, ylabel = np.arange(n_d), np.arange(n_r), "Doppler (bin)", "range (bin)"
+        figs["radar_cube"] = _add_frame_animation(
+            _heatmap(first, "Range-Doppler power (non-coherent over channels)",
+                     x=x, y=y, xlabel=xlabel, ylabel=ylabel),
+            [_rd_db(c) for c in outputs["radar_cube"]])
+
+    for key, title in (("cfar_detection", "CFAR objectness"),
+                       ("ml_detection", "Neural detector objectness")):
+        if not outputs.get(key):
+            continue
+        det = outputs[key][-1]
+        if hasattr(det, "detach"):
+            det = det.detach().cpu().numpy()
+        obj = np.asarray(det)[0]                      # [n_range, n_azimuth], in [0, 1]
+        n_r, n_a = obj.shape
+        g = rx.get("grid") or {}
+        max_r = float(g.get("max_range_m") or n_r)
+        y = (np.arange(n_r) + 0.5) * max_r / n_r     # range-bin centres, m
+        x = -1.0 + (np.arange(n_a) + 0.5) * 2.0 / n_a  # sin(azimuth) bin centres
+        fig = go.Figure(data=go.Heatmap(
+            z=obj, x=x, y=y, zmin=0.0, zmax=1.0, colorscale="Viridis",
+            colorbar=dict(title="objectness"), name="objectness",
+        ))
+        # Decoded detections (filled) and, for a replayed corpus frame, the stored
+        # ground truth (hollow) -- drawn at the surface range the metric matches on.
+        dets = (outputs.get(key + "s") or [[]])[-1]
+        if dets:
+            fig.add_trace(go.Scatter(
+                x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
+                name=f"detections (n={len(dets)})",
+                marker=dict(symbol="x", size=10, color="#ff3b3b", line=dict(width=2)),
+                text=[f"score {d[2]:.2f}" for d in dets],
+            ))
+        gt = (outputs.get("gt_detections") or [[]])[-1]
+        if gt:
+            fig.add_trace(go.Scatter(
+                x=[d[1] for d in gt], y=[d[3] for d in gt], mode="markers",
+                name=f"ground truth (n={len(gt)})",
+                marker=dict(symbol="circle-open", size=14, color="#ffffff",
+                            line=dict(width=2)),
+            ))
+        fig.update_layout(
+            title=title, xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
+            margin=dict(l=40, r=20, t=40, b=40), height=420,
+            legend=dict(orientation="h", y=-0.2),
+        )
+        figs[key] = fig
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
