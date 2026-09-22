@@ -469,7 +469,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
           deterministic: bool = False,
           input_format: str = "rd", reg_weight: float = 100.0, gamma: float = 2.0,
           cls_normalize: str = "positives", amp="auto", accum_steps: int = 1,
-          num_workers: Optional[int] = None, ssm_chunk: Optional[int] = None) -> Dict:
+          num_workers: Optional[int] = None, ssm_chunk: Optional[int] = None,
+          weight_decay: float = 0.0, extra_manifests: Optional[List] = None) -> Dict:
     """Train `model_name` on `manifest_path`'s train split, evaluating on val each epoch.
 
     `input_format` ("rd" default | "adc") selects the range-Doppler vs. raw-ADC input
@@ -524,6 +525,15 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     grid = _load_grid(manifest)
 
     train_ds = _make_dataset(manifest_path, "train", input_format)
+    if extra_manifests:
+        # Joint training across corpora (generalisation campaign): the train splits of
+        # every extra manifest are concatenated with the primary's. Validation and model
+        # selection stay on the PRIMARY manifest's val split, so a joint run is scored on
+        # the same frames as a single-corpus run and the two are comparable. Each dataset
+        # resolves its own input_scale from its own manifest.
+        from torch.utils.data import ConcatDataset
+        extras = [_make_dataset(Path(m), "train", input_format) for m in extra_manifests]
+        train_ds = ConcatDataset([train_ds, *extras])
     val_ds = _make_dataset(manifest_path, "val", input_format)
 
     if num_workers is None:
@@ -546,7 +556,14 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     manifest_for_model = dict(manifest)
     manifest_for_model["input_format"] = input_format
     model = build_model(model_name, manifest_for_model, device=device, ssm_chunk_size=ssm_chunk)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Generalisation campaign (owner, 2026-09-22, after F85's out-of-distribution caveat):
+    # decoupled weight decay is the first regulariser tried. AdamW at weight_decay=0 is
+    # NOT bit-identical to Adam in torch, so the default path keeps Adam and every
+    # existing checkpoint's provenance intact.
+    if weight_decay > 0.0:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     out_dir = Path(out_dir) if out_dir is not None else manifest_path.parent / "runs" / model_name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -592,6 +609,8 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
                 "reg_weight": float(reg_weight), "gamma": float(gamma),
                 "cls_normalize": cls_normalize, "amp": str(amp),
                 "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
+                "weight_decay": float(weight_decay),
+                "extra_manifests": [str(m) for m in (extra_manifests or [])],
             },
             # What the input pipeline WAS when this run started, so a later reader can tell
             # whether reloading these weights reproduces the metrics recorded beside them.
@@ -805,6 +824,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "activation memory (see e2e.ml.models.ssm's 'CHUNKED SCAN' "
                         "docs); lets a larger --batch-size fit that would otherwise "
                         "OOM. Ignored for model='fftradnet'.")
+    p.add_argument("--weight-decay", type=float, default=0.0,
+                   help="decoupled weight decay (AdamW); 0 keeps plain Adam, bit-identical "
+                        "to every run before 2026-09-22")
+    p.add_argument("--extra-manifest", action="append", default=[], metavar="MANIFEST",
+                   help="train jointly on this manifest's train split as well (repeatable); "
+                        "validation and model selection stay on --manifest's val split")
     p.add_argument("--out", default=None,
                    help="output run directory (default: <manifest dir>/runs/<model>)")
     p.add_argument("--eval-only", default=None, metavar="CKPT",
@@ -828,7 +853,8 @@ def main(argv: Optional[List[str]] = None) -> int:
           out_dir=args.out, input_format=args.input_format,
           reg_weight=args.reg_weight, gamma=args.gamma, cls_normalize=args.cls_normalize,
           amp={"auto": "auto", "on": True, "off": False}[args.amp], accum_steps=args.accum_steps,
-          ssm_chunk=args.ssm_chunk)
+          ssm_chunk=args.ssm_chunk, weight_decay=args.weight_decay,
+          extra_manifests=args.extra_manifest or None)
     return 0
 
 
