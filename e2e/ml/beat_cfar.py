@@ -42,6 +42,25 @@ Two honest limits remain, and no API removes them:
     seed-reproducible (same-machine agreement to a few 1e-3 in AP, the scale of this
     pipeline's own noise). Quote AP to three decimals, never more.
 
+WHAT IT COSTS (measured 2026-09-21, not estimated)
+---------------------------------------------------
+2 epochs of `fftradnet`/`rad`, batch 8, seed 42, one GPU of this box (RTX 2000-class, 8 GiB;
+torch+cuDNN as installed in `alex_env`):
+
+    default (seeded only)     987.2 s
+    --deterministic          1097.4 s     1.112x  (+11.2%)
+    --deterministic (repeat) 1086.3 s     bit-identical train_loss and val_AP -> True
+
+So determinism costs about 11% wall time here, and it does deliver: the two strict runs
+agreed exactly, not approximately.
+
+One result worth not over-reading: the seeded-only run ALSO produced the identical loss
+curve. On this box, for this model, `torch.manual_seed` alone was already reproducible --
+cuDNN autotuning (`benchmark`) is off by default in torch, which is the main thing the flag
+disables. The flag therefore buys a GUARANTEE rather than a changed number, and that
+guarantee is what matters on a different box, a different driver, or a model that does use
+an atomics-based kernel. Do not conclude from one model that the flag is unnecessary.
+
 USAGE
 -----
     python -m e2e.ml.beat_cfar                      # both arms, seed 42, deterministic
@@ -53,6 +72,11 @@ USAGE
 Training is IDEMPOTENT: an arm whose `history.json` already records the requested epoch
 count is skipped unless `--force`. That makes re-running this to regenerate the table cheap
 and safe, which is the only way a "reproducible" script actually gets re-run.
+
+The skip is NOT taken when the input pipeline has changed since the checkpoint was written
+(see `_stale_sources`) -- such an arm is retrained instead. A checkpoint is only
+interchangeable with a rerun while the code that built its inputs still exists, and on
+2026-09-21 that assumption failed silently and cost two invalid results.
 """
 
 from __future__ import annotations
@@ -131,12 +155,81 @@ def _completed_epochs(out_dir: str) -> int:
         return 0
 
 
+def _stale_reason(out_dir: str) -> Optional[str]:
+    """Why `out_dir/best.pt` is not interchangeable with a rerun, or None if it is.
+
+    A checkpoint trained by code that no longer exists is worse than useless: reloading it
+    feeds the network an input distribution it never saw, which reads as a catastrophic
+    model failure rather than as the bookkeeping error it is.
+
+    MEASURED, 2026-09-21, the reason this exists: `e2e/ml/dataset.py` was edited at 17:19
+    (the `rad` front-end parity fix, commit 45b6f22) while `b7_raddetnet` trained
+    16:36-19:36. That run recorded val_AP 0.484; its checkpoint, reloaded against the edited
+    dataset, scored 0.023 on the SAME split. `b6_fftradnet_rad` (trained 13:41-15:58) fell
+    from a reported test AP 0.229 to 0.054. Both were invalid, and the epoch-count check in
+    `_train` would have skipped the retrain and re-scored them silently.
+
+    Two mechanisms, in order of authority:
+
+    1. `pipeline_fingerprint` recorded IN the checkpoint at start-of-run (`e2e.ml.train`).
+       Authoritative: it is the content the training process actually imported.
+    2. File mtimes, for checkpoints written before that field existed. PARTIAL, and it
+       misses exactly the case above -- the final checkpoint write stamps 19:36, later than
+       the 17:19 edit, so mtime calls it fresh. It does catch a source edited after a run
+       finished, which is how `b6` is caught.
+    """
+    ck = Path(out_dir) / "best.pt"
+    if not ck.exists():
+        return None
+    try:
+        import torch
+        from e2e.ml.train import INPUT_PIPELINE_SOURCES, pipeline_fingerprint
+    except ImportError:
+        return None
+
+    try:
+        recorded = torch.load(ck, map_location="cpu").get("pipeline_fingerprint")
+    except Exception:
+        recorded = None
+
+    if recorded is not None:
+        now = pipeline_fingerprint()
+        if now is not None and now != recorded:
+            return (f"pipeline fingerprint differs from the one recorded at training start "
+                    f"({recorded[:12]} -> {now[:12]})")
+        return None
+
+    # Fallback for pre-fingerprint checkpoints. Say so, so the weaker check is never
+    # mistaken for the strong one.
+    ck_mtime = ck.stat().st_mtime
+    changed = []
+    for src in INPUT_PIPELINE_SOURCES:
+        p = Path(src)
+        if not p.exists():
+            continue
+        newest = (max((f.stat().st_mtime for f in p.rglob("*.py")), default=0.0)
+                  if p.is_dir() else p.stat().st_mtime)
+        if newest > ck_mtime:
+            changed.append(src)
+    if changed:
+        return (f"no recorded fingerprint, and {', '.join(changed)} are newer than best.pt")
+    return None
+
+
 def _train(name: str, spec: Dict, seed: int, strict: bool, force: bool) -> bool:
     done = _completed_epochs(spec["out"])
     if done >= spec["epochs"] and not force:
-        print(f"[{name}] SKIP -- {done}/{spec['epochs']} epochs already recorded "
-              f"in {spec['out']}/history.json (use --force to retrain)")
-        return True
+        reason = _stale_reason(spec["out"])
+        if reason:
+            # Retrain rather than skip. Skipping here would score a checkpoint against a
+            # pipeline it was not trained on and report the result as this arm's number.
+            print(f"[{name}] STALE -- {done}/{spec['epochs']} epochs recorded in "
+                  f"{spec['out']}, but {reason}. Retraining; the recorded metrics "
+                  f"describe code that no longer exists.")
+        else:
+            print(f"[{name}] SKIP -- {done}/{spec['epochs']} epochs already recorded "
+                  f"in {spec['out']}/history.json (use --force to retrain)")
+            return True
     cmd = [
         sys.executable, "-u", "-m", "e2e.ml.train",
         "--manifest", MANIFEST,

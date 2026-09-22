@@ -208,7 +208,12 @@ def test_train_fftradnet_two_epochs_then_evaluate(tiny_manifest_path, tmp_path):
     assert checkpoint["manifest"] == str(tiny_manifest_path)
     assert set(checkpoint) == {"model_state", "model_name", "manifest", "history",
                                "input_format", "train_config", "best_epoch",
-                               "best_val_AP", "epochs_completed"}
+                               "best_val_AP", "epochs_completed", "pipeline_fingerprint"}
+    # The code that built this checkpoint's inputs, hashed at start-of-run. Without it a
+    # checkpoint cannot be told apart from one trained by since-edited code, which on
+    # 2026-09-21 turned a recorded val_AP of 0.484 into 0.023 on reload
+    # (see tests/test_ml_pipeline_fingerprint.py).
+    assert checkpoint["pipeline_fingerprint"] == train_mod.pipeline_fingerprint()
     # A run that finished records every requested epoch; a killed one records fewer
     # (see test_checkpoint_survives_a_run_killed_mid_training), which is how a
     # truncated run is told apart from a complete one after the fact.

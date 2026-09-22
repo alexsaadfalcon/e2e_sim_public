@@ -107,6 +107,54 @@ def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+#: Sources whose CONTENT decides what a checkpoint was trained on: the input tensor it was
+#: fed, the loop that fed it, the architecture, and the metric. Canonical list -- readers
+#: (`e2e.ml.beat_cfar`) import it rather than keeping their own copy.
+INPUT_PIPELINE_SOURCES = (
+    "e2e/ml/dataset.py",
+    "e2e/ml/train.py",
+    "e2e/ml/models",
+    "e2e/ml/metrics.py",
+)
+
+
+def pipeline_fingerprint(root=None) -> Optional[str]:
+    """SHA-256 over the text of `INPUT_PIPELINE_SOURCES`, or None if they are not found.
+
+    Recorded in every checkpoint AT TRAINING START, which is the only moment that describes
+    what the process actually imported. A reader comparing this against its own current
+    fingerprint learns whether the checkpoint is interchangeable with a rerun.
+
+    WHY NOT FILE MTIMES (measured, 2026-09-21): `dataset.py` was edited at 17:19 while a run
+    trained 16:36-19:36. The checkpoint's final write stamps 19:36, so it is NEWER than the
+    edit and an mtime check calls it fresh -- while the running process still held the code
+    from 16:36. That run reported val_AP 0.484 and reloaded at 0.023 against the edited
+    file. Content hashed at start-of-run is immune to that; mtimes are not.
+
+    WHY NOT THE GIT SHA ALONE: the edit above was uncommitted when the run began. A SHA
+    describes the last commit, not the working tree that was imported.
+    """
+    import hashlib
+
+    base = Path(root) if root is not None else Path(__file__).resolve().parents[2]
+    h = hashlib.sha256()
+    found = False
+    for src in INPUT_PIPELINE_SOURCES:
+        p = base / src
+        if not p.exists():
+            continue
+        # Sorted so the digest does not depend on filesystem iteration order.
+        files = sorted(p.rglob("*.py")) if p.is_dir() else [p]
+        for f in files:
+            try:
+                h.update(f.relative_to(base).as_posix().encode())
+                h.update(f.read_bytes())
+                found = True
+            except OSError:
+                continue
+    return h.hexdigest() if found else None
+
+
 def set_determinism(seed: int, *, strict: bool = True) -> None:
     """Seed every RNG this training path touches, and pin the kernels.
 
@@ -419,6 +467,10 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
     # cuBLAS so a same-machine rerun is bit-identical. See set_determinism.
     set_determinism(seed, strict=deterministic)
 
+    # Captured HERE, before any epoch runs, because this is what the process imported. See
+    # `pipeline_fingerprint` for why the checkpoint's own mtime cannot stand in for it.
+    fingerprint = pipeline_fingerprint()
+
     with open(manifest_path) as f:
         manifest = json.load(f)
     grid = _load_grid(manifest)
@@ -493,6 +545,9 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
                 "cls_normalize": cls_normalize, "amp": str(amp),
                 "accum_steps": int(accum_steps), "ssm_chunk": ssm_chunk,
             },
+            # What the input pipeline WAS when this run started, so a later reader can tell
+            # whether reloading these weights reproduces the metrics recorded beside them.
+            "pipeline_fingerprint": fingerprint,
             "epochs_completed": len(history["epoch"]),
             "best_epoch": (int(history["epoch"][int(max(range(len(history["val_AP"])),
                                                         key=history["val_AP"].__getitem__))])
