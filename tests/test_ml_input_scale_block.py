@@ -85,8 +85,24 @@ def test_block_divides_adc_input_by_its_scale(torch_device):
     assert torch.allclose(blk._derive_input(adc), unscaled / 4.0)
 
 
-def test_block_refuses_a_rad_checkpoint_instead_of_running_the_rd_path(torch_device):
-    blk = NeuralDetectorBlock(_Identity(), mode="infer", input_format="adc", device=torch_device)
-    blk.input_format = "rad"
-    with pytest.raises(NotImplementedError, match="rad"):
+def test_block_and_dataset_derive_the_same_tensor_for_every_format(torch_device):
+    """One function, both callers: the GUI must feed a checkpoint exactly what training
+    fed it, for rd, adc AND rad (the format the architecture that beat CFAR uses)."""
+    from e2e.ml.dataset import derive_network_input
+    from e2e.radar_config import RadarConfig
+    cfg = RadarConfig(name="t", f0_hz=77e9, bandwidth_hz=500e6, n_tx=1, n_rx=4, n_chirps=8,
+                      n_samples=32, fs_hz=5e6, chirp_period_s=10e-6, mimo="single")
+    g = torch.Generator(device="cpu").manual_seed(0)
+    adc = (torch.randn(4, 8, 32, generator=g) + 1j * torch.randn(4, 8, 32, generator=g)).to(torch.complex64)
+    for fmt in ("rd", "adc", "rad"):
+        blk = NeuralDetectorBlock(_Identity(), mode="infer", input_format=fmt, cfg=cfg,
+                                  device=torch_device)
+        blk.input_scale = 2.0
+        expected = derive_network_input(cfg, adc, fmt) / 2.0
+        assert torch.allclose(blk._derive_input(adc).cpu(), expected.cpu(), atol=1e-6), fmt
+
+
+def test_block_needs_cfg_for_the_beamformed_formats(torch_device):
+    blk = NeuralDetectorBlock(_Identity(), mode="infer", input_format="rad", device=torch_device)
+    with pytest.raises(ValueError, match="needs cfg"):
         blk._derive_input(torch.zeros(2, 3, 8, dtype=torch.complex64))

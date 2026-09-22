@@ -483,6 +483,74 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
                           corpus_tag=corpus_tag)
 
 
+def derive_network_input(cfg, adc: torch.Tensor, input_format: str) -> torch.Tensor:
+    """Raw ADC `[n_rx, n_chirps, n_samples]` (complex) -> the network's input tensor.
+
+    ONE function for all three formats, used by `RadarFrameDataset` (training, scoring)
+    and by `e2e.ml.blocks.NeuralDetectorBlock` (the GUI). Until 2026-09-22 the block kept
+    its own copy of the "rd"/"adc" branches and had no "rad" branch at all, so the
+    architecture that beat CFAR (F85) could not be shown in the GUI. The `input_scale`
+    division is NOT applied here -- callers divide by `resolve_input_scale(...)`.
+
+    "rad" -- RANGE-AZIMUTH-DOPPLER (added 2026-09-21, F83). The "rd" format hands the
+    network `[2*n_virtual, R, D]`, where azimuth exists ONLY as phase across the
+    virtual-channel axis. Neither shipped head converts that to an angle bin, so both
+    learn a fixed azimuth prior instead: objectness rank-1 energy fraction 0.89/0.76
+    against 0.31 for ground truth, and azimuth-only AP no better than a constant map.
+    The information is present -- the classical beamformer reaches AP 0.30 from the same
+    ADC -- it is just never made SPATIAL. So reuse the classical arm's own front end and
+    give the network an axis aligned with the label grid: the comparison is then "what
+    does learning add on top of the beamformer", not "can a network rediscover
+    beamforming from phase".
+
+    FRONT-END PARITY, and an earlier version of this comment LIED about it. It claimed
+    "tdm_doppler_comp is left on AUTO to match the classical arm". There is no AUTO at
+    this level: `range_azimuth_power` defaults to `doppler_notch_bins=0,
+    tdm_doppler_comp=False`, and the AUTO logic lives one level up in
+    `classical_detection_map`. Passing neither fed the network a STRICTLY WEAKER front
+    end than the baseline -- measured at 0.053 AP of the gap (CFAR 0.3006 with both steps,
+    0.2473 with neither), 72% of it the zero-Doppler notch. So replicate the classical
+    arm's AUTO decisions here. (The TDM compensation is not why the format exists: on 88
+    real targets it moves target-vs-ring contrast by 0.15 dB. Tested, refuted; do not
+    re-open.)
+
+    LOG-POWER, PER-FRAME REFERENCED: the linear cube spans ~40 dB frame to frame (per-frame
+    RMS p5 0.243 / p95 5.155 after one global scale, crest factor ~130), so a handful of
+    frames would dominate every gradient step. CFAR is immune by construction -- a
+    constant-false-alarm-rate detector normalises against local background -- and that is
+    part of why it wins. Give the network the same scale-invariance.
+
+    "adc" -- raw physical channels, no deinterleave: transposed to `[n_rx, n_samples,
+    n_chirps]` so the stacked real/imag channel axis order matches "rd"'s `[C, R, D]`.
+
+    "rd" -- exactly what `generate_sample` used to precompute (deterministic, no RNG).
+    """
+    adc = torch.as_tensor(adc, dtype=torch.complex64)
+    if input_format == "rad":
+        from e2e.ml.baseline import NOTCH_MIN_VMAX_MPS, range_azimuth_power
+        pw = range_azimuth_power(
+            cfg, adc, keep_doppler=True,
+            tdm_doppler_comp=(cfg.mimo == "tdm"),
+            doppler_notch_bins=(1 if float(cfg.max_velocity_mps) >= NOTCH_MIN_VMAX_MPS
+                                else 0),
+        )   # [A, R, D] real power
+        ref = torch.median(pw) + 1e-30
+        x = 10.0 * torch.log10(torch.clamp(pw / ref, min=1e-12))
+        return x.to(torch.float32)
+    if input_format == "adc":
+        adc_rsd = adc.transpose(1, 2)
+        return torch.cat([adc_rsd.real, adc_rsd.imag], dim=0).to(torch.float32)
+    if input_format != "rd":
+        raise ValueError(f"unknown input_format {input_format!r}; expected rad, adc or rd")
+    from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
+    if cfg.mimo == "tdm":
+        sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
+        rd = adc_to_rd(sub_cfg, tdm_deinterleave(cfg, adc))
+    else:
+        rd = adc_to_rd(cfg, adc)
+    return rd_to_input(rd)
+
+
 def resolve_input_scale(manifest: Dict[str, Any], input_format: str, *,
                         where: str = "manifest") -> float:
     """The constant a network input is DIVIDED by for this corpus and format.
@@ -810,76 +878,10 @@ class RadarFrameDataset(torch.utils.data.Dataset):
             return torch.from_numpy(array).to(torch.float32)
 
         adc = torch.from_numpy(array).to(torch.complex64)  # [n_rx, n_chirps, n_samples]
-
-        if self.input_format == "rad":
-            # RANGE-AZIMUTH-DOPPLER (added 2026-09-21, F83). The "rd" format hands the
-            # network `[2*n_virtual, R, D]`, where azimuth exists ONLY as phase across the
-            # virtual-channel axis. Neither shipped head converts that to an angle bin, so
-            # both learn a fixed azimuth prior instead: objectness rank-1 energy fraction
-            # 0.89/0.76 against 0.31 for ground truth, and azimuth-only AP no better than
-            # a constant map. The information is present -- the classical beamformer
-            # reaches AP 0.30 from the same ADC -- it is just never made SPATIAL.
-            #
-            # So reuse the classical arm's own front end, the one already known to be
-            # sufficient, and give the network an axis aligned with the label grid.
-            # Deliberately the same transform the CFAR baseline runs, so the comparison
-            # is "what does learning add on top of the beamformer", not "can a network
-            # rediscover beamforming from phase".
-            #
-            # FRONT-END PARITY, and an earlier version of this comment LIED about it.
-            # It claimed "tdm_doppler_comp is left on AUTO to match the classical arm".
-            # There is no AUTO at this level: `range_azimuth_power` defaults to
-            # `doppler_notch_bins=0, tdm_doppler_comp=False`, and the AUTO logic lives one
-            # level up in `classical_detection_map`. Passing neither meant the network was
-            # fed a STRICTLY WEAKER front end than the baseline it was being compared to --
-            # measured at 0.053 AP of the gap (CFAR scores 0.3006 with both steps and
-            # 0.2473 with neither), 72% of it the zero-Doppler notch.
-            #
-            # So replicate the classical arm's AUTO decisions here rather than hardcoding,
-            # keeping the two in step if either default is ever retuned.
-            #
-            # Separately: the TDM compensation is NOT why this format exists. Measured on
-            # 88 real targets it moves target-vs-range-ring contrast by 0.15 dB (16.99 vs
-            # 16.85 dB median). That hypothesis was tested and refuted; do not re-open it.
-            # The notch is the part that carries weight.
-            from e2e.ml.baseline import NOTCH_MIN_VMAX_MPS, range_azimuth_power
-
-            cfg = self._radar_config()
-            pw = range_azimuth_power(
-                cfg, adc, keep_doppler=True,
-                tdm_doppler_comp=(cfg.mimo == "tdm"),
-                doppler_notch_bins=(1 if float(cfg.max_velocity_mps) >= NOTCH_MIN_VMAX_MPS
-                                    else 0),
-            )   # [A, R, D] real power
-            # LOG-POWER, PER-FRAME REFERENCED. The linear cube spans ~40 dB frame to frame
-            # (measured: per-frame RMS p5 0.243 / p95 5.155 after the single global
-            # `input_scale`, crest factor ~130), so a handful of frames dominate every
-            # gradient step. CFAR is immune to this by construction -- it is a CONSTANT
-            # FALSE ALARM RATE detector, normalised against local background -- and that
-            # is part of why it wins. Give the network the same scale-invariance instead
-            # of a global constant it cannot adapt to.
-            ref = torch.median(pw) + 1e-30
-            x = 10.0 * torch.log10(torch.clamp(pw / ref, min=1e-12))
-            return x.to(torch.float32)
-
-        if self.input_format == "adc":
-            # Raw physical channels, no deinterleave (see class docstring): transpose
-            # to [n_rx, n_samples, n_chirps] first so the stacked-channel axis order
-            # matches "rd"'s [C, R, D] (range-like axis before doppler-like axis).
-            adc_rsd = adc.transpose(1, 2)
-            return torch.cat([adc_rsd.real, adc_rsd.imag], dim=0).to(torch.float32)
-
-        # input_format == "rd": re-derive exactly what generate_sample used to
-        # precompute (deterministic, no RNG -- safe under any num_workers).
-        from e2e.chain.transforms import adc_to_rd, rd_to_input, tdm_deinterleave
-
-        cfg = self._radar_config()
-        if cfg.mimo == "tdm":
-            sub_cfg = dataclasses.replace(cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx)
-            rd = adc_to_rd(sub_cfg, tdm_deinterleave(cfg, adc))
-        else:
-            rd = adc_to_rd(cfg, adc)
-        return rd_to_input(rd).to("cpu")
+        # The three formats live in ONE function shared with the GUI's detector block;
+        # the reasoning for each (and the front-end parity history) is in its docstring.
+        # Deterministic, no RNG -- safe under any num_workers.
+        return derive_network_input(self._radar_config(), adc, self.input_format).to("cpu")
 
     def _load(self, idx: int):
         array, is_adc, labels, meta = self._load_raw(idx)

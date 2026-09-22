@@ -509,10 +509,10 @@ BLOCKS: List[BlockSpec] = [
                       choices=["cfar", "ml"],
                       help="'cfar': classical cell-averaging CFAR on the range-azimuth "
                            "power map (the baseline every published number is compared "
-                           "against). 'ml': a trained FFTRadNet/SSMRadNet checkpoint in "
-                           "the 'rd' or 'adc' input format (read from the checkpoint). "
-                           "'rad'-format checkpoints (b6/b7/b8, RADDetNet) are refused "
-                           "here -- that front end is not ported to the GUI block yet."),
+                           "against). 'ml': a trained checkpoint (FFTRadNet, SSMRadNet "
+                           "or RADDetNet); its input format -- rd, adc or rad -- is read "
+                           "from the checkpoint and derived by the same function the "
+                           "training dataset uses."),
             ParamSpec("checkpoint", "ML checkpoint (path)", "text", "",
                       help="ML mode only. Path to a best.pt written by e2e.ml.train, "
                            "e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Checkpoints are "

@@ -609,41 +609,19 @@ class NeuralDetectorBlock:
         return model
 
     def _derive_input(self, adc):
-        adc = torch.as_tensor(adc, dtype=torch.complex64)
-        if self.input_format == "rad":
-            # The dataset's "rad" branch runs the classical front end (range_azimuth_power
-            # with the notch and TDM compensation) and normalises per frame. It has not
-            # been ported here, and silently running the "rd" path below on a "rad"
-            # checkpoint would feed it the wrong tensor -- exactly the mismatch F84 is
-            # about -- so refuse.
-            raise NotImplementedError(
-                "NeuralDetectorBlock does not yet derive the 'rad' input format; this "
-                "checkpoint was trained on it. Use an 'rd' checkpoint (e.g. "
-                "b5_fftradnet_v3) or port RadarFrameDataset._derive_input's rad branch."
-            )
-        if self.input_format == "adc":
-            # Matches RadarFrameDataset._derive_input's "adc" branch exactly --
-            # no deinterleave (see that method's docstring for why).
-            adc_rsd = adc.transpose(1, 2)
-            x = torch.cat([adc_rsd.real, adc_rsd.imag], dim=0).to(torch.float32)
-            return x / self.input_scale
-        if self.cfg is None:
+        """The network input for this checkpoint's format, EXACTLY as the training
+        dataset derives it: `e2e.ml.dataset.derive_network_input` is the one function both
+        call (2026-09-22 -- before that this block kept its own copy of two branches and
+        had no "rad" branch, so the architecture that beat CFAR could not run here), then
+        the same `input_scale` division `RadarFrameDataset._load` applies."""
+        if self.input_format != "adc" and self.cfg is None:
             raise ValueError(
-                "NeuralDetectorBlock(input_format='rd') needs cfg (a RadarConfig) "
-                "to run adc_to_rd/tdm_deinterleave the same way "
-                "e2e.ml.dataset.generate_sample does -- pass cfg=, or use "
-                "input_format='adc'"
+                f"NeuralDetectorBlock(input_format={self.input_format!r}) needs cfg (a "
+                "RadarConfig) to run the same front end e2e.ml.dataset uses -- pass cfg=, "
+                "or use input_format='adc'"
             )
-        from e2e.chain import transforms
-
-        if self.cfg.mimo == "tdm":
-            sub_cfg = dataclasses.replace(self.cfg, n_tx=1, mimo="single",
-                                          n_chirps=self.cfg.n_chirps_per_tx)
-            rd = transforms.adc_to_rd(sub_cfg, transforms.tdm_deinterleave(self.cfg, adc))
-        else:
-            rd = transforms.adc_to_rd(self.cfg, adc)
-        # `RadarFrameDataset._load` does `x / self.input_scale` after deriving; mirror it.
-        return transforms.rd_to_input(rd) / self.input_scale
+        from e2e.ml.dataset import derive_network_input
+        return derive_network_input(self.cfg, adc, self.input_format) / self.input_scale
 
     def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
         if self.mode == "train":
