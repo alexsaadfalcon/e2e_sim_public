@@ -103,7 +103,7 @@ def test_thrust4_synthetic_filter_is_normalized_and_labelled():
 
 
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():
-    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml"):
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         st = apply_preset(PRESETS_BY_ID[pid])
         assert st["corpus_environment"]["enabled"]
         assert st["corpus_environment"]["params"]["split"] == "test"

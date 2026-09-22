@@ -32,6 +32,12 @@ from webapp.pipeline_registry import MAX_PRESET_N_STEPS  # noqa: E402
 #: machine needs the file. The rad-format checkpoints are NOT used here: see F84.
 ML_CHECKPOINT = "e2e/ml/runs/b5_fftradnet_v3/best.pt"
 
+#: The repo-native architecture that scored 0.476 vs CFAR 0.301 (F85; seed 42,
+#: deterministic, fingerprint-clean, recertified). Its recall-0.5 operating point is
+#: objectness 0.44 (`beat_cfar.json`). Presented ONLY after F85's verification addendum.
+RADDETNET_CHECKPOINT = "e2e/ml/runs/b7_raddetnet/best.pt"
+RADDETNET_THRESHOLD = 0.44
+
 #: Decode threshold for that checkpoint. Its recall-0.5 operating point is objectness
 #: 0.22 (compare_detectors, 2026-09-22); at the registry default of 0.5 it draws ZERO
 #: detections -- the "demo landmine" in DEMO_DEFENSE.md, measured again today on the
@@ -329,6 +335,55 @@ PRESETS: List[DemoPreset] = [
             "'We fixed azimuth': the stripe statistic refutes it on the next slide.",
             "That this is a benchmark of SSMRadNet or FFTRadNet: the fault is on our side "
             "of the integration, and the collaborator README says so.",
+        ],
+    ),
+    DemoPreset(
+        id="thrust5_detector_raddetnet",
+        label="Thrust 5 - detector on benchmark frames: RADDetNet (0.476 vs CFAR 0.301, VERIFICATION PENDING)",
+        thrust=5,
+        n_steps=5,
+        overrides=_merge(
+            {"corpus_environment": {"enabled": True, "params": {
+                "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
+            {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
+             "afe": {"enabled": False}},
+            _only_products("radar_cube", "detector"),
+            {"detector": {"params": {"mode": "ml", "checkpoint": RADDETNET_CHECKPOINT,
+                                     "threshold": RADDETNET_THRESHOLD}}},
+        ),
+        blurb=("The same frames through RADDetNet -- Doppler as channels, range x azimuth "
+               "as the spatial plane, on the beamformed ('rad') input with the classical "
+               "front end. Test AP 0.476 against CFAR's 0.301 under the same protocol, 3.0 "
+               "false alarms per frame at recall 0.5 against CFAR's 6.2, and the F83 "
+               "controls say it reads the frame (deranged-label retention 12%, azimuth-only "
+               "0.657 vs 0.285 for its own constant map). Threshold pinned at its recall-0.5 "
+               "operating point (0.44). DO NOT PRESENT until ESTABLISHED_FACTS F85's "
+               "independent-verification addendum says it survived, and the owner has "
+               "re-decided Thrust 5 on that basis."),
+        live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
+        say=[
+            "Every number here comes from one file, e2e/ml/runs/beat_cfar.json, regenerated "
+            "2026-09-22 with seed 42 and deterministic kernels; the checkpoint records the "
+            "fingerprint of the code that built its inputs and reproduces its own "
+            "validation number under current code (0.4753 -> 0.4753).",
+            "The controls are the ones F83 defined and the shipped nets FAILED: retention of "
+            "AP under deranged labels 12% (CFAR 10%; the FFTRadNets 48-51%), and azimuth-only "
+            "AP 0.657 against 0.285 for a frame-independent map (the FFTRadNets could not "
+            "beat their own average). Calibration: the same tool reproduces F83's numbers "
+            "for the old checkpoint to the digit.",
+            "What changed is the architecture, not the input: the same beamformed input "
+            "into the RADIal-style decoder (b8) scores 0.138 and keeps 47% under deranged "
+            "labels. Range x azimuth had to be the spatial plane.",
+            "The stripe statistic is 0.62 against 0.31 for ground truth: the map is still "
+            "partly separable. Quote it beside the AP.",
+        ],
+        do_not_say=[
+            "'Beats CFAR' before F85's addendum records that an independent verifier could "
+            "not break it (leakage, protocol parity, its own re-implementation of the "
+            "controls).",
+            "Anything about generalisation: one seed, one corpus, one tier (D2). Unmeasured.",
+            "That this is what the professor asked for in the ML thrust: it is a detector "
+            "we designed to the diagnosis, not a port of the collaborators' architectures.",
         ],
     ),
 ]
