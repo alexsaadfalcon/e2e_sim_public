@@ -74,9 +74,19 @@ count is skipped unless `--force`. That makes re-running this to regenerate the 
 and safe, which is the only way a "reproducible" script actually gets re-run.
 
 The skip is NOT taken when the input pipeline has changed since the checkpoint was written
-(see `_stale_sources`) -- such an arm is retrained instead. A checkpoint is only
+(see `_stale_reason`) -- such an arm is retrained instead. A checkpoint is only
 interchangeable with a rerun while the code that built its inputs still exists, and on
 2026-09-21 that assumption failed silently and cost two invalid results.
+
+That guard is blind to WHAT changed. After a behaviour-preserving edit to a fingerprinted
+file, do not `--force` a 5-hour retrain and do not edit the fingerprint by hand:
+
+    python -m e2e.ml.recertify e2e/ml/runs/<arm_dir>
+
+re-runs the checkpoint's own validation split under the current code and re-stamps the
+fingerprint ONLY if the recorded `best_val_AP` reproduces (default tolerance 2e-3 AP).
+The F84 checkpoints would fail that test by 0.4; the 2026-09-22 `dataset.py` refactor
+passed it with delta +0.0000.
 """
 
 from __future__ import annotations
