@@ -391,9 +391,12 @@ PRESETS: List[DemoPreset] = [
             "Range x azimuth had to be the spatial plane.",
             "THE CAVEAT, volunteered: on b1_bench_v2 test -- 173 unseen scenes, same radar and "
             "grid, an earlier generator with a different impairment model -- CFAR scores "
-            "0.179 at 13.2 FA/frame and this network 0.208 at 15.1 FA/frame. The lead is "
-            "+0.03, and at matched recall the network is worse. One seed, one corpus, one "
-            "tier; nothing here shows learning buys robustness.",
+            "0.179 at 13.2 FA/frame and this network 0.208 at 15.1 FA/frame (reproduced "
+            "under our protocol, e2e/ml/runs/ood_v2_test.json). The lead is +0.03, and at "
+            "matched recall the network is worse. The shipped FFTRadNet collapses to 0.063 "
+            "there, below the 0.065 chance floor: this one degrades, that one collapses -- "
+            "but 'degrades' is not 'robust'. One seed, one corpus, one tier; the "
+            "generalisation runs (F86) are the answer, not this slide.",
             "The stripe statistic is 0.62 (0.60 over all frames) against 0.31 for ground "
             "truth: the map is still partly separable. Quote it beside the AP.",
         ],
