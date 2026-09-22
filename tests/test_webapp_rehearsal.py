@@ -200,6 +200,70 @@ def test_load_preset_opens_the_live_knob_block_editor(preset):
 
     bid, key, _how = preset.live_knobs[0]
     label = next(ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key)
-    _state, _n, notes, editor, _status = appmod._load_preset(1, preset.id, None)
+    _state, _n, notes, editor, _status, _results = appmod._load_preset(1, preset.id, None)
     assert label in str(editor), f"{preset.id}: editor should show {label!r}"
     assert label in str(block_diagram.preset_notes(preset)), "card names the knob by label"
+
+
+# ------------------------------------------------------------------------------------
+# Operator-flow review (2026-09-22): frame count, zero-frame cancel, failed run
+# ------------------------------------------------------------------------------------
+@pytest.mark.parametrize("bad", [None, 0, -1])
+def test_invalid_frame_count_refuses_to_run(monkeypatch, bad):
+    """The spinner reports None for blank / out-of-range; 0, -1, 500 and blank all ran
+    10 frames silently while the field kept showing the typed value."""
+    import webapp.app as appmod
+    from dash import no_update
+
+    calls = []
+    monkeypatch.setattr(appmod, "run_pipeline", lambda *a, **k: calls.append(k) or {})
+    data, status, tab, _sink = appmod._run_pipeline(1, None, bad, "", None)
+    assert data is no_update and tab is no_update and not calls
+    assert "1 to" in str(status)
+
+
+def test_zero_frame_cancel_stays_on_the_diagram(monkeypatch):
+    import webapp.app as appmod
+    from dash import no_update
+
+    monkeypatch.setattr(appmod, "run_pipeline", lambda *a, **k: {
+        "_axis_meta": {"n_steps_run": 0, "cancelled": True}})
+    monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {})
+    data, status, tab, _sink = appmod._run_pipeline(1, None, 20, "", None)
+    assert data is no_update and tab is no_update
+    assert "nothing ran" in str(status)
+
+
+def test_failed_run_relabels_the_stale_results(monkeypatch):
+    import webapp.app as appmod
+    from webapp.pipeline_runner import PipelineError
+
+    def boom(*a, **k):
+        raise PipelineError("ML checkpoint not found: nope")
+    monkeypatch.setattr(appmod, "run_pipeline", boom)
+    prev = {"fft": {}, "_banner": "run #3  |  earlier"}
+    data, status, tab, _sink = appmod._run_pipeline(4, None, 2, "", prev)
+    assert data["_banner"].startswith("NOT this run -- run #4 failed")
+    assert "run #3" in data["_banner"] and "fft" in data
+    assert "ML checkpoint not found" in str(status)
+
+
+def test_before_after_pair_shares_one_y_range():
+    import webapp.app as appmod
+
+    cur = {"subspace_err": {"data": [{"type": "scatter", "y": [0.6, 0.63]}], "layout": {}}}
+    prev = {"subspace_err": {"data": [{"type": "scatter", "y": [0.04, 0.06]}], "layout": {}}}
+    appmod._share_y_ranges(cur, prev)
+    assert cur["subspace_err"]["layout"]["yaxis"]["range"] == prev["subspace_err"]["layout"]["yaxis"]["range"]
+    assert cur["subspace_err"]["layout"]["yaxis"]["range"][1] == pytest.approx(0.63 * 1.05)
+
+
+def test_single_result_card_takes_the_full_row():
+    import plotly.graph_objects as go
+
+    import webapp.app as appmod
+
+    one = str(appmod._render_results({"range_az": go.Figure().to_dict()}, "tab-results"))
+    two = str(appmod._render_results({"a": go.Figure().to_dict(), "b": go.Figure().to_dict()},
+                                     "tab-results"))
+    assert "1 1 100%" in one and "1 1 45%" in two

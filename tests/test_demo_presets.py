@@ -195,15 +195,17 @@ def test_preset_notes_render_for_every_preset():
 
 def test_load_preset_callback_returns_state_and_frames():
     import webapp.app as appmod
-    state, n_steps, notes, editor, status = appmod._load_preset(1, PRESETS[0].id, None)
+    state, n_steps, notes, editor, status, results = appmod._load_preset(
+        1, PRESETS[0].id, None)
     assert state == apply_preset(PRESETS[0]) and n_steps == PRESETS[0].n_steps
     assert notes is not None and editor is not None and status is not None
+    assert results is None, "loading a preset clears the Results tab"
 
 
 def test_load_preset_callback_reports_unknown_preset_without_touching_state():
     import webapp.app as appmod
     from dash import no_update
-    state, n_steps, notes, _editor, _status = appmod._load_preset(1, "nope", None)
+    state, n_steps, notes, _editor, _status, _results = appmod._load_preset(1, "nope", None)
     assert state is no_update and n_steps is no_update and notes is not None
 
 

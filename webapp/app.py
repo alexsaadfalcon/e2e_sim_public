@@ -44,7 +44,7 @@ from dash import (
 
 from webapp import block_diagram, scenario_editor
 from webapp.demo_presets import PRESETS_BY_ID, PresetError, apply_preset
-from webapp.pipeline_registry import BLOCKS_BY_ID, PRODUCT_IDS, default_block_state
+from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
     PipelineError,
     figures_from_outputs,
@@ -239,18 +239,35 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
     # needs this Output to belong to a pending callback to spin, but a changing
     # value also makes the sink's own purpose (a loading anchor) legible in devtools.
     sink = f"run #{n_clicks}"
+    # The spinner reports None for a blank or out-of-range value (min=1, max=50), and
+    # `int(n_steps or 10)` silently ran 10 frames for 0, -1, 500 and blank while the
+    # field kept showing the typed value (operator-flow review, 2026-09-22). Refuse.
+    if n_steps is None or int(n_steps) < 1:
+        return no_update, html.Span(
+            f"Frames to run must be a whole number from 1 to {MAX_N_STEPS}; the field is "
+            "blank or outside that range. Fix it and press Run again.",
+            style={"color": "#eb3b5a"}), no_update, sink
+    n_steps = int(n_steps)
     try:
         _CANCEL.clear()
-        outputs = run_pipeline(block_state, n_steps=int(n_steps or 10),
-                               should_stop=_CANCEL.is_set)
+        outputs = run_pipeline(block_state, n_steps=n_steps, should_stop=_CANCEL.is_set)
     except PipelineError as e:
-        # Friendly, expected failure: stay on the diagram, show the message.
-        return no_update, html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink
+        # Friendly, expected failure: stay on the diagram, show the message -- and
+        # relabel the figures still on the Results tab so they are not read as this run.
+        return (_stale_after_failure(prev_results, n_clicks, str(e)),
+                html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink)
     except Exception as e:  # unexpected — still don't crash the server
-        return no_update, html.Span(f"Unexpected error: {e}",
-                                    style={"color": "#eb3b5a"}), no_update, sink
+        return (_stale_after_failure(prev_results, n_clicks, str(e)),
+                html.Span(f"Unexpected error: {e}", style={"color": "#eb3b5a"}),
+                no_update, sink)
 
     figs = figures_from_outputs(outputs)
+    if not figs and (outputs.get("_axis_meta") or {}).get("cancelled"):
+        # Cancelled before the first frame finished: nothing ran. Stay on the diagram
+        # rather than send the presenter to a Results tab holding only a banner.
+        return no_update, html.Span(
+            "Cancelled before the first frame finished: nothing ran, nothing to show. "
+            "The Results tab is unchanged.", style={"color": "#f39c12"}), no_update, sink
     # Geometry FIRST, when the Scenario tab holds a parseable scene: a stripe in
     # sin(azimuth) is only interpretable next to the layout that produced it (see
     # pipeline_runner.scenario_topdown_figure). Best-effort by design -- the editor
@@ -306,6 +323,18 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
     return data, msg, "tab-results", sink
 
 
+def _stale_after_failure(prev_results, n_clicks, error: str):
+    """After a failed run the Results tab still holds the last run's figures; relabel
+    them so the banner does not assert currency for a run that did not happen."""
+    if not prev_results:
+        return no_update
+    data = dict(prev_results)
+    old = data.get("_banner") or "unlabelled"
+    if not old.startswith("NOT this run"):
+        data["_banner"] = f"NOT this run -- run #{n_clicks} failed ({error[:80]}). Still showing: {old}"
+    return data
+
+
 def _run_banner(n_clicks, axis_meta, n_steps: int) -> str:
     """One line saying what produced the figures on screen (see _run_pipeline)."""
     import time as _time
@@ -332,6 +361,7 @@ def _run_banner(n_clicks, axis_meta, n_steps: int) -> str:
     Output("preset-notes", "children"),
     Output("block-param-editor", "children", allow_duplicate=True),
     Output("run-status", "children", allow_duplicate=True),
+    Output("results-store", "data", allow_duplicate=True),
     Input("preset-load", "n_clicks"),
     State("preset-select", "value"),
     State("block-cytoscape", "tapNodeData"),
@@ -345,24 +375,27 @@ def _load_preset(n_clicks, preset_id, node_data):
     if preset is None:
         return (no_update, no_update,
                 html.Span(f"Unknown preset {preset_id!r}", style={"color": "#eb3b5a"}),
-                no_update, no_update)
+                no_update, no_update, no_update)
     try:
         state = apply_preset(preset)
     except PresetError as e:
         # A preset that no longer fits the registry is a bug in the preset; say so
         # rather than loading half of it.
         return (no_update, no_update, html.Span(str(e), style={"color": "#eb3b5a"}),
-                no_update, no_update)
+                no_update, no_update, no_update)
     # Open the editor on the block whose knob the card says to turn, so the operator
     # is one click from the live demo; fall back to the tapped node.
     if preset.live_knobs:
         block_id = preset.live_knobs[0][0]
     else:
         block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
+    # The Results tab is cleared: its figures came from another preset, and the
+    # before/after section would otherwise pair a Thrust 5 run with a Thrust 2 one.
     return (state, preset.n_steps, block_diagram.preset_notes(preset),
             block_diagram.param_editor(block_id, state),
             html.Span(f"Preset loaded: {preset.label}. Press Run pipeline.",
-                      style={"color": "#3867d6"}))
+                      style={"color": "#3867d6"}),
+            None)
 
 
 @app.callback(
@@ -379,6 +412,28 @@ def _cancel_run(n_clicks):
 # =================================================================================
 # Results tab
 # =================================================================================
+
+def _share_y_ranges(figs, prev_figs) -> None:
+    """Give a line plot present in both runs one y-range, so the before/after pair
+    reads as a difference in height, not two identically shaped curves with different
+    tick labels (Thrust 2: 0.06 vs 0.63 drawn the same size, review 2026-09-22).
+    Heatmaps carry fixed colour ranges already; only scatter traces are touched."""
+    for key in set(figs) & set(prev_figs):
+        pair = (figs[key], prev_figs[key])
+        ys = []
+        for fig in pair:
+            data = fig.get("data") or []
+            if not data or data[0].get("type", "scatter") != "scatter":
+                ys = []
+                break
+            for tr in data:
+                ys.extend(float(v) for v in (tr.get("y") or []) if v is not None)
+        if not ys:
+            continue
+        top = max(ys) * 1.05 if max(ys) > 0 else 1.0
+        for fig in pair:
+            fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = [0.0, top]
+
 
 @app.callback(
     Output("results-tab-content", "children"),
@@ -404,18 +459,23 @@ def _render_results(results_data, active_tab):
     # built) rather than a second, easily-stale title map duplicated in this tab.
     def _grid(figs):
         cards = []
+        # A lone figure (Thrust 1) takes the whole row instead of half a screen.
+        basis = "1 1 100%" if len(figs) == 1 else "1 1 45%"
         for key, fig_dict in figs.items():
             cards.append(html.Div(
                 # No modebar: the zoom/export toolbar overlaps each card's title at
                 # this card width, and none of its tools matter for read-only results.
                 dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
-                style={"flex": "1 1 45%", "minWidth": "420px", "margin": "6px",
+                style={"flex": basis, "minWidth": "420px", "margin": "6px",
                        "border": "1px solid #dfe4ea", "borderRadius": "6px",
                        "padding": "4px"},
             ))
         return html.Div(cards, style={"display": "flex", "flexWrap": "wrap"})
 
     figs = {k: v for k, v in results_data.items() if not k.startswith("_")}
+    prev = results_data.get("_previous") or {}
+    prev_figs = {k: v for k, v in prev.items() if not k.startswith("_")}
+    _share_y_ranges(figs, prev_figs)
     children = [html.H3("Results")]
     banner = results_data.get("_banner")
     if banner:
@@ -423,8 +483,6 @@ def _render_results(results_data, active_tab):
                                  style={"color": "#2d3a4a", "fontWeight": "bold",
                                         "marginBottom": "4px"}))
     children.append(_grid(figs))
-    prev = results_data.get("_previous") or {}
-    prev_figs = {k: v for k, v in prev.items() if not k.startswith("_")}
     if prev_figs:
         # The before/after every card asks for: the previous run stays on screen
         # under its own banner, so "turn one knob and run again" is a comparison

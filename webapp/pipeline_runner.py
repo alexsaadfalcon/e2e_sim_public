@@ -1015,7 +1015,9 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                                        transition=dict(duration=0))])
              for i in range(n)]
     fig.update_layout(
-        sliders=[dict(active=n - 1, x=0.08, len=0.9, y=-0.02,
+        # The slider starts to the right of the play/pause buttons: at two-card
+        # width its "frame N" label sat behind them.
+        sliders=[dict(active=n - 1, x=0.2, len=0.78, y=-0.02,
                       currentvalue=dict(prefix="frame ", font=dict(size=12)),
                       pad=dict(t=30, b=4), steps=steps)],
         updatemenus=[dict(type="buttons", showactive=False, direction="left",
@@ -1141,12 +1143,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                        ("ml_detection", "Neural detector objectness")):
         if not outputs.get(key):
             continue
+        n_frames = len(outputs[key])
         if det_meta:
             # Name the detector and its operating point ON the figure: the three
             # Thrust 5 presets are compared across screens, and their cross counts
-            # are set by the threshold as much as by the detector.
+            # are set by the threshold as much as by the detector. This panel is the
+            # last frame while the cube beside it animates; say which frame it is.
             title = (f"{title} -- {det_meta.get('label', '')}<br><sup>detections at "
-                     f"objectness >= {float(det_meta.get('threshold', 0.0)):.2f}</sup>")
+                     f"objectness >= {float(det_meta.get('threshold', 0.0)):.2f}"
+                     f" -- frame {n_frames} of {n_frames} (last)</sup>")
         det = outputs[key][-1]
         if hasattr(det, "detach"):
             det = det.detach().cpu().numpy()

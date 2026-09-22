@@ -1,0 +1,7 @@
+/* Dash serves this folder automatically (Dash(__name__) -> ./assets).
+   Disabled Run / Cancel buttons were drawn at full saturation, so a presenter clicking
+   Run twice got silence with no visible reason (operator-flow review, 2026-09-22). */
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

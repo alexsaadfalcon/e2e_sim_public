@@ -296,8 +296,8 @@ PRESETS: List[DemoPreset] = [
                "cross counts across the three screens ARE the false-alarm comparison. Run "
                "this first, then load the RADDetNet preset on the same frames: the previous "
                "run stays on the Results tab underneath."),
-        live_knobs=[("detector", "cfar_train", "6 -> 2 cells (noisier estimate, more false alarms)"),
-                    ("detector", "threshold", "0.66 -> 0.8 (fewer detections)")],
+        live_knobs=[("detector", "threshold", "0.66 -> 0.8 (fewer detections; the knob "
+                                              "that moves the way it sounds)")],
         say=[
             "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
             "0.081. Both numbers reproduced today from the public repo.",
@@ -316,6 +316,9 @@ PRESETS: List[DemoPreset] = [
         do_not_say=[
             "Any learned-detector number from before 2026-09-22 except the rd-format 0.127 "
             "and 0.123: the rad-format results were retracted (ESTABLISHED_FACTS F84).",
+            "That fewer CFAR training cells means more false alarms: measured on these 5 "
+            "frames at threshold 0.66 the count went 46 -> 39 (train 6 -> 2). Do not turn "
+            "that knob on stage.",
         ],
     ),
     DemoPreset(
