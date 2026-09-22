@@ -392,10 +392,12 @@ PRESETS: List[DemoPreset] = [
                "reproduces bit-identically, splits scene-disjoint, baseline fair -- and on an "
                "UNSEEN corpus from an earlier generator the result is SEED-DEPENDENT: seed 42 "
                "leads CFAR by +0.03 with worse false alarms, seed 43 trails it by -0.03 "
-               "(F86, partial). In-distribution both seeds beat CFAR (0.476 / 0.436 vs 0.301, "
-               "3.0 / 3.6 vs 6.2 false alarms per frame). Owner decision 2026-09-22: this "
-               "LEADS Thrust 5, caveat volunteered; the joint-corpus and weight-decay arms "
-               "complete F86 when they land."),
+               "(F86). In-distribution both seeds beat CFAR (0.476 / 0.436 vs 0.301, "
+               "3.0 / 3.6 vs 6.2 false alarms per frame). Trained on BOTH corpora, one "
+               "checkpoint beats CFAR on the held-out scenes of both (0.584 / 1.4 FA and "
+               "0.487 / 2.9 FA; F86 addendum, adversarial verification pending) -- but then "
+               "neither corpus is unseen. Owner decision 2026-09-22: this LEADS Thrust 5, "
+               "caveat volunteered."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         say=[
             "The defensible sentence, verbatim from the verifier: a learned head on the "
@@ -436,16 +438,19 @@ PRESETS: List[DemoPreset] = [
             "other -0.03, and both are worse at matched recall. The shipped FFTRadNet "
             "collapses to 0.063 there, below the 0.065 chance floor: these degrade, that one "
             "collapses -- but 'degrades' is not 'robust'. The in-distribution win is what "
-            "replicates (0.476 / 0.436 vs 0.301); the joint-corpus arm (F86) is the "
-            "generalisation answer, not this slide.",
+            "replicates (0.476 / 0.436 vs 0.301). Trained on both corpora the network beats "
+            "CFAR on both test splits (0.584 / 1.4 FA on v3, 0.487 / 2.9 FA on v2, controls "
+            "pass) -- say that as a data-diversity result, not as generalisation: for that "
+            "arm no corpus is unseen, and a third corpus is the only real test.",
             "The stripe statistic is 0.62 (0.60 over all frames) against 0.31 for ground "
             "truth: the map is still partly separable. Quote it beside the AP.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified. The verified claim is in-distribution and on CFAR's "
             "own front end; the first radar person in the room will ask about both.",
-            "Anything about generalisation or robustness: out of distribution the two seeds "
-            "straddle CFAR (+0.03 / -0.03) and both are worse at matched recall.",
+            "Anything about generalisation or robustness: out of distribution the two "
+            "single-corpus seeds straddle CFAR (+0.03 / -0.03), and the joint-corpus arm's "
+            "0.487 on v2 is NOT out of distribution -- it trained on v2's train split.",
             "That this is what the professor asked for in the ML thrust: it is a detector "
             "we designed to the diagnosis, not a port of the collaborators' architectures.",
             "That the model converged: val AP peaks at epoch 14 of 40 and decays to 0.35-0.41 "
