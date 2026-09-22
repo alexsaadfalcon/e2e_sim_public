@@ -338,7 +338,7 @@ PRESETS: List[DemoPreset] = [
     ),
     DemoPreset(
         id="thrust5_detector_raddetnet",
-        label="Thrust 5 - detector on benchmark frames: RADDetNet (0.476 vs CFAR 0.301, verified in-distribution; owner decision pending)",
+        label="Thrust 5 (LEAD) - RADDetNet on benchmark frames: 0.476 vs CFAR 0.301, verified in-distribution",
         thrust=5,
         n_steps=5,
         overrides=_merge(
@@ -359,8 +359,10 @@ PRESETS: List[DemoPreset] = [
                "operating point (0.44). Independently verified 2026-09-22 (F85 addendum): "
                "reproduces bit-identically, splits scene-disjoint, baseline fair -- and on an "
                "UNSEEN corpus from an earlier generator the lead falls to +0.03 with a WORSE "
-               "matched-recall false-alarm rate than CFAR. Present only after the owner has "
-               "re-decided Thrust 5 on that basis."),
+               "matched-recall false-alarm rate than CFAR. Owner decision 2026-09-22: this "
+               "LEADS Thrust 5, caveat volunteered; a generalisation campaign (second seed, "
+               "joint-corpus training, weight decay) is running -- update the caveat "
+               "sentence from ESTABLISHED_FACTS F86 when it lands."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         say=[
             "The defensible sentence, verbatim from the verifier: a learned head on the "
