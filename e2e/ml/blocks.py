@@ -512,6 +512,11 @@ class NeuralDetectorBlock:
         self.threshold = threshold
         self._device = device if device is not None else globals()["device"]
         self._frame_count = 0
+        # Divisor applied to the derived input, resolved from the checkpoint's manifest
+        # by `e2e.ml.dataset.resolve_input_scale` -- the SAME function the training
+        # dataset uses. A model passed in as an nn.Module (tests) has no manifest and
+        # keeps 1.0. See that function for the 2026-09-22 defect this closes.
+        self.input_scale = 1.0
 
         if mode == "infer":
             self.model = self._build_infer_model(model_or_ckpt)
@@ -562,6 +567,9 @@ class NeuralDetectorBlock:
             manifest = json.load(f)
         input_format = ckpt.get("input_format", manifest.get("input_format", "rd"))
         self.input_format = input_format
+        # Same resolver, same number, as the dataset the checkpoint was trained from.
+        from e2e.ml.dataset import resolve_input_scale
+        self.input_scale = resolve_input_scale(manifest, input_format, where=str(manifest_path))
         manifest_for_model = dict(manifest)
         manifest_for_model["input_format"] = input_format
         model = build_model(ckpt["model_name"], manifest_for_model, device=self._device)
@@ -576,11 +584,23 @@ class NeuralDetectorBlock:
 
     def _derive_input(self, adc):
         adc = torch.as_tensor(adc, dtype=torch.complex64)
+        if self.input_format == "rad":
+            # The dataset's "rad" branch runs the classical front end (range_azimuth_power
+            # with the notch and TDM compensation) and normalises per frame. It has not
+            # been ported here, and silently running the "rd" path below on a "rad"
+            # checkpoint would feed it the wrong tensor -- exactly the mismatch F84 is
+            # about -- so refuse.
+            raise NotImplementedError(
+                "NeuralDetectorBlock does not yet derive the 'rad' input format; this "
+                "checkpoint was trained on it. Use an 'rd' checkpoint (e.g. "
+                "b5_fftradnet_v3) or port RadarFrameDataset._derive_input's rad branch."
+            )
         if self.input_format == "adc":
             # Matches RadarFrameDataset._derive_input's "adc" branch exactly --
             # no deinterleave (see that method's docstring for why).
             adc_rsd = adc.transpose(1, 2)
-            return torch.cat([adc_rsd.real, adc_rsd.imag], dim=0).to(torch.float32)
+            x = torch.cat([adc_rsd.real, adc_rsd.imag], dim=0).to(torch.float32)
+            return x / self.input_scale
         if self.cfg is None:
             raise ValueError(
                 "NeuralDetectorBlock(input_format='rd') needs cfg (a RadarConfig) "
@@ -596,7 +616,8 @@ class NeuralDetectorBlock:
             rd = transforms.adc_to_rd(sub_cfg, transforms.tdm_deinterleave(self.cfg, adc))
         else:
             rd = transforms.adc_to_rd(self.cfg, adc)
-        return transforms.rd_to_input(rd)
+        # `RadarFrameDataset._load` does `x / self.input_scale` after deriving; mirror it.
+        return transforms.rd_to_input(rd) / self.input_scale
 
     def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
         if self.mode == "train":

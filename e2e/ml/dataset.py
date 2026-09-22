@@ -483,6 +483,53 @@ def generate_dataset(cfg_name: str, tier: str, n_frames: int, out_dir=None, *,
                           corpus_tag=corpus_tag)
 
 
+def resolve_input_scale(manifest: Dict[str, Any], input_format: str, *,
+                        where: str = "manifest") -> float:
+    """The constant a network input is DIVIDED by for this corpus and format.
+
+    One function, used by `RadarFrameDataset` (training and scoring) AND by
+    `e2e.ml.blocks.NeuralDetectorBlock` (the GUI). Until 2026-09-22 the block had its own
+    input derivation with no scale at all, so the GUI fed a checkpoint inputs on a
+    different scale from the ones it was trained on: on the same benchmark frame the
+    objectness peak was 0.12 in the GUI against 0.49 from the scoring path, and the demo's
+    ML preset drew zero detections. A constant that lives in two places is two constants.
+
+    Resolution order (unchanged from the dataset's original inline logic):
+      * "rad" is self-normalising by construction (dB relative to each frame's own median
+        power), so it is pinned at 1.0 -- applying a global constant would be a second,
+        contradictory normalisation (F83, and the note in `_derive_input`).
+      * `input_scale_by_format[input_format]` when the manifest records per-format scales;
+        a format the manifest does not list is refused rather than borrowed from another
+        (F80: that rescales the input by orders of magnitude).
+      * a legacy single `input_scale` (measured on "rd") is honoured for "rd" only.
+      * a corpus predating the constant gets 1.0, the regime it was trained and scored in.
+    """
+    by_format = manifest.get("input_scale_by_format") or {}
+    if input_format == "rad":
+        scale = 1.0
+    elif by_format:
+        if input_format not in by_format:
+            raise ValueError(
+                f"{where} records input scales for {sorted(by_format)} but not for "
+                f"input_format={input_format!r}. Applying another format's constant would "
+                "rescale the input by orders of magnitude (see F80); re-run "
+                "dataset.finalize_input_scale.")
+        scale = float(by_format[input_format])
+    elif manifest.get("input_scale"):
+        if input_format != "rd":
+            raise ValueError(
+                f"{where} records a single input_scale measured for input_format='rd', "
+                f"but this dataset was opened as {input_format!r}. Re-run "
+                "dataset.finalize_input_scale to record both.")
+        scale = float(manifest["input_scale"])
+    else:
+        scale = 1.0
+    if scale <= 0.0:
+        raise ValueError(f"{where} records a non-positive input_scale ({scale!r}); "
+                         "it must be a positive float")
+    return scale
+
+
 def measure_input_scale(manifest_path, *, n_sample: int = 32,
                         split: str = "train", input_format: str = "rd") -> float:
     """The ONE constant every consumer divides the network input by (F63, piece 2).
@@ -719,45 +766,11 @@ class RadarFrameDataset(torch.utils.data.Dataset):
         self.dataset_dir = self.manifest_path.parent
         self._cache: Dict[int, Any] = {}
         self._cfg = None  # lazily built RadarConfig, only needed for input_format="rd"
-        # F63 piece 2. One constant for the whole corpus, read from the manifest so every
-        # consumer resolves the same number. A corpus generated BEFORE the fix carries no
-        # `input_scale` and was written in the normalised regime, where dividing by the
-        # thermal RMS would be wrong -- those get 1.0, i.e. the behaviour they were
-        # trained and scored under. See `measure_input_scale`.
-        by_format = self.manifest.get("input_scale_by_format") or {}
-        if input_format == "rad":
-            # SELF-NORMALISING BY CONSTRUCTION: `_derive_input` returns dB relative to
-            # each frame's own median power, so there is no global constant to divide by
-            # and applying one would be a second, contradictory normalisation. Pinned at
-            # 1.0 rather than left absent so `_load`'s `x / self.input_scale` stays a
-            # single code path. This is also the point of the format -- see F83 and the
-            # note in `_derive_input`.
-            self.input_scale = 1.0
-        elif by_format:
-            if input_format not in by_format:
-                raise ValueError(
-                    f"{self.manifest_path} records input scales for "
-                    f"{sorted(by_format)} but not for input_format={input_format!r}. "
-                    "Applying another format's constant would rescale the input by orders "
-                    "of magnitude (see F80); re-run dataset.finalize_input_scale.")
-            self.input_scale = float(by_format[input_format])
-        elif self.manifest.get("input_scale"):
-            # A manifest written before the per-format split. Its single constant was
-            # measured on "rd"; using it for "adc" is exactly the defect this guard exists
-            # for, so refuse rather than silently mis-scale.
-            if input_format != "rd":
-                raise ValueError(
-                    f"{self.manifest_path} records a single input_scale measured for "
-                    f"input_format='rd', but this dataset was opened as {input_format!r}. "
-                    "Re-run dataset.finalize_input_scale to record both.")
-            self.input_scale = float(self.manifest["input_scale"])
-        else:
-            self.input_scale = 1.0
-        if self.input_scale <= 0.0:
-            raise ValueError(
-                f"{self.manifest_path} records a non-positive input_scale "
-                f"({self.input_scale!r}); it must be a positive float"
-            )
+        # F63 piece 2. One constant for the whole corpus, resolved by ONE function so
+        # every consumer -- this dataset and the GUI's NeuralDetectorBlock -- divides by
+        # the same number. See `resolve_input_scale`.
+        self.input_scale = resolve_input_scale(self.manifest, input_format,
+                                               where=str(self.manifest_path))
 
     def __len__(self) -> int:
         return len(self.files)

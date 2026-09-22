@@ -137,9 +137,11 @@ PRESETS: List[DemoPreset] = [
             _only_products("range_az", "subspace_err"),
         ),
         blurb=("Run as loaded, then lower the AFE weight mantissa 6 -> 1 bit and run again. "
-               "The subspace error rises sharply while the range-azimuth image barely "
-               "moves: the tracker is far more sensitive to weight precision than the image "
-               "is. The FFT az-el panel is deliberately off (it contradicts this framing)."),
+               "The subspace error rises sharply (0.06 -> 0.63 measured on this preset) "
+               "while the range-azimuth image barely moves ON THE DISPLAYED 40 dB RANGE -- "
+               "the changes sit 40-80 dB below the peak, under the colour floor. The "
+               "tracker is far more sensitive to weight precision than the picture is. The "
+               "FFT az-el panel is deliberately off (it contradicts this framing)."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.07 -> 0.61)")],
         say=[
             "Say the headline in ANGLES: subspace error 0.61 -> 0.07 is an unnormalized "
@@ -178,7 +180,9 @@ PRESETS: List[DemoPreset] = [
                "acquires the scene's 8-dimensional subspace from 512 adaptive measurements "
                "of 1024 elements. Watch subspace_err: 0.57 -> 0.15 -> 0.07 -> 0.06, at the "
                "warm-started floor by frame 3. Flip 'Tracker initialisation' back to warm "
-               "to show the historical curve starting 1e-3 from the answer."),
+               "to show the historical curve, which starts at 0.04 -- already below the "
+               "0.06 tracking floor it then settles to, because it begins from a perturbed "
+               "copy of the true subspace."),
         live_knobs=[("subspace", "warm_start", "cold <-> warm")],
         say=[
             "Three frames to converge, at ten refinement passes per frame (n_refine=10 -- "
@@ -293,6 +297,9 @@ PRESETS: List[DemoPreset] = [
         say=[
             "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
             "first; the diagnosis is the result.",
+            "This map is the full 102 m grid, uncropped: expect 40-60 crosses per frame at "
+            "threshold 0.2 (measured 2026-09-22). The published 26 false alarms per frame "
+            "at recall 0.5 is inside the 40 m scoring crop; CFAR's is 6.2 there.",
             "Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1 "
             "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant frame-independent map.",
