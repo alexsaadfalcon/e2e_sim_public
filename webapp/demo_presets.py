@@ -390,11 +390,12 @@ PRESETS: List[DemoPreset] = [
                "0.657 vs 0.472 for a train-density prior). Threshold pinned at its recall-0.5 "
                "operating point (0.44). Independently verified 2026-09-22 (F85 addendum): "
                "reproduces bit-identically, splits scene-disjoint, baseline fair -- and on an "
-               "UNSEEN corpus from an earlier generator the lead falls to +0.03 with a WORSE "
-               "matched-recall false-alarm rate than CFAR. Owner decision 2026-09-22: this "
-               "LEADS Thrust 5, caveat volunteered; a generalisation campaign (second seed, "
-               "joint-corpus training, weight decay) is running -- update the caveat "
-               "sentence from ESTABLISHED_FACTS F86 when it lands."),
+               "UNSEEN corpus from an earlier generator the result is SEED-DEPENDENT: seed 42 "
+               "leads CFAR by +0.03 with worse false alarms, seed 43 trails it by -0.03 "
+               "(F86, partial). In-distribution both seeds beat CFAR (0.476 / 0.436 vs 0.301, "
+               "3.0 / 3.6 vs 6.2 false alarms per frame). Owner decision 2026-09-22: this "
+               "LEADS Thrust 5, caveat volunteered; the joint-corpus and weight-decay arms "
+               "complete F86 when they land."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         say=[
             "The defensible sentence, verbatim from the verifier: a learned head on the "
@@ -429,20 +430,22 @@ PRESETS: List[DemoPreset] = [
             "Range x azimuth had to be the spatial plane.",
             "THE CAVEAT, volunteered: on b1_bench_v2 test -- 173 unseen scenes, same radar and "
             "grid, an earlier generator with a different impairment model -- CFAR scores "
-            "0.179 at 13.2 FA/frame and this network 0.208 at 15.1 FA/frame (reproduced "
-            "under our protocol, e2e/ml/runs/ood_v2_test.json). The lead is +0.03, and at "
-            "matched recall the network is worse. The shipped FFTRadNet collapses to 0.063 "
-            "there, below the 0.065 chance floor: this one degrades, that one collapses -- "
-            "but 'degrades' is not 'robust'. One seed, one corpus, one tier; the "
-            "generalisation runs (F86) are the answer, not this slide.",
+            "0.179 at 13.2 FA/frame; this checkpoint (seed 42) 0.208 at 15.1, and the seed-43 "
+            "replicate 0.153 at 20.7 (e2e/ml/runs/gen_s43_v2_test.json, F86). Out of "
+            "distribution the network does NOT reliably beat CFAR: one seed is +0.03, the "
+            "other -0.03, and both are worse at matched recall. The shipped FFTRadNet "
+            "collapses to 0.063 there, below the 0.065 chance floor: these degrade, that one "
+            "collapses -- but 'degrades' is not 'robust'. The in-distribution win is what "
+            "replicates (0.476 / 0.436 vs 0.301); the joint-corpus arm (F86) is the "
+            "generalisation answer, not this slide.",
             "The stripe statistic is 0.62 (0.60 over all frames) against 0.31 for ground "
             "truth: the map is still partly separable. Quote it beside the AP.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified. The verified claim is in-distribution and on CFAR's "
             "own front end; the first radar person in the room will ask about both.",
-            "Anything about generalisation or robustness: the one out-of-distribution "
-            "measurement went the other way at matched recall.",
+            "Anything about generalisation or robustness: out of distribution the two seeds "
+            "straddle CFAR (+0.03 / -0.03) and both are worse at matched recall.",
             "That this is what the professor asked for in the ML thrust: it is a detector "
             "we designed to the diagnosis, not a port of the collaborators' architectures.",
             "That the model converged: val AP peaks at epoch 14 of 40 and decays to 0.35-0.41 "
