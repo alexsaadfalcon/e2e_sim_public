@@ -46,8 +46,9 @@ class BlockSpec:
     """A node in the pipeline block diagram."""
     id: str
     label: str
-    # Whether the user may toggle this block on/off. Environment and the
-    # downstream product blocks are structural and always on.
+    # Whether the user may toggle this block on/off. The precomputed Environment
+    # source is structural and always on; every product is switchable (since
+    # 2026-09-22 -- a demo preset must be able to hide a panel).
     toggleable: bool = True
     # Whether the block is enabled by default when the UI first loads.
     enabled_default: bool = True
@@ -215,7 +216,7 @@ BLOCKS: List[BlockSpec] = [
     BlockSpec(
         id="fft",
         label="FFT",
-        toggleable=False,
+        toggleable=True,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
         blurb="Azimuth-elevation power map (coherent aperture FFT, "
@@ -224,7 +225,7 @@ BLOCKS: List[BlockSpec] = [
     BlockSpec(
         id="range_az",
         label="Range-Azimuth",
-        toggleable=False,
+        toggleable=True,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
         blurb="Range-azimuth power map (non-coherent over elevation).",
@@ -232,7 +233,7 @@ BLOCKS: List[BlockSpec] = [
     BlockSpec(
         id="range_el",
         label="Range-Elevation",
-        toggleable=False,
+        toggleable=True,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
         blurb="Range-elevation power map (non-coherent over azimuth).",
@@ -240,7 +241,7 @@ BLOCKS: List[BlockSpec] = [
     BlockSpec(
         id="range_profile",
         label="Range Profile",
-        toggleable=False,
+        toggleable=True,
         category="product",
         params=[ParamSpec("bins", "FFT bins", "int", 256, step=1)],
         blurb=("Per-channel range profile (FFT along frequency only, no aperture "
@@ -252,7 +253,7 @@ BLOCKS: List[BlockSpec] = [
     BlockSpec(
         id="subspace_err",
         label="Subspace Error",
-        toggleable=False,
+        toggleable=True,
         category="product",
         params=[],
         blurb="Frobenius subspace distance between tracked and true U.",
@@ -605,6 +606,13 @@ def normalize_edge(edge: tuple) -> tuple:
 
 # Quick lookups -------------------------------------------------------------------
 BLOCKS_BY_ID: Dict[str, BlockSpec] = {b.id: b for b in BLOCKS}
+
+#: Ceiling on frames per run, enforced by BOTH the n_steps spinner and run_pipeline
+#: (the spinner alone is advisory: a typed 1000 used to start a run that held the
+#: server for an hour with no way to stop it). 50 is well above every demo preset
+#: (<= 20, see webapp/demo_presets.py) and below where the per-frame oracle SVD makes
+#: a run tedious; raise it here, in one place, if a study needs more.
+MAX_N_STEPS = 50
 
 PRODUCT_IDS = [b.id for b in BLOCKS if b.category == "product"]
 SERIAL_IDS = [b.id for b in BLOCKS if b.category != "product"]

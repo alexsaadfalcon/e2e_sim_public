@@ -43,6 +43,7 @@ from dash import (
 )
 
 from webapp import block_diagram, scenario_editor
+from webapp.demo_presets import PRESETS_BY_ID, PresetError, apply_preset
 from webapp.pipeline_registry import BLOCKS_BY_ID, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
     PipelineError,
@@ -61,6 +62,14 @@ server = app.server  # exposed for gunicorn/WSGI if ever needed
 
 # Result figures are stored as Plotly figure dicts in this Store between runs.
 EMPTY_RESULTS: Dict[str, Any] = {}
+
+# Cancel flag for the run in progress. ONE flag, process-wide: this app is a single
+# operator's local demo server (Dash's threaded dev server lets the Cancel callback
+# execute while the Run callback is still inside run_pipeline). Under a multi-worker
+# WSGI deployment the flag would not reach the worker holding the run; that
+# deployment does not exist and would need a background-callback manager anyway.
+import threading  # noqa: E402  (deliberately next to the flag it exists for)
+_CANCEL = threading.Event()
 
 
 def _app_layout() -> Any:
@@ -194,7 +203,8 @@ def _update_block_state(enabled_values, param_values, block_state):
     # child is now an Output of this callback, which is what makes dcc.Loading
     # notice it's "loading" in the first place) actually engages for the ~10s a
     # run takes, instead of both being dead decoration.
-    running=[(Output("run-button", "disabled"), True, False)],
+    running=[(Output("run-button", "disabled"), True, False),
+             (Output("cancel-button", "disabled"), False, True)],
 )
 def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
     """Run the pipeline (lazy heavy imports inside) and stash result figures."""
@@ -204,7 +214,9 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
     # value also makes the sink's own purpose (a loading anchor) legible in devtools.
     sink = f"run #{n_clicks}"
     try:
-        outputs = run_pipeline(block_state, n_steps=int(n_steps or 10))
+        _CANCEL.clear()
+        outputs = run_pipeline(block_state, n_steps=int(n_steps or 10),
+                               should_stop=_CANCEL.is_set)
     except PipelineError as e:
         # Friendly, expected failure: stay on the diagram, show the message.
         return no_update, html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink
@@ -243,9 +255,66 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
         # In auto mode the frames declare their own convention (v2 metadata), so no
         # assumption warning is needed -- but say what was detected, for transparency.
         note = "  [auto scale mode: following the frames' own metadata]"
-    msg = html.Span(f"Run complete: {len(data)} product(s). See Results tab.{note}",
-                    style={"color": "#20bf6b"})
+    axis_meta = outputs.get("_axis_meta") or {}
+    if axis_meta.get("cancelled"):
+        # Partial results are still shown, labelled as partial.
+        msg = html.Span(f"Cancelled after {axis_meta.get('n_steps_run', '?')} of "
+                        f"{int(n_steps or 10)} frames: {len(data)} product(s) from the "
+                        f"frames that ran. See Results tab.{note}",
+                        style={"color": "#f39c12"})
+    else:
+        msg = html.Span(f"Run complete: {len(data)} product(s). See Results tab.{note}",
+                        style={"color": "#20bf6b"})
     return data, msg, "tab-results", sink
+
+
+# =================================================================================
+# Demo presets + Cancel
+# =================================================================================
+
+@app.callback(
+    Output("block-state-store", "data", allow_duplicate=True),
+    Output("run-nsteps", "value"),
+    Output("preset-notes", "children"),
+    Output("block-param-editor", "children", allow_duplicate=True),
+    Output("run-status", "children", allow_duplicate=True),
+    Input("preset-load", "n_clicks"),
+    State("preset-select", "value"),
+    State("block-cytoscape", "tapNodeData"),
+    prevent_initial_call=True,
+)
+def _load_preset(n_clicks, preset_id, node_data):
+    """Replace the block state and frame count with a demo preset's, and show its
+    operator card. The param editor is re-rendered for the currently selected block so
+    the spinners on screen show the preset's values, not the ones just replaced."""
+    preset = PRESETS_BY_ID.get(preset_id or "")
+    if preset is None:
+        return (no_update, no_update,
+                html.Span(f"Unknown preset {preset_id!r}", style={"color": "#eb3b5a"}),
+                no_update, no_update)
+    try:
+        state = apply_preset(preset)
+    except PresetError as e:
+        # A preset that no longer fits the registry is a bug in the preset; say so
+        # rather than loading half of it.
+        return (no_update, no_update, html.Span(str(e), style={"color": "#eb3b5a"}),
+                no_update, no_update)
+    block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
+    return (state, preset.n_steps, block_diagram.preset_notes(preset),
+            block_diagram.param_editor(block_id, state),
+            html.Span(f"Preset loaded: {preset.label}. Press Run pipeline.",
+                      style={"color": "#3867d6"}))
+
+
+@app.callback(
+    Output("run-status", "children", allow_duplicate=True),
+    Input("cancel-button", "n_clicks"),
+    prevent_initial_call=True,
+)
+def _cancel_run(n_clicks):
+    """Ask the run in progress to stop after the frame it is on (see _CANCEL)."""
+    _CANCEL.set()
+    return html.Span("Cancelling after the current frame...", style={"color": "#f39c12"})
 
 
 # =================================================================================

@@ -27,7 +27,7 @@ from typing import Any, Dict, List
 import numpy as np
 import plotly.graph_objects as go
 
-from webapp.pipeline_registry import BLOCKS_BY_ID, SUBSPACE_M
+from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, SUBSPACE_M
 
 # Speed of light (m/s), used to convert the frequency-FFT axis to physical range.
 _C = 2.99792458e8
@@ -215,7 +215,8 @@ def _build_detector(state: Dict[str, Dict[str, Any]], cfg, grid):
         raise PipelineError(f"Could not load the ML checkpoint {ckpt.name}: {e}")
 
 
-def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[str, Any]:
+def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
+                 should_stop=None) -> Dict[str, Any]:
     """
     Build blocks from ``state`` and run ``n_steps`` of the simulation.
 
@@ -250,6 +251,16 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     N_TX = 1
 
     scenario_name = _p(state, "environment", "scenario_name")
+    # Frame-count ceiling, checked before any block is built so an oversized request
+    # costs nothing. The spinner in the UI carries the same bound (block_diagram.py).
+    if int(n_steps) > MAX_N_STEPS:
+        raise PipelineError(
+            f"Frames to run = {int(n_steps)} exceeds the ceiling of {MAX_N_STEPS}. The "
+            f"demo presets use at most 20 (past ~20 frames the per-frame cost triples and "
+            f"the tracker's rank-collapse spike returns); raise MAX_N_STEPS in "
+            f"webapp/pipeline_registry.py for a study."
+        )
+
     k = int(_p(state, "subspace", "k"))
     # AdaOjaBlock raises ValueError for k >= m, and it does so at CONSTRUCTION -- which
     # happens below, outside the try/except that wraps the run. So without this check
@@ -389,13 +400,18 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     range_az_bins = int(_p_positive(state, "range_az", "bins"))
     range_el_bins = int(_p_positive(state, "range_el", "bins"))
     range_profile_bins = int(_p_positive(state, "range_profile", "bins"))
-    downstream_blocks = [
-        FFTBlock(bins=fft_bins),
-        RangeAzBlock(bins=range_az_bins),
-        RangeElBlock(bins=range_el_bins),
-        RangeProfileBlock(bins=range_profile_bins),
-        SubspaceErrorBlock(),
+    # Each classic product is built only when enabled. They were structural (always
+    # on) until 2026-09-22; a demo preset needs to hide a panel that contradicts its
+    # own story (the FFT az-el view in Thrust 2, notes/DEMO_DEFENSE.md #8), and a
+    # product the UI shows as switchable must actually switch.
+    classic_products = [
+        ("fft", lambda: FFTBlock(bins=fft_bins)),
+        ("range_az", lambda: RangeAzBlock(bins=range_az_bins)),
+        ("range_el", lambda: RangeElBlock(bins=range_el_bins)),
+        ("range_profile", lambda: RangeProfileBlock(bins=range_profile_bins)),
+        ("subspace_err", lambda: SubspaceErrorBlock()),
     ]
+    downstream_blocks = [build() for bid, build in classic_products if _enabled(state, bid)]
     # `rx_cfg`/`rx_grid` describe the ADC cube the RX-time products consume, when there
     # is one: set by the corpus source, or by the dechirp chain below.
     rx_cfg, rx_grid = corpus_cfg, corpus_grid
@@ -674,7 +690,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
     )
 
     try:
-        outputs = sim.run(n_steps=max(1, int(n_steps)))
+        outputs = sim.run(n_steps=max(1, int(n_steps)), should_stop=should_stop)
     except FileNotFoundError as e:
         raise PipelineError(
             "A required data file was missing during the run (generate frames "
@@ -735,6 +751,10 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10) -> Dict[st
         # block freq_plan), not from UI params/fallbacks -- lets the UI say so.
         "from_meta": bool(getattr(environment_block, "freq_plan", None)),
     }
+    # How many frames actually ran, and whether the run was cut short by Cancel, so
+    # the UI labels partial results as partial.
+    outputs["_axis_meta"]["n_steps_run"] = int(getattr(sim, "n_steps_run", n_steps))
+    outputs["_axis_meta"]["cancelled"] = bool(getattr(sim, "cancelled", False))
     if rx_cfg is not None:
         # Geometry of the ADC cube the RX-time products were built on, so their
         # figures carry physical axes (range in m, radial velocity in m/s, sin(az)).

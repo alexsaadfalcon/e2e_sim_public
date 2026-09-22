@@ -13,8 +13,9 @@ from typing import Any, Dict, List
 import dash_cytoscape as cyto
 from dash import dcc, html
 
+from webapp.demo_presets import PRESETS, DemoPreset
 from webapp.pipeline_registry import (
-    BLOCKS, BLOCKS_BY_ID, EDGES, PRODUCT_IDS, normalize_edge,
+    BLOCKS, BLOCKS_BY_ID, EDGES, MAX_N_STEPS, PRODUCT_IDS, normalize_edge,
 )
 
 # Manual positions so the graph reads left-to-right as a pipeline. Every id in
@@ -340,6 +341,30 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
     return children
 
 
+def preset_notes(preset: DemoPreset) -> Any:
+    """The operator's card for a loaded preset: what it shows, the knob(s) to turn live,
+    what to say, and what not to say. Rendered into `preset-notes` on load."""
+    def _list(title: str, items: List[str], color: str) -> Any:
+        if not items:
+            return None
+        return html.Div([
+            html.Div(title, style={"fontWeight": "bold", "color": color,
+                                   "marginTop": "6px"}),
+            html.Ul([html.Li(t, style={"marginBottom": "2px"}) for t in items],
+                    style={"marginTop": "2px", "paddingLeft": "20px"}),
+        ])
+
+    knobs = [f"{BLOCKS_BY_ID[b].label} -> {k}: {how}" for b, k, how in preset.live_knobs]
+    return html.Div([
+        html.Div(f"Loaded: {preset.label}  (Thrust {preset.thrust}, {preset.n_steps} frames)",
+                 style={"fontWeight": "bold"}),
+        html.P(preset.blurb, style={"marginTop": "4px", "marginBottom": "2px"}),
+        _list("Turn live", knobs, "#3867d6"),
+        _list("Say", preset.say, "#20bf6b"),
+        _list("Do NOT say or show", preset.do_not_say, "#eb3b5a"),
+    ], style={"fontSize": "12px", "color": "#2d3a4a"})
+
+
 def _legend_swatch(color: str, label: str) -> Any:
     """One legend entry: a small filled square + label (readable at demo scale --
     colored text alone is low-contrast for the lighter category colors)."""
@@ -388,6 +413,28 @@ def layout() -> Any:
                "Dashed edges feed a disabled block. Then hit Run pipeline.",
                style={"color": "#576574"}),
         legend,
+        # Demo presets (notes/DEMO_DEFENSE.md): one click configures every block, the
+        # frame count and the operator notes for one thrust. Loading a preset REPLACES
+        # the block state; edits made afterwards are the operator's own.
+        html.Div([
+            html.Label("Demo preset: ", style={"fontWeight": "bold", "marginRight": "6px"}),
+            dcc.Dropdown(
+                id="preset-select",
+                options=[{"label": p.label, "value": p.id} for p in PRESETS],
+                value=PRESETS[0].id if PRESETS else None, clearable=False,
+                style={"width": "460px", "display": "inline-block",
+                       "verticalAlign": "middle"},
+            ),
+            html.Button("Load preset", id="preset-load", n_clicks=0,
+                        style={"marginLeft": "12px", "padding": "6px 14px",
+                               "fontWeight": "bold", "backgroundColor": "#3867d6",
+                               "color": "white", "border": "none",
+                               "borderRadius": "4px", "cursor": "pointer",
+                               "verticalAlign": "middle"}),
+            html.Div(id="preset-notes", style={"marginTop": "8px"}),
+        ], style={"marginBottom": "10px", "padding": "10px",
+                  "border": "1px solid #dfe4ea", "borderRadius": "6px",
+                  "backgroundColor": "#f7f9fb"}),
         html.Div([
             html.Div(
                 cyto.Cytoscape(
@@ -420,13 +467,22 @@ def layout() -> Any:
         html.Div([
             html.Label("Frames to run (n_steps): ",
                        style={"fontWeight": "bold", "marginRight": "6px"}),
-            dcc.Input(id="run-nsteps", type="number", value=10, min=1, step=1,
-                      style={"width": "80px"}),
+            # Bounded to MAX_N_STEPS on both ends of the wire: here (advisory, a typed
+            # value can still exceed it) and in run_pipeline (enforced).
+            dcc.Input(id="run-nsteps", type="number", value=10, min=1, max=MAX_N_STEPS,
+                      step=1, style={"width": "80px"}),
             html.Button("Run pipeline", id="run-button", n_clicks=0,
                         style={"marginLeft": "12px", "padding": "6px 16px",
                                "fontWeight": "bold", "backgroundColor": "#20bf6b",
                                "color": "white", "border": "none",
                                "borderRadius": "4px", "cursor": "pointer"}),
+            # Enabled only while a run is in progress (see app._run_pipeline's
+            # `running=`); sets a flag the simulation polls before each frame.
+            html.Button("Cancel", id="cancel-button", n_clicks=0, disabled=True,
+                        style={"marginLeft": "8px", "padding": "6px 12px",
+                               "backgroundColor": "#eb3b5a", "color": "white",
+                               "border": "none", "borderRadius": "4px",
+                               "cursor": "pointer"}),
             html.Span(id="run-status", style={"marginLeft": "12px",
                                               "color": "#576574"}),
         ], style={"marginTop": "12px"}),

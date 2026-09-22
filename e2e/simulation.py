@@ -444,10 +444,21 @@ class Simulation:
     def get_outputs(self):
         return self.outputs
 
-    def run(self, n_steps=10):
+    def run(self, n_steps=10, should_stop=None):
+        """Run `n_steps` frames; `should_stop()` is polled BEFORE each frame and ends the
+        run early when it returns True (the GUI's Cancel button). `self.n_steps_run`
+        records how many frames actually ran, and `self.cancelled` whether the run was
+        cut short, so a caller can label partial outputs honestly instead of presenting
+        three frames as ten."""
         self.reset()
+        self.n_steps_run = 0
+        self.cancelled = False
         for i in tqdm(range(n_steps), desc='RUNNING ARRAY SIMULATION'):
+            if should_stop is not None and should_stop():
+                self.cancelled = True
+                break
             self.feed_forward()
             self.step()
+            self.n_steps_run += 1
         return self.get_outputs()
 
