@@ -21,15 +21,15 @@ from typing import Any, Dict, List, Tuple
 from webapp.corpus_catalog import DEFAULT_CORPUS
 from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
 
-#: notes/DEMO_DEFENSE.md DO-NOT-SHOW #9: runs longer than ~20 frames, for two independent
-#: reasons (per-frame cost triples past ~20 frames, and a divergence spike survives the
-#: mitigation). A preset asking for more is a bug, and a test says so.
-MAX_PRESET_N_STEPS = 20
+#: notes/DEMO_DEFENSE.md DO-NOT-SHOW #9: runs longer than ~20 frames. Defined in the
+#: registry beside MAX_N_STEPS so the runner's error text and this ceiling agree.
+from webapp.pipeline_registry import MAX_PRESET_N_STEPS  # noqa: E402
 
-#: The valid, fingerprint-clean checkpoint for the ML detector (rd format, test AP 0.127
-#: under the beat_cfar protocol, re-verified 2026-09-22). Not tracked by git -- the demo
-#: machine needs the file. See notes/ESTABLISHED_FACTS.md F84 for why the rad-format
-#: checkpoints are NOT used here.
+#: The checkpoint for the ML detector: rd format, test AP 0.127 under the beat_cfar
+#: protocol. It PREDATES the pipeline fingerprint (F84) -- it carries no stamp and is
+#: trusted because re-scoring it under current code reproduces 0.127 (2026-09-22,
+#: `e2e/ml/runs/beat_cfar.json`, arm `fftradnet_rd_b5`). Not tracked by git -- the demo
+#: machine needs the file. The rad-format checkpoints are NOT used here: see F84.
 ML_CHECKPOINT = "e2e/ml/runs/b5_fftradnet_v3/best.pt"
 
 #: Decode threshold for that checkpoint. Its recall-0.5 operating point is objectness
@@ -107,8 +107,11 @@ PRESETS: List[DemoPreset] = [
             "The noise mechanism is right: the analytic Friis cascade predicts 11.97 dB and "
             "the end-to-end chain measures 11.80 dB, through 1024 elements, an FFT, the AFE "
             "and the subspace tracker. The IF number lands on 10*log10(50) = 17.0.",
-            "At the default signal level (1e-5) these knobs correctly do nothing -- show "
-            "that as the control if asked.",
+            "At the default signal level (1e-5) these knobs correctly do nothing (0.5 dB, "
+            "under the 40 dB display floor) -- show that as the control if asked.",
+            "Below about 4 mA the modelled LNA is a LOSS stage (-8.5 dB at 0.5 mA), so most "
+            "of the 12 dB is the LNA leaving the attenuator regime. The defensible sub-claim "
+            "is 4 -> 8 mA = +1.6 dB (measured 2026-09-22). Say it before someone does.",
             "There is no trade-off in the model today: nothing clips and the IF filter only "
             "sets the noise variance. Volunteer the missing half: 1000 frequency points at "
             "1 MHz IF is a 1 ms sweep versus 20 us at 50 MHz, and a 20 m/s car moves two "
@@ -124,6 +127,10 @@ PRESETS: List[DemoPreset] = [
             "Anything about IIP3: it is constant to five decimals across 0.5-10 mA here. "
             "A real LNA's IIP3 improves with bias.",
             "Any gain knob at any level: peak normalization removes it.",
+            "Any absolute dBm sensitivity or noise-figure number for the chain.",
+            "That the 1024 receivers are modelled individually: every column of the "
+            "config table holds one value, broadcast to all elements. Channel mismatch is "
+            "structurally absent (cheap to add; not added).",
         ],
     ),
     DemoPreset(
@@ -142,13 +149,14 @@ PRESETS: List[DemoPreset] = [
                "the changes sit 40-80 dB below the peak, under the colour floor. The "
                "tracker is far more sensitive to weight precision than the picture is. The "
                "FFT az-el panel is deliberately off (it contradicts this framing)."),
-        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.07 -> 0.61)")],
+        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
         say=[
-            "Say the headline in ANGLES: subspace error 0.61 -> 0.07 is an unnormalized "
-            "distance bounded by sqrt(k); converted, the average principal angle goes "
-            "12.4 deg -> 1.4 deg.",
+            "Say the headline in ANGLES: subspace error 0.63 -> 0.06 (measured on this preset "
+            "2026-09-22: 0.626 -> 0.062) is an unnormalized distance bounded by sqrt(k); "
+            "converted, the average principal angle goes 12.8 deg -> 1.3 deg.",
             "The AFE is doing something real but modest: on vs fully removed moves the "
-            "range-azimuth image 0.18 dB -- bigger than the mantissa knob's own 0.05 dB.",
+            "displayed range-azimuth image 0.14 dB -- bigger than the mantissa knob's own "
+            "0.04 dB on the same displayed range.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
         ],
@@ -216,10 +224,11 @@ PRESETS: List[DemoPreset] = [
             _only_products("range_profile", "range_az"),
         ),
         blurb=("A SYNTHETIC bad interconnect: the 11-tap boxcar placeholder, normalized to a "
-               "0 dB peak so it has no gain a passive part could not have, leaving 59.7 dB "
+               "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
                "of in-band ripple. Run as loaded, then set Case -> passthrough and run "
-               "again: the range profile's sidelobes and the smearing across 11 range bins "
-               "disappear. Lead with the range profile, not the heatmap."),
+               "again: the range profile's floor drops ~14 dB and the smearing disappears "
+               "(11 NATIVE range cells; about 3 gates on the 256-bin display, which pools 4 "
+               "cells per gate). Lead with the range profile, not the heatmap."),
         live_knobs=[("interconnect", "case", "default (synthetic boxcar) -> passthrough")],
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
@@ -297,19 +306,23 @@ PRESETS: List[DemoPreset] = [
         say=[
             "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
             "first; the diagnosis is the result.",
-            "This map is the full 102 m grid, uncropped: expect 40-60 crosses per frame at "
-            "threshold 0.2 (measured 2026-09-22). The published 26 false alarms per frame "
-            "at recall 0.5 is inside the 40 m scoring crop; CFAR's is 6.2 there.",
+            "At threshold 0.2 expect roughly 2-70 crosses per frame (mean ~38 over 30 test "
+            "frames, 2026-09-22), ALL inside 40 m: the network never fires beyond the "
+            "labelled range. At the scored operating point (0.22) it is ~27 per frame = 26 "
+            "false alarms + ~3 hits, which is the published number; CFAR's is 6.2.",
             "Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1 "
             "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant frame-independent map.",
-            "The cause is where azimuth enters the network: as phase across a "
-            "virtual-channel axis the backbone mixes away in layer one. The fix is an "
-            "architecture that respects that -- CFAR proposes, a small learned head "
-            "rescores -- and that is what we are building, not another port.",
-            "How two results died this week and what stops it recurring: the pipeline "
-            "fingerprint every checkpoint now records (F84). Volunteer it if asked about "
-            "reproducibility.",
+            "F83's mechanism, verbatim: neither head converts channel phase into an angle "
+            "bin. Two things are in flight to test it: a fixed angle FFT in front of the "
+            "network (the 'rad' input; first valid result 0.138 vs 0.127 for 'rd'), and a "
+            "detector where CFAR proposes and a small learned head rescores (owner "
+            "directive 2026-09-22; design in HANDOFF-2026-09-22.md section 5). Neither is a "
+            "result yet.",
+            "How two results died this week and what stops it recurring: every checkpoint "
+            "trained since 2026-09-21 records a fingerprint of the code that built its "
+            "inputs (F84). The checkpoint on screen predates the field; it is trusted "
+            "because re-scoring it today reproduces its number, not because of a stamp.",
         ],
         do_not_say=[
             "'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.",

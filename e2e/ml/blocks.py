@@ -8,8 +8,11 @@ adapter alongside the code it wraps, not folded into the top-level
 `e2e/frames.py`'s `FrameCapabilities`), and importing this module has no
 side effects beyond defining the classes.
 
-Three blocks, sitting at the END of the chain (see the chain-integration
-design notes):
+Five blocks, sitting at the END of the chain (see the chain-integration
+design notes) -- the three original ones below, plus `CorpusSourceBlock` (a
+SourceBlock driven by a corpus manifest) and `CFARDetectorBlock` (the classical
+detector as a product, the peer of the neural one), both added 2026-09-22 for the
+GUI's Thrust 5 path:
 
 * `SinkBlock`   -- persists whatever the chain holds at the point it is
   inserted (an intermediate artifact, or a full training sample).
@@ -337,6 +340,28 @@ class SourceBlock:
         return dict(extra)
 
 
+#: Repo root, for resolving the RELATIVE manifest path a checkpoint records
+#: (`e2e/ml/train.py` stores `str(manifest_path)` as given on its command line, which is
+#: repo-relative on every run this project has made).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_manifest_path(manifest_path) -> Path:
+    """A manifest path as a checkpoint recorded it, made loadable from any CWD.
+
+    Reviewed finding (2026-09-22): the GUI's ML detector died with "No such file" when
+    the Dash server was launched from anywhere but the repo root, because a bare
+    `open()` on the checkpoint's relative `manifest` resolved against the process CWD.
+    Absolute paths are used as given; a relative one is tried against the CWD first
+    (unchanged behaviour) and then against the repo root.
+    """
+    p = Path(str(manifest_path))
+    if p.is_absolute() or p.is_file():
+        return p
+    candidate = _REPO_ROOT / p
+    return candidate if candidate.is_file() else p
+
+
 class CorpusSourceBlock(SourceBlock):
     """Replay the frames of a generated ML corpus, in manifest order, as the environment.
 
@@ -563,6 +588,7 @@ class NeuralDetectorBlock:
                 "(or a checkpoint that recorded its own 'manifest' path) to "
                 "reconstruct the model's input/output geometry"
             )
+        manifest_path = _resolve_manifest_path(manifest_path)
         with open(manifest_path) as f:
             manifest = json.load(f)
         input_format = ckpt.get("input_format", manifest.get("input_format", "rd"))

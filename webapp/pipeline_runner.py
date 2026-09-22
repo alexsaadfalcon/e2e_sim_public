@@ -27,7 +27,8 @@ from typing import Any, Dict, List
 import numpy as np
 import plotly.graph_objects as go
 
-from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, SUBSPACE_M
+from webapp.pipeline_registry import (BLOCKS_BY_ID, MAX_N_STEPS, MAX_PRESET_N_STEPS,
+                                      SUBSPACE_M)
 
 # Speed of light (m/s), used to convert the frequency-FFT axis to physical range.
 _C = 2.99792458e8
@@ -256,10 +257,13 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     if int(n_steps) > MAX_N_STEPS:
         raise PipelineError(
             f"Frames to run = {int(n_steps)} exceeds the ceiling of {MAX_N_STEPS}. The "
-            f"demo presets use at most 20 (past ~20 frames the per-frame cost triples and "
-            f"the tracker's rank-collapse spike returns); raise MAX_N_STEPS in "
-            f"webapp/pipeline_registry.py for a study."
+            f"demo presets use at most {MAX_PRESET_N_STEPS} (past ~{MAX_PRESET_N_STEPS} "
+            f"frames the per-frame cost triples and the tracker's rank-collapse spike "
+            f"returns); raise MAX_N_STEPS in webapp/pipeline_registry.py for a study."
         )
+    # Advisory notes about THIS run (blocks ignored, a checkpoint with no provenance
+    # stamp, ...) -- surfaced in the UI status line via outputs["_axis_meta"]["notes"].
+    run_notes: List[str] = []
 
     k = int(_p(state, "subspace", "k"))
     # AdaOjaBlock raises ValueError for k >= m, and it does so at CONSTRUCTION -- which
@@ -417,8 +421,17 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     rx_cfg, rx_grid = corpus_cfg, corpus_grid
     if corpus_mode:
         # A replayed frame is already past every frequency-domain stage and product;
-        # Simulation would refuse them at the frame contract. Run none of them.
+        # Simulation would refuse them at the frame contract. Run none of them -- and
+        # SAY which enabled blocks were skipped, so a diagram showing them lit does not
+        # read as a run that produced nothing for them (reviewed finding, 2026-09-22).
         downstream_blocks = []
+        ignored = [bid for bid, _ in classic_products if _enabled(state, bid)]
+        ignored += [bid for bid in ("rffe", "interconnect", "afe", "dechirp", "thermal_noise",
+                                    "impairment", "if_hpf", "quantizer", "sink")
+                    if _enabled(state, bid)]
+        if ignored:
+            run_notes.append("Corpus Replay skipped the enabled blocks it cannot apply to a "
+                             "stored ADC frame: " + ", ".join(ignored))
 
     # --- optional ADC-cube chain (e2e/chain/dechirp.py, e2e/chain/receive.py) ----
     # "dechirp" is this chain's activation toggle: it BRIDGES the frequency-domain
@@ -619,6 +632,19 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 raise PipelineError("The Detector needs the label grid (e2e.ml.labels), "
                                     "which could not be imported.")
             downstream_blocks.append(_build_detector(state, rx_cfg, rx_grid))
+            if str(_p(state, "detector", "mode")) == "ml":
+                # Provenance of the checkpoint on screen (F84). The guard lives in
+                # e2e.ml.beat_cfar; a checkpoint it cannot vouch for is still run --
+                # the demo's own checkpoint predates the stamp -- but the run says so.
+                try:
+                    from e2e.ml.beat_cfar import _stale_reason
+                    ckpt = _resolve_repo_path(_p(state, "detector", "checkpoint"))
+                    reason = _stale_reason(str(ckpt.parent))
+                except Exception:
+                    reason = None
+                if reason:
+                    run_notes.append(f"ML checkpoint {ckpt.parent.name}: {reason} -- "
+                                     "run `python -m e2e.ml.recertify` on it to re-verify")
     elif _enabled(state, "radar_cube") or _enabled(state, "detector"):
         raise PipelineError(
             "The Radar Cube and Detector products consume a digitized ADC cube. Enable "
@@ -670,7 +696,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     if serial_stages_override is not None and not downstream_blocks:
         raise PipelineError(
             "The ADC-cube chain is enabled but no ADC-chain product (Radar "
-            "Cube / Neural Detector / Frame Sink) is enabled -- enable one, "
+            "Cube / Detector / Frame Sink) is enabled -- enable one, "
             "or disable Dechirp to run the frequency-domain products."
         )
 
@@ -753,6 +779,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     }
     # How many frames actually ran, and whether the run was cut short by Cancel, so
     # the UI labels partial results as partial.
+    outputs["_axis_meta"]["notes"] = list(run_notes)
     outputs["_axis_meta"]["n_steps_run"] = int(getattr(sim, "n_steps_run", n_steps))
     outputs["_axis_meta"]["cancelled"] = bool(getattr(sim, "cancelled", False))
     if rx_cfg is not None:

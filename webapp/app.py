@@ -256,6 +256,10 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json):
         # assumption warning is needed -- but say what was detected, for transparency.
         note = "  [auto scale mode: following the frames' own metadata]"
     axis_meta = outputs.get("_axis_meta") or {}
+    # Run notes (blocks a source could not apply, a checkpoint without a provenance
+    # stamp, ...) belong next to the result, not in a server log nobody reads on stage.
+    if axis_meta.get("notes"):
+        note += "  [" + " | ".join(axis_meta["notes"]) + "]"
     if axis_meta.get("cancelled"):
         # Partial results are still shown, labelled as partial.
         msg = html.Span(f"Cancelled after {axis_meta.get('n_steps_run', '?')} of "

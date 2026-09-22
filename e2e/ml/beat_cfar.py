@@ -135,6 +135,18 @@ ARMS: Dict[str, Dict] = {
     },
 }
 
+#: Checkpoints scored beside the arms but never trained here: the shipped `rd`-format
+#: baselines every earlier number was quoted from. Reviewed finding (2026-09-22): the
+#: demo's cards quoted 0.127 / 0.123 from a JSON written on 2026-09-01 that this script
+#: never regenerated, while DEMO_DEFENSE.md said to quote THIS script's output only --
+#: two authorities, and the one named as authoritative did not contain the number. Now it
+#: does. A missing file is skipped with a printed line, not an error, so a clean clone
+#: (runs/ is gitignored) still produces the table for the arms it trained.
+REFERENCE_CHECKPOINTS: Dict[str, str] = {
+    "fftradnet_rd_b5": "e2e/ml/runs/b5_fftradnet_v3/best.pt",
+    "ssmradnet_rd_b5": "e2e/ml/runs/b5_ssmradnet_v3/best.pt",
+}
+
 
 def _seed_everything(seed: int, strict: bool) -> None:
     random.seed(seed)
@@ -219,8 +231,12 @@ def _stale_reason(out_dir: str) -> Optional[str]:
     # mistaken for the strong one.
     ck_mtime = ck.stat().st_mtime
     changed = []
+    # Against the repo root, NOT the CWD: from any other directory the sources "do not
+    # exist" and the fallback silently vouches for everything (found 2026-09-22 when the
+    # GUI, launched from %TEMP%, reported no note for an unfingerprinted checkpoint).
+    repo_root = Path(__file__).resolve().parents[2]
     for src in INPUT_PIPELINE_SOURCES:
-        p = Path(src)
+        p = repo_root / src
         if not p.exists():
             continue
         newest = (max((f.stat().st_mtime for f in p.rglob("*.py")), default=0.0)
@@ -348,8 +364,14 @@ def main(argv: Optional[List[str]] = None) -> int:
            "--decode-threshold", str(DECODE_THRESHOLD),
            "--max-range-m", str(MAX_RANGE_M),
            "--out", args.out]
-    for n in scored:
-        cmd += ["--checkpoint", f"{n}={ARMS[n]['out']}/best.pt"]
+    checkpoints = {n: f"{ARMS[n]['out']}/best.pt" for n in scored}
+    for n, path in REFERENCE_CHECKPOINTS.items():
+        if Path(path).is_file():
+            checkpoints[n] = path
+        else:
+            print(f"[{n}] reference checkpoint not on this machine, skipped: {path}")
+    for n, path in checkpoints.items():
+        cmd += ["--checkpoint", f"{n}={path}"]
     print(f"\nSCORE :: {' '.join(cmd)}")
     if subprocess.run(cmd, env=dict(os.environ, MPLBACKEND="Agg")).returncode != 0:
         return 1
@@ -357,8 +379,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # AP alone cannot say whether azimuth was learned -- see _stripe_statistic.
     print("\nSTRIPE STATISTIC (median rank-1 energy fraction; ground truth = 0.312)")
     stripes = {}
-    for n in scored:
-        v = _stripe_statistic(f"{ARMS[n]['out']}/best.pt")
+    for n, path in checkpoints.items():
+        v = _stripe_statistic(path)
         stripes[n] = v
         if v is not None:
             verdict = ("azimuth LEARNED" if v < 0.55 else

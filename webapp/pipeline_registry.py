@@ -509,8 +509,10 @@ BLOCKS: List[BlockSpec] = [
                       choices=["cfar", "ml"],
                       help="'cfar': classical cell-averaging CFAR on the range-azimuth "
                            "power map (the baseline every published number is compared "
-                           "against). 'ml': a trained FFTRadNet/SSMRadNet/RADDetNet "
-                           "checkpoint; its input format is read from the checkpoint."),
+                           "against). 'ml': a trained FFTRadNet/SSMRadNet checkpoint in "
+                           "the 'rd' or 'adc' input format (read from the checkpoint). "
+                           "'rad'-format checkpoints (b6/b7/b8, RADDetNet) are refused "
+                           "here -- that front end is not ported to the GUI block yet."),
             ParamSpec("checkpoint", "ML checkpoint (path)", "text", "",
                       help="ML mode only. Path to a best.pt written by e2e.ml.train, "
                            "e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Checkpoints are "
@@ -613,6 +615,11 @@ BLOCKS_BY_ID: Dict[str, BlockSpec] = {b.id: b for b in BLOCKS}
 #: (<= 20, see webapp/demo_presets.py) and below where the per-frame oracle SVD makes
 #: a run tedious; raise it here, in one place, if a study needs more.
 MAX_N_STEPS = 50
+
+#: Ceiling for the DEMO presets specifically (notes/DEMO_DEFENSE.md DO-NOT-SHOW #9: past
+#: ~20 frames the per-frame cost triples and the tracker's rank-collapse spike returns).
+#: Lives here so `webapp/demo_presets.py` and the runner's error text quote one number.
+MAX_PRESET_N_STEPS = 20
 
 PRODUCT_IDS = [b.id for b in BLOCKS if b.category == "product"]
 SERIAL_IDS = [b.id for b in BLOCKS if b.category != "product"]
