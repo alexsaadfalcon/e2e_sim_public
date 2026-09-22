@@ -47,10 +47,12 @@ N_FREQS = 512
 # Case3 was long the only one shipped, on the collaborator's statement that it is the
 # WORST-PERFORMING of their six designs -- a conservative validation bound rather than a
 # representative one. With all six now derived, that statement is MEASURED rather than
-# taken on trust: Case3's median in-band insertion loss is -0.541 dB with 0.113 dB of
-# ripple, against -0.249 to -0.291 dB and <=0.030 dB ripple for the other five. It is
-# indeed the most demanding in our band, by roughly a factor of two in loss and four
-# in ripple. Ranked by what THIS pipeline's range response is sensitive to.
+# taken on trust (measured from the shipped CSVs, 75-81 GHz, 2026-09-22): Case3's median
+# in-band insertion loss is -0.530 dB with 0.034 dB p-p of in-band ripple, against
+# -0.248 to -0.290 dB and <=0.009 dB for the other five. (An earlier version of this
+# comment quoted 0.113 dB and <=0.030 dB, which are the 70-90 GHz FULL-SWEEP ripples.)
+# It is indeed the most demanding in our band, by roughly a factor of two in loss and
+# four in ripple. Ranked by what THIS pipeline's range response is sensitive to.
 _INTERCONNECT_DATA = Path(__file__).resolve().parent.parent / "data" / "interconnect"
 
 

@@ -871,6 +871,20 @@ def _sin_angle_axis(n_bins: int):
     return (np.arange(n_bins) - n_bins // 2) / (n_bins / 2)
 
 
+def _nonnegative_range(axis) -> np.ndarray:
+    """Boolean mask selecting the physical (range >= 0) half of an fftshifted range
+    axis. The delay profile of a causal channel has no negative-delay content; what
+    sits there is sidelobe leakage (measured on munich frame 0, 2026-09-22: 4% of the
+    energy). A signed axis put half of every heatmap on a non-physical range and drew
+    the question "why negative range?" at every screen (owner decision 1A, 2026-09-22).
+    Display only: the products themselves are untouched. A bin-index axis (no
+    metadata) is kept whole."""
+    axis = np.asarray(axis, dtype=float)
+    if axis.size and axis.min() < 0:
+        return axis >= 0
+    return np.ones(axis.shape, dtype=bool)
+
+
 def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     """fftshifted range DISPLAY-gate index -> physical range (meters).
 
@@ -1080,12 +1094,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
+            frames_db = [_to_numpy_abs_db(f) for f in outputs[key]]
+            keep = _nonnegative_range(y)
+            if frames_db[-1].shape[0] == keep.size:
+                frames_db = [f[keep] for f in frames_db]
+                y = y[keep]
             figs[key] = _add_frame_animation(
-                _heatmap(
-                    _to_numpy_abs_db(outputs[key][-1]), title,
-                    x=x, y=y, xlabel=aperture_label, ylabel=ylabel,
-                ),
-                [_to_numpy_abs_db(f) for f in outputs[key]])
+                _heatmap(frames_db[-1], title, x=x, y=y, xlabel=aperture_label,
+                         ylabel=ylabel),
+                frames_db)
 
     if outputs.get("range_profile_agg"):
         prof = outputs["range_profile_agg"][-1]
@@ -1101,7 +1118,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             xlabel = "range (bins)"
         peak = max(float(prof.max()), 1e-12)
         prof_db = 10 * np.log10(prof / peak + 1e-12)
-        fig = go.Figure(data=go.Scatter(x=np.asarray(x), y=prof_db, mode="lines"))
+        x = np.asarray(x)
+        keep = _nonnegative_range(x)
+        if prof_db.shape[0] == keep.size:
+            x, prof_db = x[keep], prof_db[keep]
+        fig = go.Figure(data=go.Scatter(x=x, y=prof_db, mode="lines"))
         # Fixed display floor, like the heatmaps' -40 dB: an exactly-zero bin
         # (the notched DC bin) otherwise drops to -120 dB and autoscale hangs the
         # whole profile off that one cliff (seen on the Thrust 4 preset, 2026-09-22).

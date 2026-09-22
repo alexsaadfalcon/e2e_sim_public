@@ -761,12 +761,14 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     # targets read at positive range.
     expected_range = -(np.arange(bins) - bins // 2) * (2.99792458e8 / (2.0 * 3e9))
     np.testing.assert_allclose(figs["range_az"].data[0].x, expected_u)
-    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
+    np.testing.assert_allclose(figs["range_az"].data[0].y,
+                               expected_range[expected_range >= 0])  # display: range >= 0 (1A)
     assert figs["range_az"].layout.xaxis.title.text == "azimuth sin(θ)"
     assert figs["range_az"].layout.yaxis.title.text == "range (m)"
 
     np.testing.assert_allclose(figs["range_el"].data[0].x, expected_u)
-    np.testing.assert_allclose(figs["range_el"].data[0].y, expected_range)
+    np.testing.assert_allclose(figs["range_el"].data[0].y,
+                               expected_range[expected_range >= 0])
     assert figs["range_el"].layout.xaxis.title.text == "elevation sin(θ)"
     assert figs["range_el"].layout.yaxis.title.text == "range (m)"
 
@@ -794,7 +796,8 @@ def test_figures_from_outputs_range_axis_valid_for_any_bins():
     figs = figures_from_outputs(outputs)
     range_per_gate = 2.99792458e8 * n_freqs / (2.0 * freq_span_hz * bins)
     expected_range = -(np.arange(bins) - bins // 2) * range_per_gate
-    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
+    # Display shows the physical half only (owner decision 1A, 2026-09-22).
+    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range[expected_range >= 0])
     assert figs["range_az"].layout.yaxis.title.text == "range (m)"
 
     # No metadata at all (e.g. a hand-built outputs dict): fall back to raw gates.
@@ -825,7 +828,7 @@ def test_range_axis_mirrors_power_bin_grouping_when_nondivisible():
     zero_gate = (n_freqs // 2) // per
     assert zero_gate != bins // 2
     expected_range = -(np.arange(bins) - zero_gate) * range_per_gate
-    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
+    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range[expected_range >= 0])
     assert figs["range_az"].layout.yaxis.title.text == "range (m)"
 
 

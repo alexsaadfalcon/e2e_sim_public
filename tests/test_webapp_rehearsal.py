@@ -267,3 +267,38 @@ def test_single_result_card_takes_the_full_row():
     two = str(appmod._render_results({"a": go.Figure().to_dict(), "b": go.Figure().to_dict()},
                                      "tab-results"))
     assert "1 1 100%" in one and "1 1 45%" in two
+
+
+# ------------------------------------------------------------------------------------
+# Owner decision 1A (2026-09-22): range figures show the physical half of the axis
+# ------------------------------------------------------------------------------------
+def test_range_figures_show_only_nonnegative_range():
+    import numpy as np
+
+    from webapp.pipeline_runner import figures_from_outputs
+
+    torch = pytest.importorskip("torch")
+    bins, n_freqs, span = 16, 64, 3e9
+    ra = torch.rand((bins, bins)).to(torch.complex64)   # products are [bins, bins]
+    prof = np.random.default_rng(1).random(bins)
+    figs = figures_from_outputs({
+        "range_az": [ra], "range_profile_agg": [prof],
+        "_axis_meta": {"range_az_bins": bins, "range_profile_bins": bins,
+                       "n_freqs": n_freqs, "freq_span_hz": span},
+    })
+    y = np.asarray(figs["range_az"].data[0].y)
+    assert y.min() >= 0 and len(y) < bins, "negative-range rows are cropped"
+    assert figs["range_az"].data[0].z.shape[0] == len(y)
+    x = np.asarray(figs["range_profile"].data[0].x)
+    assert x.min() >= 0 and len(x) < bins
+
+
+def test_bin_index_range_axis_is_kept_whole():
+    import numpy as np
+
+    from webapp.pipeline_runner import figures_from_outputs
+
+    torch = pytest.importorskip("torch")
+    ra = torch.ones((12, 12), dtype=torch.complex64)
+    figs = figures_from_outputs({"range_az": [ra], "_axis_meta": {"range_az_bins": 12}})
+    assert len(figs["range_az"].data[0].y) == 12

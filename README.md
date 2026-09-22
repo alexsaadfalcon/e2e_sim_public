@@ -19,13 +19,19 @@ comes from this simulator. What a clean clone can and cannot regenerate, stated 
 - Three figures — the scene/range-azimuth pair, the signal journey, and the difficulty
   ladder — are *plotted* by scripts in the maintainers' private notes repository. The
   pipeline behind them is here; the plotting is not.
-- `ui_walkthrough.gif` is a screen recording with no generator at all.
+- `ui_walkthrough.gif` regenerates from the app itself — `python -m webapp.walkthrough`
+  drives the web UI in a headless browser (Playwright + Chromium, plus the munich frames
+  the preset replays) through load-preset → run → turn the knob → run again.
+- The **detection side-by-side** figure regenerates from the benchmark checkpoints —
+  `python -m e2e.ml.detect_side_by_side` — which are gitignored (train them with the
+  commands in the ML section, or ask the maintainers).
 
 <p align="center">
   <img src="docs/media/ui_walkthrough.gif" alt="Web UI walkthrough: block-diagram pipeline editor, parameter editing, and a live run" width="850">
 </p>
-<p align="center"><em>The web UI: edit the pipeline as a block diagram, tweak a knob, run real
-ray-traced frames through the full receive chain, and inspect the radar products — all in the browser.</em></p>
+<p align="center"><em>The web UI: load a demo preset (block state, frame count and the operator's card in
+one click), run real ray-traced frames through the receive chain, turn the card's knob, run again, and read
+the before/after on one screen. Every run carries a banner saying what produced it.</em></p>
 
 ## Gallery
 
@@ -36,7 +42,7 @@ ray-traced frames through the full receive chain, and inspect the radar products
 | ![One frame traced through every pipeline stage, from raw channel response to the final azimuth-elevation map](docs/media/signal_journey.png) | ![Moving tier-D2 scene: bird's-eye view, ideal-front-end radar returns, and non-ideal-front-end radar returns](docs/media/scene_D2.gif) |
 | *One ray-traced frame's journey through the chain: raw channel response → RF front end → interconnect → adaptive compression → azimuth-elevation map. Every stage shown is in this tree; the script that assembles them into this panel is in the maintainers' private notes repo, so this figure has no in-repo regenerate command.* | *Scenes move: vehicles and pedestrians crossing the field of view, seen by an ideal front end (scene content only) and by the non-ideal front end.* |
 | ![Adaptive subspace tracker detecting a spectral-gap collapse and refining itself](docs/media/tracking_refine.png) | ![Interconnect range response: legacy placeholder vs the simulated model](docs/media/interconnect_before_after.png) |
-| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied. The gate matches the 60-pass arm's accuracy inside the collapse — and inside the collapse it is also spending 60 passes, so it buys that accuracy with the same compute, not less. What it saves is averaged over the whole run: a mean 22.4 passes/frame against a constant 60, about 37%, earned outside the collapse where it idles at one pass and its error is ~15x worse than constant effort. It is a compute-saving heuristic that spends where a diagnostic tells it to, not a free accuracy win. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the most demanding of the six FOR THIS PIPELINE — highest in-band loss and ripple across 75–81 GHz, at −0.541 dB median loss and 0.113 dB ripple against −0.249 to −0.291 dB and ≤0.030 dB for the rest. That is a ranking by what OUR range response is sensitive to, not a verdict on the designs, which were not drawn for this band or this use. TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
+| *Rank degeneracy costs tracking accuracy at every fixed effort. Measured over 69 munich frames: error rises ×2.4 at one refinement pass per frame and ×4.6 at sixty, and the true subspace rotates 2.9× more per frame while the gap is collapsed — the target goes both lower-rank and faster-moving. Three arms, so the trade is visible rather than implied. The gate matches the 60-pass arm's accuracy inside the collapse — and inside the collapse it is also spending 60 passes, so it buys that accuracy with the same compute, not less. What it saves is averaged over the whole run: a mean 22.4 passes/frame against a constant 60, about 37%, earned outside the collapse where it idles at one pass and its error is ~15x worse than constant effort. It is a compute-saving heuristic that spends where a diagnostic tells it to, not a free accuracy win. Regenerate with `python -m e2e.main.main_subspace_refine --frame-order collapse-window`.* | *Hardware realism is data-driven: all six of the collaborators' simulated 77 GHz designs plus the Ka-band TSV, at native resolution. The legacy placeholder smears a target across 11 range bins; every simulated arm stays at one. They separate only in the skirt (lower panel), and they order there exactly as their in-band ripple does — which is how we can now SEE, rather than take on trust, that Case3 is the most demanding of the six FOR THIS PIPELINE — highest in-band loss and ripple across 75–81 GHz, at −0.53 dB median loss and 0.034 dB peak-to-peak ripple against −0.25 to −0.29 dB and ≤0.009 dB for the rest (measured from the shipped CSVs at HEAD; an earlier caption quoted the 70–90 GHz full-sweep ripple, 0.113 dB, as if it were in-band). That is a ranking by what OUR range response is sensitive to, not a verdict on the designs, which were not drawn for this band or this use. TSV is a different, non-overlapping band and is not ranked against them. Regenerate with `python -m e2e.main.main_interconnect`.* |
 
 ![Scenario difficulty ladder: from a few vehicles on flat ground to a ray-traced city](docs/media/tier_ladder.png)
 *Scenario generation spans a difficulty ladder — from a few vehicles on flat ground (D1) to a full ray-traced city (D4). (Panel assembled by a private plotting script; the scenes themselves regenerate from `e2e/environment/rt_scenes.py`.) Two ladders exist and they are not the same: the RAY-TRACED tiers (`e2e/environment/rt_scenes.py`, used by `e2e.ml.chain_generate`) run D0–D4; the ANALYTIC tiers (`e2e/ml/scenes.py`, used by `e2e.ml.dataset`) run D0–D3.*
@@ -433,130 +439,78 @@ format, smoke-test results, and model attribution/licensing notes, and
 training-set targets live, seeing no input at all. That arm is the benchmark's chance
 floor: measured on the same frames and the same metric, rather than assumed to be zero.
 
-> **⚠ PENDING REGENERATION (2026-09-21).** The table below is **superseded and not
-> reproducible from this commit.** It was measured on the `b1_bench_v2` corpus with a
-> pre-2026-08-29 classical-detector default; re-running the command shown below against
-> HEAD does not reproduce it, and the current corpus (`b1_bench_v3`) gives materially
-> different numbers — classical **0.301**, FFTRadNet **0.127**, SSMRadNet **0.123**, null
-> **0.081** — in which the two learned arms also swap order. The numbers are retained
-> here rather than deleted so the change is visible, but **do not cite them.** A
-> regenerated table is tracked for v1.1.
->
-> The cause of the learned arms' weakness is now diagnosed and is **not** a property of
-> this corpus: both detectors never learn azimuth, emitting a separable
-> range × azimuth-prior stripe rather than peaks. See the retraction note below the table.
+Measured on the **172-frame test split** (1,026 labelled targets) of the `benchmark_v1`
+tier-D2 ray-traced corpus `b1_bench_v3`, recall 0.5, decode floor 0.01, scored within
+40 m. Every number in this table is read from one file, `e2e/ml/runs/beat_cfar.json`,
+written by `python -m e2e.ml.beat_cfar` (seed 42, deterministic kernels):
 
-Measured on the **173-scene test split** (1,022 labelled targets) of a 1,721-scene
-ray-traced corpus (`benchmark_v1`, tier D2):
-
-| arm | average precision | false alarms / frame | max recall | × chance |
+| arm | average precision | false alarms / frame at recall 0.5 | max recall | × chance |
 |---|---|---|---|---|
-| classical CA-CFAR | **0.134** | 16.9 | 0.870 | 2.08× |
-| SSMRadNet | 0.103 | 26.4 | 0.982 | 1.59× |
-| FFTRadNet | 0.095 | 29.1 | 0.970 | 1.47× |
-| **data-blind null (chance floor)** | **0.065** | 41.8 | 1.000 | 1.00× |
+| **RADDetNet** (ours: Doppler as channels, range × azimuth spatial, beamformed input) | **0.476** | **3.0** | 0.978 | 5.9× |
+| classical CA-CFAR | 0.301 | 6.2 | 0.888 | 3.7× |
+| FFTRadNet (ported, range-Doppler input) | 0.127 | 26.3 | 0.977 | 1.6× |
+| SSMRadNet (ported, range-Doppler input) | 0.123 | 27.5 | 0.989 | 1.5× |
+| **data-blind null (chance floor)** | **0.081** | 33.2 | 1.000 | 1.0× |
 
-All four arms scored on identical frames at matched recall 0.50, from
-`e2e/ml/runs/b3_compare_v2.json`. Reproduce with:
+![Same four test frames through CFAR, the ported FFTRadNet and RADDetNet, each at its own recall-0.5 threshold](docs/media/detect_side_by_side.png)
+*The table, drawn: the same four test frames through three detectors, each at the objectness
+threshold where it first reaches recall 0.5 (0.66 / 0.22 / 0.44, from the same JSON), so the
+crosses are the false-alarm comparison the table quotes. FFTRadNet's row is the diagnosis
+below made visible — a stripe of detections at every true range, across azimuth. Regenerate
+with `python -m e2e.ml.detect_side_by_side`.*
+
+The null arm is *random*, so a single draw is not a constant: over seeds 0/1000/2000/3000/4000
+it scores 0.0815, 0.0820, 0.0837, 0.0781, 0.0915 — mean 0.083, sd 0.005. The table reports
+the seed-0 draw, because that is the one every other arm was scored against; the ratios in
+the last column carry that much floor noise and should not be read to two digits.
 
 ```bash
+# Rescore every arm from the checkpoints (gitignored: train them first, or ask the maintainers).
+python -m e2e.ml.beat_cfar --skip-train
+# The same protocol on one manifest, any mix of checkpoints:
 python -m e2e.ml.compare_detectors \
-  --manifest e2e/ml/datasets/b1_bench_v2/benchmark_v1_D2/manifest.json --classical \
-  --checkpoint fftradnet=e2e/ml/runs/b3_fftradnet_v1/best.pt \
-  --checkpoint ssmradnet=e2e/ml/runs/b3_ssmradnet_v2_continued/best.pt
-```
-
-Classical CFAR leads both learned detectors, and both learned detectors score above the
-chance floor. The null arm is what makes the second statement a measurement rather than
-an assumption.
-
-**Both learned arms find more targets and pay for it in false alarms**: max recall 0.97–0.98
-against classical's 0.87, at 1.6× the false-alarm rate. The learned/classical gap is a
-precision gap, not a detection gap.
-
-**Every arm is close to the floor**, and that is the honest headline for this run: the
-best of them is about 2× chance. That is not an artifact of the scorer — correcting the
-metric's known defects lifts the detector *and* the floor together — nor of the models'
-ability to fit: given five frames it is allowed to memorise, FFTRadNet drives training
-loss down by three orders of magnitude (259 → 0.26) and separates positive from negative
-cells 12×, so the label plumbing works.
-
-> **RETRACTED 2026-09-21.** This paragraph used to conclude "It is a property of this
-> corpus." That is false. The corpus is sound — feeding its own ground-truth label maps
-> through the scorer returns **AP 1.0000** with 0.0 m range RMSE, labels cross-correlate
-> with the data at zero offset, and median target SNR is 32 dB. The measured cause is in
-> the learned detectors: their objectness map is near-separable `f(range)·g(azimuth)` —
-> rank-1 energy fraction **0.89** (FFTRadNet) / **0.76** (SSMRadNet) against **0.31** for
-> ground truth — i.e. a full-field-of-view stripe at every true range instead of a peak.
-> Under azimuth-only matching a trained model scores 0.421 against 0.423 for a constant
-> map carrying no frame information at all: **range is learned, azimuth is a memorized
-> prior.** Azimuth reaches these networks only as virtual-channel phase and neither head
-> converts it into an angle bin. Pairing predictions with a deranged frame's labels
-> retains ~50% of their AP, against 10.5% for classical CFAR.
-
-The null arm is *random*, so a single run is a draw, not a constant: over seeds
-0/1000/2000/3000/4000 it scores 0.0645, 0.0604, 0.0608, 0.0638, 0.0643 — mean 0.0628,
-sd 0.0018. The table reports the seed-0 draw, because that is the one every other arm in
-it was scored against; the ratios in the last column therefore carry roughly ±0.004 of
-floor noise and should not be read to three digits. Reproduce the spread with:
-
-```bash
+  --manifest e2e/ml/datasets/b1_bench_v3/benchmark_v1_D2/manifest.json --split test \
+  --classical --recall 0.5 --decode-threshold 0.01 --max-range-m 40 \
+  --checkpoint raddetnet=e2e/ml/runs/b7_raddetnet/best.pt
+# The null arm's seed spread:
 python -c "from e2e.ml.compare_detectors import score_null; \
-print([round(score_null('e2e/ml/datasets/b1_bench_v2/benchmark_v1_D2/manifest.json', \
-'test', seed=s)['AP'], 5) for s in (0,1000,2000,3000,4000)])"
+print([round(score_null('e2e/ml/datasets/b1_bench_v3/benchmark_v1_D2/manifest.json', \
+'test', seed=s, decode_threshold=0.01, max_range_m=40.0)['AP'], 4) for s in (0,1000,2000,3000,4000)])"
 ```
 
-**Two known defects depress every absolute number in that table.** Both were found by
-adversarial review, both are measured, and the ordering above survives both because every
-arm is scored under the identical criterion:
+**Why the two ported networks lose to a CFAR threshold** — measured, not argued. Their
+objectness maps are near-separable `f(range)·g(azimuth)`: rank-1 energy fraction **0.89**
+(FFTRadNet) / **0.76** (SSMRadNet) against **0.31** for ground truth, i.e. a stripe across
+the whole field of view at every true range instead of a peak. Under azimuth-only matching
+they score no better than a constant map carrying no frame information, and pairing their
+predictions with a *deranged* frame's labels retains ~50% of their AP, against 10% for
+CFAR. Azimuth reaches these networks only as virtual-channel phase, and neither head
+converts it into an angle bin: **range is learned, azimuth is a memorised prior.** The
+corpus is sound — its own ground-truth label maps score AP 1.000 through the same scorer.
+(`e2e.ml.controls` runs these three controls on any checkpoint.)
 
-1. **The match criterion is asymmetric.** It matches range against an object's *surface*
-   but azimuth against its *centre*, while the default target model places an object's
-   energy on its corners — an offset of 0.24 in sin(azimuth) for a car at 10 m against a
-   0.06 tolerance. Correcting only the azimuth tolerance raises classical AP from 0.129 to
-   **0.303** on identical maps. (Both figures predate the angle-resampler fix that moved
-   the baseline to 0.134; the delta has not been re-measured against the new baseline.)
-2. **The label set omits ~34% of the objects the generator places** (clutter), so a
-   detector is charged a false alarm for correctly detecting a real object. Treating those
-   objects as don't-care regions — the standard remedy, and the one now implemented —
-   raises classical AP from 0.129 to **0.141**, also measured pre-resampler-fix. (Scoring them as if they had been labelled
-   targets instead gives 0.184, but that is a different and more generous counterfactual:
-   it also credits the detector for finding clutter, which the benchmark does not ask of
-   it.)
+**What fixes it is the architecture, not the input.** Feeding the same beamformed
+range-azimuth-Doppler cube CFAR uses into the ported decoder is worth +0.011. Making range ×
+azimuth the spatial plane and Doppler the channel axis (`RADDetNet`, `e2e/ml/models/`)
+scores 0.476 and passes the controls the ported networks fail (deranged-label retention
+12%, azimuth-only 0.66 against 0.47 for the strongest frame-independent prior). The
+defensible sentence is the narrow one: *a learned head on the classical front end beats a
+CFAR threshold on the same cube, in-distribution.* An independent re-scoring reproduced
+it bit-identically; the paired scene-level bootstrap gives +0.176 AP, 95% CI [+0.145, +0.206].
 
-The azimuth correction is worth much more than the label one, and its exact value on this
-corpus is not yet measurable: the per-target extent is written at generation time, and a
-corpus built before 2026-08-27 carries none, so the corrected criterion falls back to the
-old behaviour on it. The 0.303 figure above is a uniform-tolerance stand-in that bounds
-the per-target fix from above; pinning it down needs the corpus regenerated.
-
-**An earlier version of this section concluded that "detection is hard on this corpus" was
-substantially an artifact of the scoring. That conclusion was wrong, and it is worth
-recording why.** Both defects above are real and both raise the absolute numbers — but
-they raise the *data-blind null arm* almost exactly as much, because a looser or more
-forgiving criterion helps a random guesser too. Measured across a sweep of the azimuth
-tolerance, the detector's ratio to chance *falls* (2.08× at the shipped tolerance, 1.45×
-at 0.25, 1.25× at 0.40); switching the don't-care regions on moves classical AP from 0.144
-to 0.152 and the floor from 0.063 to 0.066, leaving the ratio flat at 2.29× → 2.30×
-(40-frame subset). Fixing the ruler does not reveal a better detector.
-
-So: quote the ordering, and treat the absolute values as *provisional* — they will move
-when the corpus is regenerated. But do not read the known defects as an excuse for the
-absolute numbers. **The detectors really are close to chance on this corpus, and that is
-not the scorer's doing.** It is also not the models': FFTRadNet drives training loss down
-by three orders of magnitude on frames it is allowed to memorise, separating positive from
-negative cells 12× — so the model and its label plumbing work. What remains is the corpus
-itself, which is where the current work is aimed.
-
-`SSMRadNet`'s entry is now a **converged** run: best epoch 107 of 120, with 13 further
-epochs producing no improvement. The earlier 0.096 figure came from an 80-epoch run that
-was still improving when it stopped, and was correctly flagged here as a lower bound; it
-has been superseded rather than merely relabelled.
+**Out of distribution it does not reliably beat CFAR.** On the test split of an earlier
+corpus (`b1_bench_v2`: 173 unseen scenes, same radar, an earlier generator with a
+different impairment model) CFAR scores 0.179 at 13.2 false alarms per frame; RADDetNet
+0.208 at 15.1 (the checkpoint above) and 0.153 at 20.7 (a second seed) — the two seeds
+straddle CFAR and both are worse at matched recall, while the ported FFTRadNet collapses
+to 0.063, below that corpus's 0.065 chance floor. Regularisation and joint-corpus training
+arms are in progress; the ledger entry is updated as they land.
 
 Read the accompanying caveats before quoting any of this: "false alarms" in these maps
-include deliberately-unlabelled clutter a correct detector *should* fire on, the maps are
-overwhelmingly ground-truth-free by construction, and comparison figures must use per-arm
-operating points (a single shared threshold shows whichever arm is calibrated near it).
+include deliberately-unlabelled clutter a correct detector *should* fire on (the shipped
+protocol treats those objects as don't-care regions), the maps are overwhelmingly
+ground-truth-free by construction, and comparison figures must use per-arm operating
+points (a single shared threshold shows whichever arm is calibrated near it).
 `compare_detectors` records the operating point and PR curve for every arm so these are
 checkable rather than taken on trust.
 
