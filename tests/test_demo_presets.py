@@ -263,20 +263,23 @@ def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert not any("deliberately off" in d.lower() and "range_el" in d.lower()
                   for d in p.do_not_say)
-    assert any("2.7 db" in s.lower() for s in p.say)
+    assert any("0.5 db" in s.lower() for s in p.say)
 
 
 def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     """Hostile-expert fourth read (2026-09-23): the note used to claim the elevation
-    cut moves ~2.7 dB, a number no panel on this screen shows (that figure is a
-    different, offline, unclipped-dB metric -- see notes/handoff 2026-09-22). The note
-    now claims only the on-screen range-az/range-el images and the tracker curve; the
-    2.7 dB claim moves to the card (`say`/`blurb`) with its metric named explicitly."""
+    cut moves ~2.7 dB, a number no panel on this screen shows (that figure was a
+    cross-arm mean |dB| difference on the off-screen FFT az-el product). Re-measured
+    on the final file (2026-09-23): the range-elevation panel actually shown moves
+    ~0.5 dB (peak-median 76.85 -> 76.57), so the card now quotes that on-screen
+    number instead -- the retracted 2.7 dB figure is gone, not just relocated."""
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert "2.7" not in p.screen_note
+    assert "2.7" not in p.blurb
+    assert not any("2.7" in s for s in p.say + p.do_not_say)
     assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
     assert "barely move" in p.screen_note
-    assert "not the on-screen statistic" in p.blurb
+    assert "76.85" in p.blurb and "on screen" in p.blurb
     # Wave 7 (2026-09-23, F94): the old cross-reference to Thrust 3's cold-start first
     # frame ("about 0.6") compared error values at k=8; this preset now runs at k=2
     # (k=8/k=4 are both degenerate on the Ka retrace -- see the `overrides` comment),
@@ -289,30 +292,97 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
 
 
 def test_thrust3_is_a_cold_start_at_2_to_1():
+    """Owner decision (option A, 2026-09-23): both arms cold-start; k re-picked to 2
+    (F94, the largest spike-free rank measured on the current munich_ka.pkl -- see the
+    preset's own `overrides` comment). n_refine is NOT pinned in state: it is derived
+    from gap_response by pipeline_runner.run_pipeline (see that test below), which is
+    what lets the single `ab` switch move both together."""
     st = apply_preset(PRESETS_BY_ID["thrust3_cold_start_acquisition"])
     assert st["subspace"]["params"]["warm_start"] == "cold"
-    assert st["subspace"]["params"]["k"] == 8 and st["afe"]["enabled"]
+    assert st["subspace"]["params"]["k"] == 2 and st["afe"]["enabled"]
+    assert st["subspace"]["params"]["gap_response"] == "none"
+    assert "n_refine" not in st["subspace"]["params"]
 
 
 def test_thrust3_is_an_ab_preset_naming_its_own_knob():
-    """Hostile-expert finding: the screen never named its own knob ('cold' with no
-    warm curve to compare against). A now names the cold arm, B the warm arm."""
+    """Owner decision (option A), round 2 (2026-09-23): an identical-arms screen is a
+    null demo. A is now a fixed LOW-effort arm (visible acquisition), B is the shipped
+    adaptive gate -- both still cold-start."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert p.ab == ("subspace", "warm_start", "warm")
+    assert p.ab == ("subspace", "gap_response", "refine")
     st_b = apply_preset(p, arm="b")
-    assert st_b["subspace"]["params"]["warm_start"] == "warm"
-    assert "cold" in p.ab_label_a.lower() and "warm" in p.ab_label_b.lower()
+    assert st_b["subspace"]["params"]["gap_response"] == "refine"
+    assert st_b["subspace"]["params"]["warm_start"] == "cold"  # B is still cold-start
+    assert "fixed" in p.ab_label_a.lower() and "adaptive" in p.ab_label_b.lower()
+    assert "5" in p.ab_label_a and "10" in p.ab_label_b
+
+
+def test_thrust3_derives_n_refine_from_gap_response(monkeypatch, make_env_block):
+    """n_refine has no registry ParamSpec (demo_presets._INTERNAL_PARAMS); its default
+    is DERIVED from gap_response in pipeline_runner.run_pipeline: "none" -> 5 (arm A,
+    the largest n_refine of {1, 2, 3, 5} measured to still take >=3 frames to reach
+    within 1.5x of its own settled level at k=2, real chain, 2026-09-23), anything else
+    -> 10 (the original shipped default -- byte-identical to every other preset, which
+    never sets gap_response at all). Spies on AdaOjaBlock's constructor directly (a
+    synthetic frame's own spectral gap can collapse and make the GATE escalate at
+    runtime -- a separate mechanism, not what this test is about)."""
+    pytest.importorskip("torch")
+    import e2e.blocks as blocks
+    from webapp.pipeline_runner import run_pipeline
+
+    real_cls = blocks.AdaOjaBlock
+    captured = []
+
+    class _Spy(real_cls):
+        def __init__(self, *a, **kw):
+            captured.append((kw.get("n_refine"), kw.get("gap_response")))
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(blocks, "AdaOjaBlock", _Spy)
+    env = make_env_block(n_frames=1, n_freqs=16)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    run_pipeline(apply_preset(p), n_steps=1)
+    run_pipeline(apply_preset(p, arm="b"), n_steps=1)
+    assert captured == [(5, "none"), (10, "refine")]
 
 
 def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
-    """Card numbers drift against the live nondeterministic run (hostile-expert fourth
-    read, 2026-09-23: 0.57 rendered as 0.595 in one rehearsal) -- the blurb now quotes
-    "about 0.6" instead of a fixed third decimal, and the say list tells the operator
-    why, so they never quote the third decimal on stage."""
+    """Card numbers drift against the live nondeterministic run -- the blurb quotes
+    "about" rather than a fixed third decimal, and the say list tells the operator
+    why. Numbers re-measured 2026-09-23 (round 2, visible-acquisition arms) on the
+    current file at k=2 (see the preset's `overrides` comment): arm A about
+    0.6 -> 0.31 -> 0.19, arm B about 0.30 -> 0.09."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert "about 0.6" in p.blurb
-    assert "0.57" not in p.blurb
+    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb
+    assert "0.57" not in p.blurb and "0.595" not in p.blurb
     assert any("nondeterministic" in s.lower() and "third decimal" in s.lower()
+              for s in p.say)
+
+
+def test_thrust3_gate_measured_as_a_no_op_at_the_shipped_k():
+    """F94's tracker addendum ("sv_gap_norm collapses on every Ka frame... the shipped
+    gate... spends 60 power iterations per frame") was measured at k=8 on an EARLIER
+    munich_ka.pkl. Re-measured on the current (post-8d1e251) file at the shipped k=2:
+    the gate never escalates past its 10-pass baseline (n_refine_used stays flat, 8/8
+    frames) -- the card must say so and must not carry the old "always fires" claim or
+    the retired frames-23-26 / three-frames talking points."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    assert not any("frames 23-26" in s for s in p.say + p.do_not_say + [p.blurb])
+    assert not any("three frames" in s.lower() for s in p.say + p.do_not_say + [p.blurb])
+    assert any("never escalate" in s.lower() or "measured false" in s.lower()
+              for s in p.say + p.do_not_say + [p.blurb])
+    assert any("gap diagnostic" in s.lower() for s in p.say)
+
+
+def test_thrust3_frames_to_acquire_vs_passes_statistic_is_on_the_card():
+    """Round-6 review: the A/B statistic must be frames-to-acquire vs passes-per-frame,
+    both stated on the card (and rendered on screen via the subspace_err figure's
+    second trace, see tests/test_webapp_ab.py)."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    assert any("frame 3" in s for s in [p.blurb] + p.say)
+    assert any("frame 2" in s for s in [p.blurb] + p.say)
+    assert any("passes-per-frame" in s.lower() or "passes/frame" in s.lower()
               for s in p.say)
 
 

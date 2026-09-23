@@ -22,7 +22,7 @@ import numpy as np
 import plotly.graph_objects as go
 import pytest
 
-from webapp.demo_presets import PRESETS, PRESETS_BY_ID, apply_preset
+from webapp.demo_presets import PRESETS, PRESETS_BY_ID, ab_key_is_known, apply_preset
 from webapp.pipeline_registry import BLOCKS_BY_ID
 
 
@@ -36,7 +36,10 @@ def test_ab_is_wired_on_the_presets_the_review_named(pid):
     p = PRESETS_BY_ID[pid]
     assert p.ab is not None and p.ab_label_a and p.ab_label_b
     bid, key, _value_b = p.ab
-    assert key in {ps.key for ps in BLOCKS_BY_ID[bid].params}
+    # `ab_key_is_known` also accepts the internal (no-UI-slider) tracker knobs Thrust 3
+    # uses -- see demo_presets._INTERNAL_PARAMS -- so this still fails loudly on a
+    # stale/typo'd key, registered or not.
+    assert ab_key_is_known(bid, key)
     # Run A (as loaded) must NOT already equal run B -- otherwise there is nothing to
     # compare.
     state_a, state_b = apply_preset(p), apply_preset(p, arm="b")
@@ -53,7 +56,7 @@ def test_every_shipped_preset_pairs_an_ab_arm():
     for p in PRESETS:
         assert p.ab is not None, p.id
         bid, key, _value_b = p.ab
-        assert key in {ps.key for ps in BLOCKS_BY_ID[bid].params}, p.id
+        assert ab_key_is_known(bid, key), p.id
         assert p.ab_label_a and p.ab_label_b, p.id
 
 

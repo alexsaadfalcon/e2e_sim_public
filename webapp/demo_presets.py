@@ -330,9 +330,9 @@ PRESETS: List[DemoPreset] = [
                "-- k=8 is degenerate on the Ka retrace, F94). Three numbers carry the "
                "story: the range-azimuth image barely moves (peak-median about 0.3 dB, "
                "76.7 -> "
-               "76.4), the elevation cut moves about 2.7 dB (mean image move in "
-               "unclipped dB, offline measurement 2026-09-22, not the on-screen "
-               "statistic), and the tracker error moves about 5x (0.06 -> 0.32). The "
+               "76.4), the range-elevation panel moves about 0.5 dB (peak-median "
+               "76.85 -> 76.57, on screen), and the tracker error moves about 5x "
+               "(0.06 -> 0.32). The "
                "tracker is far more sensitive to weight precision than either picture "
                "is; the elevation cut is on screen precisely because it is the one that "
                "moves. The manual path still works: lower the AFE weight mantissa 6 -> "
@@ -344,7 +344,9 @@ PRESETS: List[DemoPreset] = [
         ab_label_a="6 bit", ab_label_b="1 bit",
         # Rewritten (hostile-expert fourth read, 2026-09-23): the old note claimed the
         # elevation cut moves ~2.7 dB, a number no panel on THIS screen shows (that
-        # figure is a different, offline metric -- see the card's `say`/`blurb`). The
+        # figure was a cross-arm mean |dB| difference on the off-screen FFT az-el
+        # product). Re-measured on the final file (2026-09-23): the range-elevation
+        # panel actually shown moves 0.52 dB mean (peak-median 76.85 -> 76.57) -- the
         # note now claims only what the two displayed images and the tracker curve do.
         # Numbers re-measured wave 7 at k=2 (see the `overrides` comment above); array
         # disclosure appended (wave 7, X4-X8: mandatory on any card naming the array).
@@ -362,9 +364,9 @@ PRESETS: List[DemoPreset] = [
             "distance bounded by sqrt(k); converted, the average principal angle goes "
             "13.1 deg -> 2.6 deg.",
             "The three numbers together: range-azimuth barely moves (~0.3 dB), the "
-            "elevation cut moves ~2.7 dB (offline, not on screen), and the tracker "
-            "error moves ~5x -- the AFE does something real; the picture just is not "
-            "where it shows.",
+            "range-elevation panel moves ~0.5 dB (peak-median 76.85 -> 76.57, on "
+            "screen), and the tracker error moves ~5x -- the AFE does something real; "
+            "the picture just barely shows it.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
             "The brightest band at range 0-2 m is not a target: real multipath returns "
@@ -378,8 +380,9 @@ PRESETS: List[DemoPreset] = [
             "That the mantissa sweep models analog hardware error: AFEBlock uses "
             "WEIGHT_FLOAT, which compress.py's own docstring calls 'right for a compute "
             "datapath and wrong for an analog control'.",
-            "That the picture does not respond: the elevation cut does, by about 2.7 dB "
-            "(an offline metric, not on screen) for the same 6 -> 1 bit sweep.",
+            "That the picture does not respond: the range-elevation panel does, by "
+            "about 0.5 dB (peak-median 76.85 -> 76.57, on screen) for the same 6 -> 1 "
+            "bit sweep.",
             "That a higher compression ratio would look better: 512 of 1024 was chosen so "
             "the tracker can observe drift; observability drops from 0.50 to 0.055 at 16x, "
             "unmeasured.",
@@ -393,61 +396,94 @@ PRESETS: List[DemoPreset] = [
         id="thrust3_cold_start_acquisition",
         label="Thrust 3 - adaptive feature extraction: cold-start acquisition",
         thrust=3,
-        n_steps=6,
+        n_steps=8,
+        # Owner decision (option A, 2026-09-23), round 2: an identical-arms screen is a
+        # null demo (round-6 review). Arm A is now the FIXED-effort arm at the largest
+        # n_refine of {1, 2, 3, 5} that still took >=3 frames to reach within 1.5x of
+        # its own settled level (real chain, k=2, cold start, 8 frames, two repeats
+        # each, scratch 2026-09-23): n_refine=1 already got there in 2 frames (same as
+        # the shipped gate below), so it was rejected; 2, 3 and 5 all took 3 frames --
+        # 5 is the largest of those, keeping arm A closest to the shipped budget while
+        # still visibly slower to acquire. n_refine is not set explicitly here: the
+        # runner derives 5 from gap_response="none" (webapp/pipeline_runner.py), which
+        # is what lets the single `ab` switch below move both n_refine AND
+        # gap_response together. Arm B is the shipped default (gap_response="refine",
+        # which derives n_refine=10 the same way) -- on this file the gate never
+        # escalates past that baseline (see below), so B is exactly a fixed 10-pass
+        # tracker. k=2 is the largest spike-free rank measured on this file (matches
+        # Thrust 2's own pick, F94); k=4 spikes ~0.98 on both arms and is not shipped.
+        # At k=2 sv_gap_norm sits at 0.086-0.096 every frame, 9x the gate's 0.01
+        # threshold, so gap_response="refine" NEVER escalates to n_refine_hi=60 here --
+        # this CONTRADICTS notes/ESTABLISHED_FACTS.md F94's tracker addendum ("the
+        # shipped gate... spends 60 power iterations per frame"), which was measured at
+        # k=8 on an EARLIER munich_ka.pkl, before this file's geometry fix (8d1e251)
+        # changed the spectrum; it does not hold at k=2 on the current file (flagged in
+        # notes/STATE.md for re-verification/retraction).
         overrides=_merge(
             {"afe": {"enabled": True}},
-            {"subspace": {"params": {"k": 8, "warm_start": "cold"}}},
+            {"subspace": {"params": {"k": 2, "warm_start": "cold",
+                                     "gap_response": "none"}}},
             {"interconnect": {"enabled": False}},
             _only_products("subspace_err"),
         ),
-        blurb=("The tracker starts from a RANDOM basis with no peek at ground truth and "
-               "acquires the scene's 8-dimensional subspace from 512 adaptive measurements "
-               "of 1024 elements. Watch subspace_err: about 0.6 -> 0.15 -> 0.07 -> 0.06, at "
-               "the warm-started floor by frame 3. Press Run once: both arms run and appear as "
-               "before (A, top, cold start) / after (B, bottom, warm start), so the cold "
-               "curve's acquisition sits above the historical warm curve, which starts at "
-               "0.04 -- already below the dashed 0.06 line both curves converge to, because "
-               "it begins from a perturbed copy of the true subspace."),
-        live_knobs=[("subspace", "warm_start", "cold <-> warm")],
-        # A/B (2026-09-23 hostile-expert read #1): the screen never named its own knob
-        # ("tracker initialisation = cold" with no warm curve to compare against). As
-        # loaded IS the cold arm; run B flips to warm, the historical curve the blurb and
-        # do_not_say list both already assumed a reader could see.
-        ab=("subspace", "warm_start", "warm"),
-        ab_label_a="cold start (random basis)", ab_label_b="warm start (perturbed truth)",
-        screen_note=("Frames are 1 m of platform travel each (no time base); warm start = "
-                     "perturbed copy of the true subspace, so its curve is tracking lag "
-                     "only."),
+        blurb=("Cold start on BOTH arms, k=2 (largest spike-free rank; k=4 spikes "
+               "~0.98, see say). Arm A: FIXED 5 refinement passes/frame. Arm B: the "
+               "shipped adaptive gate (gap_response='refine'), 10 passes/frame "
+               "baseline, up to 60 when unhealthy. Measured over 8 frames: A about "
+               "0.6 -> 0.31 -> 0.19, settling ~0.16, within 1.5x by frame 3; B about "
+               "0.30 -> 0.09, settling ~0.06, within 1.5x by frame 2 -- lower floor, "
+               "one frame sooner, at 2x the passes/frame (right-axis trace: flat 5 vs "
+               "flat 10). The gate never escalates past its baseline here: k=2's gap "
+               "sits well clear of the 0.01 threshold every frame."),
+        # gap_response has no registry ParamSpec (no UI slider -- see
+        # demo_presets._INTERNAL_PARAMS); it is the `ab` knob below, not listed here as
+        # a manually-turned live_knob. warm_start does have a slider and stays
+        # reachable, though it is no longer part of this preset's A/B.
+        live_knobs=[("subspace", "warm_start",
+                     "manual: cold -> warm (perturbed truth; not part of this A/B)")],
+        ab=("subspace", "gap_response", "refine"),
+        ab_label_a="fixed effort (5 passes/frame)",
+        ab_label_b="adaptive gate (shipped default, 10 passes/frame baseline)",
+        screen_note=("Frames are 1 m of platform travel each (no time base); the "
+                     "right-axis trace is AdaOjaBlock's own refinement-passes-per-frame "
+                     "(n_refine_used) -- flat at 5 (A) vs flat at 10 (B), because this "
+                     "run's spectral gap (about 0.09) never drops below the gate's 0.01 "
+                     "threshold, so B never escalates past its baseline. "
+                     + _ARRAY_DISCLOSURE),
         say=[
-            "Three frames are three metres of platform travel: the frames carry no time "
-            "base (1 m per frame at generation), so quote convergence in frames, never "
-            "seconds.",
-            "There is deliberately no image on this screen: the range-azimuth product does "
-            "not change visibly during acquisition on the displayed 40 dB range (it is the "
-            "same panel Thrusts 1 and 2 show), and the point of the error curve is that the "
-            "picture cannot show you what the tracker has not yet learned. If asked what "
-            "the image would look like without the AFE, the answer is 'the same at this "
-            "compression' -- do not toggle it.",
-            "Three frames to converge, at ten refinement passes per frame (n_refine=10 -- "
-            "say it before someone reads it).",
-            "This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 a cold start does not "
-            "converge in this many frames, which is why m is not a live knob here.",
-            "The tracker still spikes when the scene's rank genuinely collapses (frames 23-26 "
-            "on the shipped path): 'mitigated' is not 'fixed'. Have the singular-value "
-            "spectrum as a backup slide.",
-            "The run is not faster than a full SVD, because scoring runs the full SVD every "
-            "frame to build ground truth; the 45x microbenchmark is real, the run time is not.",
-            "The run is nondeterministic at the ~5e-3 level and the cold-start first frame "
-            "varies run to run; quote 'about', never the third decimal.",
+            "Cold start, k=2 (largest spike-free rank, F94), measured over 8 frames. "
+            "Quote 'about' -- nondeterministic at ~5e-3, never the third decimal.",
+            "The A/B statistic is frames-to-acquire vs passes-per-frame, both on "
+            "screen: B pays 2x the compute for a lower floor and one frame sooner.",
+            "This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 neither arm "
+            "converges in this many frames, which is why m is not a live knob here.",
+            "There is deliberately no image on this screen: the picture does not change "
+            "visibly during acquisition (same panel as Thrusts 1-2), because the point of "
+            "the error curve is showing what the picture cannot: what the tracker has not "
+            "yet learned. Without the AFE it would look 'the same at this compression' -- "
+            "do not toggle it.",
+            "Prepared answer -- 'does your gap diagnostic work at Ka?': at k=2 the gap "
+            "sits far above 0.01 every frame, so the gate never escalates past its "
+            "baseline -- the 2x on screen is that baseline, not a reaction. At k=4 (not "
+            "shipped) the gap does collapse and the gate spends 6x more, but the "
+            "cluster still spikes and does not settle in 8 frames -- 'mitigated' is not "
+            "'fixed'; backup slide.",
+            "The run is not faster than a full SVD: scoring runs the full SVD every frame "
+            "for ground truth. The 45x microbenchmark is real, the run time is not.",
         ],
         do_not_say=[
             "Anything with an interferer: three confounders, and the sign of the response "
             "flips with a knob that is not on screen.",
-            "'k = 8 is the optimum' in raw subspace_err: the metric ceilings at sqrt(k).",
+            "'k = 2 is the optimum' in raw subspace_err: the metric ceilings at "
+            "sqrt(2) = 1.41.",
             "The AFE on/off toggle as 'the effect of adaptive feature extraction': 2:1, "
             "costs 3 dB, the picture looks identical.",
-            "Do not put subspace_err beside an m=16 run: the warm tracker's error GROWS "
-            "with frames there (0.125 -> 0.807 over six).",
+            "subspace_err beside an m=16 run: the warm tracker's error GROWS with frames "
+            "there (0.125 -> 0.807 over six).",
+            "That the gate 'always fires' or 'escalates' at Ka: measured false here "
+            "(n_refine_used stays flat, 5 on A / 10 on B, 8/8 frames). F94's addendum "
+            "measured escalation at k=8 on an earlier file, before the geometry fix "
+            "(8d1e251) -- retracted at k=2.",
         ],
     ),
     DemoPreset(
@@ -517,8 +553,9 @@ PRESETS: List[DemoPreset] = [
             "a separate limitation.",
             "The 77 GHz shipped CSVs are still not reconciled with the 30 GHz frames; "
             "caption real-CSV results as shape-only.",
-            "Range 0-2 m is not a target: Sionna's normalize_delays=True makes range 0 "
-            "the earliest arrival. The 20-22 m stripe is real drifting multipath.",
+            "Range 0-2 m is not a target: normalize_delays=True makes range 0 the "
+            "earliest arrival. On the range profile, multipath sits near 37 m and "
+            "68 m, not 20-22 m (F94: uncalibrated).",
             "Skin depth goes as f^-1/2, not f^-1: under this x2 scale model, conductor "
             "loss is under-estimated by about sqrt(2) -- about 0.2 dB on the 0.5 dB "
             "in-band loss -- and substrate conductance coupling by up to 2x; trends "
@@ -771,6 +808,39 @@ class PresetError(ValueError):
     """A preset that does not fit the registry -- raised, never papered over."""
 
 
+def _check_n_refine(preset_id: str, value: Any) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise PresetError(f"{preset_id}: subspace.n_refine={value!r} must be a positive int")
+
+
+def _check_gap_response(preset_id: str, value: Any) -> None:
+    choices = ("none", "refine", "coast")
+    if value not in choices:
+        raise PresetError(f"{preset_id}: subspace.gap_response={value!r} not in {choices}")
+
+
+#: Tracker knobs AdaOjaBlock (e2e/blocks.py) accepts that carry no registry ParamSpec
+#: -- no operator should be typing a refinement-pass count or gap-response mode into a
+#: text box mid-demo (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23). Validated
+#: here directly, against AdaOjaBlock's own accepted values, so a typo still fails
+#: `apply_preset` loudly, the same way an unknown UI param does; keyed by
+#: (block_id, param_key) and checked ahead of the registry-backed loop below.
+_INTERNAL_PARAMS: Dict[Tuple[str, str], Any] = {
+    ("subspace", "n_refine"): _check_n_refine,
+    ("subspace", "gap_response"): _check_gap_response,
+}
+
+
+def ab_key_is_known(bid: str, key: str) -> bool:
+    """True if ``(bid, key)`` is a registered UI ParamSpec or one of `_INTERNAL_PARAMS`
+    -- the single predicate `apply_preset` and its tests both use, so an `ab` tuple can
+    reference either kind of knob without the "stale/typo'd key" guard losing teeth."""
+    spec = BLOCKS_BY_ID.get(bid)
+    if spec is not None and any(ps.key == key for ps in spec.params):
+        return True
+    return (bid, key) in _INTERNAL_PARAMS
+
+
 def apply_preset(preset: DemoPreset, *, arm: str = "a") -> Dict[str, Dict[str, Any]]:
     """`default_block_state()` with the preset's overrides applied and VALIDATED.
 
@@ -796,6 +866,10 @@ def apply_preset(preset: DemoPreset, *, arm: str = "a") -> Dict[str, Dict[str, A
             state[bid]["enabled"] = bool(ov["enabled"])
         specs = {p.key: p for p in spec.params}
         for key, value in (ov.get("params") or {}).items():
+            if (bid, key) in _INTERNAL_PARAMS:
+                _INTERNAL_PARAMS[(bid, key)](preset.id, value)
+                state[bid]["params"][key] = value
+                continue
             ps = specs.get(key)
             if ps is None:
                 raise PresetError(f"{preset.id}: {bid} has no param {key!r}")

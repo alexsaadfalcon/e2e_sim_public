@@ -929,9 +929,29 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     # gap_response="refine": the reactive-refinement mitigation for the munich
     # rank-deficiency divergence, wired at the ENTRY POINT (the class default stays
     # "none" for bit-compat) -- adversarial-panel finding: the fix existed but no
-    # shipped path used it, so default runs past ~frame 22 still diverged.
-    subspace_block = AdaOjaBlock(N_RX, k, m=SUBSPACE_M, n_refine=10,
-                                 gap_response="refine")
+    # shipped path used it, so default runs past ~frame 22 still diverged. A preset
+    # may override both (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23): these
+    # two have no registry ParamSpec (no operator should be typing a refinement-pass
+    # count into a text box mid-demo -- see demo_presets._INTERNAL_PARAMS), so they
+    # are read directly off state rather than via `_p`.
+    subspace_params = state.get("subspace", {}).get("params", {}) or {}
+    subspace_gap_response = subspace_params.get("gap_response")
+    if subspace_gap_response is None:
+        subspace_gap_response = "refine"
+    subspace_n_refine = subspace_params.get("n_refine")
+    if subspace_n_refine is None:
+        # n_refine's default, absent an explicit value, is DERIVED from gap_response so
+        # a preset's single `ab` switch (Thrust 3's cold-start-vs-refine-gate A/B) can
+        # move both together: gap_response="none" (fixed-effort arm) defaults to 5 --
+        # the largest n_refine of {1, 2, 3, 5} that still took >=3 frames to reach
+        # within 1.5x of its own settled level on the real chain at k=2 (re-measured
+        # 2026-09-23, munich_ka.pkl, two repeats; n_refine=1 alone reached that bound
+        # in 2 frames, same as the shipped gate, so it was rejected). Any other
+        # gap_response (or none requested at all) keeps the ORIGINAL shipped default,
+        # n_refine=10 -- byte-identical to every preset before this change existed.
+        subspace_n_refine = 5 if subspace_gap_response == "none" else 10
+    subspace_block = AdaOjaBlock(N_RX, k, m=SUBSPACE_M, n_refine=int(subspace_n_refine),
+                                 gap_response=subspace_gap_response)
 
     # --- downstream product blocks (always present unless the ADC-cube chain is --
     # active -- see below) --------------------------------------------------------
@@ -2308,8 +2328,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # Frames are numbered 1..n, matching the heatmap animation slider (which
         # labels its steps 1-based); an implicit 0-based x autoticked at 0.5 on
         # short runs ("Frame 0.5" after a Cancel, rehearsal 2026-09-22).
+        # Named (not the "trace 0" default) because adding the n_refine_used trace
+        # below turns the legend on -- an unnamed primary trace read as "trace 0" next
+        # to "refinement passes/frame" (found in the Thrust 3 rehearsal, 2026-09-23).
         fig = go.Figure(data=go.Scatter(x=list(range(1, len(errs) + 1)), y=errs,
-                                        mode="lines+markers"))
+                                        mode="lines+markers", name="subspace error"))
         # Anchor at zero AND give the axis a MINIMUM upper bound (Change 3, 2026-09-22
         # review): the as-loaded Thrust 2 curve rises 0.04 -> 0.06 on an axis that used
         # to autoscale/tozero to 0.06, which reads as "the tracker is diverging". The
@@ -2345,6 +2368,31 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             height=460,
         )
         fig.update_yaxes(automargin=True)
+        # Compute spent per frame (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23):
+        # AdaOjaBlock's own effective_n_refine() decision (e2e/blocks.py), reported back
+        # per frame as outputs["n_refine_used"] -- the "adaptive effort" statistic
+        # belongs on the screen, not only in a preset's prose. A second, right-axis
+        # trace so an A/B pair reads side by side: two arms spending identical compute
+        # (the gate never engaging) draw two overlapping flat lines, which is itself
+        # the finding, not a missing feature.
+        n_refine_used = outputs.get("n_refine_used")
+        if n_refine_used and len(n_refine_used) == len(errs):
+            fig.add_trace(go.Scatter(
+                x=list(range(1, len(errs) + 1)), y=[int(n) for n in n_refine_used],
+                mode="lines+markers", name="refinement passes/frame",
+                line=dict(dash="dot", color="#c0392b"), marker=dict(symbol="square"),
+                yaxis="y2"))
+            fig.update_layout(
+                yaxis2=dict(title="refinement passes/frame", overlaying="y",
+                           side="right", rangemode="tozero", showgrid=False),
+                # Legend below the plot, not the default top-right: at top-right it sat
+                # on top of the new right-hand axis's own tick labels, clipping "10"
+                # into "1C" (found in the Thrust 3 rehearsal, 2026-09-23).
+                legend=dict(orientation="h", yanchor="top", y=-0.22,
+                           xanchor="center", x=0.5),
+                margin=dict(b=90),
+                showlegend=True,
+            )
         figs["subspace_err"] = _make_legible(fig)
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
