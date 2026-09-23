@@ -257,6 +257,11 @@ PRESETS: List[DemoPreset] = [
             "This filter is synthetic and labelled as such wherever it appears (owner "
             "ballot 3A). It stands in for a bad interconnect; it is not a model of any "
             "hardware.",
+            "Credit UIC by name (Gharib & Partin-Vaisband): the interconnect thrust, the "
+            "Interconnect block and the six Tessera S21 responses shipped in "
+            "e2e/data/interconnect are theirs; the finding that flat in-band loss divides "
+            "out of a peak-normalized image is ours. The boxcar is our placeholder, not "
+            "derived from their designs.",
             "The real Tessera/UIC designs are INVISIBLE on a peak-normalized display: the "
             "actual Case3 response in-band gives correlation 0.999999, max 0.021 dB "
             "difference. Flat insertion loss divides out. That is why the demo shows a "
