@@ -153,6 +153,57 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+# Safety margin under DrJit/Mitsuba's 2^32 (4294967296) per-tensor entry limit --
+# `paths.cfr()`'s internal phase tensor is roughly num_paths * n_freqs_chunk * n_rx_ant
+# entries; leaving headroom below the hard limit for other same-order-of-magnitude
+# intermediates the call allocates internally.
+_CFR_TENSOR_BUDGET = 1_500_000_000
+
+
+def _cfr_chunk_size(num_freqs: int, num_paths: int, n_rx_ant: int) -> int:
+    """How many frequencies to synthesize per `paths.cfr()` call so
+    `num_paths * chunk * n_rx_ant` stays under `_CFR_TENSOR_BUDGET` -- pulled out of
+    `_synthesize_cfr` so the sizing logic is testable without a real `Paths` object."""
+    return max(1, min(num_freqs, _CFR_TENSOR_BUDGET // max(1, num_paths * n_rx_ant)))
+
+
+def _synthesize_cfr(paths, frequencies, n_rx_ant, normalize, normalize_delays):
+    """`paths.cfr(frequencies=...)`, chunked over the frequency axis so a path-rich
+    solve (e.g. `synthetic_array=True` with diffuse reflection: tens of thousands of
+    paths, see `generate`'s "lost paths" fix) never asks DrJit for a single tensor
+    bigger than its 2^32-entry limit. Returns `[n_rx_ant, 1, 1, len(frequencies)]`,
+    identical in shape/content to one un-chunked `paths.cfr()` call.
+
+    `normalize=True` is NOT forwarded per chunk: Sionna's `cfr()` (see
+    `sionna/rt/path_solvers/paths.py`, the `normalize` branch) computes its unit-energy
+    scale factor from `mean(|H|**2)` OVER WHATEVER FREQUENCIES ARE PASSED IN THAT CALL --
+    doing that once per (much narrower) chunk would independently rescale each chunk to
+    its own local energy, corrupting relative power ACROSS chunk boundaries (measured:
+    this exact bug, in an earlier version of this function, silently varied a stored
+    frame's relative dB by >10 dB depending only on chunk size, at bins with genuine but
+    weak content). Instead every chunk is synthesized with `normalize=False`, and the
+    SAME formula Sionna uses (`1/sqrt(mean(|H|**2))`) is applied ONCE across the full
+    concatenated (unchunked) frequency axis, exactly matching what one un-chunked
+    `paths.cfr(normalize=True)` call would have produced.
+    """
+    num_paths = int(paths.tau.shape[-1])
+    chunk = _cfr_chunk_size(len(frequencies), num_paths, n_rx_ant)
+    out = []
+    for i in range(0, len(frequencies), chunk):
+        sub = frequencies[i:i + chunk]
+        cfr = paths.cfr(frequencies=sub, normalize=False,
+                        normalize_delays=normalize_delays, out_type="numpy")
+        # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_time_steps, num_freqs] ->
+        # [num_rx_ant, num_tx_ant, num_time_steps, num_freqs] (one rx, one tx node).
+        out.append(cfr[0, :, 0, :, :, :])
+    s_pars = np.concatenate(out, axis=-1)
+    if normalize:
+        mean_power = np.mean(np.abs(s_pars) ** 2)
+        if mean_power > 0:
+            s_pars = s_pars / np.sqrt(mean_power)
+    return s_pars
+
+
 def build_scene(carrier_hz: float, boresight_offset_deg: float = 0.0):
     """Load munich, set `scene.frequency` on the scene that will actually be solved,
     THEN attach the tx/rx `PlanarArray`s and place tx/rx -- see the module docstring for
@@ -262,21 +313,57 @@ def generate(args) -> tuple[np.ndarray, dict]:
     normalize = True
     normalize_delays = True
 
+    # PathSolver args in effect (receipt) -- max_depth/los/specular/refraction/seed are
+    # fixed; diffuse_reflection and synthetic_array are the two this module varies.
+    print(f"PathSolver args: max_depth=5, los=True, specular_reflection=True, "
+         f"diffuse_reflection={args.diffuse}, refraction=True, synthetic_array=True, "
+         f"seed={args.seed}")
+
+    # --- synthetic_array=True (FIX, see module docstring's "lost paths" section) -------
+    # `synthetic_array=False` (the v1/v2 setting) solves candidate paths against each of
+    # the array's 1024 individual antenna ELEMENTS as separate ray-tracing targets, and
+    # empirically DISCOVERS FAR FEWER valid specular/diffuse candidate sequences than
+    # solving once against the array's single phase center (`synthetic_array=True`) --
+    # measured on this scene (35 deg offset, diffuse, scattering_coefficient=0.4, frame
+    # 1): 10 vs 38 specular-only paths, 662 vs ~33300 with diffuse, and TWO specific
+    # non-LoS families (radial excess ~37 m and ~68 m) that read -66/-71 dB (buried in
+    # FFT sidelobe noise) under synthetic_array=False recover to roughly -24/-26 dB under
+    # synthetic_array=True -- a ~40 dB difference raising `--samples-per-src`/
+    # `--max-num-paths-per-src` by 20x did NOT close (path count grew 20x, these two
+    # bins' level did not move), so this is a per-element CANDIDATE DISCOVERY limitation,
+    # not a sampling-budget one.
+    # Plane-wave-approximation validity (why treating the array as a single point for
+    # path discovery, then applying the array response ANALYTICALLY, is legitimate here):
+    # worst-case path-length difference across the (up to) 0.219 m diagonal aperture is
+    # ~4.4 range bins (bin size c/(2B)=0.05 m) at grazing incidence, ~1.7-3 bins at this
+    # scene's actual ~35-55 deg incidence -- a few-bin SMEAR, not the ~40 dB DELETION
+    # `synthetic_array=False` exhibits above. See boresight_sin_az for the aperture/bin
+    # numbers this run actually used (printed below).
+    bin_size_m = _C / (2.0 * (args.band_hz[1] - args.band_hz[0]))
+    diag_m = aperture_m * (2.0 ** 0.5)
+    print(f"plane-wave check: aperture={aperture_m:.4f} m, diagonal={diag_m:.4f} m, "
+         f"range bin={bin_size_m:.4f} m -> worst-case smear "
+         f"{diag_m / bin_size_m:.1f} bins (grazing incidence)")
+
+    # Path-count receipt (with vs without diffuse), from a cheap probe solve at the
+    # FIRST frame's position -- BEFORE the motion loop below moves `rx`.
+    probe_no_diffuse = p_solver(scene=scene, max_depth=5, los=True,
+                                specular_reflection=True, diffuse_reflection=False,
+                                refraction=True, synthetic_array=True, seed=args.seed)
+    print(f"num_paths without diffuse (probe) = {probe_no_diffuse.tau.shape[-1]}")
+
     all_s_pars = []
     for frame_idx in range(args.num_frames):
         rx.position += [1, 0, 0]  # same per-frame motion as the original script
         paths = p_solver(scene=scene, max_depth=5, los=True, specular_reflection=True,
                          diffuse_reflection=args.diffuse, refraction=True,
-                         synthetic_array=False, seed=args.seed)
+                         synthetic_array=True, seed=args.seed)
         if frame_idx == 0:
             # tau is a stored tensor (cheap property access, no extra solve) --
-            # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths].
-            print(f"num_paths (frame 0) = {paths.tau.shape[-1]}")
-        cfr = paths.cfr(frequencies=frequencies, normalize=normalize,
-                        normalize_delays=normalize_delays, out_type="numpy")
-        # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_time_steps, num_freqs] ->
-        # [num_rx_ant, num_tx_ant, num_time_steps, num_freqs] (one rx, one tx node).
-        s_pars = cfr[0, :, 0, :, :, :]
+            # [num_rx, num_tx, num_paths] (synthetic_array=True: no antenna axes).
+            print(f"num_paths (frame 0, diffuse={args.diffuse}) = {paths.tau.shape[-1]}")
+        s_pars = _synthesize_cfr(paths, frequencies, n_rx_ant=1024,
+                                 normalize=normalize, normalize_delays=normalize_delays)
         all_s_pars.append(s_pars)
 
     all_s_pars = np.stack(all_s_pars, axis=0).astype(np.complex64)
@@ -307,6 +394,12 @@ def generate(args) -> tuple[np.ndarray, dict]:
         "normalize": normalize,
         "normalize_delays": normalize_delays,
         "boresight_offset_deg": float(args.boresight_offset_deg),
+        "synthetic_array": True,
+        # See generate()'s "lost paths" comment: synthetic_array=False under-discovers
+        # specular/diffuse candidates against the 1024 individual antenna elements;
+        # synthetic_array=True solves once against the phase center and applies the
+        # array response analytically (plane-wave approximation, justified for this
+        # aperture -- see the printed "plane-wave check" receipt).
         "diffuse_reflection": bool(args.diffuse),
         # ASSUMPTION, not a measurement, when diffuse_reflection is True: 0.4 is the
         # order-of-magnitude the Sionna scattering tutorial uses for building materials,

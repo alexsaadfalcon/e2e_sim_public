@@ -11,6 +11,9 @@ import pytest
 
 from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.environment.sionna_simple_channel import (
+    _CFR_TENSOR_BUDGET,
+    _cfr_chunk_size,
+    _synthesize_cfr,
     boresight_sin_az,
     build_frequencies,
     build_scene,
@@ -80,6 +83,95 @@ def test_parse_args_diffuse_and_boresight_overrides():
     assert args.diffuse is True
     assert args.scattering_coefficient == 0.4
     assert args.boresight_offset_deg == 35.0
+
+
+# --------------------------------------------------------------------------- CFR chunking
+
+
+def test_cfr_chunk_size_stays_under_tensor_budget():
+    # A path-rich solve (synthetic_array=True + diffuse: tens of thousands of paths,
+    # see generate()'s "lost paths" fix) must not ask for the full frequency count.
+    num_paths, n_rx_ant, num_freqs = 33_000, 1024, 5000
+    chunk = _cfr_chunk_size(num_freqs, num_paths, n_rx_ant)
+    assert chunk * num_paths * n_rx_ant <= _CFR_TENSOR_BUDGET
+    assert chunk < num_freqs
+
+
+def test_cfr_chunk_size_no_chunking_needed_for_small_problems():
+    # Few paths -> the whole frequency axis fits in one call.
+    assert _cfr_chunk_size(num_freqs=5000, num_paths=10, n_rx_ant=1024) == 5000
+
+
+def test_cfr_chunk_size_at_least_one():
+    # Pathological (huge) path count must still return a usable (>=1) chunk, not 0.
+    assert _cfr_chunk_size(num_freqs=5000, num_paths=10_000_000, n_rx_ant=1024) >= 1
+
+
+class _FakePaths:
+    """Sionna `Paths`-shaped test double: `.tau` for path count, `.cfr()` returning a
+    DETERMINISTIC, frequency-dependent (not chunk-boundary-uniform) response so a
+    per-chunk-normalize bug (this function's regression) shows up as a boundary
+    discontinuity, not just a benign global scale error."""
+
+    def __init__(self, num_paths, n_rx_ant, seed=0):
+        self.tau = np.zeros((1, 1, num_paths))
+        rng = np.random.default_rng(seed)
+        self._n_rx_ant = n_rx_ant
+        # A fixed per-(antenna, frequency-index) response so cfr() is a pure function
+        # of which absolute frequencies are requested -- values vary smoothly but
+        # non-uniformly so a per-chunk rescale would visibly kink at chunk boundaries.
+        self._table = {}
+        self._rng = rng
+
+    def _value(self, f, ant):
+        key = (float(f), int(ant))
+        if key not in self._table:
+            # Deterministic pseudo-random magnitude in [0.5, 1.5), phase in [0, 2pi).
+            h = hash(key) % (2**32)
+            r = np.random.default_rng(h)
+            mag = 0.5 + r.random()
+            phase = 2 * np.pi * r.random()
+            self._table[key] = mag * np.exp(1j * phase)
+        return self._table[key]
+
+    def cfr(self, frequencies, normalize, normalize_delays, out_type):
+        assert normalize is False  # _synthesize_cfr must never request per-chunk normalize
+        n_f = len(frequencies)
+        out = np.zeros((self._n_rx_ant, n_f), dtype=np.complex64)
+        for j, f in enumerate(frequencies):
+            for a in range(self._n_rx_ant):
+                out[a, j] = self._value(f, a)
+        # [num_rx=1, num_rx_ant, num_tx=1, num_tx_ant=1, num_time=1, num_freqs]
+        return out.reshape(1, self._n_rx_ant, 1, 1, 1, n_f)
+
+
+def test_synthesize_cfr_matches_unchunked_call_up_to_global_normalization():
+    """Regression test for the per-chunk-normalize bug: chunked synthesis (forced via a
+    tiny fake tensor budget) must reproduce the SAME values (up to one global scale
+    factor) as a single un-chunked call -- not independently-rescaled chunks."""
+    n_rx_ant = 4
+    num_paths = 2
+    frequencies = np.linspace(-1.5e9, 1.5e9, 37)  # deliberately not a multiple of any chunk
+
+    paths_chunked = _FakePaths(num_paths, n_rx_ant)
+    import e2e.environment.sionna_simple_channel as mod
+    # Force a tiny chunk size so >1 chunk is exercised.
+    old_budget = mod._CFR_TENSOR_BUDGET
+    try:
+        mod._CFR_TENSOR_BUDGET = num_paths * n_rx_ant * 5  # chunk size ~5
+        chunked = _synthesize_cfr(paths_chunked, frequencies, n_rx_ant,
+                                  normalize=True, normalize_delays=True)
+    finally:
+        mod._CFR_TENSOR_BUDGET = old_budget
+
+    # Reference: one call covering everything at once (normalize=False), then the
+    # SAME global normalization _synthesize_cfr applies.
+    paths_ref = _FakePaths(num_paths, n_rx_ant)
+    ref = paths_ref.cfr(frequencies=frequencies, normalize=False,
+                        normalize_delays=True, out_type="numpy")[0, :, 0, :, :, :]
+    ref = ref / np.sqrt(np.mean(np.abs(ref) ** 2))
+
+    np.testing.assert_allclose(chunked, ref, rtol=1e-5, atol=1e-6)
 
 
 # --------------------------------------------------------------------------- boresight geometry
