@@ -11,10 +11,12 @@ import pytest
 
 from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.environment.sionna_simple_channel import (
+    boresight_sin_az,
     build_frequencies,
     build_scene,
     generate,
     parse_args,
+    unambiguous_range_m,
     write_payload,
 )
 
@@ -31,6 +33,18 @@ def test_build_frequencies_relative_to_carrier_and_symmetric_for_default_band():
 def test_build_frequencies_num_points():
     freqs = build_frequencies(30e9, (28.5e9, 31.5e9), 7)
     assert freqs.shape == (7,)
+
+
+def test_unambiguous_range_m_1000pt_default_band():
+    # 1000 points over 3 GHz -> ~25 m (measured, munich_physics investigation 2026-09-23:
+    # too short for this scene's 37/68 m non-LoS returns, which then alias). The
+    # investigation's "25.0 m" used c=3e8; exact c=299792458 gives 24.98 m.
+    assert unambiguous_range_m(1000, (28.5e9, 31.5e9)) == pytest.approx(25.0, rel=1e-2)
+
+
+def test_unambiguous_range_m_5000pt_default_band():
+    # 5000 points over 3 GHz -> ~125 m.
+    assert unambiguous_range_m(5000, (28.5e9, 31.5e9)) == pytest.approx(125.0, rel=1e-2)
 
 
 def test_parse_args_defaults():
@@ -51,6 +65,66 @@ def test_parse_args_overrides():
     assert args.num_freqs == 16
     assert args.num_frames == 3
     assert args.seed == 7
+
+
+def test_parse_args_diffuse_and_boresight_defaults():
+    args = parse_args([])
+    assert args.diffuse is False
+    assert args.scattering_coefficient == 0.0
+    assert args.boresight_offset_deg == 0.0
+
+
+def test_parse_args_diffuse_and_boresight_overrides():
+    args = parse_args(["--diffuse", "--scattering-coefficient", "0.4",
+                       "--boresight-offset-deg", "35"])
+    assert args.diffuse is True
+    assert args.scattering_coefficient == 0.4
+    assert args.boresight_offset_deg == 35.0
+
+
+# --------------------------------------------------------------------------- boresight geometry
+
+
+def test_boresight_sin_az_zero_at_plain_look_at():
+    """F94: with orientation aimed exactly at the target (alpha=phi, beta=theta-pi/2,
+    gamma=0 -- what `Receiver.look_at` sets), the direct path is dead broadside."""
+    rx_pos = np.array([46.0, 90.0, 1.5])
+    tx_pos = np.array([8.5, 21.0, 27.0])
+    d = tx_pos - rx_pos
+    theta0 = np.arccos(d[2] / np.linalg.norm(d))
+    phi0 = np.arctan2(d[1], d[0])
+    orientation = (phi0, theta0 - np.pi / 2, 0.0)
+    assert boresight_sin_az(rx_pos, tx_pos, orientation) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_boresight_sin_az_positive_offset_gives_positive_sin_az():
+    """Subtracting `boresight_offset_deg` (converted to radians) from alpha -- the sign
+    `build_scene` uses -- must put the transmitter at POSITIVE sin(az), roughly
+    sin(35 deg)=0.57 (exact value differs from the idealized planar case because this
+    scene's direct path also has a ~18 deg elevation component -- see build_scene)."""
+    rx_pos = np.array([46.0, 90.0, 1.5])
+    tx_pos = np.array([8.5, 21.0, 27.0])
+    d = tx_pos - rx_pos
+    theta0 = np.arccos(d[2] / np.linalg.norm(d))
+    phi0 = np.arctan2(d[1], d[0])
+    beta0 = theta0 - np.pi / 2
+    offset_rad = np.radians(35.0)
+    orientation = (phi0 - offset_rad, beta0, 0.0)
+    sin_az = boresight_sin_az(rx_pos, tx_pos, orientation)
+    assert sin_az > 0.0
+    assert sin_az == pytest.approx(np.sin(offset_rad), abs=0.05)
+
+
+def test_boresight_sin_az_negative_offset_gives_negative_sin_az():
+    rx_pos = np.array([46.0, 90.0, 1.5])
+    tx_pos = np.array([8.5, 21.0, 27.0])
+    d = tx_pos - rx_pos
+    theta0 = np.arccos(d[2] / np.linalg.norm(d))
+    phi0 = np.arctan2(d[1], d[0])
+    beta0 = theta0 - np.pi / 2
+    offset_rad = np.radians(-35.0)
+    orientation = (phi0 - offset_rad, beta0, 0.0)
+    assert boresight_sin_az(rx_pos, tx_pos, orientation) < 0.0
 
 
 # --------------------------------------------------------------------------- writer/reader
@@ -208,6 +282,21 @@ def test_built_scene_frequency_and_spacing_match_carrier():
     expected_spacing = 0.5 * expected_wavelength
     assert wavelength == pytest.approx(expected_wavelength, rel=1e-6)
     assert rx_spacing_m == pytest.approx(expected_spacing, rel=1e-6)
+
+
+@pytest.mark.sionna
+def test_build_scene_boresight_offset_gives_expected_sign_and_order_of_magnitude():
+    """Real Sionna: --boresight-offset-deg 35 must move the direct path to a POSITIVE
+    sin(az) of roughly 0.5-0.6 (F94 target ~sin(35deg)=0.57; exact value differs because
+    of this scene's nonzero elevation -- see boresight_sin_az)."""
+    scene, tx, rx, wavelength, rx_spacing_m, aperture_m = build_scene(
+        30e9, boresight_offset_deg=35.0)
+
+    orientation_rad = tuple(float(c.numpy()[0]) for c in
+                            (rx.orientation.x, rx.orientation.y, rx.orientation.z))
+    sin_az = boresight_sin_az(np.asarray(rx.position.numpy()).reshape(3),
+                              np.asarray(tx.position.numpy()).reshape(3), orientation_rad)
+    assert 0.3 < sin_az < 0.8
 
 
 @pytest.mark.sionna

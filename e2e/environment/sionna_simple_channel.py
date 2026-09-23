@@ -56,6 +56,59 @@ def _git_head():
         return None
 
 
+def unambiguous_range_m(num_freqs: int, band_hz) -> float:
+    """The USABLE (non-negative-range) unambiguous range window for a band of width
+    `B = stop - start` Hz sampled at `num_freqs` complex points.
+
+    An `num_freqs`-point IFFT of the complex CFR gives a range profile with sample
+    spacing `c / (2B)` and a FULL symmetric span of `num_freqs * c / (2B)` (from
+    `-span/2` to `+span/2`, via `torch.fft.fftshift` -- see `e2e.blocks.RangeAzBlock`).
+    Only the non-negative half is physically meaningful (range can't be negative) and is
+    what downstream display/cropping (`_nonneg_range` in `webapp/pipeline_runner.py`)
+    keeps, so the window a target can actually be unambiguously placed in is HALF the
+    full span: `num_freqs * c / (4B)`.
+
+    Verified empirically (`munich_physics` investigation, 2026-09-23): 1000 points over
+    3 GHz gives 25.0 m -- this scene's 37 m non-LoS return exceeds that window and is
+    cropped, and its 68 m family aliases into the window at 15-18 m; the NAIVE
+    `num_freqs*c/(2B)` reading (50.0 m here) is too large to explain either observation
+    (37 m would neither crop nor alias within a 50 m window).
+    """
+    start_hz, stop_hz = band_hz
+    bandwidth_hz = float(stop_hz) - float(start_hz)
+    return float(num_freqs) * _C / (4.0 * bandwidth_hz)
+
+
+def _rotation_matrix(alpha, beta, gamma):
+    """TR38901 (7.1-4) GCS<-LCS rotation matrix -- same closed form as Sionna's
+    `sionna.rt.utils.rotation_matrix`, reimplemented in plain numpy so it is testable
+    without Sionna. `R @ local_vector = global_vector`; angles are (yaw about z, pitch
+    about y, roll about x) radians."""
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    cb, sb = np.cos(beta), np.sin(beta)
+    cc, sc = np.cos(gamma), np.sin(gamma)
+    return np.array([
+        [ca * cb, ca * sb * sc - sa * cc, ca * sb * cc + sa * sc],
+        [sa * cb, sa * sb * sc + ca * cc, sa * sb * cc - ca * sc],
+        [-sb, cb * sc, cb * cc],
+    ])
+
+
+def boresight_sin_az(rx_pos, tx_pos, orientation) -> float:
+    """`sin(azimuth)` of the direct rx->tx path IN THE RECEIVER'S LOCAL (array) FRAME,
+    given the receiver's `orientation = (alpha, beta, gamma)` (radians).
+
+    The array lies in the receiver's local y-z plane (`PlanarArray`), so this is the
+    y-component of the rx->tx unit vector after rotating it into that local frame --
+    exactly what `--boresight-offset-deg`'s receipt reports (see `build_scene`)."""
+    d = np.asarray(tx_pos, dtype=float) - np.asarray(rx_pos, dtype=float)
+    v_global = d / np.linalg.norm(d)
+    alpha, beta, gamma = orientation
+    r = _rotation_matrix(alpha, beta, gamma)
+    v_local = r.T @ v_global  # R is orthogonal: local = R^-1 @ global = R^T @ global
+    return float(v_local[1])
+
+
 def build_frequencies(carrier_hz: float, band_hz, num_freqs: int) -> np.ndarray:
     """`num_freqs` points spanning `band_hz` (absolute Hz), relative to `carrier_hz`.
 
@@ -78,17 +131,45 @@ def parse_args(argv=None):
     p.add_argument("--num-frames", type=int, default=DEFAULT_NUM_FRAMES)
     p.add_argument("--out", default=DEFAULT_OUT)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p.add_argument("--diffuse", action="store_true",
+                   help="Enable diffuse reflection in the path solver (v1.0 default is "
+                        "specular-only, diffuse_reflection=False -- see the module "
+                        "docstring's 'diffuse' section for why that under-populates the "
+                        "power-delay profile).")
+    p.add_argument("--scattering-coefficient", type=float, default=0.0,
+                   help="Scattering coefficient S in [0,1] applied to EVERY ITU material "
+                        "in the scene when --diffuse is set (Sionna's own default is 0.0, "
+                        "so diffuse paths carry no energy without this). Ignored unless "
+                        "--diffuse is also given. This is an ASSUMPTION, not a "
+                        "measurement -- see the module docstring.")
+    p.add_argument("--boresight-offset-deg", type=float, default=0.0,
+                   help="Yaw the receiver's orientation this many degrees away from "
+                        "boresight-at-transmitter (default 0.0 = rx.look_at(tx), "
+                        "unchanged) -- F94: at exact boresight the LoS path carries 92%% "
+                        "of the power at broadside, making frames rank-1 by geometry. "
+                        "Positive values put the transmitter at POSITIVE sin(azimuth) in "
+                        "the receiver's local (array) frame -- see build_scene/"
+                        "boresight_sin_az.")
     return p.parse_args(argv)
 
 
-def build_scene(carrier_hz: float):
+def build_scene(carrier_hz: float, boresight_offset_deg: float = 0.0):
     """Load munich, set `scene.frequency` on the scene that will actually be solved,
     THEN attach the tx/rx `PlanarArray`s and place tx/rx -- see the module docstring for
     why the order matters. Returns `(scene, tx, rx, wavelength, rx_spacing_m, aperture_m)`.
 
+    `boresight_offset_deg` (F94): with plain `rx.look_at(tx)`, the direct path arrives at
+    EXACT broadside (sin(az)=0) carrying 92% of the power, so frames are rank-1 by
+    geometry. A nonzero value yaws the receiver's orientation away from boresight by
+    that many degrees (about the local vertical, applied once after `look_at` -- the
+    per-frame motion loop in `generate()` only translates `rx.position`, never
+    re-orients it, matching the original script). See `boresight_sin_az` for the sign
+    convention and the printed receipt below for the resulting angle.
+
     Split out from `generate()` so a test can check the scene's own `.frequency` and its
     rx array spacing directly, not just the meta values `generate()` derives from them.
     """
+    import mitsuba as mi
     import sionna.rt
     from sionna.rt import Camera, PlanarArray, Receiver, Transmitter, load_scene
 
@@ -122,6 +203,24 @@ def build_scene(carrier_hz: float):
     tx.look_at(rx)
     rx.look_at(tx)
 
+    if boresight_offset_deg != 0.0:
+        alpha, beta, gamma = rx.orientation.x, rx.orientation.y, rx.orientation.z
+        # SUBTRACT from alpha (yaw about the local vertical, applied here in the GCS
+        # since gamma=0): this is the sign that puts the transmitter at POSITIVE
+        # sin(azimuth) in the receiver's local frame -- verified against this scene's
+        # actual geometry (see boresight_sin_az / tests/test_sionna_simple_channel.py).
+        new_alpha = alpha - float(np.radians(boresight_offset_deg))
+        rx.orientation = mi.Point3f(new_alpha, beta, gamma)
+
+    # Receipt: F94 found sin(az)=0 (broadside) at plain boresight; report what this run
+    # actually achieves, from the SOLVED (post-offset) orientation and positions.
+    orientation_rad = tuple(float(c.numpy()[0]) for c in
+                            (rx.orientation.x, rx.orientation.y, rx.orientation.z))
+    sin_az = boresight_sin_az(np.asarray(rx.position.numpy()).reshape(3),
+                              np.asarray(tx.position.numpy()).reshape(3), orientation_rad)
+    print(f"boresight_offset_deg = {boresight_offset_deg} -> direct-path sin(az) in "
+         f"receiver array frame = {sin_az:.4f}")
+
     # Kept for parity with the original interactive script (a camera angle used for
     # scene.render()/preview()); this module runs headless (no display), so it is
     # constructed but never rendered.
@@ -140,7 +239,19 @@ def generate(args) -> tuple[np.ndarray, dict]:
     import sionna.rt
     from sionna.rt import PathSolver
 
-    scene, tx, rx, wavelength, rx_spacing_m, aperture_m = build_scene(args.carrier_hz)
+    scene, tx, rx, wavelength, rx_spacing_m, aperture_m = build_scene(
+        args.carrier_hz, boresight_offset_deg=args.boresight_offset_deg)
+
+    # v1.0 solved specular-only (diffuse_reflection=False); its power-delay profile has
+    # exactly one tap above -20 dB per frame (vs. 22-26 on the legacy 3.5 GHz file).
+    # --diffuse turns diffuse reflection back on; Sionna's own scattering_coefficient
+    # default is 0.0 (no energy in the diffuse lobe at all) on every material, so
+    # --scattering-coefficient must also be set for --diffuse to change anything.
+    if args.diffuse and args.scattering_coefficient > 0.0:
+        for mat in scene.radio_materials.values():
+            mat.scattering_coefficient = args.scattering_coefficient
+        print(f"scattering_coefficient = {args.scattering_coefficient} "
+             f"(ASSUMPTION, not measured -- set on {len(scene.radio_materials)} materials)")
 
     frequencies = build_frequencies(args.carrier_hz, args.band_hz, args.num_freqs)
     p_solver = PathSolver()
@@ -152,11 +263,15 @@ def generate(args) -> tuple[np.ndarray, dict]:
     normalize_delays = True
 
     all_s_pars = []
-    for _ in range(args.num_frames):
+    for frame_idx in range(args.num_frames):
         rx.position += [1, 0, 0]  # same per-frame motion as the original script
         paths = p_solver(scene=scene, max_depth=5, los=True, specular_reflection=True,
-                         diffuse_reflection=False, refraction=True, synthetic_array=False,
-                         seed=args.seed)
+                         diffuse_reflection=args.diffuse, refraction=True,
+                         synthetic_array=False, seed=args.seed)
+        if frame_idx == 0:
+            # tau is a stored tensor (cheap property access, no extra solve) --
+            # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths].
+            print(f"num_paths (frame 0) = {paths.tau.shape[-1]}")
         cfr = paths.cfr(frequencies=frequencies, normalize=normalize,
                         normalize_delays=normalize_delays, out_type="numpy")
         # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_time_steps, num_freqs] ->
@@ -171,6 +286,10 @@ def generate(args) -> tuple[np.ndarray, dict]:
     except AttributeError:
         sionna_version = getattr(sys.modules.get("sionna"), "__version__", None)
 
+    unambig_range_m = unambiguous_range_m(args.num_freqs, args.band_hz)
+    print(f"unambiguous range = {unambig_range_m:.3f} m "
+         f"({args.num_freqs} points over {args.band_hz[1] - args.band_hz[0]:.3e} Hz)")
+
     meta = {
         "version": 2,
         "scenario_name": "munich",
@@ -182,10 +301,19 @@ def generate(args) -> tuple[np.ndarray, dict]:
             "stop_hz": float(args.band_hz[1]),
             "num_freqs": int(args.num_freqs),
         },
+        "unambiguous_range_m": unambig_range_m,
         "rx_spacing_m": float(rx_spacing_m),
         "aperture_m": float(aperture_m),
         "normalize": normalize,
         "normalize_delays": normalize_delays,
+        "boresight_offset_deg": float(args.boresight_offset_deg),
+        "diffuse_reflection": bool(args.diffuse),
+        # ASSUMPTION, not a measurement, when diffuse_reflection is True: 0.4 is the
+        # order-of-magnitude the Sionna scattering tutorial uses for building materials,
+        # not something fit to this scene. 0.0 (the no-op default) when --diffuse is off.
+        "scattering_coefficient": float(args.scattering_coefficient),
+        "scattering_coefficient_is_assumption": bool(args.diffuse
+                                                     and args.scattering_coefficient > 0.0),
         "sionna_version": sionna_version,
         "git_head": _git_head(),
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
