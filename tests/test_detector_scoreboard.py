@@ -147,19 +147,24 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     assert row["this frame: TP"] == "0"
     assert row["this frame: unmatched (FP)"] == "1"
     assert row["this frame: FN"] == "1"
-    # Cumulative over both frames: 1 hit, 1 false alarm.
+    # Cumulative over both frames: 1 hit, 1 false alarm. The "N/N scored" qualifier
+    # moved into the value (Change, 2026-09-23 coordinator re-check).
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
-    assert row[hits_key] == "1"
+    assert row[hits_key] == "1 (2/2 scored)"
     assert row["cumulative unmatched detections"] == "1"
     assert row["unmatched / frame (FA)"] == "0.50"
     # Renamed (finding 1, 2026-09-23 hostile-expert re-read): "false alarm"/"FA" rows
     # count UNMATCHED detections against labels that themselves omit real objects
     # (F83's precision ceiling) -- "FA" now survives only in parentheses.
+    # The frame-count qualifier lives in the VALUE now, not the label (Change,
+    # 2026-09-23 coordinator re-check: a long label wrapped to 2 lines and inflated
+    # every row in the table to that height -- see `_TABLE_COL_CHARS`).
     hit_rate_key = next(k for k in row if k.startswith("hit rate"))
-    assert row[hit_rate_key] == "0.50"
-    # This run scored 2 frames -- the row states ITS OWN frame count, not the offline
-    # split size, so a 5-frame hit rate can't be misread as a stable per-arm number.
-    assert "2 frames" in hit_rate_key
+    assert row[hit_rate_key].startswith("0.50 ")
+    # This run scored 2 frames -- the value states ITS OWN frame count, not the
+    # offline split size, so a 5-frame hit rate can't be misread as a stable per-arm
+    # number.
+    assert "2fr" in row[hit_rate_key]
     # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
     # wrapped to two lines inside the header's declared height and clipped the
     # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
@@ -212,16 +217,21 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     target_recall = beat_cfar_data["target_recall"]
     n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
                     if a.get("operating_point"))
-    # Every label is now pre-wrapped to fit the column (see `scoreboard_figure`'s
-    # `_TABLE_COL_LABEL_CHARS` comment) -- reassemble before comparing, same
-    # convention the subline tests already use for `_wrap_text`'s output.
-    labels, _values = table.cells.values
+    # Every label/value is now pre-wrapped to fit its column (see `scoreboard_figure`'s
+    # `_TABLE_COL_CHARS` comment) -- reassemble before comparing, same convention the
+    # subline tests already use for `_wrap_text`'s output. "cumulative hits"/"hit
+    # rate" moved their qualifier into the VALUE column (Change, 2026-09-23
+    # coordinator re-check) so neither label wraps past one line.
+    labels, values = table.cells.values
     labels = [l.replace("<br>", " ") for l in labels]
+    values = [v.replace("<br>", " ") for v in values]
+    row = dict(zip(labels, values))
     assert labels == ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
-                      "cumulative hits (0/1 frames scored)",
-                      "cumulative unmatched detections", "unmatched / frame (FA)",
-                      f"hit rate (0 frames; recall {target_recall:g} by design over "
-                      f"the {n_frames}-frame split)"]
+                      "cumulative hits", "cumulative unmatched detections",
+                      "unmatched / frame (FA)", "hit rate (design, not quality)"]
+    assert row["cumulative hits"] == "0 (0/1 scored)"
+    assert row["hit rate (design, not quality)"] == (
+        f"n/a (0fr; R{target_recall:g}/{n_frames}fr split)")
 
 
 def test_scoreboard_figure_header_count_label_and_threshold_in_title():
@@ -398,8 +408,10 @@ def test_scoreboard_offline_block_reads_ap_fa_and_stripe_for_a_scored_arm(beat_c
     stripe = beat_cfar_data["beat_cfar"]["stripe_rank1"]["raddetnet"]
     stripe_gt = beat_cfar_data["beat_cfar"]["stripe_ground_truth"]
     assert row["rank-1 stripe vs ground truth"] == f"{stripe:.3f} vs {stripe_gt:.3f}"
-    header_row = next(k for k in row if k.startswith("offline,"))
-    assert str(arm["operating_point"]["n_frames"]) in header_row
+    # Header row content is split label/value now (Change, 2026-09-23 coordinator
+    # re-check: a single long "offline, {n}-frame..." label wrapped to 2 lines and
+    # inflated the whole table's row height) -- the frame count lives in the value.
+    assert str(arm["operating_point"]["n_frames"]) in row["offline test split"]
     # More than the base 7 rows now -- the table's height must have grown to match
     # (see the geometric check below), not silently clipped the new rows.
     assert len(labels) > 7
@@ -525,8 +537,12 @@ def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
 # `score_null`'s docstring). Display-only remap, checked against that exact text.
 # --------------------------------------------------------------------------------
 def test_display_arm_name_remaps_only_the_null_arm():
+    # Shortened (Change, 2026-09-23 coordinator re-check): this was the single
+    # longest PR-legend entry, and a right-hand legend sized to it squeezed the plot
+    # to a ~80 px sliver -- still states the real definition, just not the full
+    # sentence.
     assert (ds._display_arm_name("null (random-in-GT-box)") ==
-           "null: random cells within the train-label bounding box (chance floor)")
+           "null: random cells in train-label box (chance floor)")
     assert ds._display_arm_name("classical CFAR") == "classical CFAR"
     assert ds._display_arm_name("raddetnet") == "raddetnet"
 
@@ -534,8 +550,7 @@ def test_display_arm_name_remaps_only_the_null_arm():
 def test_stored_pr_figure_null_arm_shows_the_real_definition_not_the_stored_name():
     fig = ds.stored_pr_figure()
     names = [tr.name for tr in fig.data]
-    assert any(n.startswith("null: random cells within the train-label bounding box")
-              for n in names)
+    assert any(n.startswith("null: random cells in train-label box") for n in names)
     assert not any("random-in-GT-box" in n for n in names)
 
 
@@ -576,15 +591,20 @@ def test_scoreboard_annotation_geometry_still_fits_with_two_sentences():
 # JSON also covers -- both numbers read from real files at test time, never typed.
 # --------------------------------------------------------------------------------
 def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
+    """The caveat row is now a SHORT two-column row right after the CI row (Change,
+    2026-09-23 coordinator re-check: the old one-column sentence wrapped to 2+ lines
+    and inflated every row in the table to that height -- see `_TABLE_COL_CHARS`)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, _values = _table(fig).cells.values
+    labels, values = _table(fig).cells.values
+    row = dict(zip(labels, values))
     ci_idx = labels.index("delta AP vs CFAR, 95% CI")
-    caveat = labels[ci_idx + 1].replace("<br>", " ")
-    assert f"seed-to-seed spread {ds.SEED_TO_SEED_AP_SPREAD_F86:.3f} AP" in caveat
-    assert "ONE training seed" in caveat
-    assert "F86" in caveat
+    caveat_label, caveat_value = labels[ci_idx + 1], values[ci_idx + 1]
+    assert "ONE seed" in caveat_label.replace("<br>", " ")
+    assert (f"seed spread {ds.SEED_TO_SEED_AP_SPREAD_F86:.3f} AP"
+           in caveat_value.replace("<br>", " "))
+    assert "F86" in caveat_value
 
 
 def test_default_ood_json_exists():
@@ -592,6 +612,9 @@ def test_default_ood_json_exists():
 
 
 def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
+    """Two SHORT two-column rows now (Change, 2026-09-23 coordinator re-check: the
+    old single "OOD AP ... vs CFAR ...: verdict" sentence wrapped to 4 lines and
+    inflated every row in the table to that height)."""
     import json
     ood_arms = {a["name"]: a for a in json.loads(ds.DEFAULT_OOD_JSON.read_text())["arms"]}
     s42, s43 = ood_arms["raddetnet_s42"], ood_arms["raddetnet_s43"]
@@ -600,18 +623,20 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, _values = _table(fig).cells.values
-    ood_header = next(l for l in labels if l.startswith("out of distribution"))
+    labels, values = _table(fig).cells.values
+    row = dict(zip(labels, values))
+    ood_header = next(l for l in labels if l.startswith("OOD AP,"))
     assert "b1_bench_v2" in ood_header
-    value_row = labels[labels.index(ood_header) + 1].replace("<br>", " ")
-    assert f"OOD AP {s42['AP']:.3f} (seed 42)" in value_row
-    assert f"{s43['AP']:.3f} (seed 43)" in value_row
-    assert f"vs CFAR {cfar['AP']:.3f}" in value_row
+    ap_row_value = row[ood_header]
+    assert f"{s42['AP']:.3f} (s42)" in ap_row_value
+    assert f"{s43['AP']:.3f} (s43)" in ap_row_value
+    cfar_row_value = row["OOD CFAR"]
+    assert f"{cfar['AP']:.3f}" in cfar_row_value
     # F86: CFAR's OOD AP sits between the two seeds' -- computed from the numbers
     # above at call time, not asserted as a hardcoded conclusion here.
     lo, hi = sorted((s42["AP"], s43["AP"]))
     if lo < cfar["AP"] < hi:
-        assert "the two seeds straddle CFAR" in value_row
+        assert "straddle" in cfar_row_value
 
 
 def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat_cfar_data):
@@ -625,7 +650,7 @@ def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat
                                match_rule_text="rule", beat_cfar_json_path=path,
                                beat_cfar_arm_name="raddetnet", ood_json_path=missing_ood)
     labels, _values = _table(fig).cells.values
-    assert not any(l.startswith("out of distribution") for l in labels)
+    assert not any(l.startswith("OOD AP,") or l == "OOD CFAR" for l in labels)
 
 
 # --------------------------------------------------------------------------------
@@ -640,3 +665,53 @@ def test_scoring_max_range_m_reads_the_real_beat_cfar_json(beat_cfar_data):
 
 def test_scoring_max_range_m_none_when_file_missing(tmp_path):
     assert ds.scoring_max_range_m(tmp_path / "no_such.json") is None
+
+
+# --------------------------------------------------------------------------------
+# Coordinator re-check (2026-09-23): the scoreboard table hit ~1500 px because a
+# single 4-line row (Plotly's Table `cells.height` is one scalar for the WHOLE
+# table, not per-row) forced every other row to that same height. Fixed by keeping
+# every row to at most `_TABLE_CELL_MAX_LINES` wrapped lines (content split across
+# both columns rather than crammed into one) -- checked here for every arm this
+# module knows how to build a full offline block for, not just the happy path.
+# --------------------------------------------------------------------------------
+def test_scoreboard_no_row_exceeds_the_max_line_cap():
+    scores = ds.score_frames([[]], None)
+    for arm_name, beat_cfar_arm_name in (
+        ("ML", None),
+        ("CA-CFAR (guard 2, train 6)", "classical CFAR"),
+        ("b7_raddetnet", "raddetnet"),
+    ):
+        fig = ds.scoreboard_figure(scores, arm_name=arm_name, threshold=0.5,
+                                   match_rule_text=ds.match_rule_text(),
+                                   beat_cfar_arm_name=beat_cfar_arm_name)
+        labels, values = _table(fig).cells.values
+        for lbl, val in zip(labels, values):
+            n_lines = max(lbl.count("<br>"), val.count("<br>")) + 1
+            assert n_lines <= ds._TABLE_CELL_MAX_LINES, (arm_name, lbl, val)
+
+
+def test_scoreboard_figure_height_fits_a_screen_for_every_arm():
+    """~800 px (coordinator budget, 2026-09-23): the worst case (an arm with a CI row,
+    a seed-spread caveat AND a two-row OOD block -- 15 rows total) must still fit."""
+    scores = ds.score_frames([[]], None)
+    for beat_cfar_arm_name in (None, "classical CFAR", "raddetnet"):
+        fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                                   match_rule_text=ds.match_rule_text(),
+                                   beat_cfar_arm_name=beat_cfar_arm_name)
+        assert fig.layout.height <= 800, (beat_cfar_arm_name, fig.layout.height)
+
+
+# --------------------------------------------------------------------------------
+# Coordinator re-check (2026-09-23): the stored-PR panel's legend, sized to its
+# longest entry (the highlighted arm's CI-augmented name), squeezed the plot to a
+# ~80 px sliver on the right. Moved below the plot instead -- that only ever costs
+# BOTTOM margin, never plot WIDTH, regardless of entry length.
+# --------------------------------------------------------------------------------
+def test_stored_pr_figure_legend_is_below_the_plot_not_squeezing_it():
+    fig = ds.stored_pr_figure(highlight_arm="raddetnet")
+    assert fig.layout.legend.orientation == "h"
+    assert fig.layout.legend.y < 0, "legend must sit BELOW the plot, not beside it"
+    domain = fig.layout.xaxis.domain
+    assert domain is not None
+    assert (domain[1] - domain[0]) >= 0.6

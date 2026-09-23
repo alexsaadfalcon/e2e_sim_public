@@ -92,8 +92,11 @@ SEED_TO_SEED_AP_SPREAD_F86 = 0.040
 #: e2e/ml/compare_detectors.py:189-192). Display-only remap; the stored JSON name
 #: (and the JSON itself) is never edited.
 _ARM_DISPLAY_NAMES = {
+    # Shortened (Change, 2026-09-23 coordinator re-check): the original full sentence
+    # was the single longest legend entry, and a right-hand vertical legend sized to
+    # its longest entry squeezed the PR plot itself to a ~80 px sliver.
     "null (random-in-GT-box)":
-        "null: random cells within the train-label bounding box (chance floor)",
+        "null: random cells in train-label box (chance floor)",
 }
 
 
@@ -214,32 +217,61 @@ def score_frames(
 #: Row COUNT is no longer fixed (see `scoreboard_figure`'s `beat_cfar_arm_name`): the
 #: offline-scored block appends a variable number of rows for an arm found in
 #: beat_cfar.json (AP/FA/stripe/CI/OOD, some of them themselves wrapped to more than
-#: one line -- see `_TABLE_COL_LABEL_CHARS`), so the table height below is computed
+#: one line -- see `_TABLE_COL_CHARS`), so the table height below is computed
 #: from the actual PER-ROW rendered height at call time, never from a hardcoded row
 #: count or a uniform row height -- the same clipping bug this comment describes would
 #: otherwise recur the moment that block's row count or a row's line count changed.
 _TABLE_HEADER_HEIGHT = 40
-_TABLE_ROW_HEIGHT = 30
-#: Character budget for a long sentence pre-wrapped INTO the (280 px) label column
-#: (e.g. the CI-row caveat, the OOD row) rather than left in the annotation below the
-#: table -- narrower than the 70-char budget `_wrap_text`'s other callers use for the
-#: full ~600 px panel width, calibrated against this column's existing longest
-#: unwrapped label ("rank-1 stripe vs ground truth", 30 chars, one line at font 18).
-_TABLE_COL_LABEL_CHARS = 34
+#: Trimmed from 30 (2026-09-23 coordinator re-check) -- with up to 15 rows now
+#: sharing one uniform row height (Plotly's Table `cells.height` is one scalar for
+#: the whole table), this is the lever that actually has budget to give: unlike
+#: `_TABLE_MARGIN_T`/`_TABLE_ANNOTATION_LINE_PX` below (both tried and reverted --
+#: trimming either one clipped real content on the rendered raddetnet PNG), a few
+#: px off each of up to 15 rows adds up without touching anything that wraps.
+_TABLE_ROW_HEIGHT = 26
+#: Column widths (px): label:value roughly 50:50 (Change, 2026-09-23 coordinator
+#: re-check) -- was [280, 160] (label-heavy), which squeezed the OOD/CI-caveat
+#: VALUES (e.g. "0.208 (s42) / 0.153 (s43)") that this width split now needs room
+#: for on the value side too.
+_TABLE_COL_WIDTHS = [250, 250]
+#: Character budget BOTH columns are pre-wrapped at (not just the label column any
+#: more -- Change, 2026-09-23): calibrated so that EVERY row this module builds fits
+#: in exactly ONE line at `_TABLE_COL_WIDTHS`' width/font 18 (verified against this
+#: module's own longest label at each width, and empirically well under the point a
+#: standalone Playwright render showed Plotly's own auto-wrap kicking in at the
+#: OLD, wider 280 px column: fits at 48 chars, wraps at 68). A table where every row
+#: is forced to the SAME height (Plotly's Table `cells.height` is one scalar for the
+#: whole table, not per-row) can only stay short if every row stays to one line: a
+#: single 2-line row previously inflated the ENTIRE table (up to 15 rows) by one
+#: full row height each, pushing a Thrust 5 card past 1500 px (coordinator re-check,
+#: 2026-09-23) -- so this module now keeps content to 1 line by SPLITTING it across
+#: both columns (see `_offline_arm_rows`/`_ood_rows_for_arm`) rather than by
+#: shortening it, other than the "hit rate"/"cumulative hits" base rows, which do
+#: the same split. `_TABLE_CELL_MAX_LINES` is enforced (and tested) as a hard cap in
+#: case a future arm/corpus name is long enough to still need a second line.
+_TABLE_COL_CHARS = 34
+_TABLE_CELL_MAX_LINES = 2
 #: Base top margin: one title line ("Detector scoreboard") + a ONE-line subtitle
 #: ("threshold 0.44"). The real subline (see `scoreboard_figure`) is usually longer
 #: and wraps to several lines -- each one needs `_TABLE_SUBLINE_LINE_PX` more margin
 #: or Plotly overflows the title DOWN into the table's own header row instead of
 #: clipping it (measured, thrust5_detector_cfar rehearsal PNG, 2026-09-23 pixel
-#: re-check).
+#: re-check; RE-BROKEN and re-measured the same day when a first attempt to trim
+#: this for the <=800 px budget shaved this margin instead of the row/annotation
+#: budgets below -- the 3-line real subline overlapped the table header on the
+#: rendered raddetnet PNG. Left at its original, known-good value; the row-height
+#: and annotation trims below carry the whole budget instead).
 _TABLE_MARGIN_T = 90
 _TABLE_SUBLINE_LINE_PX = 32
-#: Per-wrapped-line px budget for the annotation block below the table (match rule +,
-#: since the F83 precision-ceiling caveat below, the caption stating unmatched counts
-#: are an upper bound on false alarms) -- calibrated against the ORIGINAL fixed 120 px
+#: Per-wrapped-line px budget for the annotation block below the table (match rule +
+#: the F83 precision-ceiling caveat, the caption stating unmatched counts are an
+#: upper bound on false alarms) -- calibrated against the ORIGINAL fixed 120 px
 #: budget, which fit exactly the match-rule sentence alone at its default 3 wrapped
-#: lines (120 / 3 = 40). `scoreboard_figure` now computes the real total from both
-#: annotations' actual wrapped line counts instead of assuming that fixed content.
+#: lines. A first attempt at the <=800 px budget (2026-09-23 coordinator re-check)
+#: trimmed this to 30 and clipped the ceiling caveat's last line off the bottom of
+#: the rendered raddetnet PNG -- reverted to the known-good value; `_TABLE_ROW_HEIGHT`
+#: carries the budget instead. `scoreboard_figure` computes the real total from both
+#: annotations' actual wrapped line counts, never from assumed content.
 _TABLE_ANNOTATION_LINE_PX = 40
 
 
@@ -324,7 +356,8 @@ def _load_json_arms(path) -> Optional[List[Dict[str, Any]]]:
 
 def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
                       ) -> List[Tuple[str, str]]:
-    """`[(label, value)]` stating `bc_arm`'s (one beat_cfar.json arm's) performance on
+    """`[(label, value)]` -- one or two SHORT rows (never one long sentence, see the
+    comment inline below) stating `bc_arm`'s (one beat_cfar.json arm's) performance on
     a SEPARATE, out-of-distribution corpus (F86, notes/ESTABLISHED_FACTS.md) -- `[]`
     if `ood_json_path` is absent/malformed or carries no arm matching `bc_arm` (never
     invented for an arm that file never scored).
@@ -335,9 +368,10 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
 
     For a two-seed RADDetNet arm specifically (its OOD name ends "_s<seed>" and a
     sibling "_s<other seed>" arm of the same base name is in the SAME file), also
-    finds the CFAR arm in that file and states whether CFAR's AP falls between the two
-    seeds' -- F86's finding that the out-of-distribution lead is seed-dependent,
-    computed from these three numbers at call time, never typed as a conclusion here.
+    finds the CFAR arm in that file and adds a second row stating whether CFAR's AP
+    falls between the two seeds' -- F86's finding that the out-of-distribution lead is
+    seed-dependent, computed from these three numbers at call time, never typed as a
+    conclusion here.
     """
     ood_arms = _load_json_arms(ood_json_path)
     if not ood_arms:
@@ -361,7 +395,6 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
     # (the GENERATOR/corpus version, not the scene family both beat_cfar.json and this
     # file happen to share -- "benchmark_v1_D2" -- which is what distinguishes them).
     corpus = Path(ood_manifest).parent.parent.name if ood_manifest else "?"
-    label = f"out of distribution ({corpus} test)"
 
     ap = ood_arm["AP"]
     fa = (ood_arm.get("operating_point") or {}).get("fp_per_frame")
@@ -374,23 +407,23 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
                         and a.get("AP") is not None), None)
     cfar_arm = next((a for a in ood_arms if a.get("name") == "classical CFAR"), None)
 
+    # Two SHORT rows (one per column each), not one long sentence crammed into the
+    # label column -- a single 4-line row forced EVERY row in the table to that same
+    # height (Plotly's Table `cells.height` is one scalar for the whole table, not
+    # per-row), ballooning the whole scoreboard card past a screen (hostile-expert
+    # re-read, 2026-09-23). Each piece here is short enough to stay one line at the
+    # current column width (see `scoreboard_figure`'s wrap-budget comment).
     if sibling is not None and cfar_arm is not None and cfar_arm.get("AP") is not None:
         seed_b = sibling["name"].rpartition("_s")[2]
         cfar_ap, sib_ap = cfar_arm["AP"], sibling["AP"]
         lo, hi = sorted((ap, sib_ap))
-        verdict = ("the two seeds straddle CFAR" if lo < cfar_ap < hi else
-                   f"both seeds land on the same side of CFAR ({cfar_ap:.3f})")
-        value = (f"OOD AP {ap:.3f} (seed {seed_a}) / {sib_ap:.3f} (seed {seed_b}) "
-                f"vs CFAR {cfar_ap:.3f}: {verdict}")
-    else:
-        value = f"OOD AP {ap:.3f}" + (f", FA/frame {fa:.1f}" if fa is not None else "")
-
-    # Long sentence, table column is narrow (see `_TABLE_COL_LABEL_CHARS`) -- pre-wrap
-    # into the label column (280 px, twice the value column's width) with the value
-    # column left blank, same convention `_offline_arm_rows` already uses for a
-    # section-header row. `scoreboard_figure` derives that row's rendered HEIGHT from
-    # the "<br>" count left in this string -- see its row-height comment.
-    return [(label, ""), (_wrap_text(value, max_chars=_TABLE_COL_LABEL_CHARS), "")]
+        verdict = "seeds straddle it" if lo < cfar_ap < hi else "same side of CFAR"
+        return [
+            (f"OOD AP, {corpus} test", f"{ap:.3f} (s{seed_a}) / {sib_ap:.3f} (s{seed_b})"),
+            ("OOD CFAR", f"{cfar_ap:.3f} -- {verdict}"),
+        ]
+    value = f"{ap:.3f}" + (f", FA {fa:.1f}" if fa is not None else "")
+    return [(f"OOD AP, {corpus} test", value)]
 
 
 def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON,
@@ -422,9 +455,12 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
     op = arm.get("operating_point") or {}
     n_frames = op.get("n_frames")
     target_recall = op.get("target_recall", data.get("target_recall"))
-    header_label = (f"offline, {n_frames}-frame test split (beat_cfar.json)"
-                    if n_frames is not None else "offline (beat_cfar.json)")
-    rows: List[Tuple[str, str]] = [(header_label, "")]
+    # Split across both columns (Change, 2026-09-23 coordinator re-check): the old
+    # single-column "offline, {n}-frame test split (beat_cfar.json)" (46+ chars)
+    # wrapped to 2 lines and inflated the WHOLE table to that row height (see
+    # `_TABLE_COL_CHARS`).
+    header_value = f"{n_frames}fr (beat_cfar.json)" if n_frames is not None else "(beat_cfar.json)"
+    rows: List[Tuple[str, str]] = [("offline test split", header_value)]
 
     ap = arm.get("AP")
     if ap is not None:
@@ -457,13 +493,13 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
             # The CI band only speaks to SCENE-bootstrap variance of one already-
             # trained checkpoint; it hides the variance that has actually been
             # measured to matter -- a second training seed moves AP by 0.040 (F86),
-            # comparable to the CI half-width itself. Attached to this row rather than
-            # left in the caption below the table, where a viewer skimming the CI
-            # number alone would miss it (hostile-expert re-read, 2026-09-23).
-            rows.append((_wrap_text(
-                "(scene bootstrap, ONE training seed; seed-to-seed spread "
-                f"{SEED_TO_SEED_AP_SPREAD_F86:.3f} AP, F86)",
-                max_chars=_TABLE_COL_LABEL_CHARS), ""))
+            # comparable to the CI half-width itself. A SHORT two-column row (not one
+            # long sentence crammed into the label column, which forced every row in
+            # the table to that same height -- hostile-expert re-read, 2026-09-23)
+            # attached right after the CI row rather than left in the caption below
+            # the table, where a viewer skimming the CI number alone would miss it.
+            rows.append(("bootstrap: scenes, ONE seed",
+                        f"seed spread {SEED_TO_SEED_AP_SPREAD_F86:.3f} AP (F86)"))
 
     rows.extend(_ood_rows_for_arm(arm, ood_json_path))
     return rows
@@ -538,53 +574,67 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # (F83), so a detector that correctly fires on every real object still racks up
     # "false alarms" here. "FA" survives only in parentheses; the row can no longer be
     # read as a true false-alarm count on its own.
+    #
+    # "cumulative hits"/"hit rate" split their qualifier into the VALUE column
+    # (Change, 2026-09-23 coordinator re-check) instead of a long label -- a single
+    # row that needed 2 wrapped lines inflated the WHOLE table to that height
+    # (Plotly's Table `cells.height` is one scalar for every row, not per-row; see
+    # `_TABLE_COL_CHARS`), which is what pushed a 15-row Thrust 5 card past 1500 px.
+    # Quotes THIS RUN'S OWN frame count (never the offline split size) -- the finding
+    # this fixes is a *5-frame* hit rate of 0.50/0.47/0.56 being read against each
+    # other as if they were a stable per-arm quality number.
+    cum_hits_str, cum_unmatched_str, fa_per_frame_str, hit_rate_str = cum_values
     if target_recall is not None and n_frames_split is not None:
-        # Quotes this run's OWN frame count (never the offline split size) -- the
-        # finding this fixes is a *5-frame* hit rate of 0.50/0.47/0.56 being read
-        # against each other as if they were a stable per-arm quality number.
-        hit_rate_label = (f"hit rate ({n_scored} frames; recall {target_recall:g} by "
-                          f"design over the {n_frames_split}-frame split)")
+        hit_rate_value = (f"{hit_rate_str} ({n_scored}fr; R{target_recall:g}/"
+                          f"{n_frames_split}fr split)")
     else:
-        hit_rate_label = f"hit rate ({n_scored} frames)"
+        hit_rate_value = f"{hit_rate_str} ({n_scored}fr)"
     base_labels = ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
-                  f"cumulative hits ({n_scored}/{n_total} frames scored)",
-                  "cumulative unmatched detections", "unmatched / frame (FA)",
-                  hit_rate_label]
-    base_values = this_frame + cum_values
+                  "cumulative hits", "cumulative unmatched detections",
+                  "unmatched / frame (FA)", "hit rate (design, not quality)"]
+    base_values = this_frame + [
+        f"{cum_hits_str} ({n_scored}/{n_total} scored)",
+        cum_unmatched_str, fa_per_frame_str, hit_rate_value,
+    ]
     offline_rows = (_offline_arm_rows(beat_cfar_arm_name, beat_cfar_json_path,
                                       raddetnet_ci_json_path, ood_json_path)
                     if beat_cfar_arm_name else [])
-    # EVERY label is pre-wrapped at the same budget the CI-caveat/OOD rows already
-    # use (`_TABLE_COL_LABEL_CHARS`) -- not just the rows this module knows are long.
-    # The bug this fixes (rehearsal, 2026-09-23): Plotly's Table cells word-wrap
-    # automatically to fit the column's PIXEL width regardless of whether this module
-    # inserted a "<br>" -- the new, longer "hit rate (...)" label (finding 4) auto-
-    # wrapped to 2 lines that this function's line-count never knew about, silently
-    # under-sizing the table by one row and clipping the actual last row (the OOD
-    # row) off the bottom, exactly the failure mode `_TABLE_HEADER_HEIGHT`'s comment
-    # already describes for the header. Pre-wrapping every label at a budget well
-    # under the column's real auto-wrap threshold (empirically between 48 and 68
-    # characters at this column width/font, measured via a standalone Playwright
-    # render, 2026-09-23) means Plotly never NEEDS to auto-wrap, so this module's own
-    # "<br>" count is always the true rendered line count.
-    labels = [_wrap_text(l, max_chars=_TABLE_COL_LABEL_CHARS)
-             for l in base_labels + [r[0] for r in offline_rows]]
-    values = base_values + [r[1] for r in offline_rows]
+    # EVERY label AND value is pre-wrapped at the same budget (`_TABLE_COL_CHARS`),
+    # not just the rows this module knows are long (Change, 2026-09-23 coordinator
+    # re-check). The bug this originally fixed (rehearsal, 2026-09-23): Plotly's
+    # Table cells word-wrap automatically to fit the column's PIXEL width regardless
+    # of whether this module inserted a "<br>", so an un-budgeted label silently
+    # auto-wrapped to a line count this function's own math never knew about,
+    # under-sizing the table and clipping its last row -- exactly the failure mode
+    # `_TABLE_HEADER_HEIGHT`'s comment already describes for the header. Pre-wrapping
+    # everything at a budget well under the column's real auto-wrap threshold means
+    # Plotly never NEEDS to auto-wrap, so this module's own "<br>" count is always
+    # the true rendered line count.
+    raw_labels = base_labels + [r[0] for r in offline_rows]
+    raw_values = base_values + [r[1] for r in offline_rows]
+    labels = [_wrap_text(l, max_chars=_TABLE_COL_CHARS) for l in raw_labels]
+    values = [_wrap_text(v, max_chars=_TABLE_COL_CHARS) for v in raw_values]
     n_rows = len(labels)
     # Plotly's Table `cells.height` is a single scalar, not one-per-row, so a
-    # multi-line row (the pre-wrapped labels above) forces every row to the tallest
-    # row's height rather than clipping it (see the geometry comment above
-    # `_TABLE_HEADER_HEIGHT`). This is a no-op (stays at `_TABLE_ROW_HEIGHT`) only
-    # when every label in this particular table happens to be short.
+    # multi-line row forces EVERY row to the tallest row's height rather than
+    # clipping it (see the geometry comment above `_TABLE_HEADER_HEIGHT`) -- this is
+    # why every row above is kept to one line by construction. `_TABLE_CELL_MAX_LINES`
+    # is a hard cap (asserted, not just hoped for -- see the test of the same name)
+    # in case a future arm/corpus name is long enough to still need a second line;
+    # it does NOT rescue the table from a THIRD line, which would silently clip again.
     max_row_lines = max((max(lbl.count("<br>"), val.count("<br>")) + 1
                         for lbl, val in zip(labels, values)), default=1)
+    assert max_row_lines <= _TABLE_CELL_MAX_LINES, (
+        f"a scoreboard row wrapped to {max_row_lines} lines (label/value budget "
+        f"{_TABLE_COL_CHARS} chars) -- shorten it or raise _TABLE_CELL_MAX_LINES "
+        "deliberately, don't let this silently inflate the whole table"
+    )
     row_height = _TABLE_ROW_HEIGHT * max_row_lines
 
     fig = go.Figure(data=[go.Table(
-        # Widened from [220, 90] (Change 1c): the offline block's longest label
-        # ("rank-1 stripe vs ground truth") and value ("+0.176 [+0.145, +0.208]")
-        # need more room than the original 4-row table did.
-        columnwidth=[280, 160],
+        # See `_TABLE_COL_WIDTHS`: roughly 50:50 -- the value column now carries
+        # short sentences too (the OOD/CI-caveat rows), not just numbers.
+        columnwidth=_TABLE_COL_WIDTHS,
         # Second column used to be an empty dark cell -- it labels the counts below it.
         header=dict(values=[arm_name, "count"],
                    fill_color="#2d3436", font=dict(color="white", size=18),
@@ -783,7 +833,12 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                 ))
                 fallback_arms.append(disp_name)
 
-    fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1])
+    # Explicit, not the implicit full-width default (Change, 2026-09-23 coordinator
+    # re-check): this is the property "the plot is not squeezed by the legend" is
+    # tested against, so it must be a real, asserted value, not an assumption about
+    # what Plotly leaves alone.
+    fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1],
+                     domain=[0.0, 1.0])
     fig.update_yaxes(title=dict(text="precision", font=dict(size=16)), range=[0, 1])
     fig.update_layout(
         # Short enough to fit a two-card (~600 px) panel -- the old single-line
@@ -801,10 +856,23 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                  "training corpus; one training seed per curve</sup>",
             font=dict(size=18),
         ),
-        legend=dict(font=dict(size=15)),
+        # Moved BELOW the plot, horizontal (Change, 2026-09-23 coordinator re-check):
+        # a vertical legend to the RIGHT of the plot (the previous default) sizes
+        # itself to its longest entry -- the highlighted arm's CI-augmented name is
+        # ~70 characters -- and Plotly reserves that width by shrinking the plot
+        # itself, down to a ~80 px sliver on the rehearsal PNGs. A legend below only
+        # ever costs BOTTOM margin, never plot WIDTH, regardless of entry length;
+        # Plotly wraps a horizontal legend onto more rows by itself when entries
+        # don't fit one row (visible as 2 rows on the highlighted-arm screens).
+        legend=dict(font=dict(size=13), orientation="h",
+                   x=0.5, xanchor="center", y=-0.28, yanchor="top"),
         font=dict(size=16),
-        margin=dict(l=50, r=20, t=60, b=40),
-        height=440,
+        # Taller bottom margin than a single-row legend would need (Change, same
+        # re-check): the wrapped 2-row case must not overlap the x-axis title below
+        # it, which `automargin=True` below cannot solve for a LEGEND (that flag only
+        # covers axis titles/ticks).
+        margin=dict(l=50, r=20, t=60, b=110),
+        height=480,
     )
     if fallback_arms:
         fig.add_annotation(
