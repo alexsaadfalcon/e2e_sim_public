@@ -108,7 +108,7 @@ import numpy as np
 import torch
 
 from e2e.environment.geometry import nearest_surface_point
-from e2e.environment.rt_scene_build import RTScene, build_rt_scene
+from e2e.environment.rt_scene_build import DEFAULT_SCATTERING_COEFFICIENT, RTScene, build_rt_scene
 
 # See the module docstring's "Element ordering / array handedness" section.
 _ANTENNA_INDEX_REVERSED = True
@@ -1030,6 +1030,65 @@ def _add_awgn(cfg, adc: torch.Tensor, snr_db, seed, min_range_m: float) -> torch
 # --------------------------------------------------------------------------------
 # Native (single-solve) generation
 # --------------------------------------------------------------------------------
+def _fill_rt_paths_capture(capture: dict, paths, rt_scene, *, range_migration: bool,
+                           coherent_targets: bool, scattering_coefficient: float) -> None:
+    """Populate `capture` (in place) with everything needed to re-synthesise this
+    frame's CFR (`cfr_from_paths` + `coherent_target_cfr`) from stored arrays alone,
+    without re-tracing. See `rt_cfr_frame`'s `capture` parameter and
+    `e2e.ml.blocks.PATHS_CAPTURE_KEY` (the state key a `RTEnvironmentBlock` parks this
+    dict under for a `SinkBlock(store_paths=True)`).
+
+    Diffuse term: `a`/`tau`/`doppler`, Sionna's own per-path amplitude/delay/Doppler
+    (see `cfr_from_paths`). Coherent term: the FIRST-interaction object id / vertex /
+    reference delay `_rt_phase_centres` reads off the solve (one antenna pair, the
+    same slice that function takes), plus each placed object's id and world AABB
+    (`_object_bbox`) and the antenna element pattern name -- everything
+    `coherent_target_cfr` needs that is not already in the corpus's own config/scenario
+    record. `range_migration`/`coherent_targets`/`scattering_coefficient` are the
+    scalars the closed-form branch used for THIS frame and cannot be recovered from the
+    arrays alone. Numpy only -- no DrJit/Sionna object escapes this function, matching
+    `storage.write_paths_sidecar`'s flat `{name: ndarray}` contract.
+    """
+    a_re, a_im = paths.a
+    capture["a"] = (np.asarray(a_re.numpy()) + 1j * np.asarray(a_im.numpy())).astype(np.complex64)
+    tau = np.asarray(paths.tau.numpy()).astype(np.float32)
+    capture["tau"] = tau
+    capture["doppler"] = np.asarray(paths.doppler.numpy()).astype(np.float32)
+
+    try:
+        obj_ids = np.asarray(paths.objects.numpy())      # [depth, rx, rxa, tx, txa, P]
+        verts = np.asarray(paths.vertices.numpy())        # [depth, rx, rxa, tx, txa, P, 3]
+    except Exception:                                     # pragma: no cover -- Sionna
+        obj_ids = verts = None                            # build without these fields
+    if obj_ids is not None and obj_ids.ndim >= 6 and verts is not None and tau.ndim >= 5:
+        # Same slice `_rt_phase_centres` reads: the FIRST interaction, one antenna pair.
+        capture["first_object_id"] = obj_ids[0, 0, 0, 0, 0].astype(np.int32)
+        capture["first_vertex"] = verts[0, 0, 0, 0, 0].astype(np.float32)
+        capture["tau_ref"] = tau[0, 0, 0, 0]
+
+    names, ids, bb_c, bb_h = [], [], [], []
+    for name, so in rt_scene.objects.items():
+        names.append(name)
+        try:
+            ids.append(int(so.object_id))
+        except Exception:
+            ids.append(-1)
+        bb = _object_bbox(so)
+        bb_c.append(np.zeros(3) if bb is None else bb[0])
+        bb_h.append(np.zeros(3) if bb is None else bb[1])
+    capture["object_names"] = np.array(names)
+    capture["object_ids"] = np.asarray(ids, dtype=np.int32)
+    capture["object_bbox_centre"] = np.asarray(bb_c, dtype=np.float32)
+    capture["object_bbox_half"] = np.asarray(bb_h, dtype=np.float32)
+    capture["antenna_pattern"] = np.array(str(getattr(rt_scene, "antenna_pattern", "iso")))
+
+    # Scalars the closed-form branch used for THIS frame; not recoverable from the
+    # arrays above.
+    capture["range_migration"] = np.array(bool(range_migration))
+    capture["coherent_targets"] = np.array(bool(coherent_targets))
+    capture["scattering_coefficient"] = np.array(float(scattering_coefficient), dtype=np.float32)
+
+
 def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                  device=None, rt_scene: Optional[RTScene] = None, max_depth: int = 2,
                  include_leakage: bool = False, diffuse_reflection: bool = True,
@@ -1039,7 +1098,8 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
                  coherent_targets: bool = True,
                  scattering_coefficient: Optional[float] = None,
                  ground_scattering_coefficient: Optional[float] = None,
-                 samples_per_src: Optional[int] = None) -> torch.Tensor:
+                 samples_per_src: Optional[int] = None,
+                 capture: Optional[dict] = None) -> torch.Tensor:
     """Ray-trace one radar frame and return its RAW channel frequency response.
 
     `complex64 [n_rx, n_tx, n_chirps, n_samples]` on `device` -- the pipeline's
@@ -1062,6 +1122,12 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
     (`1 - S^2` coherent, `S^2` diffuse); `None` takes `rt_scene_build`'s default. When
     this function builds the scene itself it forwards the same value, so the two cannot
     drift apart.
+
+    `capture` (default `None`, no behaviour change): an out-parameter dict. When given,
+    it is filled in place (see `_fill_rt_paths_capture`) with numpy copies of every
+    array/scalar a re-synthesis of THIS frame's CFR would need -- the storage half of
+    `e2e.ml.blocks.PATHS_CAPTURE_KEY` / `SinkBlock(store_paths=True)`, which the
+    `RTEnvironmentBlock` caller parks under that key for the sink to write out.
     """
     dev = _resolve_device(device)
     if rt_scene is None:
@@ -1084,6 +1150,13 @@ def rt_cfr_frame(cfg, scenario, *, frame_idx: int = 0, base_scene: str = "flat",
             cfg, rt_scene, scenario, frame_idx=frame_idx, n_chirps=int(cfg.n_chirps),
             scattering_coefficient=scattering_coefficient,
             range_migration=range_migration, paths=paths)
+    if capture is not None:
+        _fill_rt_paths_capture(
+            capture, paths, rt_scene, range_migration=range_migration,
+            coherent_targets=coherent_targets,
+            scattering_coefficient=(DEFAULT_SCATTERING_COEFFICIENT
+                                    if scattering_coefficient is None
+                                    else scattering_coefficient))
     return torch.as_tensor(raw, dtype=torch.complex64, device=dev)
 
 

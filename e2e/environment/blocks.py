@@ -138,6 +138,11 @@ class RTEnvironmentBlock:
         # Populated by get_S_pars() for city scenes; see "City-scene material
         # provenance" above. Stays None for "flat"/"free".
         self.last_material_report = None
+        # Populated by get_S_pars(): the ray-traced PATH LIST this frame was
+        # synthesised from (see `rt_signal_chain._fill_rt_paths_capture`), emitted from
+        # get_state_updates() under `e2e.ml.blocks.PATHS_CAPTURE_KEY` for a
+        # `SinkBlock(store_paths=True)` to write out (`storage.write_paths_sidecar`).
+        self.last_rt_paths = None
 
     def _provenance_meta(self):
         """Scene/asset provenance for the CURRENT scenario (F51 + F31): the full
@@ -184,19 +189,28 @@ class RTEnvironmentBlock:
 
         Returns the ground truth for the frame `get_S_pars()` just produced, so labels
         travel WITH their frame down the chain -- plus the scene/asset provenance
-        (`scene_provenance`, on `SinkBlock`'s meta allowlist; F51 + F31). Empty before
+        (`scene_provenance`, on `SinkBlock`'s meta allowlist; F51 + F31) and the
+        ray-traced path list (`e2e.ml.blocks.PATHS_CAPTURE_KEY`, see `last_rt_paths`),
+        so a `SinkBlock(store_paths=True)` downstream can write it out. Empty before
         the first `get_S_pars()`.
         """
         if self.last_labels is None:
             return {}
+        # Lazy: this is the only non-Sionna import in the class besides get_S_pars()'s
+        # own, and importing it only here keeps `import e2e.environment.blocks` from
+        # requiring `e2e.ml`'s (torch) dependency tree at module load time.
+        from e2e.ml.blocks import PATHS_CAPTURE_KEY
+
         return {"labels": self.last_labels, "targets": self.last_targets,
-                "scene_provenance": self._provenance_meta()}
+                "scene_provenance": self._provenance_meta(),
+                PATHS_CAPTURE_KEY: self.last_rt_paths}
 
     def reset(self):
         self.frame_counter = 0
         self.last_labels = None
         self.last_targets = None
         self.last_material_report = None
+        self.last_rt_paths = None
 
     def step(self):
         self.frame_counter += 1
@@ -248,6 +262,10 @@ class RTEnvironmentBlock:
                                         stand_in_itu_type=self.stand_in_material,
                                         report_sink=self.last_material_report):
                 rt_scene = build_rt_scene(self.scenario, self.cfg, **build_kwargs)
+        # Filled in place by rt_cfr_frame -- the ray-traced path list this frame is
+        # synthesised from, for get_state_updates() to hand a SinkBlock(store_paths=
+        # True) (see that method and e2e.environment.rt_signal_chain._fill_rt_paths_capture).
+        self.last_rt_paths = {}
         s_pars = rt_cfr_frame(
             self.cfg, self.scenario, frame_idx=self.frame_counter,
             base_scene=self.base_scene, device=dev, rt_scene=rt_scene,
@@ -260,6 +278,7 @@ class RTEnvironmentBlock:
             coherent_targets=self.coherent_targets,
             scattering_coefficient=sc_coeff,
             samples_per_src=self.samples_per_src,
+            capture=self.last_rt_paths,
         )
 
         dt = 1.0 / float(self.cfg.frame_rate_hz)

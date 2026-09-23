@@ -424,6 +424,11 @@ question about `surface_range_m`; sizing is a question about `range_m`.
     labels/sample_?????.json -- per-sample ground truth (see below)
     renders/sample_?????.png -- bird's-eye scene + range-azimuth map, one PNG per sample
 
+If the source corpus was generated with `--store-cfr`/`--store-paths`, this export's
+`npz/` directory also carries that sample's `<source-stem>.cfr.npy` / `.paths.npz`
+sidecar, copied verbatim under its ORIGINAL (source) name -- `meta["cfr_sidecar"]`/
+`["paths_sidecar"]` inside the (byte-for-byte copied) npz still name that file.
+
 ## npz key schema
 
 Each `npz/sample_?????.npz` is an UNMODIFIED copy of a source-corpus file (see
@@ -577,6 +582,15 @@ def export(manifest_path, n: int, out_dir, *, render: bool = True,
 
         dst_name = f"sample_{idx:05d}"
         shutil.copy2(src_path, npz_dir / f"{dst_name}.npz")
+        # A CFR/paths sidecar (`--store-cfr`/`--store-paths`) is copied verbatim, under
+        # its OWN original name -- not renamed to `dst_name` -- because the npz is a
+        # byte-for-byte copy and its embedded `meta["cfr_sidecar"]`/`["paths_sidecar"]`
+        # still name the SOURCE file; renaming the sidecar without rewriting that meta
+        # would leave the exported sample pointing at a file that is not there.
+        for sidecar_path_fn in (storage.cfr_sidecar_path, storage.paths_sidecar_path):
+            src_sidecar = sidecar_path_fn(src_path)
+            if src_sidecar.exists():
+                shutil.copy2(src_sidecar, npz_dir / src_sidecar.name)
 
         records = build_target_records(grid, scenario, scats, pose, label_classes)
         labels_payload = {

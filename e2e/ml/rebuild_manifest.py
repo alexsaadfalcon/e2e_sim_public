@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from e2e.ml import storage
 from e2e.ml.dataset import finalize_input_scale, write_manifest
 from e2e.ml.labels import LabelGrid
 from e2e.radar_config import PRESETS
@@ -60,7 +61,15 @@ def group_frames(corpus_dir: Path) -> List[List[str]]:
     Raises rather than repairing on a torn or non-contiguous corpus -- see the module
     docstring for why each of those is unsafe to paper over.
     """
-    names = sorted(p.name for p in corpus_dir.glob("*.npz"))
+    # `*.npz` also matches a paths sidecar (`<stem>.paths.npz`, see
+    # `e2e.ml.storage.write_paths_sidecar`) -- it is not a sample frame and does not
+    # match `_FNAME` below, so it must be excluded rather than raising on every corpus
+    # generated with `--store-paths`. `*.cfr.npy` sidecars never match `*.npz` at all,
+    # but are excluded too for symmetry/documentation -- a future sidecar suffix change
+    # that happened to end in `.npz` would otherwise silently slip back into this list.
+    names = sorted(p.name for p in corpus_dir.glob("*.npz")
+                   if not p.name.endswith((storage.PATHS_SIDECAR_SUFFIX,
+                                           storage.CFR_SIDECAR_SUFFIX)))
     if not names:
         raise ValueError(f"no .npz frames under {corpus_dir}")
 
