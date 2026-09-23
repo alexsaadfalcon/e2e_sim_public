@@ -1296,7 +1296,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # DIFFERENT, absolute range axis from the ADC dechirp geometry and
                 # must NOT carry this note -- webapp/demo_presets.py's thrust5
                 # scripts already say the absolute-range story for those on screen.
-                earliest_arrival_note = "<br>range 0 = earliest arrival"
+                earliest_arrival_note = "; range 0 = earliest arrival"
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
