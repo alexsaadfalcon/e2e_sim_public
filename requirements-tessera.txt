@@ -1,0 +1,64 @@
+# OPTIONAL extra: the public Tessera / TSV_PhGNN S-parameter surrogate, used by
+# e2e/interconnect_surrogate/ to compute a TSV interconnect's S21(f) and NEXT/FEXT
+# live from geometry + temperature instead of reading a frozen CSV.
+#
+# Nothing in the default install or the default `pytest` run needs this file. The
+# wrapper imports it lazily and `e2e.interconnect_surrogate.available()` returns
+# False (without raising) when it is absent, so the pipeline and the web UI run
+# unchanged without it.
+#
+#   pip install -r requirements-tessera.txt
+#
+# Upstream is BSD 3-Clause; see e2e/interconnect_surrogate/NOTICE for the notice
+# and the citation its licence requires us to carry.
+
+# ---------------------------------------------------------------------------
+# The surrogate itself, PINNED to the commit we validated against (2026-09-23).
+# Pinned rather than vendored: BSD-3 permits vendoring, but a pin avoids
+# re-shipping their 1.6 MB checkpoint and keeps attribution unambiguous.
+# ---------------------------------------------------------------------------
+tessera-tsv @ git+https://github.com/HiPerCAS/tessera.git@e53bb88
+
+# Its one non-obvious dependency (upstream asks for >=2.5; 2.8.0 is what we tested).
+torch-geometric>=2.5
+
+# ---------------------------------------------------------------------------
+# TORCH -- deliberately NOT listed here.
+#
+# Upstream declares torch>=2.2. This repo pins torch 2.1.2+cu121 in practice, and
+# installing this file WITHOUT --no-deps makes pip try to upgrade torch, which is
+# not something an optional interconnect knob is allowed to do. Install with:
+#
+#     pip install --no-deps -r requirements-tessera.txt
+#     pip install torch-geometric        # if not already present
+#
+# Validated 2026-09-23 on torch 2.1.2+cu121 / torch-geometric 2.8.0.post1 /
+# Python 3.10: inference runs correctly despite being below upstream's declared
+# floor. That is UNSUPPORTED by upstream -- if it ever misbehaves, the torch
+# version is the first thing to check.
+#
+# Upstream also declares optuna/scipy/pandas/matplotlib/PyYAML for its
+# design-space-exploration and sign-off features. We use none of those code paths
+# (only tessera.model / tessera.scaler / tessera.predict_s_matrix), so they are
+# omitted; `pip check` will report optuna as missing and that is expected.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# THE CHECKPOINT IS NOT INSTALLED BY PIP.
+#
+# Upstream's pyproject declares `packages = ["tessera"]` with no package data, so
+# the wheel built from the git URL above contains the Python package but NOT
+# models/best_model.pth, models/input_scaler.pt, or config.yaml. Verified
+# 2026-09-23: the wheel is 69 KB and upstream's own tessera.load_model() raises
+# FileNotFoundError on config.yaml after this install.
+#
+# Point the wrapper at a checkout to supply the weights:
+#
+#     git clone https://github.com/HiPerCAS/tessera.git && \
+#       cd tessera && git checkout e53bb88
+#     export TESSERA_REPO=/path/to/tessera          # or
+#     export E2E_TESSERA_MODELS_DIR=/path/to/tessera/models
+#
+# `e2e.interconnect_surrogate.checkpoint_dir()` reports which directory it found,
+# and `available()` is False until one has both .pth files.
+# ---------------------------------------------------------------------------

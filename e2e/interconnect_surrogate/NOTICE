@@ -1,0 +1,91 @@
+NOTICE -- third-party software used by e2e/interconnect_surrogate/
+==================================================================
+
+This subpackage is a thin wrapper. It contains no upstream source code and no
+upstream model weights; it calls the `tessera-tsv` package, which must be
+installed separately (see requirements-tessera.txt). This NOTICE is carried
+because BSD 3-Clause clause 2 requires the copyright notice, the conditions and
+the disclaimer to be reproduced "in the documentation and/or other materials
+provided with the distribution".
+
+--------------------------------------------------------------------------
+Tessera / TSV_PhGNN -- physics-informed GNN surrogate for TSV-network
+S-parameters, steady-state thermal, closed EM-thermal coupling, and Ansys
+HFSS<->Mechanical sign-off.
+
+  Upstream:  https://github.com/HiPerCAS/tessera
+  Package:   tessera-tsv (version 1.1.0; pinned here at commit e53bb88)
+  Authors:   Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband
+             (HiPerCAS Lab, University of Illinois Chicago)
+--------------------------------------------------------------------------
+
+BSD 3-Clause License
+
+Copyright (c) 2026, HiPerCAS Lab
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Note on clause 3 (no endorsement)
+---------------------------------
+We may state that this simulator *uses* Tessera and cite the paper below. We
+may NOT present HiPerCAS Lab, the University of Illinois Chicago, or the named
+authors as endorsing or promoting this simulator or any material derived from
+it without their specific prior written permission. Conference and marketing
+copy naming UIC as a partner (rather than as a cited dependency) needs that
+written permission first.
+
+
+Citation
+--------
+If you use this wrapper's output, cite the upstream work, not the wrapper:
+
+  M. Gharib, L. Popryho, and I. Partin-Vaisband, "From Physics to Surrogate
+  Intelligence: A Unified Electro-Thermo-Optimization Framework for TSV
+  Networks," IEEE Transactions on Computer-Aided Design of Integrated Circuits
+  and Systems, 2026, doi: 10.1109/TCAD.2026.3718807.
+  https://ieeexplore.ieee.org/document/11631696
+
+  @ARTICLE{11631696,
+    author={Gharib, Mohamed and Popryho, Leonid and Partin-Vaisband, Inna},
+    journal={IEEE Transactions on Computer-Aided Design of Integrated Circuits
+             and Systems},
+    title={From Physics to Surrogate Intelligence: A Unified
+           Electro-Thermo-Optimization Framework for TSV Networks},
+    year={2026}, pages={1-1},
+    doi={10.1109/TCAD.2026.3718807}}
+
+
+What is NOT covered by the public release
+-----------------------------------------
+* The training dataset (upstream: "not ours to redistribute").
+* The HFSS-finetuned checkpoint that produced
+  e2e/data/interconnect/tessera_tsv_s21.csv. The public checkpoint
+  models/best_model.pth is a DIFFERENT instrument and does not reproduce that
+  file (about -0.57 dB vs -7.48 dB at 30 GHz, measured 2026-09-23).
+* The 77 GHz automotive HFSS projects behind
+  e2e/data/interconnect/tessera_case{1..6}_s21_77ghz.csv. Those are a different
+  structure and are not producible by this package at all.
