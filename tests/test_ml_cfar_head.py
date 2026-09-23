@@ -11,7 +11,7 @@ asserted is the mechanics a reviewer would otherwise have to take on trust:
 * a perfect oracle score really does reorder the candidates into ground truth first
   (i.e. the head has the authority the design says it has);
 * the forward pass is deterministic;
-* the registration shim makes `train.build_model` build it.
+* `train.build_model` builds it natively (the registration shim is gone, 2026-09-23).
 """
 
 import dataclasses
@@ -455,7 +455,7 @@ def test_floor_is_inclusive_and_empty_selection_is_clean():
 
 
 # --------------------------------------------------------------------------------
-# The registration shim
+# Native registration in train.py
 # --------------------------------------------------------------------------------
 @pytest.fixture
 def manifest(cfg, grid):
@@ -465,17 +465,10 @@ def manifest(cfg, grid):
             "input_format": "rad"}
 
 
-def test_register_makes_train_build_the_model(manifest, rad, monkeypatch):
+def test_train_build_model_builds_the_model(manifest, rad):
+    """Edit 1+2 landed natively in `train.py` (2026-09-23); the `register()` shim that
+    used to monkey-patch them in is deleted, so this asserts the real branch."""
     from e2e.ml import train as train_mod
-
-    monkeypatch.setattr(train_mod, "_MODEL_NAMES", tuple(train_mod._MODEL_NAMES))
-    monkeypatch.setattr(train_mod, "build_model", train_mod.build_model)
-
-    with pytest.raises(ValueError, match="unknown model"):
-        train_mod.build_model(ch.MODEL_NAME, manifest, device=DEVICE)
-
-    ch.register(train_mod)
-    ch.register(train_mod)              # idempotent
 
     assert ch.MODEL_NAME in train_mod._MODEL_NAMES
     assert ch.MODEL_NAME in train_mod.build_arg_parser()._actions[2].choices
@@ -486,41 +479,109 @@ def test_register_makes_train_build_the_model(manifest, rad, monkeypatch):
     out = model(rad[None])["detection"]
     assert out.shape == (1, 3, manifest["grid"]["n_range"], manifest["grid"]["n_azimuth"])
 
-    # Every other name still reaches the original registry.
+    # Every other name still reaches its own branch, and an unknown one still raises.
     assert isinstance(train_mod.build_model("fftradnet", {**manifest, "input_format": "rd"},
                                             device=DEVICE), torch.nn.Module)
     with pytest.raises(ValueError, match="unknown model"):
         train_mod.build_model("nope", manifest, device=DEVICE)
 
 
-def test_register_refuses_to_train_until_the_loss_hook_lands(manifest, monkeypatch):
-    """`register()` does edits 1 and 2 but NOT edit 3, so `train.train` would optimise
-    `detection_loss` against a map that is zero outside the candidate cells and finish
-    without complaint. It must fail loudly instead (review finding, 2026-09-22)."""
+def test_train_loop_dispatches_to_the_models_own_loss(model, rad, grid):
+    """Edit 3: the loop calls `model.loss(out, y)` when the model defines one.
+
+    `detection_loss` over this model's map has ZERO gradient outside <= K cells, so the
+    check that matters is that a parameter actually moves -- asserted here against the
+    source of the loop rather than trusting the branch by reading it."""
+    import inspect
     from e2e.ml import train as train_mod
 
-    monkeypatch.setattr(train_mod, "_MODEL_NAMES", tuple(train_mod._MODEL_NAMES))
-    monkeypatch.setattr(train_mod, "build_model", train_mod.build_model)
-    monkeypatch.setattr(train_mod, "train", train_mod.train)
-    ch.register(train_mod)
+    src = inspect.getsource(train_mod.train)
+    assert 'hasattr(model, "loss")' in src and "model.loss(out, y)" in src
 
-    with pytest.raises(NotImplementedError, match="model.loss"):
-        train_mod.train("ignored.json", ch.MODEL_NAME, epochs=1)
-
-    # Every other model still reaches the real trainer: the guard delegates, and it must
-    # not swallow their arguments. `fftradnet` on a nonexistent manifest must fail the way
-    # it always did (a file error from the real function), not with the guard's message.
-    assert train_mod.train.__wrapped__ is not None
-    with pytest.raises((FileNotFoundError, OSError)):
-        train_mod.train("no_such_manifest.json", "fftradnet", epochs=1)
+    y = torch.zeros((1, 3, grid.n_range, grid.n_azimuth), device=rad.device)
+    y[0, 0, 5, 40] = 1.0
+    out = model(rad[None])
+    loss, parts = model.loss(out, y)
+    loss.backward()
+    assert parts["reg"] == 0.0
+    assert any(p.grad is not None and torch.any(p.grad != 0) for p in model.parameters())
 
 
-def test_register_refuses_a_non_rad_input_format(manifest, monkeypatch):
+@pytest.fixture(scope="module")
+def tiny_rad_manifest(tmp_path_factory, cfg):
+    """A real on-disk `rad` corpus, 8 frames, so `train.train` can be run END TO END.
+
+    Exists because of a review finding (2026-09-23): the deleted `register()` guard used
+    to be exercised by a test that actually CALLED `train.train(..., "cfarhead")`. When
+    the guard went away, the only replacement asserted on the source text of the loop,
+    which cannot catch a dispatch that runs but trains the wrong thing. This fixture buys
+    back the integration-level coverage on the path the CLI actually takes.
+    """
+    from e2e.ml import dataset as ml_dataset
+    from e2e.ml.scenes import DIFFICULTY_TIERS
+    from e2e.radar_config import PRESETS
+
+    PRESETS[cfg.name] = cfg
+    try:
+        out_dir = tmp_path_factory.mktemp("cfar_head_corpus")
+        yield ml_dataset.generate_dataset(
+            cfg.name, sorted(DIFFICULTY_TIERS)[0], 8, out_dir=out_dir, seed=0,
+            device=DEVICE, splits=(0.5, 0.25, 0.25))
+    finally:
+        PRESETS.pop(cfg.name, None)
+
+
+def test_train_end_to_end_uses_the_models_own_loss(tiny_rad_manifest, tmp_path,
+                                                   monkeypatch):
+    """`train.train(..., "cfarhead")` runs the real loop and optimises `CFARHead.loss`.
+
+    Three things are asserted, and each one is a way the dispatch could be wrong while
+    still completing: the regression column is EXACTLY zero every epoch (this head has no
+    regression output, so a non-zero there means `detection_loss` ran instead); the
+    weights actually moved; and the checkpoint reloads through the ordinary evaluation
+    seam. `--gamma`/`--reg-weight`/`--cls-normalize` are passed deliberately absurd
+    values -- they are inert for this model, and a run whose loss responds to them is
+    running the wrong loss.
+    """
     from e2e.ml import train as train_mod
 
-    monkeypatch.setattr(train_mod, "_MODEL_NAMES", tuple(train_mod._MODEL_NAMES))
-    monkeypatch.setattr(train_mod, "build_model", train_mod.build_model)
-    ch.register(train_mod)
+    # The sharpest form of the assertion: `detection_loss` must never be reached at all.
+    # Checking the loss VALUE instead would be weak -- with `reg_weight=0` the wrong loss
+    # also reports a zero regression term.
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("detection_loss ran; the loop ignored CFARHead.loss")
+    monkeypatch.setattr(train_mod, "detection_loss", _must_not_run)
+
+    out = tmp_path / "cfarhead_run"
+    history = train_mod.train(tiny_rad_manifest, ch.MODEL_NAME, epochs=2, batch_size=2,
+                              input_format="rad", amp=False, seed=0, out_dir=out,
+                              reg_weight=0.0, gamma=0.0, cls_normalize="none")
+
+    assert history["train_reg_loss"] == [0.0, 0.0]
+    assert all(v > 0.0 for v in history["train_cls_loss"])
+    assert history["train_loss"] == history["train_cls_loss"]   # total == cls, no reg term
+
+    model, _m, _grid, fmt = train_mod.load_model_for_eval(
+        tiny_rad_manifest, out / "best.pt", device=DEVICE)
+    assert fmt == "rad" and isinstance(model, ch.CFARHead)
+
+
+def test_forward_is_immune_to_autocast(model, rad):
+    """`--amp auto` is the CLI default, and fp16 moves stage 1's objectness by up to
+    0.127 (module docstring). `forward` disables autocast for its whole body rather than
+    trusting the caller to pass `--amp off`, so the SAME output must come back either
+    way. Run on CPU autocast (bfloat16), which is available without a GPU."""
+    with torch.no_grad():
+        plain = model(rad[None])["detection"]
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            casted = model(rad[None])["detection"]
+    assert casted.dtype == plain.dtype
+    assert torch.equal(plain, casted)
+
+
+def test_train_build_model_refuses_a_non_rad_input_format(manifest):
+    from e2e.ml import train as train_mod
+
     with pytest.raises(ValueError, match="input_format='rad'"):
         train_mod.build_model(ch.MODEL_NAME, {**manifest, "input_format": "rd"},
                               device=DEVICE)

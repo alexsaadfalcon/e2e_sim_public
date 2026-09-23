@@ -89,7 +89,7 @@ from e2e.ml.losses import detection_loss
 from e2e.ml.metrics import evaluate_dataset
 from e2e.radar_config import RadarConfig
 
-_MODEL_NAMES = ("fftradnet", "ssmradnet", "raddetnet")
+_MODEL_NAMES = ("fftradnet", "ssmradnet", "raddetnet", "cfarhead")
 
 
 def _autocast(enabled: bool):
@@ -370,6 +370,21 @@ def build_model(name: str, manifest: Dict, *, device=None, ssm_chunk_size=None) 
 
         model = RADDetNet(in_channels, n_range_in, n_doppler_in,
                           n_range_out, n_azimuth_out)
+    elif name == "cfarhead":
+        # CFAR candidates + a learned patch rescorer (`e2e.ml.cfar_head`). Stage 1 is the
+        # classical front end recovered algebraically from the `rad` tensor, so the model
+        # needs the same input_format raddetnet does and the LabelGrid it detects on.
+        # NOTE it lives OUTSIDE `e2e/ml/models/` deliberately -- see that module's
+        # docstring; moving it in would move every checkpoint's pipeline fingerprint.
+        if input_format != "rad":
+            raise ValueError(
+                f"cfarhead requires input_format='rad' (stage 1 is the classical "
+                f"beamformer's own cube); got {input_format!r}")
+        from e2e.ml.cfar_head import CFARHead, build_grid_from_manifest
+
+        model = CFARHead(in_channels, n_range_in, n_doppler_in,
+                         n_range_out, n_azimuth_out,
+                         cfg=cfg, grid=build_grid_from_manifest(manifest))
     else:
         raise ValueError(f"unknown model {name!r}; choices: {_MODEL_NAMES}")
 
@@ -637,9 +652,21 @@ def train(manifest_path, model_name: str, *, epochs: int = 10, batch_size: int =
         for i, (x, y) in enumerate(train_loader):
             x, y = x.to(device), y.to(device)
             with _autocast(use_amp):
-                pred = model(x)["detection"]
-                loss, parts = detection_loss(pred, y, gamma=gamma, reg_weight=reg_weight,
-                                             cls_normalize=cls_normalize)
+                out = model(x)
+                # A model that defines its OWN loss is trained by it. `e2e.ml.cfar_head`'s
+                # two-stage detector is the case this exists for: its output map is a
+                # literal constant zero outside <= K candidate cells, so `detection_loss`'
+                # focal BCE over all R*A cells would have zero gradient on most of its own
+                # value AND a `cls_normalize` denominator computed from the constant part.
+                # Its `loss()` returns the same `(total, {"cls", "reg"})` tuple this loop
+                # consumes, so nothing below changes. `--gamma`, `--reg-weight` and
+                # `--cls-normalize` are inert for such a model (see its docstring).
+                if hasattr(model, "loss"):
+                    loss, parts = model.loss(out, y)
+                else:
+                    loss, parts = detection_loss(out["detection"], y, gamma=gamma,
+                                                 reg_weight=reg_weight,
+                                                 cls_normalize=cls_normalize)
             # Scale by 1/(this group's ACTUAL micro-batch count) so accumulated grads
             # average the group's members (accum_steps=1: no-op, loss unchanged).
             # The epoch's last group can be PARTIAL (n_train_batches % accum_steps

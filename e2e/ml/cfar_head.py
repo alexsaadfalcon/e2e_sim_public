@@ -25,35 +25,21 @@ Written 2026-09-22 with two training runs in flight. `train.pipeline_fingerprint
 existing run has to be re-certified (`python -m e2e.ml.recertify <run_dir>`). This module
 is outside that list, so importing/using it changes no checkpoint's fingerprint.
 
-REGISTRATION ONCE THE FREEZE LIFTS -- three edits, in this order:
+REGISTRATION -- LANDED 2026-09-23, natively in `train.py`; the monkey-patching
+`register()` shim that stood in for it while the F84 freeze held is DELETED. The three
+edits that replaced it:
 
-1. `e2e/ml/train.py:92` -- `_MODEL_NAMES = ("fftradnet", "ssmradnet", "raddetnet")`
-   becomes `(..., "raddetnet", "cfarhead")`. That tuple is also `--model`'s `choices`
-   (`train.py:788`), so this is what makes the CLI accept it.
-2. `e2e/ml/train.py:308` `build_model` -- add a branch beside the `raddetnet` one
-   (`train.py:361-373`)::
+1. `train._MODEL_NAMES` gained `"cfarhead"` (that tuple is also `--model`'s `choices`).
+2. `train.build_model` gained a `cfarhead` branch beside the `raddetnet` one; it raises
+   unless `input_format == "rad"` and builds `CFARHead(..., cfg=cfg,
+   grid=build_grid_from_manifest(manifest))`.
+3. The training loop dispatches to `model.loss(out, y)` when the model defines one, and
+   to `detection_loss` otherwise. See "TRAINING" below for why this head needs it.
 
-       elif name == "cfarhead":
-           if input_format != "rad":
-               raise ValueError("cfarhead requires input_format='rad'")
-           from e2e.ml.cfar_head import CFARHead
-           model = CFARHead(in_channels, n_range_in, n_doppler_in,
-                            n_range_out, n_azimuth_out,
-                            cfg=cfg, grid=_grid_from_manifest(manifest))
-
-   `cfg` is already in scope at that point (`train.py:334`); the grid is
-   `manifest["grid"]` -- `build_grid_from_manifest()` in this module does that
-   conversion, so the branch can call it and nothing new is needed in `train.py`.
-3. `e2e/ml/train.py:640-642` -- the training loop's loss call. See "TRAINING" below;
-   this head cannot be trained by `detection_loss`, and the change is one line.
-
-Until then, `register(train_module)` in this module performs edits 1 and 2 at runtime by
-monkey-patching, so every EVALUATION path works with a `cfarhead` checkpoint without
-editing a fingerprinted file: `train.build_model`, `train.load_model_for_eval`,
-`train.evaluate`, `compare_detectors.score_checkpoint`, `beat_cfar`, `e2e.ml.controls`
-and the GUI's `ml` mode (`e2e/ml/blocks.py:601`, which also goes through
-`train.build_model`). It does NOT do edit 3, so `register()` additionally makes
-`train.train(..., "cfarhead")` RAISE rather than train on the wrong loss -- see `register`.
+Those edits moved every checkpoint's `pipeline_fingerprint` (`train.py` is in
+`INPUT_PIPELINE_SOURCES`); all eight existing runs were re-certified by measurement
+immediately afterwards (`python -m e2e.ml.recertify <run_dir> ...`), every one
+reproducing its recorded val AP to delta +/-0.0000 (2026-09-23).
 
 MOVING THIS FILE INTO `e2e/ml/models/` LATER moves the fingerprint of every checkpoint
 ever trained. If that is done, run
@@ -126,7 +112,7 @@ both regression channels moves AP by +/-0.002.
 
 TRAINING -- `train.py`'s loss CANNOT train this head; the change is one line
 ---------------------------------------------------------------------------------
-`train.py:640-642` does, unconditionally::
+Before edit 3, `train.py`'s loop did, unconditionally::
 
         pred = model(x)["detection"]
         loss, parts = detection_loss(pred, y, gamma=..., reg_weight=..., cls_normalize=...)
@@ -148,15 +134,14 @@ Two things break:
    20 m, so a candidate the metric counts as a hit would be labelled a miss).
 
 So this module implements `CFARHead.loss(output, y, targets=...)`, returning
-`(total, {"cls": float, "reg": float})` -- the exact tuple shape `train.py:668-670`
-consumes. The integration is::
+`(total, {"cls": float, "reg": float})` -- the exact tuple shape the loop's accumulators
+consume. The integration, now in `train.py`, is::
 
         out = model(x)
-        pred = out["detection"]
         if hasattr(model, "loss"):
             loss, parts = model.loss(out, y)
         else:
-            loss, parts = detection_loss(pred, y, gamma=..., ...)
+            loss, parts = detection_loss(out["detection"], y, gamma=..., ...)
 
 `parts["reg"]` is always 0.0 (no regression head), so `--reg-weight` is inert for this
 model and `history["train_reg_loss"]` will be a column of zeros. Say so in the run notes
@@ -164,7 +149,14 @@ rather than letting a reader infer a converged regression term. `--gamma` and
 `--cls-normalize` are inert too: the loss here is a plain BCE over a balanced-ish
 candidate set, not a focal loss over 1365:1 background.
 
-TRAIN WITH `--amp off`. `--amp auto` turns autocast on for CUDA, and stage 1 is a
+AMP IS NOW REFUSED BY THE MODEL ITSELF, not by an instruction in this paragraph:
+`forward` runs its whole body inside `torch.autocast(..., enabled=False)` and casts its
+input to float32 (2026-09-23, after a reviewer pointed out that native registration had
+made `--model cfarhead` with the DEFAULT `--amp auto` reachable and silently harmful).
+`--amp off` therefore remains the honest flag to pass, but forgetting it no longer
+changes a number. The measurement that motivates both:
+
+Stage 1 is a
 CLASSICAL computation with ~60 dB of dynamic range inside it (`10**(x/10)`, a Doppler
 sum, a median, then a ratio of means). Half precision there is not a 5% memory
 optimisation, it is a change to the detector. MEASURED 2026-09-22 on one synthetic
@@ -219,8 +211,8 @@ the same AP / matched-recall-FA protocol as every other arm:
 These four are this model's OWN controls. The F83/F85 control battery
 (`python -m e2e.ml.controls --checkpoint cfarhead=<path>`: deranged-label retention,
 azimuth-only vs a constant map, stripe rank-1) needs no work here -- it goes through
-`train.load_model_for_eval`, so `register()` is enough, and it was smoke-run against a
-`cfarhead` checkpoint on 2026-09-22. Run BOTH before any claim: these say the two stages
+`train.load_model_for_eval`, which resolves `build_model` and therefore the native
+`cfarhead` branch. Run BOTH before any claim: these say the two stages
 each earn their place, those say the model reads the frame.
 
 NOT RUN ON THE REAL CORPUS YET (2026-09-22): both GPUs were training, so every number
@@ -232,6 +224,14 @@ the fitted head outscores the CFAR ordering of its own candidate set on those fr
 (train-fit AP 0.851 vs 0.727 -- four frames, no validation split, so this says the
 gradient flows, nothing more); a saved checkpoint round-trips through
 `compare_detectors.score_checkpoint` and `e2e.ml.controls`.
+
+SUPERSEDED IN PART 2026-09-23: the model has since been trained on the real corpus
+(`e2e/ml/runs/b13_cfarhead`, seed 42, `--deterministic --amp off`) and scored under the
+F85 protocol on three corpora, with both control batteries. The paragraph above still
+describes what was true on 2026-09-22; the NUMBERS live in the artifacts, not here --
+`e2e/ml/runs/gen_cfarhead_{v3_test,v2_test,v4_train}.json`,
+`e2e/ml/runs/controls_cfarhead.json`, `e2e/ml/runs/cfarhead_controls_v3.json` -- so this
+docstring cannot drift away from them. Read those, or the ledger entry that cites them.
 """
 
 from __future__ import annotations
@@ -285,6 +285,25 @@ DEFAULT_PATCH = 7              # odd; the head's receptive field in label-grid c
 #: set is computed from the unclamped power and is unaffected.
 FEATURE_DB_MIN = -40.0
 FEATURE_DB_MAX = 60.0
+
+
+def _lower_median(flat: Tensor) -> Tensor:
+    """`torch.median(flat, dim=1).values`, computed by a sort so CUDA determinism holds.
+
+    WHY, measured 2026-09-23: `python -m e2e.ml.train --model cfarhead --deterministic`
+    died on the first forward with "median CUDA with indices output does not have a
+    deterministic implementation" -- `torch.use_deterministic_algorithms(True)` (which is
+    what `--deterministic` sets) REFUSES `Tensor.median(dim=...)` on CUDA, because the
+    kernel's tie-breaking INDEX is unspecified. Only the value is used here.
+
+    `torch.median` returns the LOWER of the two middles for an even count, i.e. the
+    element at sorted index `(n - 1) // 2`; this reproduces that exactly (bit-for-bit,
+    since both just select an input element). `torch.sort(...).values` is deterministic on
+    CUDA -- only its INDICES are unspecified among equal elements, and those are discarded.
+    Costs one sort of `n_range * n_azimuth` (24576 on b1_bench_v3) per frame.
+    """
+    n = flat.shape[-1]
+    return flat.sort(dim=-1).values[..., (n - 1) // 2]
 
 
 def build_grid_from_manifest(manifest: Dict) -> LabelGrid:
@@ -355,7 +374,7 @@ def global_threshold_objectness(x: Tensor, cfg, grid: LabelGrid, *,
     """
     pw = grid_power_from_rad(x, cfg, grid)
     flat = pw.reshape(pw.shape[0], -1) if pw.dim() == 3 else pw.reshape(1, -1)
-    ref = flat.median(dim=1).values.clamp_min(torch.finfo(pw.dtype).tiny)
+    ref = _lower_median(flat).clamp_min(torch.finfo(pw.dtype).tiny)
     ref = ref.view(-1, 1, 1) if pw.dim() == 3 else ref.view(1, 1)
     ratio_db = 10.0 * torch.log10((pw / ref).clamp_min(1e-12))
     obj = ((ratio_db - min_db) / (max_db - min_db)).clamp_(0.0, 1.0)
@@ -471,7 +490,7 @@ class CFARHead(nn.Module):
         after `group_peaks`, which is what candidates are drawn from.
         """
         pw = grid_power_from_rad(x, self.cfg, self.grid)
-        ref = pw.reshape(pw.shape[0], -1).median(dim=1).values \
+        ref = _lower_median(pw.reshape(pw.shape[0], -1)) \
                 .clamp_min(torch.finfo(pw.dtype).tiny).view(-1, 1, 1)
         pdb = (10.0 * torch.log10((pw / ref).clamp_min(1e-12))
                ).clamp(FEATURE_DB_MIN, FEATURE_DB_MAX)
@@ -534,30 +553,52 @@ class CFARHead(nn.Module):
                 f"expected [B, {self.in_azimuth}, {self.n_range_in}, {self.n_doppler}], "
                 f"got {tuple(x.shape)}")
 
-        _pw, pdb, obj, obj_peaks = self._stage1(x)                        # each [B, R, A]
+        # AUTOCAST IS DISABLED FOR THE WHOLE OF THIS FORWARD, and the input is forced to
+        # float32. This is a CORRECTNESS guard, not a performance choice, and it replaces
+        # the docstring instruction "train with --amp off" with something a caller cannot
+        # forget (review finding, 2026-09-23: after native registration landed, the plain
+        # `--model cfarhead` CLI defaults to `--amp auto`, which is autocast-ON for CUDA,
+        # and nothing at runtime objected).
+        #
+        # Stage 1 is a CLASSICAL computation with ~60 dB of dynamic range inside it
+        # (`10**(x/10)`, a Doppler sum, a median, then a ratio of local means). MEASURED
+        # 2026-09-22 on one synthetic noise frame (benchmark_v1 shrunk to 32 chirps x 64
+        # samples, CPU): rounding only the INPUT cube to fp16 and back moves the CFAR
+        # objectness by up to 0.127 on its [0,1] scale -- a quarter of the metric's whole
+        # threshold sweep. That is a change to the DETECTOR, not a rounding of it.
+        #
+        # Disabling it for stage 2 as well (rather than only stage 1) is deliberate: it
+        # makes this model's output identical under `--amp on`, `--amp off` and
+        # `--amp auto`, so a checkpoint recertifies (`e2e.ml.recertify` evaluates with
+        # `amp="auto"`) and scores the same number on every path. An autocast-off block is
+        # a no-op when autocast is already off, so this changes nothing for a run that
+        # passed `--amp off` -- including `e2e/ml/runs/b13_cfarhead`, trained 2026-09-23.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = x.float()
+            _pw, pdb, obj, obj_peaks = self._stage1(x)                        # each [B, R, A]
 
-        pick = self.candidate_fn or (
-            lambda o, floor, k: select_candidates(o, floor=floor, max_candidates=k))
+            pick = self.candidate_fn or (
+                lambda o, floor, k: select_candidates(o, floor=floor, max_candidates=k))
 
-        out = x.new_zeros((b, 3, self.n_range_out, self.n_azimuth_out))
-        all_logits, all_rows, all_cols, all_cfar = [], [], [], []
-        for i in range(b):
-            rows, cols, scores = pick(obj_peaks[i], self.cfar_floor, self.max_candidates)
-            all_rows.append(rows)
-            all_cols.append(cols)
-            all_cfar.append(scores)
-            if rows.numel() == 0:
-                all_logits.append(x.new_zeros(0))
-                continue
-            feat = torch.stack([pdb[i], obj[i]], dim=0)                    # [2, R, A]
-            patches = self._patches(feat, rows, cols)                      # [K, 2, P, P]
-            centre = torch.stack([pdb[i][rows, cols], obj[i][rows, cols]], dim=1)
-            logits = (self.score_fn(patches, centre, rows, cols) if self.score_fn
-                      else self._logits(patches, centre))
-            all_logits.append(logits)
-            out[i, 0, rows, cols] = torch.sigmoid(logits).to(out.dtype)
-        return {"detection": out, "logits": all_logits, "rows": all_rows,
-                "cols": all_cols, "cfar": all_cfar}
+            out = x.new_zeros((b, 3, self.n_range_out, self.n_azimuth_out))
+            all_logits, all_rows, all_cols, all_cfar = [], [], [], []
+            for i in range(b):
+                rows, cols, scores = pick(obj_peaks[i], self.cfar_floor, self.max_candidates)
+                all_rows.append(rows)
+                all_cols.append(cols)
+                all_cfar.append(scores)
+                if rows.numel() == 0:
+                    all_logits.append(x.new_zeros(0))
+                    continue
+                feat = torch.stack([pdb[i], obj[i]], dim=0)                    # [2, R, A]
+                patches = self._patches(feat, rows, cols)                      # [K, 2, P, P]
+                centre = torch.stack([pdb[i][rows, cols], obj[i][rows, cols]], dim=1)
+                logits = (self.score_fn(patches, centre, rows, cols) if self.score_fn
+                          else self._logits(patches, centre))
+                all_logits.append(logits)
+                out[i, 0, rows, cols] = torch.sigmoid(logits).to(out.dtype)
+            return {"detection": out, "logits": all_logits, "rows": all_rows,
+                    "cols": all_cols, "cfar": all_cfar}
 
     # ---- training ---------------------------------------------------------------
     def detections_for(self, rows: Tensor, cols: Tensor, scores: Sequence[float]
@@ -699,78 +740,6 @@ class CFARHead(nn.Module):
         return {"candidate_recall": (hit / tot) if tot else float("nan"),
                 "candidate_recall_pre_nms": (raw_hit / tot) if tot else float("nan"),
                 "n_targets": float(tot), "candidates_per_frame": ncand / max(nframes, 1)}
-
-
-# --------------------------------------------------------------------------------
-# Registration shim (edits 1 and 2 of the module docstring, at runtime)
-# --------------------------------------------------------------------------------
-def register(train_module=None) -> None:
-    """Teach `e2e.ml.train` about `cfarhead` without editing a fingerprinted file.
-
-    Idempotent. Adds `MODEL_NAME` to `train._MODEL_NAMES` (which is also `--model`'s
-    `choices`) and wraps `train.build_model` so the new name is handled and every other
-    name falls through to the original. Because `train.load_model_for_eval`,
-    `compare_detectors.score_checkpoint` and `e2e.ml.blocks.NeuralDetectorBlock` all
-    resolve `build_model` through the `train` module at call time, patching it here
-    reaches all of them.
-
-    Delete this function when `train.py:92` and `train.py:361` carry the real branch.
-    """
-    if train_module is None:
-        from e2e.ml import train as train_module
-
-    if MODEL_NAME in getattr(train_module, "_MODEL_NAMES", ()):
-        return
-    train_module._MODEL_NAMES = tuple(train_module._MODEL_NAMES) + (MODEL_NAME,)
-    original = train_module.build_model
-
-    def build_model(name: str, manifest: Dict, *, device=None, ssm_chunk_size=None):
-        if name != MODEL_NAME:
-            return original(name, manifest, device=device, ssm_chunk_size=ssm_chunk_size)
-        from e2e.radar_config import RadarConfig
-
-        input_format = manifest.get("input_format", "rd")
-        if input_format != "rad":
-            raise ValueError(
-                f"{MODEL_NAME} requires input_format='rad' (stage 1 is the classical "
-                f"beamformer's own cube); got {input_format!r}")
-        cfg = RadarConfig.from_dict(manifest["config"])
-        grid = build_grid_from_manifest(manifest)
-        in_channels, n_range_in, n_doppler_in = train_module._input_dims(cfg, input_format)
-        model = CFARHead(in_channels, n_range_in, n_doppler_in,
-                         grid.n_range, grid.n_azimuth, cfg=cfg, grid=grid)
-        dev = device if device is not None else train_module._default_device()
-        return model.to(dev)
-
-    build_model.__doc__ = (original.__doc__ or "") + \
-        f"\n\nPatched by e2e.ml.cfar_head.register(): also accepts {MODEL_NAME!r}."
-    build_model.__wrapped__ = original
-    train_module.build_model = build_model
-
-    # EDIT 3 IS NOT DONE BY THIS SHIM, AND THAT HAS TO FAIL LOUDLY.
-    # `train.train`'s loop calls `detection_loss` unconditionally (train.py:640-642); it
-    # does not consult `model.loss`. Registering the architecture is therefore enough to
-    # make `python -m e2e.ml.train --model cfarhead` RUN TO COMPLETION while optimising
-    # the wrong objective on a map that is constant zero outside <= K cells -- the exact
-    # failure the module docstring's "TRAINING" section describes. A silent wrong answer
-    # is worse than a missing feature (review finding, 2026-09-22), so training this
-    # model is refused until a human makes the one-line change.
-    original_train = train_module.train
-
-    def train(manifest_path, model_name: str, *args, **kwargs):
-        if model_name == MODEL_NAME:
-            raise NotImplementedError(
-                f"{MODEL_NAME} cannot be trained by train.train() as it stands: the loop "
-                "at train.py:640-642 calls detection_loss unconditionally and never "
-                "consults model.loss(), so it would optimise a focal BCE over a map that "
-                "is zero everywhere outside the candidate cells. Apply edit 3 from "
-                "e2e/ml/cfar_head.py's module docstring (dispatch to model.loss when the "
-                "model defines one) and delete this guard, or train with your own loop "
-                "calling CFARHead.loss(output, y). See also: train with --amp off.")
-        return original_train(manifest_path, model_name, *args, **kwargs)
-
-    train.__wrapped__ = original_train
-    train_module.train = train
 
 
 # --------------------------------------------------------------------------------
