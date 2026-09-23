@@ -547,8 +547,14 @@ corpus (`b1_bench_v2`: 173 unseen scenes, same radar, an earlier generator with 
 different impairment model) CFAR scores 0.179 at 13.2 false alarms per frame; RADDetNet
 0.208 at 15.1 (the checkpoint above) and 0.153 at 20.7 (a second seed) — the two seeds
 straddle CFAR and both are worse at matched recall, while the ported FFTRadNet collapses
-to 0.063, below that corpus's 0.065 chance floor. Regularisation and joint-corpus training
-arms are in progress; the ledger entry is updated as they land.
+to 0.063, below that corpus's 0.065 chance floor. Trained on the train splits of BOTH
+corpora, one checkpoint beats CFAR on the held-out scenes of both (0.584 at 1.4 false
+alarms per frame on `b1_bench_v3` test, 0.487 at 2.9 on `b1_bench_v2` test; paired
+scene-level bootstrap +0.108 and +0.279 AP over the single-corpus checkpoint, controls
+pass on both corpora, independently verified) — a data-diversity result, not a
+generalisation one, since neither corpus is then unseen; and one training seed until its
+replicate lands. Regularisation arms are in progress; the ledger entry is updated as they
+land.
 
 Read the accompanying caveats before quoting any of this: "false alarms" in these maps
 include deliberately-unlabelled clutter a correct detector *should* fire on (the shipped

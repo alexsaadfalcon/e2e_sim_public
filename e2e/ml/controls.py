@@ -150,10 +150,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--checkpoint", action="append", default=[], metavar="NAME=PATH",
                    help="may repeat")
     p.add_argument("--out", default="e2e/ml/runs/controls.json")
+    p.add_argument("--manifest", default=MANIFEST,
+                   help="corpus manifest to score on (default: beat_cfar's, b1_bench_v3). "
+                        "The 2026-09-22 joint-arm controls were run on v3 only because this "
+                        "flag did not exist; the artifact must name its corpus.")
+    p.add_argument("--split", default=SPLIT)
     args = p.parse_args(argv)
     if not args.checkpoint:
         p.error("at least one --checkpoint NAME=PATH")
-    print(f"protocol: split={SPLIT} decode={DECODE_THRESHOLD} max_range_m={MAX_RANGE_M}")
+    print(f"protocol: manifest={args.manifest} split={args.split} "
+          f"decode={DECODE_THRESHOLD} max_range_m={MAX_RANGE_M}")
     print(f"{'checkpoint':20s} {'AP':>6s} {'derang':>7s} {'keep%':>6s} {'az-only':>8s} "
           f"{'az-const':>8s} {'az-prior':>8s} {'rng-only':>8s} {'rng-const':>9s} {'stripe':>7s}")
     results = {}
@@ -162,7 +168,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not Path(path).is_file():
             print(f"{name:20s} missing: {path}")
             continue
-        r = controls_for(path)
+        r = controls_for(path, manifest=args.manifest, split=args.split)
         results[name] = {"checkpoint": path, **r}
         prior = r.get("az_only_train_prior_AP", float("nan"))
         print(f"{name:20s} {r['AP']:6.3f} {r['deranged_AP']:7.3f} "
@@ -170,8 +176,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"{r['az_only_constant_AP']:8.3f} {prior:8.3f} {r['range_only_AP']:8.3f} "
               f"{r['range_only_constant_AP']:9.3f} {r['stripe_rank1']:7.3f}")
     Path(args.out).write_text(json.dumps({
-        "protocol": {"split": SPLIT, "decode_threshold": DECODE_THRESHOLD,
-                     "max_range_m": MAX_RANGE_M},
+        "protocol": {"manifest": args.manifest, "split": args.split,
+                     "decode_threshold": DECODE_THRESHOLD, "max_range_m": MAX_RANGE_M},
         "reference_F83": {"deranged_retention_shipped_nets": "48-51%",
                           "deranged_retention_cfar": "10.5%",
                           "az_only_model_vs_constant": "0.421 vs 0.423",
