@@ -18,7 +18,8 @@ stated exactly:
   `munich.pkl` frames, which are **gitignored and not shipped**. Generate them first (see
   [Sionna RT frame generation](#advanced-sionna-rt-frame-generation-gpu)) — that needs a
   GPU and hours. Without it the command fails immediately with `FileNotFoundError` —
-  though `scenario_runner --dry-run --out e2e/environment/sionna_sims/munich.pkl` gives
+  though `scenario_runner --dry-run --frames 10 --out e2e/environment/sionna_sims/munich.pkl`
+  (without `--frames` the dry run writes the full-length file, ~4 GB) gives
   synthetic frames that exercise the same pipeline on a CPU (the figure still needs the
   real ones).
 - The four **scene GIFs** (`scene_D0`–`scene_D3`) regenerate on a CPU from the analytic
@@ -450,7 +451,12 @@ python -m e2e.ml.train --manifest $M --model raddetnet --input-format rad --epoc
 ```
 
 `e2e/ml/datasets/` and `e2e/ml/runs/` are gitignored: a clean clone has neither the corpus
-nor the checkpoints, and every number below was produced from them by the commands shown.
+nor the checkpoints. Every number in the detection table below was produced from them by
+the commands shown; the bootstrap interval, the out-of-distribution and joint-corpus
+paragraph, and the control statistics name their own artifact and command where they
+appear. `b1_bench_v2` (the earlier corpus used for the distribution-shift test) has no
+documented regeneration recipe: it is a salvaged partial run of the previous generator
+and exists only on the machines it was generated on.
 
 `benchmark_v1` (4×16 = 64 virtual elements, v_max 9.69 m/s) is the preset the benchmark
 was measured on, and is valid on both axes at once (`ddma_wide_v1`, 4×48 = 192 virtual at
@@ -527,8 +533,9 @@ objectness maps are near-separable `f(range)·g(azimuth)`: rank-1 energy fractio
 (FFTRadNet) / **0.76** (SSMRadNet) against **0.31** for ground truth, i.e. a stripe across
 the whole field of view at every true range instead of a peak. Under azimuth-only matching
 they score no better than a constant map carrying no frame information, and pairing their
-predictions with a *deranged* frame's labels retains ~50% of their AP, against 10% for
-CFAR. Azimuth reaches these networks only as virtual-channel phase, and neither head
+predictions with a *deranged* frame's labels retains ~50% of their AP, against 10.5% for
+CFAR (the F83 reference measurement, recorded as a constant in `e2e/ml/controls.py`; the
+learned-detector retentions are recomputed by `python -m e2e.ml.controls`). Azimuth reaches these networks only as virtual-channel phase, and neither head
 converts it into an angle bin: **range is learned, azimuth is a memorised prior.** The
 corpus is sound — its own ground-truth label maps score AP 1.000 through the same scorer.
 (`e2e.ml.controls` runs these three controls on any checkpoint.)
@@ -553,7 +560,13 @@ different impairment model) CFAR scores 0.179 at 13.2 false alarms per frame; RA
 straddle CFAR and both are worse at matched recall, while the ported FFTRadNet collapses
 to 0.063, below that corpus's 0.065 chance floor. Trained on the train splits of BOTH
 corpora, one checkpoint beats CFAR on the held-out scenes of both (0.584 at 1.4 false
-alarms per frame on `b1_bench_v3` test, 0.487 at 2.9 on `b1_bench_v2` test; paired
+alarms per frame on `b1_bench_v3` test, 0.487 at 2.9 on `b1_bench_v2` test — artifacts
+`e2e/ml/runs/gen_joint_v3_test.json`, `gen_joint_v2_test.json`, `ood_v2_test.json`,
+`controls_joint.json`, `controls_joint_v2.json`, each written by `python -m
+e2e.ml.compare_detectors --manifest <that corpus's manifest> --split test --classical
+--recall 0.5 --decode-threshold 0.01 --max-range-m 40 --checkpoint
+raddetnet_joint=e2e/ml/runs/b9_raddetnet_joint_v2v3/best.pt` and `python -m e2e.ml.controls
+--manifest <manifest> --checkpoint raddetnet_joint=...`; paired
 scene-level bootstrap +0.108 and +0.279 AP over the single-corpus checkpoint, controls
 pass on both corpora, independently verified) — a data-diversity result, not a
 generalisation one, since neither corpus is then unseen; and one training seed until its
