@@ -570,8 +570,9 @@ raddetnet_joint=e2e/ml/runs/b9_raddetnet_joint_v2v3/best.pt` and `python -m e2e.
 scene-level bootstrap +0.108 and +0.279 AP over the single-corpus checkpoint, controls
 pass on both corpora, independently verified) — a data-diversity result, not a
 generalisation one, since neither corpus is then unseen; and one training seed until its
-replicate lands. Regularisation arms are in progress; the ledger entry is updated as they
-land.
+replicate lands. Weight decay (AdamW, 0.1) leaves the in-distribution number unchanged (0.476)
+and the shifted-corpus number inside the seed spread (0.186); it is not the lever. The ledger
+entry is updated as further arms land.
 
 Read the accompanying caveats before quoting any of this: "false alarms" in these maps
 include deliberately-unlabelled clutter a correct detector *should* fire on (the shipped
