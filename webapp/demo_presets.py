@@ -16,7 +16,7 @@ the operator did not intend -- the failure mode the interconnect "case3" alias t
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from webapp.corpus_catalog import DEFAULT_CORPUS
 from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
@@ -68,6 +68,16 @@ class DemoPreset:
     say: List[str] = field(default_factory=list)
     #: What NOT to say or show -- from the adversarial review, each item measured.
     do_not_say: List[str] = field(default_factory=list)
+    #: One-click A/B comparison (2026-09-22 hostile-expert read: three headline claims
+    #: showed no evidence of themselves on a single screen). (block_id, param_key,
+    #: value_for_run_B); run A is this preset AS LOADED (its own `overrides`), run B is
+    #: the same state with ONLY this one param replaced. `apply_preset(preset, arm="b")`
+    #: builds run B's state. None (the default) keeps a preset single-run, unchanged.
+    ab: Optional[Tuple[str, str, Any]] = None
+    #: Human labels for the two arms, quoted in the Results banner, e.g. "8 mA" / "0.5 mA".
+    #: Required whenever `ab` is set (apply_preset does not check this; the webapp does).
+    ab_label_a: str = ""
+    ab_label_b: str = ""
 
 
 def _only_products(*keep: str) -> Dict[str, Dict[str, Any]]:
@@ -112,6 +122,10 @@ PRESETS: List[DemoPreset] = [
                "coherent gain."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "15 -> 50 MHz (about -5 dB; 1 -> 50 is -16 dB)")],
+        # A/B (Change 1, 2026-09-22 hostile-expert read): as-loaded IS the 8 mA arm;
+        # run B drops to 0.5 mA, the direction the card's headline (+12 dB) quotes.
+        ab=("rffe", "lna_bias_ma", 0.5),
+        ab_label_a="8 mA", ab_label_b="0.5 mA",
         say=[
             "LNA bias 0.5 -> 8 mA is worth about +12 dB of image dynamic range at this "
             "operating point; IF bandwidth 1 -> 50 MHz costs about -16 dB. Two significant "
@@ -128,6 +142,13 @@ PRESETS: List[DemoPreset] = [
             "sets the noise variance. Volunteer the missing half: 1000 frequency points at "
             "1 MHz IF is a 1 ms sweep versus 20 us at 50 MHz, and a 20 m/s car moves two "
             "wavelengths in that time.",
+            "The brightest band at range 0-2 m across all azimuth is not a target: the "
+            "munich frames were generated with Sionna's normalize_delays=True "
+            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
+            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
+            "scale on these screens is referenced to it (47.6 dB above the profile median "
+            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
+            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
         ],
         do_not_say=[
             "Any DC power readout: PRX is U-shaped with its MINIMUM at the best-quality "
@@ -162,6 +183,10 @@ PRESETS: List[DemoPreset] = [
                "tracker is far more sensitive to weight precision than the picture is. The "
                "FFT az-el panel is deliberately off (it contradicts this framing)."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
+        # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
+        # to 1 bit, the 0.63 arm the card's headline quotes.
+        ab=("afe", "mantissa", 1),
+        ab_label_a="6 bit", ab_label_b="1 bit",
         say=[
             "As loaded the curve starts at 0.04 and settles at 0.06 within two frames: "
             "the tracker is warm-started from a perturbed copy of the true subspace and "
@@ -175,6 +200,13 @@ PRESETS: List[DemoPreset] = [
             "0.04 dB on the same displayed range.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
+            "The brightest band at range 0-2 m across all azimuth is not a target: the "
+            "munich frames were generated with Sionna's normalize_delays=True "
+            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
+            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
+            "scale on these screens is referenced to it (47.6 dB above the profile median "
+            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
+            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
         ],
         do_not_say=[
             "That the mantissa sweep models analog hardware error: AFEBlock uses "
@@ -249,14 +281,22 @@ PRESETS: List[DemoPreset] = [
                "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
                "of in-band ripple. Run as loaded, then set Case -> passthrough and run "
                "again: the range profile's floor drops ~14 dB (the visible effect; the "
-               "previous run stays on the Results tab for the comparison). On the heatmap "
-               "the filter streaks each bright return along the WHOLE range axis: two "
-               "vertical streaks at the targets' azimuths, visible down to the -40 dB clip "
-               "(rehearsal 2026-09-23, frame 3). That, not the 11-cell main-lobe smear, is "
-               "what the audience sees, and the range profile's ~14 dB floor rise is the "
-               "same energy. Lead with the floor; when asked about the streaks, they are "
-               "the filter's range sidelobes on every target."),
+               "previous run stays on the Results tab for the comparison). "
+               "On the heatmap the filter streaks each bright return along the range "
+               "axis: the 11-tap boxcar is applied along frequency unwindowed, the worst "
+               "possible filter shape (first sidelobe -13 dB, 6 dB per octave), so one "
+               "clean point target's sidelobes reach -40 dB over 14.4 m of the 25 m axis "
+               "(72 of 126 gates; 2.8 m without the filter) -- measured 2026-09-23 through "
+               "the real InterconnectBlock and RangeProfileBlock. That, not an 11-cell "
+               "main-lobe smear, is what the audience sees; the range profile's ~14 dB "
+               "floor rise is the same energy. Lead with the floor; when asked about the "
+               "two vertical streaks, they are the filter's range sidelobes on the two "
+               "strongest returns."),
         live_knobs=[("interconnect", "case", "default (synthetic boxcar) -> passthrough")],
+        # A/B (Change 1): as-loaded IS the synthetic boxcar ("default"); run B swaps to
+        # passthrough, the ~14 dB floor-drop direction the card's headline quotes.
+        ab=("interconnect", "case", "passthrough"),
+        ab_label_a="default (boxcar)", ab_label_b="passthrough",
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
             "ballot 3A). It stands in for a bad interconnect; it is not a model of any "
@@ -274,6 +314,13 @@ PRESETS: List[DemoPreset] = [
             "absent: one S21 is broadcast to all 1024 elements. Say it up front.",
             "The 77 GHz parts are not reconciled with the 30 GHz frames; today's "
             "reconciliation is 'relabel the axis'. Caption real-data results as shape-only.",
+            "The brightest band at range 0-2 m across all azimuth is not a target: the "
+            "munich frames were generated with Sionna's normalize_delays=True "
+            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
+            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
+            "scale on these screens is referenced to it (47.6 dB above the profile median "
+            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
+            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
         ],
         do_not_say=[
             "'Case3' from the dropdown as the UIC Case3: it is a legacy alias for "
@@ -427,7 +474,8 @@ PRESETS: List[DemoPreset] = [
             "deterministic kernels); the checkpoint records the fingerprint of the code that "
             "built its inputs and reproduces its own validation number under current code. "
             "An independent verifier re-scored it bit-identically and re-implemented the "
-            "controls to 1e-6. Paired scene-level bootstrap: +0.176 AP, 95% CI [+0.145, +0.206].",
+            "controls to 1e-6. Paired scene-level bootstrap: +0.176 AP, 95% CI "
+            "[+0.145, +0.208] (e2e/ml/runs/raddetnet_ci.json).",
             "The controls are the ones F83 defined and the shipped nets FAILED: AP retention "
             "under deranged labels 12% (CFAR 10%; the FFTRadNets 48-51%; stable across random "
             "derangements), and azimuth-only AP 0.657 against 0.472 for the strongest "
@@ -495,10 +543,22 @@ class PresetError(ValueError):
     """A preset that does not fit the registry -- raised, never papered over."""
 
 
-def apply_preset(preset: DemoPreset) -> Dict[str, Dict[str, Any]]:
-    """`default_block_state()` with the preset's overrides applied and VALIDATED."""
+def apply_preset(preset: DemoPreset, *, arm: str = "a") -> Dict[str, Dict[str, Any]]:
+    """`default_block_state()` with the preset's overrides applied and VALIDATED.
+
+    ``arm="b"`` (only meaningful when ``preset.ab`` is set) additionally applies the
+    preset's single A/B override on top of its own overrides -- see `DemoPreset.ab`.
+    """
+    if arm not in ("a", "b"):
+        raise PresetError(f"{preset.id}: unknown ab arm {arm!r}")
+    overrides = preset.overrides
+    if arm == "b":
+        if preset.ab is None:
+            raise PresetError(f"{preset.id}: has no `ab` override to apply arm 'b'")
+        bid_ab, key_ab, value_b = preset.ab
+        overrides = _merge(overrides, {bid_ab: {"params": {key_ab: value_b}}})
     state = default_block_state()
-    for bid, ov in preset.overrides.items():
+    for bid, ov in overrides.items():
         spec = BLOCKS_BY_ID.get(bid)
         if spec is None:
             raise PresetError(f"{preset.id}: unknown block {bid!r}")
@@ -537,3 +597,7 @@ def validate_all() -> None:
     tests, deliberately NOT run at app import so a bad preset cannot take the shell down."""
     for p in PRESETS:
         apply_preset(p)
+        if p.ab is not None:
+            apply_preset(p, arm="b")
+            assert p.ab_label_a and p.ab_label_b, (
+                f"{p.id}: ab is set but ab_label_a/ab_label_b are missing")

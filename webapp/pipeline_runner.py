@@ -29,6 +29,7 @@ import plotly.graph_objects as go
 
 from webapp.pipeline_registry import (BLOCKS_BY_ID, MAX_N_STEPS, MAX_PRESET_N_STEPS,
                                       SUBSPACE_M)
+from webapp import detector_scoreboard
 
 # Speed of light (m/s), used to convert the frequency-FFT axis to physical range.
 _C = 2.99792458e8
@@ -912,14 +913,91 @@ def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     return -(np.arange(n_bins) - zero_gate) * range_per_gate
 
 
+#: Podium-distance legibility floor (fresh-context review, 2026-09-22: every figure's
+#: browser-default 12-13 px text reads fine on a laptop and fails at the ~2 m a demo
+#: audience actually reads from). Applied, as the LAST step, to every figure this
+#: module hands back to the UI via `_make_legible`.
+_LEGIBLE_FONT_SIZE = 16
+_LEGIBLE_TICK_SIZE = 15
+_LEGIBLE_COLORBAR_TICK_SIZE = 14
+_LEGIBLE_COLORBAR_TITLE_SIZE = 15
+
+#: Minimum y-axis upper bound for the subspace-error plot (Change 3, 2026-09-22
+#: review), so a near-floor curve reads as flat rather than filling the plot height.
+#: Picked from the presets' own measured range: Thrust 2's B arm (AFE mantissa 6->1)
+#: reaches ~0.63 and Thrust 3's cold start begins ~0.57 (webapp/demo_presets.py
+#: blurbs, measured 2026-09-22).
+_SUBSPACE_ERR_MIN_YMAX = 0.65
+#: The warm-started settled tracking floor the Thrust 2/3 cards quote.
+_SUBSPACE_ERR_SETTLED_LEVEL = 0.06
+
+
+def _make_legible(fig: go.Figure) -> go.Figure:
+    """Bump every text element on `fig` to the podium-distance floor above, IN PLACE,
+    and return it (so a call can wrap the figure's own construction). Safe on any
+    figure -- heatmap or scatter, with or without a slider/colorbar -- since each
+    update targets an element that may simply not be present."""
+    fig.update_layout(font=dict(size=_LEGIBLE_FONT_SIZE))
+    fig.update_xaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE))
+    fig.update_yaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE))
+    for trace in fig.data:
+        cbar = getattr(trace, "colorbar", None)
+        if cbar is not None:
+            cbar.tickfont = dict(size=_LEGIBLE_COLORBAR_TICK_SIZE)
+            if cbar.title is not None and cbar.title.text:
+                cbar.title.font = dict(size=_LEGIBLE_COLORBAR_TITLE_SIZE)
+    for slider in (fig.layout.sliders or ()):
+        slider.currentvalue.font = dict(size=_LEGIBLE_FONT_SIZE)
+    return fig
+
+
+def _peak_minus_median_db(db: np.ndarray) -> float:
+    """Peak minus median of an already peak-normalized power-dB map -- the T1/T2 card
+    headline statistic ("+12 dB", "-14 dB"), computed on the UNCLIPPED map (before any
+    display clip). Matches notes/tools/demo_thrust1_rescue.py::q exactly: that script's
+    `db.max() - np.median(db)` on `10*log10(ra/ra.max())` is the same quantity as
+    `db.max() - np.median(db)` here, since `_to_numpy_abs_db` already peak-normalizes."""
+    return float(np.max(db) - np.median(db))
+
+
+def _radar_cube_clip_db(db: np.ndarray) -> float:
+    """Display clip (dB rel. peak) for the range-Doppler panel ONLY -- every other
+    heatmap keeps the shared -40 dB clip.
+
+    Physics review, 2026-09-23, measured on the benchmark corpus's first 5 test
+    frames (the Thrust 5 presets' own source): the ambient floor sits at median -47.8
+    to -39.2 dB and p95 -46.6 to -38.2 dB depending on the frame, sometimes within
+    ~1-2 dB of the fixed -40 dB clip -- close enough that floor fluctuation crosses
+    the clip boundary and lights up whole Doppler rows as false "smear" (the true
+    per-target mainlobe is 6-8 of 64 bins, ~2 m/s). Fixed candidates (-30, -35 dB)
+    were tried and left too little margin on the highest-floor frame measured (-35 dB
+    left only ~0.2 dB against that frame's p95); an adaptive clip is used instead, so
+    the frame's own floor is guaranteed >= 3 dB below the clip: never looser (more
+    negative) than the shared -40 dB, but tightened toward the frame's own median +
+    3 dB when that median sits above -43 dB.
+    """
+    return max(-40.0, float(np.median(db)) + 3.0)
+
+
+def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
+    """A small top-right, paper-anchored annotation -- the headline dynamic-range/floor
+    statistic the demo cards quote, printed on the panel itself instead of living only
+    in the operator's memory."""
+    return dict(text=text, xref="paper", yref="paper", x=0.99, y=y,
+                showarrow=False, xanchor="right", align="right",
+                font=dict(size=_LEGIBLE_TICK_SIZE, color="#2d3a4a"))
+
+
 def _heatmap(data_db, title: str, *, x=None, y=None,
-             xlabel: str = "Bin", ylabel: str = "Bin") -> go.Figure:
+             xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0) -> go.Figure:
     fig = go.Figure(
         data=go.Heatmap(
-            # Peak-relative, and -40 is a display clip, not the data floor; the
-            # title says both so the colorbar is not read as absolute dB.
-            z=data_db, x=x, y=y, zmin=-40, zmax=0,
-            colorbar=dict(title="dB rel. peak<br>(clipped at -40)")
+            # Peak-relative, and `zmin` is a display clip, not the data floor; the
+            # colorbar title says both so it is not read as absolute dB. Every caller
+            # but the range-Doppler panel uses the -40 dB default; that panel picks its
+            # own clip per `_radar_cube_clip_db` (Change: physics review 2026-09-23).
+            z=data_db, x=x, y=y, zmin=zmin, zmax=0,
+            colorbar=dict(title=f"dB rel. peak<br>(clipped at {zmin:g})")
         )
     )
     fig.update_layout(
@@ -999,10 +1077,11 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
     # Equal aspect: a plan view with distorted axes misleads about angle, which is the
     # one thing this figure exists to make readable.
     fig.update_yaxes(scaleanchor="x", scaleratio=1)
-    return fig
+    return _make_legible(fig)
 
 
-def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap"):
+def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap",
+                         frame_layouts=None):
     """Attach a frame slider + play control to `fig`, leaving its initial view alone.
 
     `per_frame` is the already-converted data for each frame, in frame order, matching
@@ -1010,6 +1089,10 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
     figure's existing trace 0 keeps the LAST frame's data, and the slider starts parked
     on that same index, so the default rendering is byte-for-byte what it was before
     animation existed.
+
+    `frame_layouts`, if given, is a per-frame list of layout dicts (same length and
+    order as `per_frame`) merged into each `go.Frame` -- used by the range-azimuth
+    panel to keep its peak-median dB annotation in step with the slider (Change 2).
 
     Returns `fig` unchanged when there are fewer than two frames -- a slider over one
     frame is noise.
@@ -1020,9 +1103,11 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
 
     # `type` is REQUIRED: without it Plotly infers Scatter for the frame's trace and
     # rejects "z" as an invalid property.
-    fig.frames = [go.Frame(name=str(i), data=[{"type": trace_type, key: d}],
-                           traces=[trace_idx])
-                  for i, d in enumerate(per_frame)]
+    fig.frames = [
+        go.Frame(name=str(i), data=[{"type": trace_type, key: d}], traces=[trace_idx],
+                 **({"layout": frame_layouts[i]} if frame_layouts is not None else {}))
+        for i, d in enumerate(per_frame)
+    ]
     steps = [dict(method="animate", label=str(i + 1),
                   args=[[str(i)], dict(mode="immediate",
                                        frame=dict(duration=0, redraw=True),
@@ -1032,7 +1117,7 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
         # The slider starts to the right of the play/pause buttons: at two-card
         # width its "frame N" label sat behind them.
         sliders=[dict(active=n - 1, x=0.2, len=0.78, y=-0.02,
-                      currentvalue=dict(prefix="frame ", font=dict(size=12)),
+                      currentvalue=dict(prefix="frame ", font=dict(size=_LEGIBLE_FONT_SIZE)),
                       pad=dict(t=30, b=4), steps=steps)],
         updatemenus=[dict(type="buttons", showactive=False, direction="left",
                           x=0.0, y=-0.02, xanchor="left", yanchor="top",
@@ -1068,13 +1153,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         u = _sin_angle_axis(bins)
         # Coherent 2D aperture FFT, non-coherent (power) integration over range --
         # a target shows up regardless of its range, not just one at range 0.
-        figs["fft"] = _add_frame_animation(
+        figs["fft"] = _make_legible(_add_frame_animation(
             _heatmap(
                 _to_numpy_abs_db(outputs["fft"][-1]),
                 "Azimuth-Elevation power (non-coherent over range)",
                 x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
             ),
-            [_to_numpy_abs_db(f) for f in outputs["fft"]])
+            [_to_numpy_abs_db(f) for f in outputs["fft"]]))
 
     for key, title, aperture_label in [
         ("range_az", "Range-Azimuth power (non-coherent over elevation)", "azimuth sin(θ)"),
@@ -1094,15 +1179,30 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
+            # Peak-median dB, per frame, on the UNCLIPPED map BEFORE the nonneg-range
+            # crop below -- matches notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4
+            # cards' own dynamic-range definition (Change 2). range_az only: it is the
+            # panel the cards quote a number on; range_el gets no annotation.
+            dyn_range_db = ([_peak_minus_median_db(d) for d in
+                             (_to_numpy_abs_db(f) for f in outputs[key])]
+                            if key == "range_az" else None)
             frames_db = [_to_numpy_abs_db(f) for f in outputs[key]]
             keep = _nonnegative_range(y)
             if frames_db[-1].shape[0] == keep.size:
                 frames_db = [f[keep] for f in frames_db]
                 y = y[keep]
-            figs[key] = _add_frame_animation(
-                _heatmap(frames_db[-1], title, x=x, y=y, xlabel=aperture_label,
-                         ylabel=ylabel),
-                frames_db)
+            # The stat lives in the TITLE (a "<br><sup>" subline, like the detector
+            # panel below) rather than a floating annotation: an annotation anchored
+            # near the top of the plot's own paper coordinates collided with the title
+            # text at this font size (found in the 2026-09-23 rehearsal screenshot).
+            titles = ([f"{title}<br><sup>peak - median, dB: {d:.1f}</sup>" for d in dyn_range_db]
+                     if dyn_range_db is not None else [title] * len(outputs[key]))
+            fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
+                           ylabel=ylabel)
+            frame_layouts = ([dict(title=dict(text=t)) for t in titles]
+                            if dyn_range_db is not None else None)
+            figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
+                                                           frame_layouts=frame_layouts))
 
     if outputs.get("range_profile_agg"):
         prof = outputs["range_profile_agg"][-1]
@@ -1127,14 +1227,23 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # (the notched DC bin) otherwise drops to -120 dB and autoscale hangs the
         # whole profile off that one cliff (seen on the Thrust 4 preset, 2026-09-22).
         fig.update_yaxes(range=[-60.0, 2.0])
+        # Median floor level, dB rel. peak, of the DISPLAYED (cropped) profile -- the
+        # T4 card's "~14 dB floor" statistic (Change 2), computed the same way as the
+        # range_az dynamic-range statistic above (median), just without the peak term
+        # since a range profile's own peak is already 0 dB by construction. In the
+        # title (a "<br><sup>" subline), not a floating annotation: a corner
+        # annotation collided with the title text at this font size (rehearsal,
+        # 2026-09-23).
+        floor_db = float(np.median(prof_db)) if prof_db.size else float("nan")
         fig.update_layout(
-            title="Range profile (non-coherent over channels)",
+            title=f"Range profile (non-coherent over channels)"
+                 f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}</sup>",
             xaxis_title=xlabel,
             yaxis_title="power (dB rel. peak)",
             margin=dict(l=40, r=20, t=40, b=40),
             height=360,
         )
-        figs["range_profile"] = fig
+        figs["range_profile"] = _make_legible(fig)
 
     rx = meta.get("rx") or {}
     if outputs.get("radar_cube"):
@@ -1154,10 +1263,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             xlabel, ylabel = "radial velocity (m/s)", "range (m)"
         else:
             x, y, xlabel, ylabel = np.arange(n_d), np.arange(n_r), "Doppler (bin)", "range (bin)"
-        figs["radar_cube"] = _add_frame_animation(
+        # Adaptive clip (see _radar_cube_clip_db): the shared -40 dB clip sits too
+        # close to this corpus's own ambient floor and lights up whole Doppler rows.
+        # One clip for the whole animation, from the LAST frame (same convention as
+        # every other stat/annotation this module attaches to the animated view).
+        rd_clip = _radar_cube_clip_db(first)
+        figs["radar_cube"] = _make_legible(_add_frame_animation(
             _heatmap(first, "Range-Doppler power (non-coherent over channels)",
-                     x=x, y=y, xlabel=xlabel, ylabel=ylabel),
-            [_rd_db(c) for c in outputs["radar_cube"]])
+                     x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip),
+            [_rd_db(c) for c in outputs["radar_cube"]]))
 
     det_meta = meta.get("detector") or {}
     for key, title in (("cfar_detection", "CFAR objectness"),
@@ -1193,7 +1307,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
                 name=f"detections (n={len(dets)})",
-                marker=dict(symbol="x", size=10, color="#ff3b3b", line=dict(width=2)),
+                marker=dict(symbol="x", size=14, color="#ff3b3b", line=dict(width=2)),
                 text=[f"score {d[2]:.2f}" for d in dets],
             ))
         gt = (outputs.get("gt_detections") or [[]])[-1]
@@ -1201,7 +1315,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in gt], y=[d[3] for d in gt], mode="markers",
                 name=f"ground truth (n={len(gt)})",
-                marker=dict(symbol="circle-open", size=14, color="#ffffff",
+                marker=dict(symbol="circle-open", size=18, color="#ffffff",
                             line=dict(width=2)),
             ))
         fig.update_layout(
@@ -1212,7 +1326,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             legend=dict(orientation="h", y=-0.2, bgcolor="#2d3436",
                         font=dict(color="#ffffff")),
         )
-        figs[key] = fig
+        figs[key] = _make_legible(fig)
+
+        # Scoreboard: TP/FP/FN this frame + cumulative hits/false alarms/FA-per-frame/
+        # hit-rate over the run, and the match rule in words -- the numbers a hostile-
+        # expert read (2026-09-22) said the objectness panel alone does not show. Reuses
+        # e2e.ml.metrics' own matcher (webapp/detector_scoreboard.py); appears whenever
+        # this detector product is on, next to its objectness panel.
+        det_scores = detector_scoreboard.score_frames(
+            outputs.get(key + "s") or [], outputs.get("gt_detections"),
+            threshold=det_meta.get("threshold"))
+        figs[key + "_scoreboard"] = _make_legible(detector_scoreboard.scoreboard_figure(
+            det_scores, arm_name=det_meta.get("label", title),
+            threshold=det_meta.get("threshold"),
+            match_rule_text=detector_scoreboard.match_rule_text()))
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
@@ -1221,19 +1348,35 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # short runs ("Frame 0.5" after a Cancel, rehearsal 2026-09-22).
         fig = go.Figure(data=go.Scatter(x=list(range(1, len(errs) + 1)), y=errs,
                                         mode="lines+markers"))
-        # Anchor the axis at zero: a before/after pair (Thrust 2: 0.06 -> 0.63) is
-        # read across two autoscaled plots, and autoscale draws a flat 0.06 line as
-        # a full-height curve.
-        fig.update_yaxes(rangemode="tozero")
+        # Anchor at zero AND give the axis a MINIMUM upper bound (Change 3, 2026-09-22
+        # review): the as-loaded Thrust 2 curve rises 0.04 -> 0.06 on an axis that used
+        # to autoscale/tozero to 0.06, which reads as "the tracker is diverging". The
+        # floor comes from the presets' own measured range -- T2's B arm (mantissa
+        # 6->1) reaches ~0.63, T3's cold start begins ~0.57 -- so a near-floor curve now
+        # reads as flat near zero instead of filling the plot height.
+        top = max(_SUBSPACE_ERR_MIN_YMAX, (max(errs) if errs else 0.0) * 1.05)
+        fig.update_yaxes(range=[0.0, top])
         fig.update_xaxes(dtick=1)
+        # The settled warm-start level the cards quote, so "is 0.06 good?" has an
+        # on-screen answer instead of living only in the operator's script.
+        fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash", line_color="#576574",
+                     annotation_text=f"settled level ({_SUBSPACE_ERR_SETTLED_LEVEL:g})",
+                     annotation_position="top left",
+                     annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(
             title="Subspace error (Frobenius) per frame",
             xaxis_title="frame",
-            yaxis_title="Error",
-            margin=dict(l=40, r=20, t=40, b=40),
-            height=360,
+            # Unnormalised: the cards say it grows ~sqrt(k) and is not a fraction.
+            yaxis_title="subspace error (Frobenius, unnormalised)",
+            margin=dict(l=70, r=20, t=40, b=40),
+            # Taller than the other 360px panels: this y-axis title (40 characters,
+            # rotated) is LONGER than a 360px-tall plot at the 16px legibility floor,
+            # so it clipped top and bottom regardless of margin (rehearsal,
+            # 2026-09-23) -- the fix is vertical room, not horizontal margin.
+            height=460,
         )
-        figs["subspace_err"] = fig
+        fig.update_yaxes(automargin=True)
+        figs["subspace_err"] = _make_legible(fig)
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
     # BER/EVM-per-frame lines + a constellation snapshot of the last frame.
@@ -1267,7 +1410,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 xref="paper", yref="paper", x=0.5, y=1.02,
                 showarrow=False, font=dict(size=11, color="#576574"),
             )
-        figs["ber"] = fig
+        figs["ber"] = _make_legible(fig)
 
     if outputs.get("evm"):
         evms = [float(e) for e in outputs["evm"]]
@@ -1279,7 +1422,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             margin=dict(l=40, r=20, t=40, b=40),
             height=360,
         )
-        figs["evm"] = fig
+        figs["evm"] = _make_legible(fig)
 
     if outputs.get("comm_data_eq"):
         data_np = _to_numpy_complex(outputs["comm_data_eq"][-1])
@@ -1318,7 +1461,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             height=360,
         )
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
-        figs["comm_const"] = fig
+        figs["comm_const"] = _make_legible(fig)
 
     return figs
 

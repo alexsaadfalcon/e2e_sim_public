@@ -288,7 +288,7 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
     st = block_state.get(block_id, {})
     children: List[Any] = [
         html.H4(spec.label, style={"marginBottom": "2px"}),
-        html.P(spec.blurb, style={"fontSize": "12px", "color": "#576574"}),
+        html.P(spec.blurb, style={"fontSize": "16px", "color": "#576574"}),
     ]
 
     # Enable/disable toggle for toggleable blocks. The subspace block is a special
@@ -314,11 +314,11 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
             children.append(html.P(
                 "(always on while AFE is enabled -- the AFE draws its combining "
                 "weights from the tracker)",
-                style={"fontSize": "11px", "color": "#8395a7"},
+                style={"fontSize": "15px", "color": "#8395a7"},
             ))
     else:
         children.append(html.P("(structural block — always on)",
-                               style={"fontSize": "11px", "color": "#8395a7"}))
+                               style={"fontSize": "15px", "color": "#8395a7"}))
 
     params = st.get("params", {})
     for ps in spec.params:
@@ -327,7 +327,7 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
                                                      "display": "block",
                                                      "marginTop": "6px"}))
         if ps.help:
-            children.append(html.Span(ps.help, style={"fontSize": "11px",
+            children.append(html.Span(ps.help, style={"fontSize": "15px",
                                                        "color": "#8395a7"}))
         cid = {"role": "block-param", "block": block_id, "param": ps.key}
         if ps.kind == "choice":
@@ -385,7 +385,7 @@ def preset_notes(preset: DemoPreset) -> Any:
         _list("Turn live", knobs, "#3867d6"),
         _list("Say", preset.say, "#20bf6b"),
         _list("Do NOT say or show", preset.do_not_say, "#eb3b5a"),
-    ], style={"fontSize": "12px", "color": "#2d3a4a"})
+    ], style={"fontSize": "16px", "color": "#2d3a4a"})
 
 
 def _legend_swatch(color: str, label: str) -> Any:

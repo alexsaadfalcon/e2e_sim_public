@@ -29,6 +29,7 @@ import sys
 import tempfile
 from typing import Any, Dict
 
+import numpy as np
 from dash import (
     ALL,
     Dash,
@@ -43,7 +44,7 @@ from dash import (
 )
 
 from webapp import block_diagram, scenario_editor
-from webapp.demo_presets import PRESETS_BY_ID, PresetError, apply_preset
+from webapp.demo_presets import PRESETS, PRESETS_BY_ID, DemoPreset, PresetError, apply_preset
 from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
     PipelineError,
@@ -63,13 +64,46 @@ server = app.server  # exposed for gunicorn/WSGI if ever needed
 # Result figures are stored as Plotly figure dicts in this Store between runs.
 EMPTY_RESULTS: Dict[str, Any] = {}
 
-# Cancel flag for the run in progress. ONE flag, process-wide: this app is a single
-# operator's local demo server (Dash's threaded dev server lets the Cancel callback
-# execute while the Run callback is still inside run_pipeline). Under a multi-worker
-# WSGI deployment the flag would not reach the worker holding the run; that
+# Cancel flags + in-progress locks, keyed by PER-TAB session id (see "session-id-store"
+# below). Dash's threaded dev server lets the Cancel callback execute while the Run
+# callback is still inside run_pipeline; before 2026-09-23 there was ONE flag,
+# process-wide, so a second browser tab's Cancel button silently truncated an
+# unrelated tab's run ("Cancelled after 5 of 20 frames" with no hint why -- found in a
+# hands-on browser bug hunt, reproduced deterministically). A missing/falsy session id
+# (a unit test calling a callback directly, or a client whose store has not yet
+# seeded) shares one fallback key -- the pre-existing global behaviour. Under a
+# multi-worker WSGI deployment neither dict would be shared across workers; that
 # deployment does not exist and would need a background-callback manager anyway.
-import threading  # noqa: E402  (deliberately next to the flag it exists for)
-_CANCEL = threading.Event()
+import threading  # noqa: E402  (deliberately next to the flags/locks it exists for)
+_SESSION_LOCK = threading.Lock()  # guards both dicts below
+_CANCEL_FLAGS: Dict[str, "threading.Event"] = {}
+_RUN_LOCKS: Dict[str, "threading.Lock"] = {}
+
+
+def _session_key(session_id) -> str:
+    return session_id or "_default"
+
+
+def _cancel_event(session_id) -> "threading.Event":
+    """This session's Cancel flag, created on first use."""
+    key = _session_key(session_id)
+    with _SESSION_LOCK:
+        ev = _CANCEL_FLAGS.get(key)
+        if ev is None:
+            ev = _CANCEL_FLAGS[key] = threading.Event()
+        return ev
+
+
+def _run_lock(session_id) -> "threading.Lock":
+    """This session's reentrancy guard (a rapid double-click on Run, or two Run
+    clicks before the button's client-side `disabled` state takes effect, must not
+    dispatch two overlapping pipeline runs -- found in the same bug hunt)."""
+    key = _session_key(session_id)
+    with _SESSION_LOCK:
+        lock = _RUN_LOCKS.get(key)
+        if lock is None:
+            lock = _RUN_LOCKS[key] = threading.Lock()
+        return lock
 
 
 def _app_layout() -> Any:
@@ -85,6 +119,17 @@ def _app_layout() -> Any:
         # Per-session last-rendered diagram signature (see _render_diagram): starts
         # None each session/refresh so a fresh client always gets its first render.
         dcc.Store(id="diagram-sig-store", data=None),
+        # A per-BROWSER-TAB id (sessionStorage, not shared across tabs like
+        # localStorage or a cookie session would be), seeded once by the clientside
+        # callback below. Scopes Cancel and the double-click guard to the tab that
+        # actually clicked Run.
+        dcc.Store(id="session-id-store", storage_type="session", data=None),
+        # The RAW text of "Frames to run" at the moment Run was clicked, captured
+        # client-side (see the clientside callback below): the browser's own number
+        # input reports None for BOTH a blank field and an out-of-range one (0, 51,
+        # ...), which read as the identical "blank or outside 1..50" message either
+        # way (bug hunt, 2026-09-23) -- the raw text lets the refusal say which.
+        dcc.Store(id="run-nsteps-raw", data=None),
 
         dcc.Tabs(id="tabs", value="tab-blocks", children=[
             dcc.Tab(label="Block Diagram", value="tab-blocks",
@@ -99,6 +144,36 @@ def _app_layout() -> Any:
 
 
 app.layout = _app_layout
+
+
+@app.callback(
+    Output("session-id-store", "data"),
+    Input("session-id-store", "data"),
+)
+def _ensure_session_id(existing):
+    """Seed this tab's session id once (self-seeding dcc.Store idiom: Input and
+    Output share a prop, so the callback fires once more after writing a value and
+    then stops, since the second call sees `existing` already set)."""
+    if existing:
+        return no_update
+    import uuid
+    return str(uuid.uuid4())
+
+
+# Captures the Frames-to-run field's RAW text at the moment Run is clicked, via the
+# DOM directly rather than Dash's own number-input coercion (which reports None for
+# both a blank field and an out-of-range one -- see "run-nsteps-raw" above).
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        var el = document.getElementById('run-nsteps');
+        return el ? el.value : null;
+    }
+    """,
+    Output("run-nsteps-raw", "data"),
+    Input("run-button", "n_clicks"),
+    prevent_initial_call=True,
+)
 
 
 # =================================================================================
@@ -204,70 +279,42 @@ def _with_param(block_state, bid, pkey, val):
     return block_state
 
 
-@app.callback(
-    Output("results-store", "data"),
-    Output("run-status", "children"),
-    Output("tabs", "value"),
-    Output("run-sink", "children"),
-    Input("run-button", "n_clicks"),
-    State("block-state-store", "data"),
-    State("run-nsteps", "value"),
-    State("scenario-json", "value"),
-    State("results-store", "data"),
-    prevent_initial_call=True,
-    # dash>=2.9 supports `running` on plain (non-background) callbacks: the
-    # renderer flips these properties synchronously around the request, so the
-    # button disables and the dcc.Loading spinner around "run-sink" (its only
-    # child is now an Output of this callback, which is what makes dcc.Loading
-    # notice it's "loading" in the first place) actually engages for the ~10s a
-    # run takes, instead of both being dead decoration.
-    running=[(Output("run-button", "disabled"), True, False),
-             (Output("cancel-button", "disabled"), False, True)],
-)
-def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=None):
-    """Run the pipeline (lazy heavy imports inside) and stash result figures.
+def _matching_ab_preset(block_state: Dict[str, Any]):
+    """The loaded preset, IF `block_state` is exactly its as-loaded ("arm a") state
+    and it defines an A/B comparison (`DemoPreset.ab`, Change 1) -- i.e. the operator
+    has not hand-edited anything since Load preset. A manual edit changes
+    `block_state` away from `apply_preset(p)`, so this returns None and Run falls
+    back to the ordinary single-run path (the "turn one knob and run again" flow
+    every card also documents keeps working, ab-enabled preset or not)."""
+    for p in PRESETS:
+        if p.ab is None:
+            continue
+        try:
+            if apply_preset(p) == block_state:
+                return p
+        except PresetError:
+            continue
+    return None
 
-    The store holds the figures under their product keys plus two reserved entries:
-    ``_banner`` (what produced these figures: run number, time, source, frames, the
-    detector's operating point) and ``_previous`` (the last run's figures and banner),
-    so the Results tab can show a before/after -- every demo card says "run, turn one
-    knob, run again", and until 2026-09-22 the comparison lived only in the audience's
-    memory of a screen that had been replaced.
-    """
-    block_state = block_state or default_block_state()
-    # Unique per-invocation value so "run-sink" always changes -- dcc.Loading only
-    # needs this Output to belong to a pending callback to spin, but a changing
-    # value also makes the sink's own purpose (a loading anchor) legible in devtools.
-    sink = f"run #{n_clicks}"
-    # The spinner reports None for a blank or out-of-range value (min=1, max=50), and
-    # `int(n_steps or 10)` silently ran 10 frames for 0, -1, 500 and blank while the
-    # field kept showing the typed value (operator-flow review, 2026-09-22). Refuse.
-    if n_steps is None or int(n_steps) < 1:
-        return no_update, html.Span(
-            f"Frames to run must be a whole number from 1 to {MAX_N_STEPS}; the field is "
-            "blank or outside that range. Fix it and press Run again.",
-            style={"color": "#eb3b5a"}), no_update, sink
-    n_steps = int(n_steps)
-    try:
-        _CANCEL.clear()
-        outputs = run_pipeline(block_state, n_steps=n_steps, should_stop=_CANCEL.is_set)
-    except PipelineError as e:
-        # Friendly, expected failure: stay on the diagram, show the message -- and
-        # relabel the figures still on the Results tab so they are not read as this run.
-        return (_stale_after_failure(prev_results, n_clicks, str(e)),
-                html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink)
-    except Exception as e:  # unexpected — still don't crash the server
-        return (_stale_after_failure(prev_results, n_clicks, str(e)),
-                html.Span(f"Unexpected error: {e}", style={"color": "#eb3b5a"}),
-                no_update, sink)
 
+def _ab_banner_line(preset: "DemoPreset") -> str:
+    """'A: <value> | B: <value>', naming the knob the way the editor labels it --
+    prefixed onto both arms' banners so the comparison the operator asked for a knob
+    turn to show is legible without also reading the operator card."""
+    bid, key, _value_b = preset.ab
+    label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
+    return f"A/B -- {label}: A: {preset.ab_label_a or '?'} | B: {preset.ab_label_b or '?'}"
+
+
+def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str):
+    """Figures + banner + status message for ONE run's outputs -- shared by the
+    ordinary single-run path and each arm of an A/B run. `note` is the caller's
+    already-computed status-line suffix (see `_run_pipeline`'s `_note_for`). Returns
+    None when nothing rendered (cancelled before the first frame)."""
     figs = figures_from_outputs(outputs)
-    if not figs and (outputs.get("_axis_meta") or {}).get("cancelled"):
-        # Cancelled before the first frame finished: nothing ran. Stay on the diagram
-        # rather than send the presenter to a Results tab holding only a banner.
-        return no_update, html.Span(
-            "Cancelled before the first frame finished: nothing ran, nothing to show. "
-            "The Results tab is unchanged.", style={"color": "#f39c12"}), no_update, sink
+    axis_meta = outputs.get("_axis_meta") or {}
+    if not figs and axis_meta.get("cancelled"):
+        return None
     # Geometry FIRST, when the Scenario tab holds a parseable scene: a stripe in
     # sin(azimuth) is only interpretable next to the layout that produced it (see
     # pipeline_runner.scenario_topdown_figure). Best-effort by design -- the editor
@@ -287,30 +334,19 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 scene_fig = None
     if scene_fig is not None:
         figs = {"scene_topdown": scene_fig, **figs}
-    # store as plain dicts (Plotly figures are JSON-serializable via to_dict)
-    data = {k: f.to_dict() for k, f in figs.items()}
-    n_products = len(data)
-    axis_meta = outputs.get("_axis_meta") or {}
-    data["_banner"] = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
-    if prev_results:
-        data["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
-    note = ""
-    # Physical scale mode trusts the frames to BE volts; nothing in a bare .pkl can
-    # verify that (no metadata until the frames-carry-metadata refactor), so surface
-    # the assumption instead of silently producing clipped/underdriven nonsense when
-    # a legacy unit-energy pkl (e.g. the stock munich frames) is fed through it.
-    scale_mode = block_state.get("rffe", {}).get("params", {}).get("scale_mode")
-    if scale_mode == "physical":
-        note = ("  [physical scale mode (forced): assumes frames were generated with "
-                "tx_power_dbm set -- stock munich/etoile pkls are legacy-normalized]")
-    elif scale_mode in (None, "auto") and (outputs.get("_axis_meta") or {}).get("from_meta"):
-        # In auto mode the frames declare their own convention (v2 metadata), so no
-        # assumption warning is needed -- but say what was detected, for transparency.
-        note = "  [auto scale mode: following the frames' own metadata]"
-    # Run notes (blocks a source could not apply, a checkpoint without a provenance
-    # stamp, ...) belong next to the result, not in a server log nobody reads on stage.
-    if axis_meta.get("notes"):
-        note += "  [" + " | ".join(axis_meta["notes"]) + "]"
+    # Thrust 5 preset: the offline-scored PR curve (e2e/ml/runs/beat_cfar.json) this
+    # run's operating point sits on, next to the live scoreboard figures_from_outputs
+    # already added -- only when the on-screen detector maps to one of its scored arms.
+    if axis_meta.get("detector"):
+        from webapp import detector_scoreboard
+        try:
+            arm_name = detector_scoreboard.arm_name_for_detector(axis_meta["detector"])
+        except (FileNotFoundError, ValueError):
+            arm_name = None
+        if arm_name is not None:
+            figs = {**figs, "detector_pr_stored": detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)}
+    n_products = len(figs)
+    banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
     if axis_meta.get("cancelled"):
         # Partial results are still shown, labelled as partial.
         msg = html.Span(f"Cancelled after {axis_meta.get('n_steps_run', '?')} of "
@@ -320,7 +356,201 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
     else:
         msg = html.Span(f"Run complete: {n_products} product(s). See Results tab.{note}",
                         style={"color": "#20bf6b"})
-    return data, msg, "tab-results", sink
+    return {"figs": figs, "banner": banner, "msg": msg, "n_products": n_products,
+            "cancelled": bool(axis_meta.get("cancelled"))}
+
+
+def _describe_bad_frame_count(raw) -> str:
+    """A precise reason for refusing a Frames-to-run value, using the RAW text typed
+    into the field (see the clientside callback that populates "run-nsteps-raw").
+    The browser's own number-input coercion reports None for BOTH a blank field and
+    an out-of-range one (0, 51, ...), which used to read as the identical "blank or
+    outside 1..50" message either way (bug hunt, 2026-09-23)."""
+    text = str(raw if raw is not None else "").strip()
+    if not text:
+        return "the field is blank"
+    try:
+        val = float(text)
+    except ValueError:
+        return f"{text!r} is not a number"
+    if val < 1:
+        return f"{text} is below the minimum of 1"
+    if val > MAX_N_STEPS:
+        return f"{text} exceeds the maximum of {MAX_N_STEPS}"
+    return f"{text} is not a whole number"
+
+
+@app.callback(
+    Output("results-store", "data"),
+    Output("run-status", "children"),
+    Output("tabs", "value"),
+    Output("run-sink", "children"),
+    Input("run-button", "n_clicks"),
+    State("block-state-store", "data"),
+    State("run-nsteps", "value"),
+    State("scenario-json", "value"),
+    State("results-store", "data"),
+    State("run-nsteps-raw", "data"),
+    State("session-id-store", "data"),
+    prevent_initial_call=True,
+    # dash>=2.9 supports `running` on plain (non-background) callbacks: the
+    # renderer flips these properties synchronously around the request, so the
+    # button disables and the dcc.Loading spinner around "run-sink" (its only
+    # child is now an Output of this callback, which is what makes dcc.Loading
+    # notice it's "loading" in the first place) actually engages for the ~10s a
+    # run takes, instead of both being dead decoration.
+    running=[(Output("run-button", "disabled"), True, False),
+             (Output("cancel-button", "disabled"), False, True)],
+)
+def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=None,
+                  nsteps_raw=None, session_id=None):
+    """Run the pipeline (lazy heavy imports inside) and stash result figures.
+
+    The store holds the figures under their product keys plus two reserved entries:
+    ``_banner`` (what produced these figures: run number, time, source, frames, the
+    detector's operating point) and ``_previous`` (the last run's figures and banner),
+    so the Results tab can show a before/after -- every demo card says "run, turn one
+    knob, run again", and until 2026-09-22 the comparison lived only in the audience's
+    memory of a screen that had been replaced.
+
+    A/B presets (Change 1, `DemoPreset.ab`): when `block_state` is exactly an ab-preset's
+    as-loaded state, this runs the pipeline TWICE -- run A as loaded, run B with the
+    preset's single override -- and reuses this same before/after mechanism: A becomes
+    ``_previous``, B becomes the current run. One click, two runs, no manual re-run.
+
+    `session_id` scopes Cancel and the double-click guard to the browser tab that
+    clicked Run (see `_cancel_event`/`_run_lock`): a second click while a run for the
+    SAME session is still in flight is ignored rather than dispatching an overlapping
+    run (bug hunt, 2026-09-23).
+    """
+    block_state = block_state or default_block_state()
+    # Unique per-invocation value so "run-sink" always changes -- dcc.Loading only
+    # needs this Output to belong to a pending callback to spin, but a changing
+    # value also makes the sink's own purpose (a loading anchor) legible in devtools.
+    sink = f"run #{n_clicks}"
+    # The spinner reports None for a blank or out-of-range value (min=1, max=50), and
+    # `int(n_steps or 10)` silently ran 10 frames for 0, -1, 500 and blank while the
+    # field kept showing the typed value (operator-flow review, 2026-09-22). Refuse.
+    if n_steps is None or int(n_steps) < 1:
+        return no_update, html.Span(
+            f"Frames to run must be a whole number from 1 to {MAX_N_STEPS}; "
+            f"{_describe_bad_frame_count(nsteps_raw)}. Fix it and press Run again.",
+            style={"color": "#eb3b5a"}), no_update, sink
+    n_steps = int(n_steps)
+
+    lock = _run_lock(session_id)
+    if not lock.acquire(blocking=False):
+        # A second Run click for the SAME session while one is still in flight (a
+        # forced rapid double-click can beat the button's client-side `disabled`
+        # state to the server) -- ignore it rather than dispatching an overlapping
+        # run that would render two result panels.
+        return no_update, html.Span(
+            "A run is already in progress for this session; ignoring the extra click.",
+            style={"color": "#f39c12"}), no_update, sink
+
+    try:
+        def _note_for(state_arm: Dict[str, Any], axis_meta: Dict[str, Any]) -> str:
+            """The status-line suffix: a scale-mode assumption, or blocks a source
+            could not apply -- computed per arm (A and B can differ, e.g. scale_mode)."""
+            note = ""
+            # Physical scale mode trusts the frames to BE volts; nothing in a bare
+            # .pkl can verify that (no metadata until the frames-carry-metadata
+            # refactor), so surface the assumption instead of silently producing
+            # clipped/underdriven nonsense when a legacy unit-energy pkl (e.g. stock
+            # munich frames) is fed in.
+            scale_mode = state_arm.get("rffe", {}).get("params", {}).get("scale_mode")
+            if scale_mode == "physical":
+                note = ("  [physical scale mode (forced): assumes frames were "
+                        "generated with tx_power_dbm set -- stock munich/etoile "
+                        "pkls are legacy-normalized]")
+            elif scale_mode in (None, "auto") and axis_meta.get("from_meta"):
+                # In auto mode the frames declare their own convention (v2
+                # metadata), so no assumption warning is needed -- but say what was
+                # detected.
+                note = "  [auto scale mode: following the frames' own metadata]"
+            # Run notes (blocks a source could not apply, a checkpoint without a
+            # provenance stamp, ...) belong next to the result, not in a server log
+            # nobody reads on stage.
+            if axis_meta.get("notes"):
+                note += "  [" + " | ".join(axis_meta["notes"]) + "]"
+            return note
+
+        ab_preset = _matching_ab_preset(block_state)
+        state_b = apply_preset(ab_preset, arm="b") if ab_preset is not None else None
+        cancel = _cancel_event(session_id)
+        try:
+            cancel.clear()
+            outputs_a = run_pipeline(block_state, n_steps=n_steps, should_stop=cancel.is_set)
+            outputs_b = None
+            if state_b is not None and not (outputs_a.get("_axis_meta") or {}).get("cancelled"):
+                # The frame ceiling (MAX_N_STEPS/MAX_PRESET_N_STEPS) is enforced inside
+                # run_pipeline itself, so it applies to THIS call independently of run A.
+                outputs_b = run_pipeline(state_b, n_steps=n_steps, should_stop=cancel.is_set)
+        except PipelineError as e:
+            # Friendly, expected failure: stay on the diagram, show the message -- and
+            # relabel the figures still on the Results tab so they are not read as this run.
+            return (_stale_after_failure(prev_results, n_clicks, str(e)),
+                    html.Span(str(e), style={"color": "#eb3b5a"}), no_update, sink)
+        except Exception as e:  # unexpected — still don't crash the server
+            return (_stale_after_failure(prev_results, n_clicks, str(e)),
+                    html.Span(f"Unexpected error: {e}", style={"color": "#eb3b5a"}),
+                    no_update, sink)
+
+        result_a = _arm_result(n_clicks, outputs_a, n_steps, block_state, scenario_json,
+                               _note_for(block_state, outputs_a.get("_axis_meta") or {}))
+        if result_a is None:
+            # Cancelled before the first frame finished: nothing ran. Stay on the diagram
+            # rather than send the presenter to a Results tab holding only a banner.
+            return no_update, html.Span(
+                "Cancelled before the first frame finished: nothing ran, nothing to show. "
+                "The Results tab is unchanged.", style={"color": "#f39c12"}), no_update, sink
+
+        if state_b is not None:
+            ab_line = _ab_banner_line(ab_preset)
+            result_b = (_arm_result(n_clicks, outputs_b, n_steps, state_b, scenario_json,
+                                    _note_for(state_b, outputs_b.get("_axis_meta") or {}))
+                       if outputs_b is not None else None)
+            if result_b is None:
+                # Cancelled between A and B (or before B's first frame): show A alone,
+                # exactly like an ordinary single run -- Cancel still leaves something.
+                data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
+                data_a["_banner"] = f"{ab_line} -- B did not run (cancelled)  ||  {result_a['banner']}"
+                if prev_results:
+                    data_a["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
+                return data_a, html.Span(
+                    "Cancelled before run B started: showing run A only. See Results tab.",
+                    style={"color": "#f39c12"}), "tab-results", sink
+            data_b = {k: f.to_dict() for k, f in result_b["figs"].items()}
+            data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
+            data_b["_banner"] = f"{ab_line}  ||  {result_b['banner']}"
+            data_b["_previous"] = {**data_a, "_banner": f"{ab_line}  ||  {result_a['banner']}"}
+            if result_b["cancelled"]:
+                msg = html.Span(
+                    f"A complete, B cancelled after "
+                    f"{(outputs_b.get('_axis_meta') or {}).get('n_steps_run', '?')} of "
+                    f"{n_steps} frames. See Results tab (partial B).",
+                    style={"color": "#f39c12"})
+            else:
+                msg = html.Span(
+                    f"A/B run complete ({ab_preset.ab_label_a} vs {ab_preset.ab_label_b}): "
+                    f"{result_a['n_products']} / {result_b['n_products']} product(s). "
+                    "See Results tab.", style={"color": "#20bf6b"})
+            return data_b, msg, "tab-results", sink
+
+        # Ordinary single-run path: unchanged behaviour.
+        data = {k: f.to_dict() for k, f in result_a["figs"].items()}
+        data["_banner"] = result_a["banner"]
+        if prev_results:
+            data["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
+        return data, result_a["msg"], "tab-results", sink
+    finally:
+        # Not cleaned up from _RUN_LOCKS/_CANCEL_FLAGS: popping here would race a
+        # concurrent `_run_lock`/`_cancel_event` lookup for the SAME session (it
+        # could create a second Lock/Event object right as this one is removed,
+        # letting a genuinely overlapping run slip past the guard). The dicts grow
+        # by one entry per distinct browser tab that has ever clicked Run or
+        # Cancel -- trivial for a demo session.
+        lock.release()
 
 
 def _stale_after_failure(prev_results, n_clicks, error: str):
@@ -401,11 +631,14 @@ def _load_preset(n_clicks, preset_id, node_data):
 @app.callback(
     Output("run-status", "children", allow_duplicate=True),
     Input("cancel-button", "n_clicks"),
+    State("session-id-store", "data"),
     prevent_initial_call=True,
 )
-def _cancel_run(n_clicks):
-    """Ask the run in progress to stop after the frame it is on (see _CANCEL)."""
-    _CANCEL.set()
+def _cancel_run(n_clicks, session_id=None):
+    """Ask the run in progress to stop after the frame it is on. Scoped to THIS
+    session (see `_cancel_event`) -- before 2026-09-23 one shared flag let a second
+    browser tab's Cancel truncate an unrelated tab's run."""
+    _cancel_event(session_id).set()
     return html.Span("Cancelling after the current frame...", style={"color": "#f39c12"})
 
 
@@ -413,26 +646,95 @@ def _cancel_run(n_clicks):
 # Results tab
 # =================================================================================
 
+def _decode_plotly_array(v) -> list:
+    """A heatmap trace's x/y/z, after `go.Figure.to_dict()`, is EITHER a plain list OR
+    plotly's compact typed-array encoding (`{"dtype": ..., "bdata": <base64>}` -- used
+    for large numpy arrays since plotly 5.20+; every range_az/range_el/radar_cube axis
+    here is a numpy array). Decode either into a flat list of floats. Found live in the
+    2026-09-22 rehearsal: `_share_y_ranges` crashed reading 'dtype' as a coordinate
+    because it assumed the plain-list form. Used only for axis bookkeeping -- the
+    stored trace dict itself (what actually renders) is untouched."""
+    if v is None:
+        return []
+    if isinstance(v, dict) and "bdata" in v:
+        import base64
+        raw = base64.b64decode(v["bdata"])
+        return np.frombuffer(raw, dtype=np.dtype(v.get("dtype", "f8"))).tolist()
+    return list(v)
+
+
 def _share_y_ranges(figs, prev_figs) -> None:
-    """Give a line plot present in both runs one y-range, so the before/after pair
-    reads as a difference in height, not two identically shaped curves with different
-    tick labels (Thrust 2: 0.06 vs 0.63 drawn the same size, review 2026-09-22).
-    Heatmaps carry fixed colour ranges already; only scatter traces are touched."""
+    """Give a figure present in both runs of a before/after pair one set of axes, so
+    the pair reads as a difference in the DATA, not two independently autoscaled
+    panels (Thrust 2: 0.06 vs 0.63 drawn the same size, review 2026-09-22; A/B
+    heatmaps with mismatched axes/colour scale, Change 1 review 2026-09-22).
+
+    Scatter traces share one y-range (0 to the larger of the two curves' own peak,
+    or a floor either figure already set -- see pipeline_runner's subspace-error
+    minimum y-axis bound, which this must not shrink back down). Heatmap traces
+    additionally share one x-range, y-range AND zmin/zmax, so an A/B pair's colour
+    scale and axis extent cannot silently differ even if one arm's binning did."""
     for key in set(figs) & set(prev_figs):
         pair = (figs[key], prev_figs[key])
-        ys = []
-        for fig in pair:
-            data = fig.get("data") or []
-            if not data or data[0].get("type", "scatter") != "scatter":
-                ys = []
-                break
-            for tr in data:
-                ys.extend(float(v) for v in (tr.get("y") or []) if v is not None)
-        if not ys:
+        datas = [fig.get("data") or [] for fig in pair]
+        if not all(datas):
             continue
-        top = max(ys) * 1.05 if max(ys) > 0 else 1.0
-        for fig in pair:
-            fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = [0.0, top]
+        kinds = [d[0].get("type", "scatter") for d in datas]
+        if kinds[0] != kinds[1]:
+            continue
+        if kinds[0] == "heatmap":
+            xs, ys, zmins, zmaxs = [], [], [], []
+            for data in datas:
+                for tr in data:
+                    if tr.get("type") != "heatmap":
+                        continue
+                    xs.extend(v for v in _decode_plotly_array(tr.get("x")) if v is not None)
+                    ys.extend(v for v in _decode_plotly_array(tr.get("y")) if v is not None)
+                    if tr.get("zmin") is not None:
+                        zmins.append(float(tr["zmin"]))
+                    if tr.get("zmax") is not None:
+                        zmaxs.append(float(tr["zmax"]))
+            if xs and ys:
+                xr, yr = [min(xs), max(xs)], [min(ys), max(ys)]
+                for fig in pair:
+                    fig.setdefault("layout", {}).setdefault("xaxis", {})["range"] = xr
+                    fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = yr
+            if zmins and zmaxs:
+                zr = (min(zmins), max(zmaxs))
+                for fig in pair:
+                    for tr in fig.get("data") or []:
+                        if tr.get("type") == "heatmap":
+                            tr["zmin"], tr["zmax"] = zr
+        else:
+            if kinds[0] != "scatter":
+                continue
+            existing = [((fig.get("layout") or {}).get("yaxis") or {}).get("range")
+                       for fig in pair]
+            if any(existing):
+                # Respect a range either figure ALREADY fixed explicitly (range_profile's
+                # constant -60..2 dB display floor, subspace_err's own minimum-bound
+                # range) -- union them instead of recomputing tozero from the raw data,
+                # which clobbered range_profile's negative-dB scale into [0, 1] (found in
+                # rehearsal, 2026-09-23: the A/B before/after pair went blank because the
+                # error-curve convention below assumes non-negative, zero-anchored data,
+                # which is true for subspace_err and false for a dB-scale line plot).
+                lo = min(r[0] for r in existing if r)
+                hi = max(r[1] for r in existing if r)
+                for fig in pair:
+                    fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = [lo, hi]
+                continue
+            # No figure set its own range (e.g. subspace_err before Change 3, or any
+            # other non-negative error-like curve): fall back to a shared, zero-anchored
+            # range computed from the data, exactly as before.
+            ys = []
+            for data in datas:
+                for tr in data:
+                    ys.extend(v for v in _decode_plotly_array(tr.get("y")) if v is not None)
+            if not ys:
+                continue
+            top = max(ys) * 1.05 if max(ys) > 0 else 1.0
+            for fig in pair:
+                fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = [0.0, top]
 
 
 @app.callback(
