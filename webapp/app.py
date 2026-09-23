@@ -366,11 +366,18 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
-def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str):
+def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str,
+                arm: str = "a"):
     """Figures + banner + status message for ONE run's outputs -- shared by the
     ordinary single-run path and each arm of an A/B run. `note` is the caller's
     already-computed status-line suffix (see `_run_pipeline`'s `_note_for`). Returns
-    None when nothing rendered (cancelled before the first frame)."""
+    None when nothing rendered (cancelled before the first frame).
+
+    `arm` ("a" or "b") is which A/B panel this is, if any (ignored on a single-run
+    path). Item 7 (hostile-expert read, 2026-09-23): the offline-scored PR panel
+    below is scored on the fixed beat_cfar.json split and is IDENTICAL on both arms
+    by design -- an A/B knob never touches it -- which read as a bug (two panels,
+    same numbers) until arm B's copy said so in its own subtitle."""
     figs = figures_from_outputs(outputs)
     axis_meta = outputs.get("_axis_meta") or {}
     if not figs and axis_meta.get("cancelled"):
@@ -404,7 +411,13 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
         except (FileNotFoundError, ValueError):
             arm_name = None
         if arm_name is not None:
-            figs = {**figs, "detector_pr_stored": detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)}
+            pr_fig = detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)
+            if arm == "b":
+                pr_fig.update_layout(title=dict(
+                    text=pr_fig.layout.title.text
+                        + "<br><sup>scored offline; identical on both arms, the "
+                          "knob cannot move it</sup>"))
+            figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
     if axis_meta.get("cancelled"):
@@ -587,7 +600,8 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             # before/after render mechanism, but each banner now names ONLY its own arm.
             line_a = _ab_arm_line(ab_preset, "a")
             result_b = (_arm_result(n_clicks, outputs_b, n_steps, state_b, scenario_json,
-                                    _note_for(state_b, outputs_b.get("_axis_meta") or {}))
+                                    _note_for(state_b, outputs_b.get("_axis_meta") or {}),
+                                    arm="b")
                        if outputs_b is not None else None)
             if result_b is None:
                 # Cancelled between A and B (or before B's first frame): show A alone,

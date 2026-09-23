@@ -39,8 +39,13 @@ RADDETNET_THRESHOLD = 0.44
 
 #: Classical CA-CFAR's recall-0.5 operating point on the same split (`beat_cfar.json`,
 #: `operating_point.score_threshold` 0.661). All three Thrust 5 presets sit at their
-#: recall-0.5 points so the cross counts on screen are the false-alarm comparison the
-#: cards quote (6.2 / 26 / 3.0 per frame), not three arbitrary thresholds.
+#: recall-0.5 points on the 172-frame beat_cfar.json split -- not three arbitrary
+#: thresholds -- so the FA/frame numbers quoted from that file (6.2 / 26 / 3.0 per
+#: frame) are the comparison. RETRACTED (hostile-expert read, 2026-09-23, item 4):
+#: this comment used to say the on-screen CROSS COUNTS (5 live frames) ARE that
+#: comparison; they are not -- recall varies frame to frame on 5 frames (arm-A hit
+#: rates measured 2026-09-23: CFAR 0.53, RADDetNet 0.33, ML 0.50 -- nowhere near
+#: matched), so only the 172-frame rows are comparable across arms.
 CFAR_THRESHOLD = 0.66
 
 #: Decode threshold for that checkpoint: its recall-0.5 operating point, objectness
@@ -446,23 +451,28 @@ PRESETS: List[DemoPreset] = [
         ),
         # MEASURED 2026-09-23 (CUDA, two identical runs per arm): A (12-bit) 61
         # detections over the 5 test frames, 16 hits / 45 unmatched / 9.0 per frame;
-        # B (4-bit) 55 detections, 15 hits / 40 unmatched / 8.0 per frame. The gate
+        # B (3-bit) 49 detections, 13 hits / 36 unmatched / 7.2 per frame. The gate
         # printed max |diff| = 0 ADC codes on the A arm (bit-identical to the corpus)
-        # and 2048 codes on the B arm -- the quantizer, which is the point.
+        # and a nonzero live-vs-stored diff on the B arm -- the quantizer, which is
+        # the point. 3-bit, not 4 (item 2, hostile-expert read, 2026-09-23): swept
+        # {2, 3, 4, 6} bits on both this preset and RADDetNet -- 4-bit was the value
+        # at which RADDetNet's hit count went UP relative to 12-bit (10 -> 11) on
+        # these 5 frames, reading backwards on screen; 3-bit is the largest depth in
+        # the sweep at which BOTH detectors lose hits relative to 12-bit.
         blurb=("The held-out TEST frames, replayed as the STORED RAY-TRACED CHANNEL: "
                "the RF front end, dechirp, thermal floor, impairments, IF high-pass "
                "and ADC all run LIVE from that channel with the values on screen, then "
                "CA-CFAR. Press Run once: A is the 12-bit ADC the corpus was generated "
-               "at, B the same frames re-digitised at 4 bits. Measured over the 5 "
-               "frames: 16 hits / 45 unmatched (9.0 per frame) at 12 bits, 15 / 40 "
-               "(8.0) at 4 bits. The threshold is CFAR's recall-0.5 point (0.66), "
-               "matching the two network presets, so the cross counts across the "
-               "three screens ARE the false-alarm comparison."),
-        live_knobs=[("quantizer", "bits", "12 -> 4 (the ADC is re-run, not re-loaded)"),
+               "at, B the same frames re-digitised at 3 bits. Measured over the 5 "
+               "frames: 16 hits / 45 unmatched (9.0 per frame) at 12 bits, 13 / 36 "
+               "(7.2) at 3 bits. Thresholds are each detector's recall-0.5 point on "
+               "the 172-frame split; on 5 frames recall varies, so compare the "
+               "172-frame FA/frame rows, not the crosses."),
+        live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.66 -> 0.8 (fewer detections)")],
-        ab=("quantizer", "bits", 4),
-        ab_label_a="12-bit ADC",
-        ab_label_b="4-bit ADC -- same frames, live chain",
+        ab=("quantizer", "bits", 3),
+        ab_label_a="12-bit ADC (as built)",
+        ab_label_b="3-bit ADC (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich "
@@ -487,7 +497,7 @@ PRESETS: List[DemoPreset] = [
             "if asked.",
         ],
         do_not_say=[
-            "That 16 vs 15 hits measures what 4-bit quantisation costs: 5 frames at "
+            "That 16 vs 13 hits measures what 3-bit quantisation costs: 5 frames at "
             "one threshold is a demonstration that the knob reaches the detector, not "
             "a measurement of the detector.",
             "Any learned-detector number from before 2026-09-22 except the rd-format "
@@ -512,21 +522,31 @@ PRESETS: List[DemoPreset] = [
         # detections, 4 hits / 61 unmatched / 12.2 per frame. 25 m was chosen by
         # sweeping: 4 m and 8 m move the count by 1-2 crosses (invisible on stage),
         # 40 m empties the screen (3 arms of 5 frames show nothing at all).
+        # ATTENUATION, MEASURED not assumed (item 1, hostile-expert read, 2026-09-23):
+        # the caption used to say the 25 m corner "discards everything closer", which
+        # the plot contradicts (targets at 20-25 m stay bright). The filter is an
+        # order-2 Butterworth high-pass (e2e/chain/receive.py IFHighPassBlock); its
+        # |H(R)| = 1/sqrt(1+(corner/R)^(2*order)) gives 4.27 dB of attenuation at the
+        # targets' ~22 m range for a 25 m corner (order 2) -- computed directly from
+        # `IFHighPassBlock.response`, not eyeballed. That is well above the 3 dB floor
+        # the task set for keeping the corner as-is, so 25 m is unchanged; the wording
+        # now states the measured dB instead of "discards".
         blurb=("The same live chain, decoded by the ported FFTRadNet checkpoint (rd "
                "input; offline test AP 0.127 against CFAR's 0.301). Its objectness map "
                "is a range-profile x fixed-azimuth-prior STRIPE, not peaks: the network "
                "never learns azimuth (F83). A/B moves the IF high-pass corner from the "
-               "1 m a real receiver uses to a deliberately broken 25 m, which suppresses "
-               "every return closer than that BEFORE digitisation: 148 crosses over the "
-               "5 frames fall to 65, and hits 15 -> 4. The decode threshold is pinned at "
-               "its recall-0.5 point (0.22); at the default 0.5 this checkpoint draws "
-               "nothing."),
+               "1 m a real receiver uses to a deliberately broken 25 m, which attenuates "
+               "(not discards) returns inside 25 m -- about 4.3 dB at the targets' ~22 m "
+               "range -- before digitisation: 148 crosses over the 5 frames fall to 65, "
+               "and hits 15 -> 4. The decode threshold is pinned at its recall-0.5 point "
+               "(0.22); at the default 0.5 this checkpoint draws nothing."),
         live_knobs=[("if_hpf", "corner_range_m",
-                     "1 m (as built) -> 25 m (an absurd receiver, and the detector says so)"),
+                     "1 m (as built) -> 25 m (attenuates returns inside 25 m; about "
+                     "4.3 dB at the targets' 22 m range)"),
                     ("detector", "threshold", "0.22 -> 0.5 (the figure goes blank)")],
         ab=("if_hpf", "corner_range_m", 25.0),
         ab_label_a="IF high-pass corner 1 m (as built)",
-        ab_label_b="corner 25 m -- the receiver discards everything closer",
+        ab_label_b="IF high-pass corner 25 m (attenuates ~4.3 dB at 22 m)",
         # ".": the shared note ends on the render-time v_max clause, so the sentence
         # separator has to be added back here or the two run together on screen
         # ("v_max +-9.69 m/s Loses to CFAR", read off the rehearsal PNG).
@@ -572,23 +592,26 @@ PRESETS: List[DemoPreset] = [
                                      "threshold": RADDETNET_THRESHOLD}}},
         ),
         # MEASURED 2026-09-23 (CUDA, repeated): A (12-bit) 23 detections over the 5
-        # frames, 10 hits / 13 unmatched / 2.6 per frame; B (4-bit) 19 detections, 11
-        # hits / 8 unmatched / 1.6 per frame. The hit count moves the "wrong" way by
-        # one -- 5 frames, and the card says so rather than hiding it.
+        # frames, 10 hits / 13 unmatched / 2.6 per frame; B (3-bit) 16 detections, 5
+        # hits / 11 unmatched / 2.2 per frame. 3-bit, not 4 (item 2, hostile-expert
+        # read, 2026-09-23): at 4-bit the hit count moved the WRONG way (10 -> 11,
+        # reading backwards on screen); swept {2, 3, 4, 6} bits on both this preset
+        # and CFAR -- 3-bit is the largest depth at which BOTH detectors lose hits
+        # relative to 12-bit, so the direction on screen now agrees with the claim.
         blurb=("The same live chain through RADDetNet (Doppler as channels, range x "
                "azimuth as the spatial plane) on CFAR's own beamformed cube. Offline "
                "test AP 0.476 vs CFAR's 0.301, 3.0 FA/frame at recall 0.5 vs CFAR's "
-               "6.2, controls pass (F85). A/B re-digitises the same stored channel at "
-               "4 bits: 23 crosses become 19, 13 unmatched become 8, and hits go 10 -> "
-               "11 -- five frames, so read it as 'the knob reaches the detector', not "
-               "as a ranking. On an unseen earlier-generator corpus the result is "
-               "SEED-DEPENDENT (F86). Owner decision: LEADS Thrust 5, caveat "
-               "volunteered."),
-        live_knobs=[("quantizer", "bits", "12 -> 4 (the ADC is re-run, not re-loaded)"),
+               "6.2, controls pass. A/B re-digitises the same stored channel at "
+               "3 bits: 23 crosses become 16, 13 unmatched become 11, and hits go "
+               "10 -> 5 -- five frames, so read it as 'the knob reaches the detector', "
+               "not as a ranking. On an unseen earlier-generator corpus the result is "
+               "seed-dependent (F86). Lead with this: it leads Thrust 5, and volunteer "
+               "the out-of-distribution caveat before being asked."),
+        live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
-        ab=("quantizer", "bits", 4),
-        ab_label_a="12-bit ADC",
-        ab_label_b="4-bit ADC -- same frames, live chain",
+        ab=("quantizer", "bits", 3),
+        ab_label_a="12-bit ADC (as built)",
+        ab_label_b="3-bit ADC (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "The defensible sentence: a learned head on the classical front end beats a "
@@ -614,8 +637,9 @@ PRESETS: List[DemoPreset] = [
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution and on "
             "CFAR's own front end (F85 addendum).",
-            "That 11 hits at 4 bits beating 10 at 12 bits means anything: it is 5 "
-            "frames at one threshold.",
+            "That 5 hits at 3 bits vs 10 at 12 bits measures the cost of 3-bit "
+            "quantisation: 5 frames at one threshold shows the knob reaches the "
+            "detector, not measures it.",
             "Anything about generalisation or robustness: the two single-corpus seeds "
             "straddle CFAR out of distribution (+0.03/-0.03); the joint 0.487 on v2 is "
             "NOT out-of-distribution -- it trained on v2 (F86).",

@@ -782,3 +782,39 @@ def test_share_axes_keeps_a_deliberate_heatmap_crop():
     assert prev["det"]["layout"]["yaxis"]["range"] == [0.0, 50.0]
     # x was fixed by neither panel, so it still shares the data extent.
     assert cur["det"]["layout"]["xaxis"]["range"] == [-1, 1]
+
+
+# ------------------------------------------------------------------------------------
+# Item 7 (hostile-expert read, 2026-09-23): the 172-frame offline PR panel is scored
+# on the fixed beat_cfar.json split and is IDENTICAL on both A/B arms by design -- an
+# A/B knob never touches it -- which reads as a bug (two panels, same numbers) unless
+# arm B's own copy says so.
+# ------------------------------------------------------------------------------------
+def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
+    import plotly.graph_objects as go
+
+    import webapp.app as appmod
+    from webapp import detector_scoreboard
+
+    monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {})
+    monkeypatch.setattr(detector_scoreboard, "arm_name_for_detector",
+                        lambda det_meta: "classical CFAR")
+    monkeypatch.setattr(
+        detector_scoreboard, "stored_pr_figure",
+        lambda highlight_arm=None: go.Figure(layout=dict(title=dict(text="scored offline: x"))))
+
+    outputs = {"_axis_meta": {"detector": {"mode": "cfar", "threshold": 0.66, "label": "x"}}}
+
+    result_a = appmod._arm_result(1, outputs, 5, {}, "", "", arm="a")
+    result_b = appmod._arm_result(1, outputs, 5, {}, "", "", arm="b")
+
+    title_a = result_a["figs"]["detector_pr_stored"].layout.title.text
+    title_b = result_b["figs"]["detector_pr_stored"].layout.title.text
+    assert "identical on both arms" not in title_a
+    assert "identical on both arms" in title_b
+    assert "the knob cannot move it" in title_b
+    # The default arm is "a" -- an ordinary single-run call must not pick up the
+    # B-only subtitle by accident.
+    result_default = appmod._arm_result(1, outputs, 5, {}, "", "")
+    assert "identical on both arms" not in (
+        result_default["figs"]["detector_pr_stored"].layout.title.text)

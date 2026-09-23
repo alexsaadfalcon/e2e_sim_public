@@ -328,8 +328,12 @@ def test_thrust5_ab_arms_move_a_front_end_knob_not_the_corpus():
     screen makes, so the test pins that the A/B never touches the source again."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_raddetnet"):
         p = PRESETS_BY_ID[pid]
-        assert p.ab == ("quantizer", "bits", 4), pid
-        assert "12-bit" in p.ab_label_a and "4-bit" in p.ab_label_b
+        # 3-bit, not 4 (item 2, hostile-expert read, 2026-09-23): swept {2, 3, 4, 6}
+        # bits on both detectors over the same 5 frames; 4-bit made RADDetNet's hit
+        # count go UP relative to 12-bit (10 -> 11), reading backwards on screen --
+        # 3-bit is the largest depth at which BOTH detectors lose hits.
+        assert p.ab == ("quantizer", "bits", 3), pid
+        assert "12-bit" in p.ab_label_a and "3-bit" in p.ab_label_b
     ml = PRESETS_BY_ID["thrust5_detector_ml"]
     assert ml.ab == ("if_hpf", "corner_range_m", 25.0)
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):

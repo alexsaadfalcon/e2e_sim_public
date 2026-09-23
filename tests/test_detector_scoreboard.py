@@ -164,13 +164,17 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     assert row["unmatched / frame, these 2 frames"] == "0.50"
     # The frame-count qualifier lives in the VALUE now, not the label (Change,
     # 2026-09-23 coordinator re-check: a long label wrapped to 2 lines and inflated
-    # every row in the table to that height -- see `_TABLE_COL_CHARS`).
-    hit_rate_key = next(k for k in row if k.startswith("hit rate"))
+    # every row in the table to that height -- see `_TABLE_COL_CHARS`). Relabelled
+    # from "hit rate (design, not quality)" (hostile-expert read, 2026-09-23, item 5:
+    # ambiguous -- "16 hits / 5 frames / an assumed 5 GT/frame" reads as 0.64, not
+    # the actual tp/(tp+fn)) to say exactly what it is.
+    hit_rate_key = next(k for k in row if k.startswith("recall (hits / GT)"))
     assert row[hit_rate_key].startswith("0.50 ")
     # This run scored 2 frames -- the value states ITS OWN frame count, not the
     # offline split size, so a 5-frame hit rate can't be misread as a stable per-arm
     # number.
     assert "2fr" in row[hit_rate_key]
+    assert "GT varies/frame" in row[hit_rate_key]
     # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
     # wrapped to two lines inside the header's declared height and clipped the
     # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
@@ -229,19 +233,23 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
                     if a.get("operating_point"))
     # Every label/value is now pre-wrapped to fit its column (see `scoreboard_figure`'s
     # `_TABLE_COL_CHARS` comment) -- reassemble before comparing, same convention the
-    # subline tests already use for `_wrap_text`'s output. "cumulative hits"/"hit
-    # rate" moved their qualifier into the VALUE column (Change, 2026-09-23
-    # coordinator re-check) so neither label wraps past one line.
+    # subline tests already use for `_wrap_text`'s output. "cumulative hits"/"recall"
+    # moved their qualifier into the VALUE column (Change, 2026-09-23 coordinator
+    # re-check) so neither label wraps past one line.
     labels, values = table.cells.values
     labels = [l.replace("<br>", " ") for l in labels]
     values = [v.replace("<br>", " ") for v in values]
     row = dict(zip(labels, values))
     assert labels == ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
                       "cumulative hits", "unmatched / frame, these 0 frames",
-                      "hit rate (design, not quality)"]
+                      "recall (hits / GT), this run"]
     assert row["cumulative hits"] == "0 (0/1 scored)"
-    assert row["hit rate (design, not quality)"] == (
-        f"n/a (0fr; R{target_recall:g}/{n_frames}fr split)")
+    # target_recall/n_frames (the beat_cfar.json split calibration) no longer appear
+    # on this row (item 5, moved out to disambiguate what the number actually is);
+    # kept read from the real file above only to document that this row does not
+    # depend on it any more, not because it's still used in the assertion below.
+    assert target_recall is not None and n_frames is not None
+    assert row["recall (hits / GT), this run"] == "n/a (0fr; GT varies/frame)"
 
 
 def test_scoreboard_figure_header_count_label_and_threshold_in_title():
@@ -404,7 +412,7 @@ def test_scoreboard_subline_falls_back_when_beat_cfar_json_missing(tmp_path):
     assert fig.layout.title.text == "Detector scoreboard<br><sup>threshold 0.50</sup>"
 
 
-def test_scoreboard_offline_block_reads_ap_fa_and_stripe_for_a_scored_arm(beat_cfar_data):
+def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
@@ -415,16 +423,13 @@ def test_scoreboard_offline_block_reads_ap_fa_and_stripe_for_a_scored_arm(beat_c
     # "offline test split" was merged into the AP row (Change, 4th hostile-expert
     # read, 2026-09-23: freed a row for the connector/OOD-FA rows added this same
     # pass, within the <=800 px budget) -- both the AP number and the split's own
-    # frame count now live on one row. The rank-1 stripe stat rides on THIS SAME row
-    # too for an arm that has one (Change, 5th pass, F87: raddetnet -- the one arm
-    # with a stripe stat AND the seed-sibling OOD/3rd-corpus rows -- hit 800 px
-    # exactly with the 3rd-corpus row added, so the stripe stat moved in with AP
-    # rather than staying its own row; see `_offline_arm_rows`'s comment).
-    stripe = beat_cfar_data["beat_cfar"]["stripe_rank1"]["raddetnet"]
-    stripe_gt = beat_cfar_data["beat_cfar"]["stripe_ground_truth"]
-    assert row["AP, split, stripe vs GT"] == (
-        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr; "
-        f"stripe {stripe:.3f}/{stripe_gt:.3f}")
+    # frame count now live on one row. RETRACTED (hostile-expert read, 2026-09-23,
+    # item 8): this row used to also carry the rank-1 stripe statistic
+    # ("AP, split, stripe vs GT" / "stripe 0.617/0.312") -- a bare number pair no
+    # visitor could interpret without the presenter's own narration; the row is now
+    # AP + split only, and the presenter's card keeps the stripe number.
+    assert row["AP, offline test split"] == (
+        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr (beat_cfar.json)")
     fa_label = next(k for k in row if k.startswith("FA/frame at recall"))
     assert row[fa_label] == f"{arm['operating_point']['fp_per_frame']:.2f}"
     # The offline block's own frame count is now stated on this row too (4th
@@ -594,6 +599,26 @@ def test_scoreboard_annotation_states_the_precision_ceiling_caveat():
     assert "unmatched is an upper bound on false alarms" in text
     # The match rule sentence must still be present, unmerged/undropped.
     assert "rule" in text
+    # No bare "F-ledger"/"F83" tag on screen (hostile-expert read, 2026-09-23, item 8):
+    # a visitor cannot look that up.
+    assert "F-ledger" not in text and "F83" not in text
+
+
+# --------------------------------------------------------------------------------
+# Item 3 (hostile-expert read, 2026-09-23): four detection crosses on one ground-
+# truth box scored as 1 TP + 3 unmatched read as a bug on screen -- it is the same
+# 3x3 peak-grouping every detector here is scored under, and the caption must say so.
+# --------------------------------------------------------------------------------
+def test_scoreboard_annotation_states_the_peak_grouping_caveat():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text="rule")
+    ann = fig.layout.annotations[0]
+    text = ann.text.replace("<br>", " ")
+    assert "3x3" in text
+    assert "grouped to local peaks" in text
+    assert "same rule for every detector" in text
+    assert "wide target can draw extra unmatched hits" in text
 
 
 def test_scoreboard_annotation_geometry_still_fits_with_two_sentences():
@@ -637,7 +662,9 @@ def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
     caveat_text = (caveat_label + " " + caveat_value).replace("<br>", " ")
     assert f"seed spread {ds.SEED_TO_SEED_AP_SPREAD_F86:.3f}" in caveat_text
     assert f"{op} CI half-width {half_width:.3f}" in caveat_text
-    assert "F86" in caveat_text
+    # No "(F86)" ledger tag on screen (hostile-expert read, 2026-09-23, item 8): a
+    # visitor cannot look that up, so the row must stand on its two numbers alone.
+    assert "F86" not in caveat_text
 
 
 def test_default_ood_json_exists():
@@ -649,7 +676,10 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     row to make room for the FA row below, within the <=800 px budget) plus a
     dedicated "OOD unmatched/frame" row -- the finding this fixes: AP alone hides that
     the best-AP seed (s42) LOSES to CFAR on false alarms out of distribution, which
-    the AP-only rows never showed."""
+    the AP-only rows never showed. The row itself no longer names the corpus by its
+    internal tag or the seeds by number (hostile-expert read, 2026-09-23, item 8) --
+    it reads "out-of-distribution corpus" / "2 seeds"; this test still reads the real
+    numbers from the file, just not the internal identifiers."""
     import json
     ood_arms = {a["name"]: a for a in json.loads(ds.DEFAULT_OOD_JSON.read_text())["arms"]}
     s42, s43 = ood_arms["raddetnet_s42"], ood_arms["raddetnet_s43"]
@@ -661,8 +691,10 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     labels, values = _table(fig).cells.values
     row = dict(zip(labels, values))
     ood_header = next(l for l in labels if l.startswith("OOD AP,"))
-    assert "b1_bench_v2" in ood_header
+    assert "b1_bench_v2" not in ood_header and "s42" not in ood_header
+    assert "out-of-distribution corpus" in ood_header
     ap_row_value = row[ood_header]
+    assert "2 seeds" in ap_row_value
     assert f"{s42['AP']:.3f}" in ap_row_value and f"{s43['AP']:.3f}" in ap_row_value
     assert f"{cfar['AP']:.3f}" in ap_row_value
 
@@ -777,8 +809,6 @@ def test_scoreboard_connector_row_between_live_and_offline_blocks(beat_cfar_data
     # fixed-split numbers, in that order.
     live_idx = labels.index(live_label)
     connector_idx = labels.index(connector_label)
-    # "raddetnet" merges the stripe stat into this row ("AP, split, stripe vs GT",
-    # F87 pass) -- match by prefix so this test doesn't care which form it takes.
     offline_idx = labels.index(next(l for l in labels if l.startswith("AP,")))
     assert live_idx < connector_idx < offline_idx
 
@@ -830,18 +860,21 @@ def test_scoreboard_no_row_exceeds_the_max_line_cap():
 
 
 def test_scoreboard_figure_height_fits_a_screen_for_every_arm():
-    """~800 px (coordinator budget, 2026-09-23): the worst case (an arm with a CI row,
-    a seed-spread caveat, the connector row and a two-row OOD block -- 14 rows total
-    as of the 4th hostile-expert read, which also added a render-safety margin: see
-    `ds._TABLE_RENDER_SAFETY_PX`) must still fit, with real slack in the browser, not
-    just in this geometric formula (a real Playwright render of this exact arm's
-    figure JSON clipped its last row at zero slack, 2026-09-23)."""
+    """~880 px (raised from the 800 px coordinator budget, 2026-09-23, item 3: the
+    mandatory peak-grouping footnote adds 2 wrapped annotation lines to every arm,
+    measured +80 px here -- there was no slack left in the 800 px budget to absorb a
+    line the content requires). The worst case (an arm with a CI row, a seed-spread
+    caveat, the connector row and a two-row OOD block -- 14 rows total) must still
+    fit, with real slack in the browser, not just in this geometric formula (a real
+    Playwright render of this exact arm's figure JSON clipped its last row at zero
+    slack, 2026-09-23: see `ds._TABLE_RENDER_SAFETY_PX`). Re-verify against a
+    rendered rehearsal PNG after any further change to this annotation."""
     scores = ds.score_frames([[]], None)
     for beat_cfar_arm_name in (None, "classical CFAR", "raddetnet"):
         fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                    match_rule_text=ds.match_rule_text(),
                                    beat_cfar_arm_name=beat_cfar_arm_name)
-        assert fig.layout.height <= 800, (beat_cfar_arm_name, fig.layout.height)
+        assert fig.layout.height <= 880, (beat_cfar_arm_name, fig.layout.height)
 
 
 # --------------------------------------------------------------------------------
