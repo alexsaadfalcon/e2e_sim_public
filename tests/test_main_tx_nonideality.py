@@ -97,14 +97,22 @@ def test_nonideal_evm_improves_monotonically_with_backoff():
         assert nxt <= prev + 1e-6
 
 
-def test_ideal_evm_is_near_zero_and_flat_across_backoff():
+def test_ideal_evm_is_bias_floored_and_flat_across_backoff():
     """The ideal (no-PA) arm sees the same channel/AWGN at every backoff, and
     equalization cancels the shared drive-level scale factor exactly (see the
-    module docstring's algebra) -- so ideal EVM should be small AND essentially
-    constant across the whole sweep."""
+    module docstring's algebra) -- so ideal EVM must be essentially constant
+    across the whole sweep. It is NOT an AWGN-only floor: on the physically
+    corrected munich Ka retrace (8d1e251, richer discovered multipath) the
+    channel is genuinely frequency-selective across this fast config's 20-
+    subcarrier occupied band, so pilot-spaced LS interpolation (`_FAST_KW`'s
+    pilot_spacing=4, 5 pilots) carries an irreducible estimation bias -- measured
+    flat at ~0.115 even at snr_db=120 (2026-09-23), i.e. bias-dominated, not
+    noise-dominated, at this pilot density. The bound below is that measured
+    floor plus headroom, not "near zero"; it still stays well under the
+    non-ideal (PA-distorted) EVM asserted elsewhere."""
     r = _run(backoff_db_list=[0, -4, -8, -12], snr_db=45.0)
     evm = np.asarray(r["evm_ideal"])
-    assert np.all(evm < 0.05)
+    assert np.all(evm < 0.15)
     assert (evm.max() - evm.min()) < 1e-3
 
 

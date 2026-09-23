@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from webapp.demo_presets import PRESETS, PRESETS_BY_ID, apply_preset
+from webapp.demo_presets import PRESETS, PRESETS_BY_ID, ab_key_is_known, apply_preset
 from webapp.pipeline_registry import BLOCKS_BY_ID
 
 
@@ -24,9 +24,22 @@ def test_every_numeric_override_is_on_its_step_grid(preset):
     as a stepMismatch and reports null on blur -- even when nothing was typed. The
     Thrust 1 preset's signal_scaling 1e-7 on a step=1e-6 input, and the RADDetNet
     preset's threshold 0.44 on step=0.05, both silently became the registry default
-    at run time. A step of None or "any" accepts anything."""
+    at run time. A step of None or "any" accepts anything.
+
+    Some overrides (e.g. subspace.gap_response) are internal tracker params with no
+    UI slider at all (demo_presets._INTERNAL_PARAMS) -- there is no step grid to check
+    them against. `apply_preset` below still runs the preset module's own validation
+    for those (its per-key checker functions), so a typo'd internal value fails loudly
+    here too, just not via the step-grid assertion."""
+    apply_preset(preset)
+    if preset.ab is not None:
+        apply_preset(preset, arm="b")
     for bid, ov in preset.overrides.items():
         for key, val in (ov.get("params") or {}).items():
+            is_registry_param = any(ps.key == key for ps in BLOCKS_BY_ID[bid].params)
+            if not is_registry_param:
+                assert ab_key_is_known(bid, key), f"{preset.id}: unknown param {bid}.{key}"
+                continue  # internal param, validated by apply_preset above, no step grid
             spec = next(ps for ps in BLOCKS_BY_ID[bid].params if ps.key == key)
             if spec.kind not in ("number", "int") or spec.step in (None, "any"):
                 continue

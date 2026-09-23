@@ -423,7 +423,7 @@ def _make_figures(results, agg, backoff_db_list, faxis_i, psd_i, faxis_n, psd_n,
 
     plt.figure()
     plt.plot(backoff_db_list, evm_ideal_pct, "o-", color="tab:blue",
-              label="linear TX (thermal noise floor only)")
+              label="linear TX (noise + channel-estimation floor only)")
     plt.plot(backoff_db_list, evm_nonideal_pct, "s-", color="tab:orange",
               label="Rapp PA model (AM/AM + AM/PM)")
     plt.xlabel("input backoff (dB, relative to a_knee -- 0 dB = driven at saturation knee)")
