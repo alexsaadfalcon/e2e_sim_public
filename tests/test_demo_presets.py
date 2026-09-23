@@ -12,8 +12,8 @@ import pytest
 
 from webapp import demo_presets
 from webapp.demo_presets import (
-    MAX_PRESET_N_STEPS, ML_THRESHOLD, PRESETS, PRESETS_BY_ID, DemoPreset, PresetError,
-    apply_preset, validate_all,
+    DEMO_CFR_CORPUS, MAX_PRESET_N_STEPS, ML_THRESHOLD, PRESETS, PRESETS_BY_ID,
+    DemoPreset, PresetError, apply_preset, validate_all,
 )
 from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, default_block_state
 
@@ -95,17 +95,19 @@ def test_thrust5_screen_notes_share_the_vmax_placeholder():
         note = PRESETS_BY_ID[pid].screen_note
         assert "{VMAX_CLAUSE}" in note
         assert "40 m" in note
-        # the seed clause is RADDetNet's; the losing-network screen drops it on purpose
-        assert ("seed 42 of two" in note) == (pid != "thrust5_detector_ml")
 
 
-def test_thrust5_screen_notes_all_admit_the_frames_are_replayed():
-    """Hostile-expert fourth read (2026-09-23): a visitor reading only the Results-tab
-    note must see, on all three Thrust 5 presets, that the frames are a stored
-    benchmark corpus replay and the RF chain of Thrusts 1-4 is bypassed -- not just
-    hear it from the presenter (the `say` list already carried this)."""
-    prefix = ("frames: stored ADC corpus (benchmark_v1_D2), replayed -- the RF chain "
-              "of Thrusts 1-4 is bypassed;")
+def test_thrust5_screen_notes_state_the_live_chain_and_scope_the_offline_numbers():
+    """Owner wording, 2026-09-23 (the live-chain architecture change): a visitor
+    reading only the Results-tab note must see WHAT IS STORED (the ray-traced
+    channel), WHAT IS COMPUTED (the ADC chain, live, at the knobs on screen), which
+    corpus the offline numbers belong to, and that a live count is a demonstration
+    rather than a re-measurement."""
+    prefix = ("frames: stored ray-traced channel (b1_demo_cfr), the ADC chain runs "
+              "LIVE with the knobs; the offline numbers (beat_cfar.json) were scored "
+              "on b1_bench_v3 at 12-bit default impairments -- the live count is a "
+              "demonstration, not a re-measurement; the ML arm leaves its training "
+              "distribution when a knob moves")
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         assert PRESETS_BY_ID[pid].screen_note.startswith(prefix), pid
 
@@ -132,7 +134,13 @@ def test_thrust5_screen_note_resolves_within_a_one_line_character_budget(pid):
     preset = PRESETS_BY_ID[pid]
     state = apply_preset(preset)
     note = appmod._resolve_screen_note(preset, state)
-    assert len(note) <= 230, f"{pid}: {len(note)} chars, likely wraps to a second line"
+    # TWO lines since 2026-09-23, not one: the owner's mandated live-chain sentence
+    # (what is stored / what runs live / which corpus the offline numbers are from /
+    # demonstration not re-measurement) does not fit 230 chars, and the content is
+    # not negotiable. 400 is the same ~7.1 px/char proxy applied to two lines, read
+    # back on the rendered rehearsal PNG. A THIRD line would push the first figure
+    # below the fold, so the ceiling stays.
+    assert len(note) <= 400, f"{pid}: {len(note)} chars, likely wraps to a third line"
 
 
 @pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])
@@ -275,83 +283,68 @@ def test_thrust5_ml_threshold_is_pinned_below_the_blank_figure_point():
     assert st["detector"]["params"]["checkpoint"].endswith("best.pt")
 
 
-def test_bridge_corpora_are_discovered_on_this_machine():
-    """The bridge preset only means anything if BOTH regenerated corpora are actually
-    on disk and found by the same discovery `corpus_environment.manifest`'s help text
-    lists (webapp/corpus_catalog.py) -- otherwise the A/B silently falls back to
-    whatever `apply_preset` was handed, with no error until the run itself."""
-    from webapp.corpus_catalog import CORPUS_MANIFESTS
-    from webapp.demo_presets import BRIDGE_CORPUS_12BIT, BRIDGE_CORPUS_4BIT
-
-    assert BRIDGE_CORPUS_12BIT in CORPUS_MANIFESTS
-    assert BRIDGE_CORPUS_4BIT in CORPUS_MANIFESTS
-    assert BRIDGE_CORPUS_12BIT != BRIDGE_CORPUS_4BIT
-
-
-def test_thrust5_bridge_preset_sits_right_after_the_cfar_preset():
-    ids = [p.id for p in PRESETS]
-    i = ids.index("thrust5_detector_cfar")
-    assert ids[i + 1] == "thrust5_bridge_adc_bits_vs_detections"
-
-
-def test_thrust5_bridge_preset_is_ab_wired_to_the_two_bit_depths():
-    """A (as loaded) is the 12-bit corpus, matching thrust5_detector_cfar's CFAR
-    settings exactly; B swaps ONLY the corpus manifest to the 4-bit re-generation of
-    the same 5 test scenes -- no other param differs between the arms."""
-    from webapp.demo_presets import (
-        BRIDGE_CORPUS_12BIT, BRIDGE_CORPUS_4BIT, CFAR_THRESHOLD,
-    )
-
-    p = PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"]
-    assert p.thrust == 5
-    assert p.ab == ("corpus_environment", "manifest", BRIDGE_CORPUS_4BIT)
-    assert p.ab_label_a and p.ab_label_b
-    assert "12-bit" in p.ab_label_a and "4-bit" in p.ab_label_b
-
-    st_a = apply_preset(p)
-    assert st_a["corpus_environment"]["params"]["manifest"] == BRIDGE_CORPUS_12BIT
-    assert st_a["corpus_environment"]["params"]["split"] == "test"
-    assert st_a["detector"]["params"]["mode"] == "cfar"
-    assert st_a["detector"]["params"]["threshold"] == CFAR_THRESHOLD
-    assert st_a["detector"]["params"]["cfar_guard"] == 2
-    assert st_a["detector"]["params"]["cfar_train"] == 6
-    for bid in ("rffe", "interconnect", "afe", "subspace"):
-        assert st_a[bid]["enabled"] is False
-
-    st_b = apply_preset(p, arm="b")
-    assert st_b["corpus_environment"]["params"]["manifest"] == BRIDGE_CORPUS_4BIT
-    # Only the manifest differs between the two arms' resolved states.
-    st_a_no_manifest = dict(st_a["corpus_environment"]["params"])
-    st_b_no_manifest = dict(st_b["corpus_environment"]["params"])
-    del st_a_no_manifest["manifest"]
-    del st_b_no_manifest["manifest"]
-    assert st_a_no_manifest == st_b_no_manifest
-    assert st_a["detector"] == st_b["detector"]
+def test_thrust5_presets_replay_the_stored_channel_through_the_live_chain():
+    """The architecture change (owner 2026-09-23): the Thrust 5 screens no longer
+    replay a stored ADC cube. They replay the stored RAY-TRACED CHANNEL of the demo
+    corpus and re-run the whole chain that produced it -- front end, interconnect,
+    dechirp, thermal floor, impairments, IF high-pass, ADC -- so a front-end knob
+    reaches the detector. Anything less and the A/B below would be a no-op."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        st = apply_preset(PRESETS_BY_ID[pid])
+        assert st["corpus_environment"]["params"]["domain"] == "cfr", pid
+        assert st["corpus_environment"]["params"]["manifest"] == DEMO_CFR_CORPUS, pid
+        for bid in ("rffe", "interconnect", "dechirp", "thermal_noise", "impairment",
+                    "if_hpf", "quantizer"):
+            assert st[bid]["enabled"], (pid, bid)
+        # The chain that wrote the corpus: its own data-driven interconnect (what
+        # 'default' resolves to on this path, never the boxcar placeholder) and the
+        # quantizer's automatic gain (a fixed full scale zeroes a physical cube).
+        assert st["interconnect"]["params"]["case"] == "default", pid
+        assert st["quantizer"]["params"]["full_scale"] == 0, pid
+        assert st["quantizer"]["params"]["bits"] == 12, pid
 
 
-def test_thrust5_bridge_preset_replays_the_test_split_and_disables_the_frequency_chain():
-    """Same shape as the other Thrust 5 presets: corpus replay into radar_cube +
-    detector only, Thrusts 1-4 and every classic frequency-domain product off."""
-    st = apply_preset(PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"])
-    assert st["corpus_environment"]["enabled"]
-    assert st["radar_cube"]["enabled"] and st["detector"]["enabled"]
-    for bid in ("fft", "range_az", "range_el", "range_profile", "subspace_err", "comms"):
-        assert st[bid]["enabled"] is False
+def test_the_demo_cfr_corpus_is_on_this_machine_with_its_channel_sidecars():
+    """The live chain only exists if the corpus actually carries `.cfr.npy` sidecars;
+    without them the runner falls back to ADC replay and the screens quietly become
+    the old ones. Checked on the manifest's own first test frame, not by globbing."""
+    import json
+    from pathlib import Path
+
+    from webapp.corpus_catalog import CORPUS_MANIFESTS, REPO_ROOT
+
+    assert DEMO_CFR_CORPUS in CORPUS_MANIFESTS
+    manifest_path = REPO_ROOT / DEMO_CFR_CORPUS
+    manifest = json.loads(manifest_path.read_text())
+    first = manifest["files"]["test"][0]
+    assert (manifest_path.parent / first).exists()
+    assert (manifest_path.parent / (Path(first).stem + ".cfr.npy")).exists()
 
 
-def test_thrust5_bridge_card_reports_the_measured_hit_gap():
-    """The card must carry the measured numbers, not a promise to measure later
-    (MEASURE FIRST): cumulative hits 19 (12-bit) vs 17 (4-bit) over the 5 test frames,
-    reproduced bit-for-bit across two independent runs each arm (2026-09-23)."""
-    p = PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"]
-    assert "19" in p.blurb and "17" in p.blurb
-    assert "same scenes" in p.screen_note or "same 5 scenes" in p.screen_note
-    assert "quantizer" in p.screen_note.lower()
+def test_thrust5_ab_arms_move_a_front_end_knob_not_the_corpus():
+    """Before the live chain, the only Thrust 5 A/B that moved a front-end setting did
+    it by swapping to a SECOND pre-generated corpus (the retired bridge preset). Now
+    the arms differ by a knob on the same stored frames -- which is the claim the
+    screen makes, so the test pins that the A/B never touches the source again."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_raddetnet"):
+        p = PRESETS_BY_ID[pid]
+        assert p.ab == ("quantizer", "bits", 4), pid
+        assert "12-bit" in p.ab_label_a and "4-bit" in p.ab_label_b
+    ml = PRESETS_BY_ID["thrust5_detector_ml"]
+    assert ml.ab == ("if_hpf", "corner_range_m", 25.0)
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        p = PRESETS_BY_ID[pid]
+        st_a, st_b = apply_preset(p), apply_preset(p, arm="b")
+        assert st_a["corpus_environment"] == st_b["corpus_environment"], pid
 
 
-# ------------------------------------------------------------------------------------
-# apply_preset refuses what the registry cannot represent
-# ------------------------------------------------------------------------------------
+def test_the_retired_bridge_preset_is_gone():
+    """It was replaced by the live bits knob (owner 2026-09-23). Its two corpora may
+    stay on disk; the preset must not, or the demo offers two answers to one question."""
+    assert "thrust5_bridge_adc_bits_vs_detections" not in PRESETS_BY_ID
+    assert not any("bridge" in p.id for p in PRESETS)
+
+
 def _preset(**overrides):
     return DemoPreset(id="x", label="x", thrust=1, n_steps=1, overrides=overrides,
                       blurb="b", say=["s"], do_not_say=["d"])

@@ -64,15 +64,41 @@ def test_corpus_mode_reports_skipped_blocks_in_run_notes(tmp_path):
 
 
 def test_corpus_mode_with_nothing_to_skip_has_no_notes(tmp_path):
+    """ADC replay with every inapplicable block already off says nothing -- unchanged.
+
+    The vehicle changed on 2026-09-23, not the invariant: this used to load the
+    thrust5_detector_cfar preset, which since the live-chain change replays the stored
+    RAY-TRACED CHANNEL (`corpus_environment.domain == "cfr"`) and turns the whole ADC
+    chain ON. On a corpus with no `.cfr.npy` sidecar that preset now (correctly) fails
+    loudly, and on one with sidecars it always emits notes -- the live-vs-stored gate
+    is a run note. The state is therefore built directly, which is what the test was
+    always about: an ADC-replay run with nothing to skip.
+    """
     from tests.test_webapp_detector import _corpus_state, _tiny_corpus
-    from webapp.demo_presets import PRESETS_BY_ID, apply_preset
     from webapp.pipeline_runner import run_pipeline
-    # The demo preset disables everything a replayed frame cannot use -- so no note.
-    st = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
-    st["corpus_environment"]["params"]["manifest"] = str(_tiny_corpus(tmp_path))
+    st = _corpus_state(_tiny_corpus(tmp_path))
+    for bid in ("fft", "range_az", "range_el", "range_profile", "subspace_err",
+                "rffe", "interconnect", "afe", "dechirp", "thermal_noise",
+                "impairment", "if_hpf", "quantizer", "sink"):
+        st[bid]["enabled"] = False
     st["detector"]["params"].update({"cfar_guard": 1, "cfar_train": 2})
     out = run_pipeline(st, n_steps=1)
     assert out["_axis_meta"]["notes"] == []
+    assert out["_axis_meta"]["source"].startswith("Corpus Replay (ADC replay)")
+
+
+def test_the_live_chain_preset_refuses_a_corpus_with_no_stored_channel(tmp_path):
+    """The other half of the change above, pinned where the reader of that test is:
+    thrust5_detector_cfar asks for the stored ray-traced channel, so a corpus that
+    does not carry one is an error naming --store-cfr, never a silent ADC replay of
+    frames the preset's card describes as computed live."""
+    from tests.test_webapp_detector import _tiny_corpus
+    from webapp.demo_presets import PRESETS_BY_ID, apply_preset
+    from webapp.pipeline_runner import PipelineError, run_pipeline
+    st = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
+    st["corpus_environment"]["params"]["manifest"] = str(_tiny_corpus(tmp_path))
+    with pytest.raises(PipelineError, match="store-cfr"):
+        run_pipeline(st, n_steps=1)
 
 
 def test_run_status_carries_the_notes():

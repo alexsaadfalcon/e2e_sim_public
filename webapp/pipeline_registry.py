@@ -150,11 +150,14 @@ BLOCKS: List[BlockSpec] = [
                       choices=["default", "passthrough", "case3"],
                       help="'default' = SYNTHETIC 11-tap boxcar PLACEHOLDER (owner ballot "
                            "3A: labelled synthetic wherever it appears; smears a target "
-                           "across 11 range bins -- not a real interconnect). "
-                           "'passthrough' = no interconnect at all. 'case3' is a legacy "
-                           "alias for 'passthrough' and does NOT load the simulated "
-                           "Case3 hardware response of the same name; that is not yet "
-                           "reachable from this UI."),
+                           "across 11 range bins -- not a real interconnect) -- EXCEPT on "
+                           "the live-chain path (Corpus Replay from the stored channel), "
+                           "where it is the simulated transfer function that corpus was "
+                           "generated with (e2e/data/interconnect/), because that is the "
+                           "interconnect those frames actually went through; the run note "
+                           "says so. 'passthrough' means pass-through on every path. "
+                           "'case3' is a legacy alias for 'passthrough' and does NOT load "
+                           "the simulated Case3 hardware response of the same name."),
             ParamSpec("normalize_gain", "Normalize peak gain to 0 dB", "choice", False,
                       choices=[False, True],
                       help="Scale the filter so its peak magnitude is 1. The boxcar "
@@ -328,7 +331,7 @@ BLOCKS: List[BlockSpec] = [
     ),
     BlockSpec(
         id="corpus_environment",
-        label="Corpus Replay (stored ADC frames)",
+        label="Corpus Replay (stored frames)",
         toggleable=True,
         enabled_default=False,
         category="source",
@@ -338,20 +341,42 @@ BLOCKS: List[BlockSpec] = [
                            "manifest.json. Found on this machine: "
                            + (", ".join(CORPUS_MANIFESTS) if CORPUS_MANIFESTS
                               else "none -- corpora are generated locally, not tracked")),
+            # Owner directive 2026-09-23 ("store the ray tracing, compute everything
+            # else live with the knobs"): a corpus generated with `--store-cfr` keeps
+            # the ray-traced channel in a `.cfr.npy` sidecar beside each frame, so the
+            # WHOLE analog/digital chain can be re-run from it with the GUI's values
+            # instead of being frozen at generation time. "auto" takes that path
+            # whenever the corpus has the sidecars and falls back to the stored ADC
+            # cube when it does not -- which is every corpus generated before
+            # 2026-09-23, so their screens are unchanged.
+            ParamSpec("domain", "Replay from", "choice", "auto",
+                      choices=["auto", "cfr", "adc"],
+                      help="'cfr' = replay the stored RAY-TRACED CHANNEL and run the "
+                           "RF front end / dechirp / thermal floor / impairments / IF "
+                           "high-pass / quantizer LIVE with the values set below "
+                           "(needs a corpus generated with --store-cfr). 'adc' = "
+                           "replay the stored ADC cube and skip that chain (the "
+                           "pre-2026-09-23 behaviour). 'auto' = cfr when the corpus "
+                           "has the sidecars, else adc."),
             ParamSpec("split", "Split", "choice", "test",
                       choices=["test", "val"],
-                      help="'test' is the held-out split every published detection "
-                           "number was scored on."),
+                      help="'test' is the split held out from training. It is the one "
+                           "the published detection numbers were scored on for the "
+                           "corpus they were scored on (b1_bench_v3); on any other "
+                           "corpus it is simply that corpus's held-out split."),
             ParamSpec("start_frame", "First frame index", "int", 0, step=1, min=0,
                       help="Frames are replayed in manifest order from this index; "
                            "each run step advances one frame."),
         ],
-        blurb=("Replays the digitized frames of a generated ML corpus -- with their "
-               "stored ground-truth labels -- as the source, starting the chain at the "
-               "ADC cube. The frequency-domain stages and products do not apply "
-               "(the frame is already past them); use Radar Cube and the Detector. "
-               "This is how the Thrust 5 demo shows a detector on the exact frames it "
-               "was scored on."),
+        blurb=("Replays the frames of a generated ML corpus -- with their stored "
+               "ground-truth labels -- as the source. 'Replay from' decides where the "
+               "frame enters: the stored RAY-TRACED CHANNEL (the ADC chain then runs "
+               "live with the knobs below, so a front-end setting reaches the "
+               "detector), or the stored ADC cube (the chain is skipped -- the frame "
+               "is already past it). Either way the frequency-domain products (FFT / "
+               "range-azimuth / subspace) do not apply; use Radar Cube and the "
+               "Detector. This is how the Thrust 5 demo runs a detector on held-out "
+               "ray-traced frames whose ground truth rides along with them."),
     ),
     BlockSpec(
         id="waveform",
@@ -419,7 +444,11 @@ BLOCKS: List[BlockSpec] = [
                            "information at that array size. benchmark_v1 (TDM) and "
                            "ddma_wide_v1 (DDMA, also 192 virtual) are the two presets "
                            "whose targets do NOT alias at scene speeds -- the ones a "
-                           "detection benchmark is valid on (F43)."),
+                           "detection benchmark is valid on (F43). IGNORED on the "
+                           "live-chain path (Corpus Replay from the stored channel), "
+                           "where the geometry is the corpus manifest's: dechirping a "
+                           "stored frame at a different chirp count or slope would not "
+                           "reproduce it, it would silently produce a different one."),
             ParamSpec("mimo", "MIMO scheme", "choice", "ddma",
                       choices=["tdm", "ddma", "single"],
                       help="How multiple transmit antennas share the array; "
@@ -437,7 +466,11 @@ BLOCKS: List[BlockSpec] = [
         category="stage",
         params=[
             ParamSpec("seed", "Random seed", "int", 0, step=1,
-                      help="Seeds the per-frame noise draw (deterministic reruns)."),
+                      help="Seeds the per-frame noise draw (deterministic reruns). "
+                           "IGNORED on the live-chain path (Corpus Replay from the "
+                           "stored channel): each replayed frame carries the seed it "
+                           "was generated with, and the run uses that, so the live "
+                           "chain reproduces the corpus exactly."),
         ],
         blurb=("Puts the cube on an absolute power scale (transmit power) and adds "
                "the physical k*T*B*F thermal noise floor. Enable together with ADC "
@@ -453,7 +486,14 @@ BLOCKS: List[BlockSpec] = [
         category="stage",
         params=[
             ParamSpec("seed", "Random seed", "int", 0, step=1,
-                      help="Seeds the per-frame randomness (deterministic reruns)."),
+                      help="Seeds the per-frame randomness (deterministic reruns). "
+                           "IGNORED on the live-chain path (Corpus Replay from the "
+                           "stored channel): the replayed frame carries both the seed "
+                           "and the domain-randomised severities it was generated "
+                           "with, and the run uses those. THERE IS NO SEVERITY/LEVEL "
+                           "KNOB on this block -- the severities are per-stage "
+                           "dataclasses (phase noise / leakage / clutter), not a "
+                           "scalar the UI could offer."),
         ],
         blurb=("Adds realistic receiver imperfections to the digitized signal: "
                "oscillator phase noise, TX/RX antenna leakage, and ground "
@@ -485,9 +525,19 @@ BLOCKS: List[BlockSpec] = [
         enabled_default=False,
         category="stage",
         params=[
-            ParamSpec("bits", "ADC bits", "int", 12, step=1),
+            ParamSpec("bits", "ADC bits", "int", 12, step=1, min=1, max=24,
+                      help="Converter resolution. On the live-chain path (Corpus "
+                           "Replay from the stored channel) this is the knob that "
+                           "moves detections: 12 bits is what the corpora were "
+                           "generated at."),
             ParamSpec("full_scale", "Full-scale amplitude", "number", 1.0, step=0.1,
-                      help="Amplitude (real/imag independently) that hard-clips."),
+                      min=0.0,
+                      help="Amplitude (real/imag independently) that hard-clips. "
+                           "0 = AUTOMATIC GAIN (full scale set from the frame's own "
+                           "peak with 6 dB of headroom) -- what the corpus generator "
+                           "uses, and the only workable setting on a physically "
+                           "scaled cube, whose returns sit near 1e-7 and would "
+                           "quantize to exactly zero against a fixed 1.0."),
         ],
         blurb=("Digitizes the signal the way a real analog-to-digital converter "
                "would: a limited number of bits and a hard clip past full scale."),
@@ -595,8 +645,13 @@ EDGES: List[tuple] = [
     ("quantizer", "radar_cube"),
     ("quantizer", "detector"),
     ("quantizer", "sink"),
-    # A replayed corpus frame enters the chain already digitized, so its only
-    # consumers are the RX-time products.
+    # Corpus Replay enters the chain at ONE of two points, depending on what the
+    # corpus stored and which 'Replay from' is selected: a stored ADC cube is already
+    # digitized, so its only consumers are the RX-time products; a stored RAY-TRACED
+    # CHANNEL enters at the front end and runs the whole chain live. Both are drawn,
+    # as alternative source paths -- the diagram lit the products only, which made the
+    # live path (the one the Thrust 5 presets use) invisible on the Block Diagram tab.
+    ("corpus_environment", "rffe", "alt"),
     ("corpus_environment", "radar_cube", "alt"),
     ("corpus_environment", "detector", "alt"),
 ]

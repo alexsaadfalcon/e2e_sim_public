@@ -626,10 +626,17 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                     f"{n_steps} frames. See Results tab (partial B).",
                     style={"color": "#f39c12"})
             else:
+                # The per-arm run notes belong here too (Change, 2026-09-23): they used
+                # to be dropped on the A/B path, which is now EVERY Thrust 5 run -- and
+                # the live chain's correctness gate ("max |diff| = N ADC codes") is a
+                # run note. A number that only exists when nobody looks is not a gate.
                 msg = html.Span(
                     f"A/B run complete ({ab_preset.ab_label_a} vs {ab_preset.ab_label_b}): "
                     f"{result_a['n_products']} / {result_b['n_products']} product(s). "
-                    "See Results tab.", style={"color": "#20bf6b"})
+                    "See Results tab."
+                    + _note_for(block_state, outputs_a.get("_axis_meta") or {})
+                    + _note_for(state_b, outputs_b.get("_axis_meta") or {}),
+                    style={"color": "#20bf6b"})
             return data_a, msg, "tab-results", sink
 
         # Ordinary single-run path: unchanged behaviour.
@@ -671,6 +678,13 @@ def _run_banner(n_clicks, axis_meta, n_steps: int) -> str:
         frames += " -- CANCELLED, partial"
     parts = [f"run #{n_clicks}", _time.strftime("%H:%M:%S"),
              axis_meta.get("source") or "", frames]
+    # The live-chain correctness gate (pipeline_runner._StoredADCGateBlock), on the
+    # Results tab rather than only in the status line: a visitor photographs this
+    # banner, and whether the cube on screen is the corpus's own is part of what the
+    # picture has to say. Absent on every other path, which leaves those banners
+    # byte-identical to before.
+    if axis_meta.get("gate"):
+        parts.append(axis_meta["gate"])
     det = axis_meta.get("detector") or {}
     if det:
         parts.append(f"detector: {det.get('label', '?')}, detections at objectness >= "
@@ -760,6 +774,19 @@ def _decode_plotly_array(v) -> list:
     return list(v)
 
 
+def _union_fixed_range(pair, axis: str):
+    """`[lo, hi]` spanning whatever explicit `layout.<axis>.range` the pair already
+    carries, or None when neither figure fixed one. Shared by the heatmap and scatter
+    branches of :func:`_share_y_ranges`: an axis a figure deliberately set (a display
+    crop, a dB floor) is a claim about what should be on screen, and sharing must widen
+    it to cover both arms rather than replace it with the raw data extent."""
+    fixed = [((fig.get("layout") or {}).get(axis) or {}).get("range") for fig in pair]
+    fixed = [r for r in fixed if r and len(r) == 2 and None not in r]
+    if not fixed:
+        return None
+    return [min(float(r[0]) for r in fixed), max(float(r[1]) for r in fixed)]
+
+
 def _share_y_ranges(figs, prev_figs) -> None:
     """Give a figure present in both runs of a before/after pair one set of axes, so
     the pair reads as a difference in the DATA, not two independently autoscaled
@@ -793,6 +820,18 @@ def _share_y_ranges(figs, prev_figs) -> None:
                         zmaxs.append(float(tr["zmax"]))
             if xs and ys:
                 xr, yr = [min(xs), max(xs)], [min(ys), max(ys)]
+                # ...unless a figure already FIXED that axis, in which case union the
+                # fixed ranges instead of recomputing from the data -- the same rule
+                # the scatter branch below has carried since 2026-09-23, applied here
+                # after the live-chain A/B pairs shipped: the detector's objectness
+                # panel is deliberately cropped to 50 m (the labels and the offline
+                # scoring both stop at 40 m -- pipeline_runner reads that crop from
+                # beat_cfar.json), and recomputing from the cube's own 0-102 m extent
+                # silently undid the crop the moment those screens gained an A/B arm
+                # (found in the rehearsal PNGs, 2026-09-23). The range-Doppler panel
+                # fixes nothing and still shares the data extent.
+                xr = _union_fixed_range(pair, "xaxis") or xr
+                yr = _union_fixed_range(pair, "yaxis") or yr
                 for fig in pair:
                     fig.setdefault("layout", {}).setdefault("xaxis", {})["range"] = xr
                     fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = yr

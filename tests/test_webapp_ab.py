@@ -43,14 +43,28 @@ def test_ab_is_wired_on_the_presets_the_review_named(pid):
     assert state_a[bid]["params"][key] != state_b[bid]["params"][key]
 
 
-def test_presets_without_ab_are_unaffected():
+def test_every_shipped_preset_pairs_an_ab_arm():
+    """Since 2026-09-23 every preset carries an A/B: the three Thrust 5 screens got one
+    when their frames started running through the LIVE chain (ADC bits on two of them,
+    the IF high-pass corner on the ported-network screen), so there is no longer a
+    preset whose headline claim has no evidence of itself on a single screen. The
+    single-run path still exists -- it is what a hand-edited state takes (see
+    `_single_run_state`)."""
     for p in PRESETS:
-        if p.id in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error",
-                    "thrust3_cold_start_acquisition",
-                    "thrust4_interconnect_range_profile",
-                    "thrust5_bridge_adc_bits_vs_detections"):  # A/B on the corpus itself
-            continue
-        assert p.ab is None
+        assert p.ab is not None, p.id
+        bid, key, _value_b = p.ab
+        assert key in {ps.key for ps in BLOCKS_BY_ID[bid].params}, p.id
+        assert p.ab_label_a and p.ab_label_b, p.id
+
+
+def _single_run_state():
+    """A block state that matches NO preset -- one hand edit away from thrust5's CFAR
+    screen. Every shipped preset now defines an A/B, so this is how the single-run
+    path is exercised (it is also exactly how an operator reaches it)."""
+    import webapp.app as appmod
+
+    return appmod._with_param(apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"]),
+                              "detector", "threshold", 0.9)
 
 
 def _fake_runner(monkeypatch, calls, fig_key="range_az", extra_axis_meta=None):
@@ -151,19 +165,27 @@ def test_manual_edit_after_loading_ab_preset_falls_back_to_single_run(monkeypatc
     assert "A/B" not in data["_banner"]
 
 
-def test_matching_ab_preset_none_for_presets_without_ab():
+def test_matching_ab_preset_pairs_the_thrust5_live_chain_screens():
+    """Their A/B is the whole point of the live chain: the same stored ray-traced
+    frames, re-digitised (or re-filtered) at a different front-end setting."""
     import webapp.app as appmod
 
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         st = apply_preset(PRESETS_BY_ID[pid])
-        assert appmod._matching_ab_preset(st) is None
+        assert appmod._matching_ab_preset(st) is PRESETS_BY_ID[pid]
 
 
-def test_single_run_path_unchanged_for_non_ab_preset(monkeypatch):
-    """Loading/running a preset with no `ab` behaves exactly as before this change:
+def test_matching_ab_preset_none_for_a_hand_edited_state():
+    import webapp.app as appmod
+
+    assert appmod._matching_ab_preset(_single_run_state()) is None
+
+
+def test_single_run_path_unchanged_for_an_unpaired_state(monkeypatch):
+    """A state with no matching `ab` preset behaves exactly as before this change:
     one run_pipeline call, no automatic pairing."""
     preset = PRESETS_BY_ID["thrust5_detector_cfar"]
-    state = apply_preset(preset)
+    state = _single_run_state()
     calls = []
     appmod = _fake_runner(monkeypatch, calls, fig_key="subspace_err")
 
@@ -212,7 +234,7 @@ def test_render_results_single_run_keeps_generic_prefix(monkeypatch):
     import webapp.app as appmod
 
     preset = PRESETS_BY_ID["thrust5_detector_cfar"]
-    state = apply_preset(preset)
+    state = _single_run_state()
     calls = []
     appmod2 = _fake_runner(monkeypatch, calls, fig_key="subspace_err")
     data, *_ = appmod2._run_pipeline(1, state, preset.n_steps, "", None)
@@ -532,10 +554,10 @@ def test_run_lock_blocks_a_second_concurrent_run_for_the_same_session(monkeypatc
 
     monkeypatch.setattr(appmod, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {"range_az": go.Figure()})
-    # A non-ab preset: thrust3 now has its own A/B (cold vs warm start), which would
-    # make run_pipeline fire twice here and break the len(calls) == 1 assertion below
-    # -- this test is about the run lock, not the A/B mechanism.
-    state = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
+    # An UNPAIRED state: every shipped preset now defines an A/B, which would make
+    # run_pipeline fire twice here and break the len(calls) == 1 assertion below --
+    # this test is about the run lock, not the A/B mechanism.
+    state = _single_run_state()
 
     data, status, tab, _sink = appmod._run_pipeline(1, state, 3, "", None, None, session)
     assert len(calls) == 1
@@ -645,7 +667,9 @@ def test_resolve_screen_note_drops_vmax_clause_when_manifest_is_unreadable():
     state["corpus_environment"]["params"]["manifest"] = "does/not/exist/manifest.json"
     note = appmod._resolve_screen_note(preset, state)
     assert "{VMAX_CLAUSE}" not in note and "unambiguous velocity" not in note
-    assert note.endswith("seed 42 of two (0.476 / 0.436).")  # the T5 note names the seed pair now
+    # The clause drops cleanly: the note still ends on its own last clause (the
+    # scoring crop), with no dangling separator where the velocity used to be.
+    assert note.endswith("40 m.")
 
 
 def test_read_corpus_v_max_returns_none_without_a_manifest():
@@ -706,3 +730,55 @@ def test_run_pipeline_omits_screen_note_for_a_manual_hand_edited_state(monkeypat
 
     data, *_ = appmod._run_pipeline(1, state, preset.n_steps, "", None)
     assert "_screen_note" not in data
+
+
+# ------------------------------------------------------------------------------------
+# The live chain's correctness gate has to reach the screen (2026-09-23): it is a run
+# note, and A/B was the one path that dropped run notes -- which is now every Thrust 5
+# run. A number nobody can see is not a gate.
+# ------------------------------------------------------------------------------------
+def test_run_banner_carries_the_live_chain_gate():
+    import webapp.app as appmod
+
+    meta = {"source": "Corpus Replay (live chain from stored channel): test split",
+            "n_steps_run": 5, "cancelled": False,
+            "gate": "live vs stored ADC: max |diff| 0 codes (bit-identical)"}
+    banner = appmod._run_banner(1, meta, 5)
+    assert "live vs stored ADC: max |diff| 0 codes (bit-identical)" in banner
+    # Absent on every other path: those banners stay exactly as they were.
+    assert "live vs stored" not in appmod._run_banner(1, {"source": "x"}, 5)
+
+
+def test_ab_status_line_carries_each_arm_s_run_notes(monkeypatch):
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
+    state_a = apply_preset(preset)
+    calls = []
+    appmod = _fake_runner(monkeypatch, calls, fig_key="radar_cube", extra_axis_meta={
+        "notes": ["live chain vs stored ADC over 5 frame(s): max |diff| = 0 ADC codes"]})
+
+    _data, status, _tab, _sink = appmod._run_pipeline(1, state_a, preset.n_steps, "", None)
+
+    text = _all_text(status)
+    assert "A/B run complete" in text
+    assert "max |diff| = 0 ADC codes" in text
+
+
+def test_share_axes_keeps_a_deliberate_heatmap_crop():
+    """An axis a panel FIXED is a claim about what belongs on screen, so A/B sharing
+    must widen it across the arms, not replace it with the raw data extent. The
+    detector's objectness panel crops to 50 m because labels and offline scoring stop
+    at 40 m (pipeline_runner reads that crop from beat_cfar.json); when the Thrust 5
+    screens gained an A/B arm the sharing silently restored the cube's full 0-102 m
+    extent -- found in the rehearsal PNGs, 2026-09-23."""
+    import webapp.app as appmod
+
+    cur = {"det": {"data": [{"type": "heatmap", "x": [-1, 1], "y": [0, 102.4]}],
+                   "layout": {"yaxis": {"range": [0.0, 50.0]}}}}
+    prev = {"det": {"data": [{"type": "heatmap", "x": [-1, 1], "y": [0, 102.4]}],
+                    "layout": {"yaxis": {"range": [0.0, 50.0]}}}}
+    appmod._share_y_ranges(cur, prev)
+
+    assert cur["det"]["layout"]["yaxis"]["range"] == [0.0, 50.0]
+    assert prev["det"]["layout"]["yaxis"]["range"] == [0.0, 50.0]
+    # x was fixed by neither panel, so it still shares the data extent.
+    assert cur["det"]["layout"]["xaxis"]["range"] == [-1, 1]

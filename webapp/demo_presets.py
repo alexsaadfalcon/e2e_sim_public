@@ -18,7 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from webapp.corpus_catalog import DEFAULT_CORPUS
 from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
 
 #: notes/DEMO_DEFENSE.md DO-NOT-SHOW #9: runs longer than ~20 frames. Defined in the
@@ -50,27 +49,30 @@ CFAR_THRESHOLD = 0.66
 #: again on the real frames. Pinned here so the figure is never blank.
 ML_THRESHOLD = 0.22
 
-#: The bridge corpora (verified 2026-09-23): 50 scenes each, seed 4242, generated into
-#: ONE path with a rename between runs so the scene salt is shared; splits 40/5/5. The
-#: 5 TEST frames carry IDENTICAL target lists frame by frame (checked via each frame's
-#: `meta["targets"]`) and differ ONLY in ADC quantizer resolution -- per-frame
-#: `meta["quant_snr_db"]` ~57-58 dB (12-bit) vs ~9-10 dB (4-bit). This is the one T5
-#: screen where a front-end setting (ADC bits) reaches a detection count, and it does so
-#: baked into the corpus at generation time, not on a live knob.
-BRIDGE_CORPUS_12BIT = "e2e/ml/datasets/b1_bridge_12bit/benchmark_v1_D2/manifest.json"
-BRIDGE_CORPUS_4BIT = "e2e/ml/datasets/b1_bridge_4bit/benchmark_v1_D2/manifest.json"
+#: The demo corpus that stores the RAY-TRACED CHANNEL beside each frame (50 scenes,
+#: seed 4242, splits 40/5/5, every frame with a `.cfr.npy` sidecar -- generated
+#: 2026-09-23 by `chain_generate --store-cfr`). Replaying it in the `cfr` domain runs
+#: the whole analog/digital chain LIVE from that channel, which is what makes a
+#: front-end knob reach the detector at all (owner directive, notes/STATE.md §0.1).
+#: The predecessor screens replayed a stored ADC cube and could not do that; the two
+#: pre-generated bridge corpora that stood in for a live ADC knob are retired with
+#: them (the directories may stay on disk).
+DEMO_CFR_CORPUS = "e2e/ml/datasets/b1_demo_cfr/benchmark_v1_D2/manifest.json"
 
-#: Shared Results-tab screen note for the three Thrust 5 detector presets (hostile-
-#: expert third read, 2026-09-23; fourth read, 2026-09-23: prepended the "frames:
-#: ..." clause below so the note itself says the RF chain is bypassed, not just the
-#: `say` list). "{VMAX_CLAUSE}" is filled in (or dropped, if the manifest cannot be
-#: read) at render time -- see `_read_corpus_v_max` in webapp/app.py -- so the number
-#: is never typed here. Kept terse (measured against the rendered PNG, 2026-09-23) so
-#: the whole line -- including the per-preset addition on `thrust5_detector_ml` --
-#: still fits one line at 16 px on the 1600 px results page.
+
+#: Shared Results-tab screen note for the three Thrust 5 detector presets. The opening
+#: sentence is the owner's wording (2026-09-23) for the live-chain screens: it states
+#: what is stored, what is computed, which corpus the OFFLINE numbers belong to, and
+#: that a live count is a demonstration rather than a re-measurement. "{VMAX_CLAUSE}"
+#: is filled in (or dropped, if the manifest cannot be read) at render time -- see
+#: `_read_corpus_v_max` in webapp/app.py -- so the number is never typed here. It no
+#: longer fits one 16 px line on the 1600 px results page and wraps to two; that was
+#: read on the rendered PNG and accepted, the content being mandatory.
 _T5_SCREEN_NOTE = (
-    "frames: stored ADC corpus (benchmark_v1_D2), replayed -- the RF chain of "
-    "Thrusts 1-4 is bypassed; 40 m; in-distribution; seed 42 of two (0.476 / 0.436){VMAX_CLAUSE}."
+    "frames: stored ray-traced channel (b1_demo_cfr), the ADC chain runs LIVE with the "
+    "knobs; the offline numbers (beat_cfar.json) were scored on b1_bench_v3 at 12-bit "
+    "default impairments -- the live count is a demonstration, not a re-measurement; "
+    "the ML arm leaves its training distribution when a knob moves; 40 m{VMAX_CLAUSE}."
 )
 
 
@@ -131,6 +133,31 @@ def _merge(*parts: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             if ov.get("params"):
                 slot.setdefault("params", {}).update(ov["params"])
     return out
+
+
+#: Block state shared by all three Thrust 5 presets: the demo corpus replayed as its
+#: stored channel, through the chain that GENERATED it -- the corpus front end
+#: (`rffe`, absolute scale) and its own data-driven interconnect (which is what the
+#: 'default' case means on this path -- see that ParamSpec), dechirp,
+#: thermal floor, impairments, IF high-pass, ADC. The quantizer's full scale is 0 =
+#: automatic gain, the corpus generator's setting; a fixed 1.0 would quantize a
+#: physically scaled cube (returns near 1e-7) to exactly zero. With every knob here at
+#: the value each frame was generated with, the runner's gate reports max |diff| = 0
+#: ADC codes against the stored cube -- measured 2026-09-23, printed on every run.
+_T5_LIVE_CHAIN = _merge(
+    {"corpus_environment": {"enabled": True, "params": {
+        "manifest": DEMO_CFR_CORPUS, "split": "test", "start_frame": 0,
+        "domain": "cfr"}}},
+    {"rffe": {"enabled": True, "params": {"scale_mode": "auto"}},
+     "interconnect": {"enabled": True},
+     "dechirp": {"enabled": True, "params": {"preset": "benchmark_v1", "mimo": "tdm"}},
+     "thermal_noise": {"enabled": True},
+     "impairment": {"enabled": True},
+     "if_hpf": {"enabled": True, "params": {"corner_range_m": 1.0, "order": 2}},
+     "quantizer": {"enabled": True, "params": {"bits": 12, "full_scale": 0.0}},
+     "afe": {"enabled": False}, "subspace": {"enabled": False}},
+    _only_products("radar_cube", "detector"),
+)
 
 
 PRESETS: List[DemoPreset] = [
@@ -351,19 +378,18 @@ PRESETS: List[DemoPreset] = [
         ),
         blurb=("A SYNTHETIC bad interconnect: the 11-tap boxcar placeholder, normalized to a "
                "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
-               "of in-band ripple. Press Run once: both arms run and appear as before "
+               "in-band ripple. Press Run once: both arms appear as before "
                "(A, top, passthrough) / after (B, bottom, SYNTHETIC boxcar), each panel "
-               "printing its own median-floor statistic (about -49 dB for A vs about "
-               "-34 dB for B, measured on screen 2026-09-23). "
+               "printing its own median-floor statistic (about -49 dB for A, -34 dB for "
+               "B, measured 2026-09-23). "
                "On the heatmap the filter streaks each bright return along the range "
                "axis: the 11-tap boxcar is applied along frequency unwindowed, the worst "
                "possible filter shape (first sidelobe -13 dB, 6 dB per octave), so one "
                "clean point target's sidelobes reach -40 dB over 14.4 m of the 25 m axis "
                "(72 of 126 gates) -- measured through the real InterconnectBlock and "
                "RangeProfileBlock. That, not the main-lobe smear, is what the audience "
-               "sees; the floor rise is the same energy. Lead with the floor; the two "
-               "vertical streaks are the filter's sidelobes on its two strongest returns. "
-               "Manual path: set Case -> default and run again."),
+               "sees; the floor rise is the same energy. Lead with the floor: the two "
+               "streaks are its sidelobes on the two strongest returns."),
         live_knobs=[("interconnect", "case", "passthrough -> default (synthetic boxcar)")],
         # A/B (hostile-expert fourth read, 2026-09-23: polarity was inverted relative to
         # T1/T2, where "after"/B is always the degraded arm -- here "after" used to be
@@ -377,21 +403,20 @@ PRESETS: List[DemoPreset] = [
         ab_label_a="passthrough (no interconnect)",
         ab_label_b="SYNTHETIC 11-tap boxcar placeholder -- added",
         screen_note=("SYNTHETIC filter: the real Tessera/UIC responses differ by <= 0.021 "
-                     "dB in band and are invisible on this display -- for the real parts "
+                     "dB in band, invisible on this display -- for the real parts "
                      "the honest result is a null."),
         say=[
-            "This filter is synthetic and labelled as such wherever it appears (owner "
-            "ballot 3A). It stands in for a bad interconnect; it is not a model of any "
+            "This filter is synthetic, labelled as such wherever it appears (owner "
+            "ballot 3A); it stands in for a bad interconnect, not a model of any "
             "hardware.",
-            "Credit UIC by name (Gharib & Partin-Vaisband): the interconnect thrust, the "
-            "Interconnect block and the six Tessera S21 responses shipped in "
-            "e2e/data/interconnect are theirs; the finding that flat in-band loss divides "
-            "out of a peak-normalized image is ours. The boxcar is our placeholder, not "
-            "derived from their designs.",
+            "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
+            "doi 10.1109/TCAD.2026.3718807): the interconnect thrust, the Interconnect "
+            "block and the six Tessera S21 responses shipped in e2e/data/interconnect are "
+            "theirs. The boxcar is our placeholder, not derived from their designs.",
             "The real Tessera/UIC designs are INVISIBLE on a peak-normalized display: the "
             "actual Case3 response in-band gives correlation 0.999999, max 0.021 dB "
-            "difference. Flat insertion loss divides out. That is why the demo shows a "
-            "shaped filter, and why the range profile, not the image, is the view.",
+            "difference. Flat insertion loss divides out. That is why the demo uses a "
+            "shaped filter and the range profile, not the image.",
             "Crosstalk -- the dominant real array-interconnect impairment -- is structurally "
             "absent: one S21 is broadcast to all 1024 elements. Say it up front.",
             "The 77 GHz parts are not reconciled with the 30 GHz frames; today's "
@@ -402,198 +427,138 @@ PRESETS: List[DemoPreset] = [
             "is real drifting multipath (2-21 m across frames), not fixed.",
         ],
         do_not_say=[
-            "'Case3' from the dropdown as the UIC Case3: it is a legacy alias for "
+            "'Case3' from the dropdown as the UIC Case3: a legacy alias for "
             "passthrough. The real CSV is not reachable from this screen yet.",
-            "That the boxcar is physically legitimate: unnormalized it has +20.8 dB gain.",
+            "That the boxcar is physically legitimate: unnormalized, +20.8 dB gain.",
             "That the real designs 'do nothing' -- they are invisible on THIS display, which "
             "is a statement about the display.",
         ],
     ),
     DemoPreset(
         id="thrust5_detector_cfar",
-        label="Thrust 5 - detector on benchmark frames: classical CFAR",
+        label="Thrust 5 - live chain from the stored channel: classical CFAR",
         thrust=5,
         n_steps=5,
         overrides=_merge(
-            {"corpus_environment": {"enabled": True, "params": {
-                "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
-            {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}, "subspace": {"enabled": False}},
-            _only_products("radar_cube", "detector"),
+            _T5_LIVE_CHAIN,
             {"detector": {"params": {"mode": "cfar", "threshold": CFAR_THRESHOLD,
                                      "cfar_guard": 2, "cfar_train": 6}}},
         ),
-        blurb=("Replays the held-out TEST frames every published number was scored on, "
-               "labels included, and runs the classical CA-CFAR baseline on them: the "
-               "range-Doppler cube, then the objectness map with detections (red x) over "
-               "ground truth's match-tolerance box (white; a cross inside is a hit, scored "
-               "beside it). The threshold is CFAR's recall-0.5 point (0.66), matching the "
-               "two network presets, so the cross counts across the three screens ARE the "
-               "false-alarm comparison. Run this first, then load RADDetNet on the same "
-               "frames: the previous run stays on the Results tab underneath."),
-        live_knobs=[("detector", "threshold", "0.66 -> 0.8 (fewer detections; the knob "
-                                              "that moves the way it sounds)")],
+        # MEASURED 2026-09-23 (CUDA, two identical runs per arm): A (12-bit) 61
+        # detections over the 5 test frames, 16 hits / 45 unmatched / 9.0 per frame;
+        # B (4-bit) 55 detections, 15 hits / 40 unmatched / 8.0 per frame. The gate
+        # printed max |diff| = 0 ADC codes on the A arm (bit-identical to the corpus)
+        # and 2048 codes on the B arm -- the quantizer, which is the point.
+        blurb=("The held-out TEST frames, replayed as the STORED RAY-TRACED CHANNEL: "
+               "the RF front end, dechirp, thermal floor, impairments, IF high-pass "
+               "and ADC all run LIVE from that channel with the values on screen, then "
+               "CA-CFAR. Press Run once: A is the 12-bit ADC the corpus was generated "
+               "at, B the same frames re-digitised at 4 bits. Measured over the 5 "
+               "frames: 16 hits / 45 unmatched (9.0 per frame) at 12 bits, 15 / 40 "
+               "(8.0) at 4 bits. The threshold is CFAR's recall-0.5 point (0.66), "
+               "matching the two network presets, so the cross counts across the "
+               "three screens ARE the false-alarm comparison."),
+        live_knobs=[("quantizer", "bits", "12 -> 4 (the ADC is re-run, not re-loaded)"),
+                    ("detector", "threshold", "0.66 -> 0.8 (fewer detections)")],
+        ab=("quantizer", "bits", 4),
+        ab_label_a="12-bit ADC",
+        ab_label_b="4-bit ADC -- same frames, live chain",
         screen_note=_T5_SCREEN_NOTE,
         say=[
-            "Unambiguous velocity is +-v_max from the manifest (read it: ~9.7 m/s); the "
-            "corpus targets are slower by construction, so a 20 m/s car would alias here "
-            "-- say so if asked.",
-            "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich frames "
-            "(25 m, range-azimuth); this is the benchmark corpus: stored ADC frames "
-            "(100 m, range-Doppler cube), already impaired at generation. On replay the "
-            "ADC-cube blocks are SKIPPED (the run note says so) and the Thrust 1-4 blocks "
-            "are off.",
-            "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
-            "0.081. Both numbers reproduced today from the public repo.",
-            "At this operating point CFAR averages 6.2 false alarms per frame over the 172 "
-            "test frames (a single frame can show more or fewer). The objectness map is a "
-            "clipped CFAR ratio, near zero away from detections -- it looks dark because "
-            "CFAR is a threshold test, not a probability field.",
-            "The top 60 m of the map is empty because the labels stop at 40 m, which is "
-            "also the scoring crop; say it before someone asks what is up there.",
-            "Range-azimuth heatmaps elsewhere in the demo come from the munich frames' "
-            "delay-normalised channel (range 0 = earliest arrival); this panel's range is "
-            "absolute because the ADC cube is dechirped -- different pipeline.",
-            "Ground truth omits about 3 real strongly-scattering objects per frame inside "
-            "40 m, so any detector that fires on every real object has a precision ceiling "
-            "of 0.64. Some of the 'false alarms' are real objects.",
-            "Streaked targets in Doppler: ANSWERED. True mainlobe is 6-8 of 64 bins "
-            "(~2 m/s at 0.303 m/s/bin); ambient floor sits at median -41.6 dB / p95 "
-            "-40.6 dB, within 1 dB of the -40 dB clip -- floor fluctuation lights up "
-            "whole rows, a display-threshold coincidence.",
+            "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich "
+            "frames (25 m, range-azimuth); this is the benchmark corpus (100 m, "
+            "range-Doppler). What is STORED is the ray-traced channel -- everything "
+            "after it runs live, so the ADC knob below reaches the detector.",
+            "The gate that makes this honest: at the settings each frame was generated "
+            "with, the live cube is BIT-IDENTICAL to the stored one -- the run note "
+            "prints max |diff| = 0 ADC codes. Move a knob and that number leaves zero; "
+            "that difference is the whole demonstration.",
+            "Classical CFAR scores AP 0.301 on this split offline; the data-blind "
+            "chance floor is 0.081. Those are b1_bench_v3 numbers at 12-bit default "
+            "impairments -- the counts on screen are 5 live frames of a different "
+            "corpus, a demonstration rather than a re-measurement.",
+            "The top 60 m of the map is empty because the labels stop at 40 m, which "
+            "is also the scoring crop; say it before someone asks.",
+            "Ground truth omits about 3 real strongly-scattering objects per frame "
+            "inside 40 m, so any detector that fires on every real object has a "
+            "precision ceiling of 0.64. Some 'false alarms' are real objects.",
+            "Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); the corpus "
+            "targets are slower by construction, so a 20 m/s car would alias -- say so "
+            "if asked.",
         ],
         do_not_say=[
-            "Any learned-detector number from before 2026-09-22 except the rd-format 0.127 "
-            "and 0.123: the rad-format results were retracted (ESTABLISHED_FACTS F84).",
-            "That fewer CFAR training cells means more false alarms: measured on these 5 "
-            "frames at threshold 0.66 the count went 46 -> 39 (train 6 -> 2). Do not turn "
-            "that knob on stage.",
-        ],
-    ),
-    DemoPreset(
-        id="thrust5_bridge_adc_bits_vs_detections",
-        label=("Thrust 5 (bridge) - ADC resolution vs detections: same 5 scenes, "
-               "12-bit vs 4-bit"),
-        thrust=5,
-        n_steps=5,
-        overrides=_merge(
-            {"corpus_environment": {"enabled": True, "params": {
-                "manifest": BRIDGE_CORPUS_12BIT, "split": "test", "start_frame": 0}}},
-            {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}, "subspace": {"enabled": False}},
-            _only_products("radar_cube", "detector"),
-            {"detector": {"params": {"mode": "cfar", "threshold": CFAR_THRESHOLD,
-                                     "cfar_guard": 2, "cfar_train": 6}}},
-        ),
-        # MEASURED (2026-09-23, CUDA, two independent runs each arm -- both runs agreed
-        # bit-for-bit, so the gap below is the quantizer, not run-to-run noise): over the
-        # 5 test frames, cumulative hits 19 (A, 12-bit) vs 17 (B, 4-bit); unmatched
-        # detections 25 both arms (redistributed frame to frame, not net reduced); hit
-        # rate 0.613 vs 0.548.
-        blurb=("Same CA-CFAR run as the classical-CFAR preset (threshold 0.66, guard 2, "
-               "train 6), but the CORPUS itself was regenerated at two ADC resolutions "
-               "from one scene salt (seed 4242): the same 5 held-out test scenes, same "
-               "target ranges/velocities/classes frame by frame -- only the ADC "
-               "quantizer changed (per-frame quant_snr_db ~57-58 dB at 12-bit vs ~9-10 "
-               "dB at 4-bit). Press Run once: both arms run and appear as before (A, "
-               "top, 12-bit) / after (B, bottom, 4-bit). Measured over the 5 test "
-               "frames: cumulative hits 19 (A) vs 17 (B), unmatched detections 25 both "
-               "arms (redistributed across frames, not reduced), hit rate 0.613 vs "
-               "0.548. This is the one Thrust 5 screen where a front-end setting (ADC "
-               "bit depth) visibly moves a detection count -- and it moves it baked "
-               "into the corpus at generation time, not on a live knob: the manifest "
-               "path IS the knob, changed by re-running the generator, never live on "
-               "the ADC itself."),
-        live_knobs=[("corpus_environment", "manifest",
-                     "12-bit corpus -> 4-bit corpus (same 5 scenes, run again)")],
-        ab=("corpus_environment", "manifest", BRIDGE_CORPUS_4BIT),
-        ab_label_a="12-bit ADC (as generated)",
-        ab_label_b="4-bit ADC, same scenes re-generated -- added quantisation",
-        screen_note=("frames: stored ADC corpus (b1_bridge_12bit vs b1_bridge_4bit, "
-                     "benchmark_v1_D2), replayed -- same 5 scenes (seed 4242), "
-                     "quantizer 12 vs 4 bits is the only difference; the RF chain of "
-                     "Thrusts 1-4 is bypassed; 40 m; in-distribution."),
-        say=[
-            "Read the cumulative-hits row: 19 (A, 12-bit) vs 17 (B, 4-bit) over the 5 "
-            "test frames -- 2 fewer real targets crossed CFAR's threshold at 4-bit. "
-            "Unmatched detections stayed at 25 both arms, just redistributed "
-            "frame to frame, so the story is fewer hits, not fewer false alarms.",
-            "4-bit quantisation raises the ADC noise floor by construction "
-            "(quant_snr_db ~57-58 dB at 12-bit vs ~9-10 dB at 4-bit, stored per frame "
-            "in the corpus meta). CFAR's own adaptive threshold tracks that floor, so a "
-            "real return that cleared the 12-bit threshold can fall back under the "
-            "4-bit one.",
-            "The Thrust 1-4 blocks (RFFE, interconnect, AFE, subspace) are off here, "
-            "same as the other two Thrust 5 presets -- this corpus enters the chain "
-            "already digitized.",
-            "Both arms are deterministic and reproduced bit-for-bit run to run "
-            "(checked twice each, 2026-09-23): the 2-hit gap is the quantizer, not "
-            "run-to-run noise.",
-            "The two manifests share one scene salt (seed 4242) with a rename between "
-            "generator runs, so geometry and target lists are identical frame by "
-            "frame -- verified by diffing each test frame's stored meta.",
-        ],
-        do_not_say=[
-            "That this isolates a learned detector: like thrust5_detector_cfar, this "
-            "preset only runs classical CFAR on 5 frames -- no network is loaded here.",
-            "'Unmatched detections' as false alarms: ground truth omits real objects "
-            "(F83), so the precision ceiling is 0.64 and some unmatched crosses are "
-            "real, unlabelled targets.",
+            "That 16 vs 15 hits measures what 4-bit quantisation costs: 5 frames at "
+            "one threshold is a demonstration that the knob reaches the detector, not "
+            "a measurement of the detector.",
+            "Any learned-detector number from before 2026-09-22 except the rd-format "
+            "0.127 and 0.123: the rad-format results were retracted (F84).",
+            "That fewer CFAR training cells means more false alarms: measured, the "
+            "count went 46 -> 39 (train 6 -> 2). Do not turn that knob on stage.",
         ],
     ),
     DemoPreset(
         id="thrust5_detector_ml",
-        label=("Thrust 5 - detector on benchmark frames: ported network (the arm that "
-               "LOSES, shown on purpose)"),
+        label=("Thrust 5 - live chain, ported network (the arm that LOSES, shown on "
+               "purpose)"),
         thrust=5,
         n_steps=5,
         overrides=_merge(
-            {"corpus_environment": {"enabled": True, "params": {
-                "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
-            {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}, "subspace": {"enabled": False}},
-            _only_products("radar_cube", "detector"),
+            _T5_LIVE_CHAIN,
             {"detector": {"params": {"mode": "ml", "checkpoint": ML_CHECKPOINT,
                                      "threshold": ML_THRESHOLD}}},
         ),
-        blurb=("The same frames, through the ported FFTRadNet checkpoint (rd input; test AP "
-               "0.127 against CFAR's 0.301 under the same protocol). Its objectness map is "
-               "a range-profile x fixed-azimuth-prior STRIPE, not peaks: the network never "
-               "learns azimuth (F83). The decode threshold is pinned at its recall-0.5 "
-               "operating point (0.22), matching the CFAR and RADDetNet presets; at the "
-               "default 0.5 this checkpoint draws nothing."),
-        live_knobs=[("detector", "threshold", "0.22 -> 0.5 (the figure goes blank -- that is the point)")],
-        # This is the arm the demo shows on purpose to LOSE (hostile-expert fourth
-        # read, 2026-09-23): the shared T5 note plus a one-clause reminder, kept short
-        # so the combined line still fits 16 px on the 1600 px results page.
-        screen_note=_T5_SCREEN_NOTE.replace("; seed 42 of two (0.476 / 0.436)", "").rstrip(".")
-        + "; loses to CFAR 0.127 vs 0.301, shown on purpose.",
+        # MEASURED 2026-09-23 (CUDA, repeated): A (corner 1.0 m) 148 detections over
+        # the 5 frames, 15 hits / 133 unmatched / 26.6 per frame; B (corner 25 m) 65
+        # detections, 4 hits / 61 unmatched / 12.2 per frame. 25 m was chosen by
+        # sweeping: 4 m and 8 m move the count by 1-2 crosses (invisible on stage),
+        # 40 m empties the screen (3 arms of 5 frames show nothing at all).
+        blurb=("The same live chain, decoded by the ported FFTRadNet checkpoint (rd "
+               "input; offline test AP 0.127 against CFAR's 0.301). Its objectness map "
+               "is a range-profile x fixed-azimuth-prior STRIPE, not peaks: the network "
+               "never learns azimuth (F83). A/B moves the IF high-pass corner from the "
+               "1 m a real receiver uses to a deliberately broken 25 m, which suppresses "
+               "every return closer than that BEFORE digitisation: 148 crosses over the "
+               "5 frames fall to 65, and hits 15 -> 4. The decode threshold is pinned at "
+               "its recall-0.5 point (0.22); at the default 0.5 this checkpoint draws "
+               "nothing."),
+        live_knobs=[("if_hpf", "corner_range_m",
+                     "1 m (as built) -> 25 m (an absurd receiver, and the detector says so)"),
+                    ("detector", "threshold", "0.22 -> 0.5 (the figure goes blank)")],
+        ab=("if_hpf", "corner_range_m", 25.0),
+        ab_label_a="IF high-pass corner 1 m (as built)",
+        ab_label_b="corner 25 m -- the receiver discards everything closer",
+        # ".": the shared note ends on the render-time v_max clause, so the sentence
+        # separator has to be added back here or the two run together on screen
+        # ("v_max +-9.69 m/s Loses to CFAR", read off the rehearsal PNG).
+        screen_note=_T5_SCREEN_NOTE.rstrip(".")
+        + ". Loses to CFAR 0.127 vs 0.301, shown on purpose.",
         say=[
-            "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
-            "first; the diagnosis is the result.",
-            "At this operating point (0.22) expect ~29 crosses per frame ON AVERAGE over the "
-            "172 test frames = 26.4 false alarms + 3.0 hits (beat_cfar.json); any single "
-            "frame differs (the rehearsal's frame 5 showed 25). CFAR's false-alarm rate is "
-            "6.2, RADDetNet's 3.0. ALL inside 40 m: the network never fires beyond the "
-            "labelled range.",
-            "Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1 "
-            "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
-            "matching they score no better than a constant frame-independent map.",
-            "F83's mechanism, verbatim: neither head converts channel phase into an angle "
-            "bin. Tested two ways (F85): the same beamformed input into this decoder is "
-            "worth +0.011 (0.138); an architecture with range x azimuth as its spatial "
-            "plane, on that input, scores 0.476 and passes the same controls this one "
-            "fails. Load the RADDetNet preset for that -- and read its caveats first.",
-            "How two results died this week and what stops it recurring: every checkpoint "
-            "trained since 2026-09-21 records a fingerprint of the code that built its "
-            "inputs (F84). The checkpoint on screen predates the field; it is trusted "
-            "because re-scoring it today reproduces its number, not because of a stamp.",
+            "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. "
+            "Say it first; the diagnosis is the result.",
+            "B is not a plausible receiver -- it is a 25 m high-pass corner, twenty-five "
+            "times the real one, and the point is that a front-end setting now reaches "
+            "the detector at all: 148 crosses become 65, hits 15 become 4.",
+            "At the A operating point expect ~29 crosses per frame on the offline split "
+            "= 26.4 false alarms + 3.0 hits (beat_cfar.json); these 5 live frames give "
+            "26.6 unmatched per frame, which is the same regime, not the same number.",
+            "Both ported networks emit a near-separable f(range) * g(azimuth) map: "
+            "rank-1 energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under "
+            "azimuth-only matching they score no better than a constant map.",
+            "F83's mechanism, verbatim: neither head converts channel phase into an "
+            "angle bin. An architecture with range x azimuth as its spatial plane, on "
+            "the same input, scores 0.476 and passes the controls this one fails -- "
+            "load the RADDetNet preset for that, and read its caveats first.",
+            "This checkpoint was trained on a different corpus from the frames on "
+            "screen, and its rd input scaling comes from that corpus (the run note says "
+            "so); moving a knob takes it further out of its training distribution.",
         ],
         do_not_say=[
             "'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.",
             "'We fixed azimuth': the stripe statistic refutes it on the next slide.",
-            "That this is a benchmark of SSMRadNet or FFTRadNet: the fault is on our side "
-            "of the integration, and the collaborator README says so.",
+            "That the 25 m corner measures receiver-design sensitivity: it is an "
+            "illustration on 5 frames, not a sweep.",
+            "That this is a benchmark of SSMRadNet or FFTRadNet: the fault is on our "
+            "side of the integration, and the collaborator README says so.",
         ],
     ),
     DemoPreset(
@@ -602,69 +567,63 @@ PRESETS: List[DemoPreset] = [
         thrust=5,
         n_steps=5,
         overrides=_merge(
-            {"corpus_environment": {"enabled": True, "params": {
-                "manifest": DEFAULT_CORPUS, "split": "test", "start_frame": 0}}},
-            {"rffe": {"enabled": False}, "interconnect": {"enabled": False},
-             "afe": {"enabled": False}, "subspace": {"enabled": False}},
-            _only_products("radar_cube", "detector"),
+            _T5_LIVE_CHAIN,
             {"detector": {"params": {"mode": "ml", "checkpoint": RADDETNET_CHECKPOINT,
                                      "threshold": RADDETNET_THRESHOLD}}},
         ),
-        blurb=("The same frames through RADDetNet (Doppler as channels, range x azimuth as "
-               "the spatial plane) on CFAR's own beamformed cube. Test AP 0.476 vs CFAR's "
-               "0.301, 3.0 FA/frame at recall 0.5 vs CFAR's 6.2, controls pass (F85). "
-               "Threshold pinned at recall-0.5 (0.44). Independently verified (F85/F86 "
-               "addenda): bit-identical, no leakage, baseline fair. On an unseen "
-               "earlier-generator corpus the result is SEED-DEPENDENT (F86): seed 42 leads "
-               "CFAR by +0.03 with worse false alarms, seed 43 trails by -0.03. "
-               "In-distribution both seeds beat CFAR. Trained on both corpora, one "
-               "checkpoint beats CFAR on both held-out splits (F86 addendum) -- but "
-               "neither corpus is unseen; two seeds agree (0.584 / 0.577). Owner decision: "
-               "LEADS Thrust 5, caveat volunteered."),
-        live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
+        # MEASURED 2026-09-23 (CUDA, repeated): A (12-bit) 23 detections over the 5
+        # frames, 10 hits / 13 unmatched / 2.6 per frame; B (4-bit) 19 detections, 11
+        # hits / 8 unmatched / 1.6 per frame. The hit count moves the "wrong" way by
+        # one -- 5 frames, and the card says so rather than hiding it.
+        blurb=("The same live chain through RADDetNet (Doppler as channels, range x "
+               "azimuth as the spatial plane) on CFAR's own beamformed cube. Offline "
+               "test AP 0.476 vs CFAR's 0.301, 3.0 FA/frame at recall 0.5 vs CFAR's "
+               "6.2, controls pass (F85). A/B re-digitises the same stored channel at "
+               "4 bits: 23 crosses become 19, 13 unmatched become 8, and hits go 10 -> "
+               "11 -- five frames, so read it as 'the knob reaches the detector', not "
+               "as a ranking. On an unseen earlier-generator corpus the result is "
+               "SEED-DEPENDENT (F86). Owner decision: LEADS Thrust 5, caveat "
+               "volunteered."),
+        live_knobs=[("quantizer", "bits", "12 -> 4 (the ADC is re-run, not re-loaded)"),
+                    ("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
+        ab=("quantizer", "bits", 4),
+        ab_label_a="12-bit ADC",
+        ab_label_b="4-bit ADC -- same frames, live chain",
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "The defensible sentence: a learned head on the classical front end beats a "
             "CFAR threshold on the same cube, in-distribution -- say that, not 'beats "
             "CFAR' (F85 addendum).",
-            "Every number comes from e2e/ml/runs/beat_cfar.json (seed 42, deterministic); "
-            "independently re-scored bit-identically, controls re-implemented to 1e-6. "
-            "Paired scene-level bootstrap: +0.175 AP, 95% CI [+0.145, +0.208] "
-            "(raddetnet_ci.json, F85 addendum).",
+            "Every offline number comes from e2e/ml/runs/beat_cfar.json (seed 42, "
+            "b1_bench_v3, 12-bit default impairments); re-scored bit-identically. "
+            "Paired scene bootstrap: +0.175 AP, 95% CI [+0.145, +0.208].",
+            "The counts on screen are 5 live frames of a different corpus at whatever "
+            "the knobs say -- a demonstration that the front end reaches the detector, "
+            "never a re-measurement of AP. The network also leaves its training "
+            "distribution the moment a knob moves.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
-            "retention 12%, CFAR 10%, shipped nets 48-51%; azimuth-only AP 0.657 vs 0.472 "
-            "prior); the baseline is honest too -- nine classical configs scored, best "
-            "0.328, shipped CFAR beats every alternative (F85 addendum).",
-            # Word-count trade (hostile-expert fourth read, 2026-09-23): this bullet was
-            # ADDED and the two above it merged into one to keep the say list at its
-            # tested ceiling of 6 while staying inside the 450-word card ceiling.
+            "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
+            "were scored too, best 0.328, and shipped CFAR beats every alternative.",
             "Four learned arms were screened on this test split: three ported "
             "architectures and this one designed to the F83 diagnosis; all four are in "
             "beat_cfar.json, none dropped.",
-            "THE CAVEAT: on an unseen earlier-generator corpus (b1_bench_v2), CFAR scores "
-            "0.179/13.2 FA; this checkpoint (seed 42) 0.208/15.1; seed 43 0.153/20.7 "
-            "(F86). Out of distribution it does NOT reliably beat CFAR -- one seed +0.03, "
-            "the other -0.03.",
-            "Trained on both corpora, the network beats CFAR on both test splits "
-            "(0.584/1.4 FA v3, 0.487/2.9 FA v2; controls pass -- F86 addendum). Say this "
-            "as a data-diversity result, not generalisation: it is also one training "
-            "seed.",
+            "THE CAVEAT: on an unseen earlier-generator corpus (b1_bench_v2), CFAR "
+            "scores 0.179/13.2 FA; this checkpoint (seed 42) 0.208/15.1; seed 43 "
+            "0.153/20.7 (F86). Out of distribution it does NOT reliably beat CFAR.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution and on "
-            "CFAR's own front end (F85 addendum); the first radar person in the room will "
-            "ask about both.",
+            "CFAR's own front end (F85 addendum).",
+            "That 11 hits at 4 bits beating 10 at 12 bits means anything: it is 5 "
+            "frames at one threshold.",
             "Anything about generalisation or robustness: the two single-corpus seeds "
             "straddle CFAR out of distribution (+0.03/-0.03); the joint 0.487 on v2 is "
             "NOT out-of-distribution -- it trained on v2 (F86).",
-            "The joint numbers as generalisation: two seeds agree (F86) but both corpora were "
-            "trained on; the only unseen corpus is the third (F87: 0.539 vs 0.274, one backdrop).",
-
-            "That this is what the professor asked for: it is a detector designed to the "
-            "F83 diagnosis, not a port of the collaborators' architectures.",
+            "That this is what the professor asked for: it is a detector designed to "
+            "the F83 diagnosis, not a port of the collaborators' architectures.",
             "That the model converged: val AP peaks at epoch 14 of 40 and decays to "
-            "0.35-0.41 while train loss keeps falling (F85 addendum); early stopping on "
-            "val is load-bearing.",
+            "0.35-0.41 while train loss keeps falling (F85 addendum); early stopping "
+            "on val is load-bearing.",
         ],
     ),
 ]
