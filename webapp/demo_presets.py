@@ -198,7 +198,7 @@ PRESETS: List[DemoPreset] = [
             {"afe": {"enabled": True}},
             {"subspace": {"params": {"k": 8, "warm_start": "cold"}}},
             {"interconnect": {"enabled": False}},
-            _only_products("subspace_err", "range_az"),
+            _only_products("subspace_err"),
         ),
         blurb=("The tracker starts from a RANDOM basis with no peek at ground truth and "
                "acquires the scene's 8-dimensional subspace from 512 adaptive measurements "
@@ -209,11 +209,12 @@ PRESETS: List[DemoPreset] = [
                "copy of the true subspace."),
         live_knobs=[("subspace", "warm_start", "cold <-> warm")],
         say=[
-            "The range-azimuth panel is the end product the tracker feeds; it does not "
-            "change visibly during acquisition on the displayed 40 dB range, and that is "
-            "the point of the error curve: the picture cannot show you what the tracker "
-            "has not yet learned. If asked what the image would look like without the AFE, "
-            "the answer is 'the same at this compression' -- do not toggle it.",
+            "There is deliberately no image on this screen: the range-azimuth product does "
+            "not change visibly during acquisition on the displayed 40 dB range (it is the "
+            "same panel Thrusts 1 and 2 show), and the point of the error curve is that the "
+            "picture cannot show you what the tracker has not yet learned. If asked what "
+            "the image would look like without the AFE, the answer is 'the same at this "
+            "compression' -- do not toggle it.",
             "Three frames to converge, at ten refinement passes per frame (n_refine=10 -- "
             "say it before someone reads it).",
             "This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 a cold start does not "
@@ -248,10 +249,13 @@ PRESETS: List[DemoPreset] = [
                "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
                "of in-band ripple. Run as loaded, then set Case -> passthrough and run "
                "again: the range profile's floor drops ~14 dB (the visible effect; the "
-               "previous run stays on the Results tab for the comparison). The range "
-               "smearing is 11 NATIVE cells = 0.55 m, about 3 gates on the 256-gate axis "
-               "that spans 50 m -- sub-pixel at full scale, so drag-zoom to +-3 m around "
-               "the peak if you want to show it. Lead with the floor, not the heatmap."),
+               "previous run stays on the Results tab for the comparison). On the heatmap "
+               "the filter streaks each bright return along the WHOLE range axis: two "
+               "vertical streaks at the targets' azimuths, visible down to the -40 dB clip "
+               "(rehearsal 2026-09-23, frame 3). That, not the 11-cell main-lobe smear, is "
+               "what the audience sees, and the range profile's ~14 dB floor rise is the "
+               "same energy. Lead with the floor; when asked about the streaks, they are "
+               "the filter's range sidelobes on every target."),
         live_knobs=[("interconnect", "case", "default (synthetic boxcar) -> passthrough")],
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
@@ -304,6 +308,11 @@ PRESETS: List[DemoPreset] = [
         live_knobs=[("detector", "threshold", "0.66 -> 0.8 (fewer detections; the knob "
                                               "that moves the way it sounds)")],
         say=[
+            "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich frames "
+            "through the RF front end, interconnect and tracker (25 m scene, range-azimuth). "
+            "This is the benchmark corpus: stored ADC frames (100 m, range-Doppler cube) "
+            "replayed through the ADC-cube chain on the diagram; the Thrust 1-4 blocks are "
+            "off. The detector sees the corpus's cube, not the Thrust 1-4 output.",
             "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
             "0.081. Both numbers reproduced today from the public repo.",
             "At this operating point CFAR averages 6.2 false alarms per frame over the 172 "
@@ -350,9 +359,11 @@ PRESETS: List[DemoPreset] = [
         say=[
             "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
             "first; the diagnosis is the result.",
-            "At this operating point (0.22) expect ~27 crosses per frame = 26 false alarms "
-            "+ ~3 hits, which is the published number; CFAR's is 6.2 and RADDetNet's 3.0. "
-            "ALL inside 40 m: the network never fires beyond the labelled range.",
+            "At this operating point (0.22) expect ~29 crosses per frame ON AVERAGE over the "
+            "172 test frames = 26.4 false alarms + 3.0 hits (beat_cfar.json); any single "
+            "frame differs (the rehearsal's frame 5 showed 25). CFAR's false-alarm rate is "
+            "6.2, RADDetNet's 3.0. ALL inside 40 m: the network never fires beyond the "
+            "labelled range.",
             "Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1 "
             "energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant frame-independent map.",
@@ -429,9 +440,12 @@ PRESETS: List[DemoPreset] = [
             "Where the gain is: pedestrians. Hit rate at the decode floor (threshold 0.01) "
             "0.945 vs CFAR's 0.798; on vehicles 0.983 vs 0.929. Physically sensible, not "
             "suspicious. On THIS screen the threshold is 0.44 -- the recall-0.5 point by "
-            "construction -- so about half the white circles carry a red cross; the "
-            "comparison at this point is the cross count against CFAR's (3.0 vs 6.2 false "
-            "alarms per frame on average), not the hit rate.",
+            "construction, AVERAGED over 172 test frames -- so over the whole split half the "
+            "circles carry a cross; on any ONE frame the fraction varies (the rehearsal's "
+            "frame 5 showed 6 crosses on 7 circles). Never read a single frame as recall or "
+            "as a false-alarm rate; the comparison is the cross count against CFAR's over "
+            "the run (3.0 vs 6.2 per frame on average), and the scoreboard states the "
+            "match rule it counts with.",
             "Same threshold convention as the CFAR screen: both sit at their recall-0.5 "
             "operating point, so fewer crosses here is fewer false alarms, not fewer hits.",
             "What changed is the architecture, not the input: the same beamformed input into "
