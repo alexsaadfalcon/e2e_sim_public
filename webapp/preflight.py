@@ -5,8 +5,10 @@ fall back to the PDF deck.
 
 Six checks, in order, each printing PASS/FAIL/WARN per item:
 
-  1. Assets      -- every preset's corpus manifest / ML checkpoint exists, munich.pkl
-                     exists, the sionna_sims scan matches the registry's Scenario choices.
+  1. Assets      -- every preset's corpus manifest / ML checkpoint exists, munich_ka.pkl
+                     and the legacy munich.pkl exist, the Tessera public CSV and
+                     surrogate checkpoint exist, and the sionna_sims scan matches the
+                     registry's Scenario choices.
   2. Environment  -- torch imports, CUDA is visible, dash/plotly import, webapp.app imports.
   3. Port         -- the app's host:port (read from webapp.app) is free.
   4. Warm-up      -- runs the cheapest preset once (1 frame) so THIS process pays the
@@ -101,12 +103,40 @@ def check_assets(repo_root: Optional[Path] = None, presets=None,
     results: List[CheckResult] = []
     missing: List[str] = []
 
-    munich = repo_root / "e2e" / "environment" / "sionna_sims" / "munich.pkl"
-    if munich.is_file():
-        results.append(CheckResult("assets.munich_pkl", "PASS", f"{munich} present"))
+    # munich_ka.pkl is what every preset actually loads by default (F93,
+    # notes/ESTABLISHED_FACTS.md); munich.pkl is the legacy 3.5 GHz trace, still shipped
+    # and selectable via the 'munich_legacy_3p5ghz' link -- both must be present or the
+    # GUI offers a Scenario entry it cannot load.
+    for name, fname in (("munich_ka_pkl", "munich_ka.pkl"), ("munich_legacy_pkl", "munich.pkl")):
+        path = sims_dir / fname
+        if path.is_file():
+            results.append(CheckResult(f"assets.{name}", "PASS", f"{path} present"))
+        else:
+            results.append(CheckResult(f"assets.{name}", "FAIL", f"{path} MISSING"))
+            missing.append(str(path))
+
+    # The public Tessera interconnect artifacts (e2e/blocks.py TESSERA_INTERCONNECT_CSV,
+    # and the surrogate checkpoint `python -m e2e.interconnect_surrogate.fetch` installs):
+    # both are gitignored/derived so a clean clone can be missing either, and Thrust 4's
+    # 'source: tessera' preset needs both to run live.
+    tessera_csv = repo_root / "e2e" / "data" / "interconnect" / "tessera_tsv_s21_public.csv"
+    if tessera_csv.is_file():
+        results.append(CheckResult("assets.tessera_public_csv", "PASS", f"{tessera_csv} present"))
     else:
-        results.append(CheckResult("assets.munich_pkl", "FAIL", f"{munich} MISSING"))
-        missing.append(str(munich))
+        results.append(CheckResult("assets.tessera_public_csv", "FAIL", f"{tessera_csv} MISSING"))
+        missing.append(str(tessera_csv))
+
+    checkpoint_dir = (repo_root / "e2e" / "interconnect_surrogate" / "_models"
+                     / "tessera_checkout" / "models")
+    if (checkpoint_dir / "best_model.pth").is_file() and (checkpoint_dir / "input_scaler.pt").is_file():
+        results.append(CheckResult(
+            "assets.tessera_checkpoint", "PASS", f"{checkpoint_dir} present"))
+    else:
+        results.append(CheckResult(
+            "assets.tessera_checkpoint", "FAIL",
+            f"{checkpoint_dir}/{{best_model.pth,input_scaler.pt}} MISSING -- run "
+            f"`python -m e2e.interconnect_surrogate.fetch`"))
+        missing.append(str(checkpoint_dir))
 
     scanned = discover_sionna_scenarios(sims_dir)
     if scanned == list(registry_choices):

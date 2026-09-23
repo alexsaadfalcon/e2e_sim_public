@@ -14,6 +14,7 @@ from webapp.demo_presets import DemoPreset
 from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
 from webapp.preflight import (
     CheckResult,
+    _preset_asset_paths,
     _step_grid_violations,
     check_assets,
     check_environment,
@@ -34,25 +35,45 @@ def _preset(**overrides) -> DemoPreset:
 # =====================================================================================
 
 def test_check_assets_all_present(tmp_path):
+    from webapp.corpus_catalog import discover_sionna_scenarios
+
     manifest = tmp_path / "corpus" / "manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text("{}")
     checkpoint = tmp_path / "runs" / "best.pt"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_text("")
-    munich = tmp_path / "e2e" / "environment" / "sionna_sims" / "munich.pkl"
-    munich.parent.mkdir(parents=True)
-    munich.write_bytes(b"x")
+    sims_dir = tmp_path / "e2e" / "environment" / "sionna_sims"
+    sims_dir.mkdir(parents=True)
+    (sims_dir / "munich_ka.pkl").write_bytes(b"x")  # garbage bytes: _munich_ka_label's
+    (sims_dir / "munich.pkl").write_bytes(b"x")     # pickle.load fails closed to a
+                                                     # metadata-free label, never raises
+    tessera_csv = tmp_path / "e2e" / "data" / "interconnect" / "tessera_tsv_s21_public.csv"
+    tessera_csv.parent.mkdir(parents=True)
+    tessera_csv.write_text("freq_hz,s21_re,s21_im\n")
+    checkpoint_dir = (tmp_path / "e2e" / "interconnect_surrogate" / "_models"
+                     / "tessera_checkout" / "models")
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "best_model.pth").write_bytes(b"x")
+    (checkpoint_dir / "input_scaler.pt").write_bytes(b"x")
 
     presets = [_preset(
         corpus_environment={"enabled": True, "params": {"manifest": str(manifest)}},
         detector={"params": {"mode": "ml", "checkpoint": str(checkpoint)}},
     )]
 
-    results = check_assets(repo_root=tmp_path, presets=presets, sims_dir=munich.parent,
-                           registry_choices=["munich"])
+    # registry_choices comes from the SAME scan here, mirroring how the real registry is
+    # built from discover_sionna_scenarios -- this test checks check_assets' PASS branch
+    # when they agree, not the exact label text (that's _discover_sionna_scenario_specs'
+    # concern, tested in test_corpus_catalog.py-style tests elsewhere).
+    scanned = discover_sionna_scenarios(sims_dir)
+    results = check_assets(repo_root=tmp_path, presets=presets, sims_dir=sims_dir,
+                           registry_choices=scanned)
     by_name = {r.name: r for r in results}
-    assert by_name["assets.munich_pkl"].status == "PASS"
+    assert by_name["assets.munich_ka_pkl"].status == "PASS"
+    assert by_name["assets.munich_legacy_pkl"].status == "PASS"
+    assert by_name["assets.tessera_public_csv"].status == "PASS"
+    assert by_name["assets.tessera_checkpoint"].status == "PASS"
     assert by_name["assets.sionna_registry_match"].status == "PASS"
     assert by_name[f"assets.{manifest}"].status == "PASS"
     assert by_name[f"assets.{checkpoint}"].status == "PASS"
@@ -69,7 +90,10 @@ def test_check_assets_reports_missing_checkpoint_and_manifest(tmp_path):
     results = check_assets(repo_root=tmp_path, presets=presets, sims_dir=tmp_path / "sims",
                            registry_choices=["munich"])
     by_name = {r.name: r for r in results}
-    assert by_name["assets.munich_pkl"].status == "FAIL"
+    assert by_name["assets.munich_ka_pkl"].status == "FAIL"
+    assert by_name["assets.munich_legacy_pkl"].status == "FAIL"
+    assert by_name["assets.tessera_public_csv"].status == "FAIL"
+    assert by_name["assets.tessera_checkpoint"].status == "FAIL"
     assert by_name["assets.e2e/ml/datasets/nope/manifest.json"].status == "FAIL"
     assert "x" in by_name["assets.e2e/ml/datasets/nope/manifest.json"].message  # names preset id
     assert by_name["assets.e2e/ml/runs/nope/best.pt"].status == "FAIL"
@@ -77,12 +101,26 @@ def test_check_assets_reports_missing_checkpoint_and_manifest(tmp_path):
     assert "manifest.json" in by_name["assets.summary"].message
 
 
-def test_check_assets_cfar_preset_has_no_checkpoint_to_check(tmp_path):
-    """mode='cfar' presets carry no checkpoint path; the scan must not invent one."""
-    presets = [_preset(detector={"params": {"mode": "cfar", "checkpoint": ""}})]
-    results = check_assets(repo_root=tmp_path, presets=presets, sims_dir=tmp_path / "sims",
+def test_check_assets_reports_missing_tessera_checkpoint_file_individually(tmp_path):
+    """Only one of the two checkpoint files present is still a FAIL (an incomplete
+    fetch is as unusable as no fetch) -- the real failure mode
+    `python -m e2e.interconnect_surrogate.fetch` interrupted mid-clone would produce."""
+    checkpoint_dir = (tmp_path / "e2e" / "interconnect_surrogate" / "_models"
+                     / "tessera_checkout" / "models")
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "best_model.pth").write_bytes(b"x")  # input_scaler.pt missing
+    results = check_assets(repo_root=tmp_path, presets=[], sims_dir=tmp_path / "sims",
                            registry_choices=["munich"])
-    assert not any(r.name.startswith("assets.") and "checkpoint" in r.name for r in results)
+    by_name = {r.name: r for r in results}
+    assert by_name["assets.tessera_checkpoint"].status == "FAIL"
+
+
+def test_check_assets_cfar_preset_has_no_checkpoint_to_check():
+    """mode='cfar' presets carry no checkpoint path; the scan must not invent one (the
+    fixed infra checks like assets.tessera_checkpoint are unrelated to this scan, so this
+    exercises the preset-path helper directly rather than substring-matching result names)."""
+    presets = [_preset(detector={"params": {"mode": "cfar", "checkpoint": ""}})]
+    assert _preset_asset_paths(presets) == {}
 
 
 def test_check_assets_flags_sionna_registry_mismatch(tmp_path):
