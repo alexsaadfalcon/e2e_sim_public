@@ -35,6 +35,13 @@ measurements from a specific part.** If real numbers for the modelled hardware e
 this is the only place to change, and the whole corpus difficulty moves coherently with it.
 Do not tune them to make a detector's curves look better; that is precisely the failure
 mode this module was created to end.
+
+**Ka-band provenance note (owner decision 2026-09-23, Ka-band re-founding):** `benchmark_v1_ka`
+(`e2e.radar_config`) reuses these same two defaults unchanged. They are assumed at Ka-band,
+unmeasured (owner 2026-09-23) -- a 77 GHz-MMIC-derived Tx power/noise figure carried over to a
+30 GHz carrier with no datasheet or measurement behind that carry-over. If real Ka-band hardware
+numbers arrive, update `DEFAULT_TX_POWER_DBM`/`DEFAULT_NOISE_FIGURE_DB` (or override per-config)
+rather than leaving the 77 GHz values standing unlabeled.
 """
 
 from __future__ import annotations
@@ -53,12 +60,15 @@ K_BOLTZMANN = 1.380649e-23
 T0_KELVIN = 290.0
 
 #: Transmit power per TX channel, dBm. IWR1443-class parts sit around 12 dBm of output
-#: power per channel at 77 GHz.
+#: power per channel at 77 GHz. Also used, unchanged, by `benchmark_v1_ka`: assumed at
+#: Ka-band, unmeasured (owner 2026-09-23) -- see the module docstring's Ka-band note.
 DEFAULT_TX_POWER_DBM = 12.0
 
 #: Receiver noise figure, dB, referenced at the antenna input. 15 dB is typical for an
 #: integrated 77 GHz automotive receive chain (a discrete low-noise design would do better;
-#: an integrated MMIC with the mixer and IF chain on die does not).
+#: an integrated MMIC with the mixer and IF chain on die does not). Also used, unchanged,
+#: by `benchmark_v1_ka`: assumed at Ka-band, unmeasured (owner 2026-09-23) -- see the
+#: module docstring's Ka-band note.
 DEFAULT_NOISE_FIGURE_DB = 15.0
 
 

@@ -65,6 +65,42 @@ DEFAULT_LABEL_CLASSES = ("vehicle", "pedestrian")
 DEFAULT_INTERCONNECT_CSV = (Path(__file__).resolve().parent.parent
                             / "data" / "interconnect" / "tessera_case3_s21_77ghz.csv")
 
+#: Width of the frequency window the interconnect S21(f) is resampled over (see
+#: `_interconnect_band_hz`), matching the historical 77 GHz literal's 6 GHz span
+#: (75-81 GHz) -- wide enough to characterize insertion-loss ripple around the carrier,
+#: not the (much narrower) chirp sweep itself.
+_INTERCONNECT_EVAL_SPAN_HZ = 6e9
+
+#: The literal band `build_chain_simulation` used for every 77 GHz config before
+#: 2026-09-23 (Ka-band re-founding, owner decision). Preserved EXACTLY (not re-derived
+#: as `f0_hz +- span/2`, which would give (74e9, 80e9), not (75e9, 81e9)) so every
+#: corpus generated at f0=77e9 -- b1_bench_v3, benchmark_v1_D2/D4, b1_demo_cfr --
+#: regenerates identically. See `_interconnect_band_hz`.
+_LEGACY_77GHZ_INTERCONNECT_BAND_HZ = (75e9, 81e9)
+
+
+def _interconnect_band_hz(cfg) -> Tuple[float, float]:
+    """The frequency span the interconnect's S21(f) is resampled onto for `cfg`.
+
+    Three cases, in order: (1) a config that carries explicit `f_start_hz`/`f_stop_hz`
+    fields uses them directly -- `RadarConfig` has none today, but a future config that
+    does should not be second-guessed; (2) the historical f0=77e9 configs (benchmark_v1,
+    ti_iwr1443, radial_like, ddma_wide_v1) get back the EXACT literal band every corpus
+    generated before this change used, bit-for-bit (see
+    `_LEGACY_77GHZ_INTERCONNECT_BAND_HZ`); (3) everything else -- including
+    `benchmark_v1_ka` (owner decision 2026-09-23, Ka-band re-founding) -- derives the
+    band from its own carrier: `f0_hz +- _INTERCONNECT_EVAL_SPAN_HZ / 2`, so a config
+    generated for a different band is not silently mapped over 75-81 GHz.
+    """
+    start = getattr(cfg, "f_start_hz", None)
+    stop = getattr(cfg, "f_stop_hz", None)
+    if start is not None and stop is not None:
+        return (float(start), float(stop))
+    if float(cfg.f0_hz) == 77e9:
+        return _LEGACY_77GHZ_INTERCONNECT_BAND_HZ
+    half = _INTERCONNECT_EVAL_SPAN_HZ / 2.0
+    return (float(cfg.f0_hz) - half, float(cfg.f0_hz) + half)
+
 
 # --------------------------------------------------------------------------------
 # ImpairmentBlock -> SinkBlock provenance glue
@@ -125,6 +161,11 @@ class _ChainFlagsStage:
     live-chain gate had to guess at a mismatch's cause instead of naming it. A frame
     written before this stage existed simply carries none of these keys, and the
     gate's wording for that case is unchanged.
+
+    `f0_hz`/`band_hz` (added 2026-09-23, F91) close a second gap the same finding named:
+    a frame's meta recorded `if_hpf_corner_hz` and these chain flags but never the
+    carrier itself, so which sensing band a corpus was generated at was only
+    recoverable by cross-referencing the manifest's `config` block by hand.
     """
 
     frame_capabilities = FrameCapabilities(
@@ -132,12 +173,14 @@ class _ChainFlagsStage:
     )
 
     def __init__(self, use_rffe: bool, use_interconnect: bool, use_link_budget: bool,
-                quant_bits: int):
+                quant_bits: int, f0_hz: float, band_hz: Tuple[float, float]):
         self._extra: Dict[str, Any] = {
             "use_rffe": bool(use_rffe),
             "use_interconnect": bool(use_interconnect),
             "use_link_budget": bool(use_link_budget),
             "quant_bits": int(quant_bits),
+            "f0_hz": float(f0_hz),
+            "band_hz": [float(band_hz[0]), float(band_hz[1])],
         }
 
     def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -241,7 +284,8 @@ def build_chain_simulation(
     # position relative to the rest of the list has no effect on any stored payload --
     # placed first only so it reads first.
     serial_stages.append(_ChainFlagsStage(use_rffe, use_interconnect, use_link_budget,
-                                          quant_bits))
+                                          quant_bits, cfg.f0_hz,
+                                          _interconnect_band_hz(cfg)))
 
     # FIRST, ahead of even the transmit tributary: the frame as it ENTERS the chain is
     # what "store the ray-traced channel" means -- anything later would have the RF
@@ -291,7 +335,7 @@ def build_chain_simulation(
         # sidelobes -75 dB. The classic pipeline's default is deliberately untouched.
         ic_kwargs = dict(interconnect_kwargs) if interconnect_kwargs else {}
         ic_kwargs.setdefault("transfer_csv", str(DEFAULT_INTERCONNECT_CSV))
-        ic_kwargs.setdefault("band_hz", (75e9, 81e9))
+        ic_kwargs.setdefault("band_hz", _interconnect_band_hz(cfg))
         serial_stages.append(InterconnectStage(InterconnectBlock(**ic_kwargs)))
     serial_stages.append(DechirpBlock(cfg))
     # The link budget goes BETWEEN dechirp and impairments, and the position is the whole

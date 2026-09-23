@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict, List, Optional
 
 # Speed of light, m/s.
@@ -66,6 +66,8 @@ class RadarConfig:
     # Datasheet-plausible for a TI IWR1443-class 77 GHz automotive MMIC, reviewed by an
     # independent RF pass, NOT measured from a specific part. Do not tune them to make a
     # detector's curves look better -- that is the failure mode they exist to end.
+    # `benchmark_v1_ka` (below) inherits these same two defaults unchanged: assumed at
+    # Ka-band, unmeasured (owner 2026-09-23) -- see e2e.chain.link_budget's Ka-band note.
     tx_power_dbm: float = 12.0        # per transmit channel
     noise_figure_db: float = 15.0     # receiver, referenced at the antenna input
     # `temperature_k` (290.0 K) lived here until 2026-08-28 and was read by nothing:
@@ -428,6 +430,35 @@ BENCHMARK_V1 = RadarConfig(
     chirp_period_s=25e-6,
     mimo="tdm",
 )
+# `benchmark_v1` is now the LEGACY 77 GHz preset (kept resolving so corpora already
+# generated at f0=77e9 -- b1_bench_v3, benchmark_v1_D2/D4, b1_demo_cfr -- keep loading
+# and, if regenerated at the same (config, tier, seed), reproduce identically). New work
+# uses `benchmark_v1_ka` below.
+
+# --------------------------------------------------------------------------------
+# BENCHMARK_V1_KA -- Ka-band re-founding of BENCHMARK_V1 (owner decision 2026-09-23).
+# --------------------------------------------------------------------------------
+# Owner call, 2026-09-23 15:4x: Ka-band (28.5-31.5 GHz around a 30 GHz carrier) is THE
+# sensing band for everything, including the ML corpora, which `benchmark_v1` generated
+# at 77 GHz (F91 flagged the mismatch against every other Thrust's 31.5 GHz munich
+# frames). This preset is `benchmark_v1` with ONLY `f0_hz` moved to 30e9 -- every other
+# field (bandwidth, TX/RX counts, chirp timing, mimo) is identical, so range resolution,
+# max range, n_virtual and the answerability guard's Rayleigh limit are all UNCHANGED
+# (they don't depend on f0). What DOES move, printed here from the config's own
+# properties so this comment cannot drift from the code (measured 2026-09-23):
+#     wavelength_m            0.0038745515559016346 (77 GHz) -> 0.009869791784294521 (Ka)
+#         (2.55x longer -- element spacing at half-wavelength grows from ~1.94 mm to
+#         ~4.93 mm; this preset does not itself set spacing, that lives in the array/
+#         scenario layer, but anything assuming a 77 GHz half-wavelength must be re-read)
+#     max_velocity_mps         9.686378889754087   -> 24.6744794607363
+#         (2.55x more unambiguous Doppler headroom over the same 8 m/s scene ceiling --
+#         still answerable, same margin logic as BENCHMARK_V1's own comment block)
+#     velocity_resolution_mps  0.3026993403048152  -> 0.7710774831480094
+#         (2.55x coarser Doppler bins for the same CPI -- the same span-for-resolution
+#         trade DDMA_WIDE_V1's comment describes, here from carrier not from mimo)
+#     range_resolution_m / max_range_m / n_virtual: UNCHANGED (0.2 m / 102.4 m / 64) --
+#         neither depends on f0_hz.
+BENCHMARK_V1_KA = replace(BENCHMARK_V1, name="benchmark_v1_ka", f0_hz=30e9)
 
 # --------------------------------------------------------------------------------
 # DDMA_WIDE_V1 -- the ANSWERABLE replacement for radial_like (v1.1 / release-plan B1).
@@ -466,7 +497,8 @@ DDMA_WIDE_V1 = RadarConfig(
 )
 
 PRESETS = {"ti_iwr1443": TI_IWR1443, "radial_like": RADIAL_LIKE,
-           "benchmark_v1": BENCHMARK_V1, "ddma_wide_v1": DDMA_WIDE_V1}
+           "benchmark_v1": BENCHMARK_V1, "ddma_wide_v1": DDMA_WIDE_V1,
+           "benchmark_v1_ka": BENCHMARK_V1_KA}
 
 
 if __name__ == "__main__":

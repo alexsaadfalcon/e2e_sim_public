@@ -516,6 +516,62 @@ def test_chain_flags_reach_written_sample_meta_at_the_defaults(tmp_path, fake_en
         assert meta["use_interconnect"] is True
         assert meta["use_link_budget"] is True
         assert meta["quant_bits"] == 12
+        # F91: the carrier + interconnect evaluation band must reach the ON-DISK meta,
+        # not just the in-memory state -- `e2e.ml.blocks._EXTRA_META_KEYS` is what makes
+        # that so (a frame used to record if_hpf_corner_hz/chain flags but never this).
+        assert meta["f0_hz"] == pytest.approx(_CFG.f0_hz)
+        assert meta["band_hz"] == [pytest.approx(75e9), pytest.approx(81e9)]
+
+
+def test_chain_flags_stage_emits_carrier_and_interconnect_band(tmp_path, fake_env):
+    """F91 gap, stage-level contract: `_ChainFlagsStage` is the SOURCE of the carrier/
+    band provenance asserted end-to-end (on-disk meta) in
+    `test_chain_flags_reach_written_sample_meta_at_the_defaults` above; this pins the
+    stage's own `apply()` output so a regression there is caught at the unit level."""
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+    )
+    stage = next(s for s in sim.serial_stages
+                if isinstance(s, chain_generate._ChainFlagsStage))
+    extra = stage.apply({})
+    assert extra["f0_hz"] == pytest.approx(_CFG.f0_hz)
+    assert extra["band_hz"] == [pytest.approx(75e9), pytest.approx(81e9)]
+
+
+def test_interconnect_band_hz_legacy_literal_for_77ghz_configs():
+    """Every config generated before 2026-09-23 used f0=77e9 and the literal
+    (75e9, 81e9) band -- that exact pair must survive so old corpora regenerate
+    identically (not `f0_hz +- span/2`, which would give (74e9, 80e9))."""
+    from e2e.radar_config import BENCHMARK_V1, DDMA_WIDE_V1, RADIAL_LIKE, TI_IWR1443
+
+    for cfg in (BENCHMARK_V1, DDMA_WIDE_V1, RADIAL_LIKE, TI_IWR1443):
+        assert chain_generate._interconnect_band_hz(cfg) == (75e9, 81e9)
+
+
+def test_interconnect_band_hz_derives_from_carrier_for_other_configs():
+    from e2e.radar_config import BENCHMARK_V1_KA
+
+    band = chain_generate._interconnect_band_hz(BENCHMARK_V1_KA)
+    assert band == (30e9 - 3e9, 30e9 + 3e9)
+    # centered on the config's own carrier, not the 77 GHz literal
+    assert (band[0] + band[1]) / 2.0 == pytest.approx(BENCHMARK_V1_KA.f0_hz)
+
+
+def test_interconnect_band_hz_prefers_explicit_start_stop_if_present():
+    """Forward-compat: a config carrying explicit f_start_hz/f_stop_hz (none of
+    today's RadarConfig presets do) must win over both the literal and the
+    carrier+-span derivation."""
+    import dataclasses
+
+    cfg = dataclasses.replace(_CFG)
+    # RadarConfig is frozen and has no such fields; simulate one via a tiny stand-in
+    # that carries everything build_chain_simulation's interconnect path reads.
+    class _CfgWithBand:
+        f0_hz = 77e9
+        f_start_hz = 10e9
+        f_stop_hz = 12e9
+
+    assert chain_generate._interconnect_band_hz(_CfgWithBand()) == (10e9, 12e9)
 
 
 def test_chain_flags_reflect_a_non_default_composition(tmp_path, fake_env):

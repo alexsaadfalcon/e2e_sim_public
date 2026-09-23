@@ -131,7 +131,19 @@ _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # corpora generated after this landed; absent everywhere else (every
                     # corpus generated before it, including b1_demo_cfr), which the
                     # gate's wording for that case preserves exactly.
-                    "use_rffe", "use_interconnect", "use_link_budget", "quant_bits")
+                    "use_rffe", "use_interconnect", "use_link_budget", "quant_bits",
+                    # Carrier + interconnect evaluation band (F91: a frame recorded the
+                    # chain flags and if_hpf_corner_hz above but never the SENSING BAND
+                    # it was generated at, which is how the repo ended up with 77 GHz ML
+                    # corpora next to 31.5 GHz munich frames without either being
+                    # discoverable from an artifact alone). `f0_hz` is a scalar; `band_hz`
+                    # is a plain 2-element `[start_hz, stop_hz]` list -- this allowlist
+                    # already passes other non-scalar values through as-is ("shape",
+                    # "link_budget", "targets"), and a 2-float list needs no special
+                    # JSON handling (unlike the dataclass/numpy/tensor cases
+                    # `_json_default` exists for), so no new field split
+                    # (band_start_hz/band_stop_hz) is needed.
+                    "f0_hz", "band_hz")
 
 
 #: State key under which `CFRCaptureStage` parks the frame entering the chain, for a

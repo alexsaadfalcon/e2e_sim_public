@@ -283,3 +283,47 @@ def test_answerability_boundary_is_inclusive():
     # Exactly at v_max and exactly at the Rayleigh limit both pass (>=, not >).
     assert answerability_problems(cfg, top_speed_mps=cfg.max_velocity_mps,
                                   max_sin_az_err=2.0 / cfg.n_virtual) == []
+
+
+# ---- BENCHMARK_V1_KA (owner decision 2026-09-23, Ka-band re-founding) ---------
+
+def test_benchmark_v1_ka_differs_from_benchmark_v1_only_in_f0_and_derived():
+    """`benchmark_v1_ka` must be `benchmark_v1` with ONLY f0_hz moved -- every other
+    field byte-for-byte identical, so anything that doesn't depend on carrier
+    (range resolution, max range, n_virtual, chirp timing) is unaffected."""
+    from e2e.radar_config import BENCHMARK_V1, BENCHMARK_V1_KA
+    import dataclasses
+
+    assert BENCHMARK_V1_KA.f0_hz == pytest.approx(30e9)
+    assert BENCHMARK_V1_KA.name == "benchmark_v1_ka"
+    same_fields = dataclasses.replace(BENCHMARK_V1_KA, f0_hz=BENCHMARK_V1.f0_hz,
+                                      name=BENCHMARK_V1.name)
+    assert same_fields == BENCHMARK_V1
+
+    # Carrier-independent derived quantities are unchanged.
+    assert BENCHMARK_V1_KA.range_resolution_m == pytest.approx(BENCHMARK_V1.range_resolution_m)
+    assert BENCHMARK_V1_KA.max_range_m == pytest.approx(BENCHMARK_V1.max_range_m)
+    assert BENCHMARK_V1_KA.n_virtual == BENCHMARK_V1.n_virtual
+
+    # Carrier-dependent derived quantities move by the wavelength ratio (77/30 GHz-ish,
+    # via f0 + B/2): wavelength grows, so max velocity grows and velocity resolution
+    # coarsens by the same factor.
+    ratio = BENCHMARK_V1.wavelength_m / BENCHMARK_V1_KA.wavelength_m
+    assert ratio < 1.0  # Ka wavelength is longer
+    assert BENCHMARK_V1_KA.max_velocity_mps == pytest.approx(
+        BENCHMARK_V1.max_velocity_mps / ratio, rel=1e-9)
+    assert BENCHMARK_V1_KA.velocity_resolution_mps == pytest.approx(
+        BENCHMARK_V1.velocity_resolution_mps / ratio, rel=1e-9)
+
+
+def test_benchmark_v1_ka_is_answerable():
+    from e2e.radar_config import BENCHMARK_V1_KA, answerability_problems
+    assert answerability_problems(BENCHMARK_V1_KA, top_speed_mps=8.0,
+                                  max_sin_az_err=0.06) == []
+
+
+def test_benchmark_v1_ka_is_registered_and_legacy_preset_unchanged():
+    from e2e.radar_config import BENCHMARK_V1, BENCHMARK_V1_KA, PRESETS
+    assert PRESETS["benchmark_v1_ka"] is BENCHMARK_V1_KA
+    assert PRESETS["benchmark_v1"] is BENCHMARK_V1
+    assert PRESETS["benchmark_v1"].f0_hz == pytest.approx(77e9)
