@@ -47,11 +47,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
+from e2e import frames
 from e2e.blocks import CircuitStage, InterconnectBlock, InterconnectStage, RFFEBlock
 from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
                                RadarCubeBlock)
 from e2e.environment.blocks import RTEnvironmentBlock
+from e2e.frames import FrameCapabilities
 from e2e.ml.blocks import CFRCaptureStage, SinkBlock
 from e2e.ml.dataset import DATASETS_DIR, finalize_input_scale
 from e2e.simulation import Simulation
@@ -104,6 +106,42 @@ def default_domain_randomizer(
         }
 
     return _sample
+
+
+# --------------------------------------------------------------------------------
+# Chain-topology provenance: what a frame does NOT otherwise record
+# --------------------------------------------------------------------------------
+class _ChainFlagsStage:
+    """Pass-through serial stage: stamp every frame's state with the CONFIG-LEVEL
+    chain flags this composition actually ran with -- which analog stages were
+    wired in, and the ADC bit depth. These are constants of the whole `Simulation`
+    run, not per-frame products, but `SinkBlock` only writes what `state` carries at
+    the point it runs, so they are re-asserted on every `apply()` to reach every
+    frame's meta (see `e2e.ml.blocks._EXTRA_META_KEYS`).
+
+    Before this, a frame recorded its noise seeds, its impairment severities and its
+    IF high-pass corner, but NOT whether the RF front end, the interconnect or the
+    link budget ran, nor the ADC's bit depth -- so `webapp.pipeline_runner`'s
+    live-chain gate had to guess at a mismatch's cause instead of naming it. A frame
+    written before this stage existed simply carries none of these keys, and the
+    gate's wording for that case is unchanged.
+    """
+
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=True, chirps=frames.CHIRP_NATIVE, domain=frames.DOMAIN_CFR,
+    )
+
+    def __init__(self, use_rffe: bool, use_interconnect: bool, use_link_budget: bool,
+                quant_bits: int):
+        self._extra: Dict[str, Any] = {
+            "use_rffe": bool(use_rffe),
+            "use_interconnect": bool(use_interconnect),
+            "use_link_budget": bool(use_link_budget),
+            "quant_bits": int(quant_bits),
+        }
+
+    def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        return dict(self._extra)
 
 
 # --------------------------------------------------------------------------------
@@ -198,6 +236,12 @@ def build_chain_simulation(
     )
 
     serial_stages: List[Any] = []
+
+    # Chain-topology provenance (see _ChainFlagsStage): a pass-through, so its
+    # position relative to the rest of the list has no effect on any stored payload --
+    # placed first only so it reads first.
+    serial_stages.append(_ChainFlagsStage(use_rffe, use_interconnect, use_link_budget,
+                                          quant_bits))
 
     # FIRST, ahead of even the transmit tributary: the frame as it ENTERS the chain is
     # what "store the ray-traced channel" means -- anything later would have the RF

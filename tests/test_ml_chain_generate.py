@@ -493,3 +493,43 @@ def test_if_hpf_provenance_reaches_written_sample_meta(tmp_path, fake_env):
     assert 0.0 <= meta["clipped_fraction"] <= 1.0
     assert meta["link_budget"]["thermal_noise_w"] > 0.0
     assert "noise_figure_db" in meta["link_budget"]
+
+
+# --------------------------------------------------------------------------------
+# Chain-topology provenance: what a frame does NOT otherwise record
+# --------------------------------------------------------------------------------
+def test_chain_flags_reach_written_sample_meta_at_the_defaults(tmp_path, fake_env):
+    """The default composition (RFFE/interconnect/link budget on, 12-bit ADC) must
+    stamp exactly those values into every frame's meta -- what
+    `webapp.pipeline_runner`'s live-chain gate reads to name a mismatch instead of
+    guessing at one (see `_ChainFlagsStage`)."""
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+    )
+    sim.run(n_steps=2)
+    files = sorted(tmp_path.glob("sample_frame_*.npz"))
+    assert len(files) == 2
+    for f in files:
+        with np.load(f) as data:
+            meta = json.loads(str(data["meta"].item()))
+        assert meta["use_rffe"] is True
+        assert meta["use_interconnect"] is True
+        assert meta["use_link_budget"] is True
+        assert meta["quant_bits"] == 12
+
+
+def test_chain_flags_reflect_a_non_default_composition(tmp_path, fake_env):
+    """A corpus generated with the front end and link budget off, and a non-default
+    bit depth, must record exactly THAT -- not the composition's own defaults."""
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+        use_rffe=False, use_link_budget=False, quant_bits=6,
+    )
+    sim.run(n_steps=1)
+    files = sorted(tmp_path.glob("sample_frame_*.npz"))
+    with np.load(files[0]) as data:
+        meta = json.loads(str(data["meta"].item()))
+    assert meta["use_rffe"] is False
+    assert meta["use_interconnect"] is True
+    assert meta["use_link_budget"] is False
+    assert meta["quant_bits"] == 6

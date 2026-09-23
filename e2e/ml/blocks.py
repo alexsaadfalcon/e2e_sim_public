@@ -122,7 +122,16 @@ _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # ray-traced PATH LIST the frame was synthesised from -- the cheap,
                     # durable form of the same information (see
                     # `storage.write_paths_sidecar`).
-                    "paths_sidecar")
+                    "paths_sidecar",
+                    # Chain-topology provenance (2026-09-23): which analog stages this
+                    # frame's generation actually composed in, and the ADC bit depth --
+                    # stamped every frame by `e2e.ml.chain_generate._ChainFlagsStage`, so
+                    # `webapp.pipeline_runner`'s live-chain gate can name the SPECIFIC
+                    # setting a mismatch is in instead of guessing. Present only on
+                    # corpora generated after this landed; absent everywhere else (every
+                    # corpus generated before it, including b1_demo_cfr), which the
+                    # gate's wording for that case preserves exactly.
+                    "use_rffe", "use_interconnect", "use_link_budget", "quant_bits")
 
 
 #: State key under which `CFRCaptureStage` parks the frame entering the chain, for a

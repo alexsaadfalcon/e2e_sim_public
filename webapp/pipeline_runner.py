@@ -234,7 +234,8 @@ class _StoredFrameSettingsStage:
 
     frame_contract_name = "stored-frame chain settings"
 
-    def __init__(self, noise_blocks, impairment_block, if_hpf_block=None):
+    def __init__(self, noise_blocks, impairment_block, if_hpf_block=None,
+                chain_flags=None):
         from e2e import frames as _frames
 
         self.frame_capabilities = _frames.FrameCapabilities(
@@ -255,6 +256,16 @@ class _StoredFrameSettingsStage:
         #: this the only symptom was a non-zero gate reading that the run note then
         #: attributed to a knob the operator had not touched (reviewed 2026-09-23).
         self.if_hpf_mismatch = None
+        #: THIS run's chain-topology settings ({"use_rffe", "use_interconnect",
+        #: "use_link_budget", "quant_bits"}), for comparison against whatever a frame
+        #: recorded of its own (see `e2e.ml.chain_generate._ChainFlagsStage`).
+        self.chain_flags = dict(chain_flags) if chain_flags else {}
+        #: A list of `(label, stored, live)` tuples, one per differing setting a frame
+        #: actually records -- None until the first frame whose recorded topology is
+        #: not this run's. A frame with none of these keys (every corpus generated
+        #: before 2026-09-23) leaves this None forever, which is what keeps the gate's
+        #: generic wording for that case exactly unchanged.
+        self.chain_flags_mismatch = None
         #: Frames whose meta carried no seed at all (an artifact written by something
         #: other than the corpus generator) -- surfaced as a run note rather than
         #: silently running on the UI seed.
@@ -274,6 +285,7 @@ class _StoredFrameSettingsStage:
                 block.seed = int(seed)
                 block._frame_idx = frame_idx
         self._check_if_hpf(state)
+        self._check_chain_flags(state)
         if self.impairment_block is not None:
             severities = {k: params[k] for k in ("phase_noise", "leakage", "clutter")
                           if k in params}
@@ -282,6 +294,33 @@ class _StoredFrameSettingsStage:
             if severities:
                 self.impairment_block.chain_params = severities
         return {}
+
+    def _check_chain_flags(self, state: Dict[str, Any]) -> None:
+        """Record the first frame whose recorded chain topology is not this run's.
+
+        Only settings the frame ACTUALLY recorded are compared -- a frame with none
+        of these keys (written before `_ChainFlagsStage` existed) leaves
+        `chain_flags_mismatch` at None, same as if nothing were checked at all.
+        """
+        if self.chain_flags_mismatch is not None:
+            return
+        diffs = []
+        for key, label in (("use_rffe", "RF front end"),
+                           ("use_interconnect", "interconnect"),
+                           ("use_link_budget", "link budget")):
+            stored = state.get(key)
+            if stored is None:
+                continue
+            live = bool(self.chain_flags.get(key))
+            if bool(stored) != live:
+                diffs.append((label, bool(stored), live))
+        stored_bits = state.get("quant_bits")
+        if stored_bits is not None:
+            live_bits = self.chain_flags.get("quant_bits")
+            if live_bits is None or int(stored_bits) != int(live_bits):
+                diffs.append(("ADC bit depth", int(stored_bits), live_bits))
+        if diffs:
+            self.chain_flags_mismatch = diffs
 
     def _check_if_hpf(self, state: Dict[str, Any]) -> None:
         """Record the first frame whose stored IF high-pass is not this run's.
@@ -314,14 +353,30 @@ class _StoredFrameSettingsStage:
                                     live_corner, live_order)
 
 
+def _describe_chain_flag_diff(label: str, stored, live) -> str:
+    """One `(label, stored, live)` tuple from `_StoredFrameSettingsStage.
+    chain_flags_mismatch`, in the same "this run: ... vs frames: ..." phrasing the
+    knobs summary already uses (e.g. "ADC bit depth (this run: ADC 4-bit vs frames:
+    12-bit)")."""
+    if label == "ADC bit depth":
+        live_text = "no quantizer" if live is None else f"ADC {live}-bit"
+        return f"{label} (this run: {live_text} vs frames: {stored}-bit)"
+    live_text = "on" if live else "off"
+    stored_text = "on" if stored else "off"
+    return f"{label} (this run: {live_text} vs frames: {stored_text})"
+
+
 class _StoredADCGateBlock:
     """The correctness gate, ON EVERY LIVE RUN: live cube vs the frame's stored cube.
 
     A live chain that silently diverged from the corpus it replays would still draw a
     plausible picture, so the divergence is measured rather than asserted once in a
-    test: this product re-encodes the live `adc` in the stored frame's OWN int16 code
-    space (`e2e.ml.storage`'s codec, the same scale the corpus was written with) and
-    records the largest code difference over the run.
+    test: this product re-encodes both cubes in THIS RUN'S OWN quantizer LSBs (its
+    live full scale / 2**bits -- not the storage codec's scale, which is a different
+    number: a reviewer correctly read "max |diff| 18456 codes" next to a 12-bit
+    (4096-code) ADC as a unit mismatch, 2026-09-23) and records the largest LSB
+    difference over the run, clipped to the converter's own representable code range
+    so the figure can never exceed what a converter of that bit depth can express.
 
     WHAT ZERO MEANS, EXACTLY (scoped after a review found the unscoped version false,
     2026-09-23): zero says this run's chain reproduced these frames. It is reached when
@@ -342,7 +397,7 @@ class _StoredADCGateBlock:
 
     frame_contract_name = "live-vs-stored ADC gate"
 
-    def __init__(self, files, knobs: str = ""):
+    def __init__(self, files, knobs: str = "", quantizer_block=None):
         from e2e import frames as _frames
 
         self.frame_capabilities = _frames.FrameCapabilities(
@@ -353,9 +408,17 @@ class _StoredADCGateBlock:
         #: a difference is the POINT of an A/B arm, so the note names what was turned
         #: rather than reading as a failure.
         self.knobs = knobs
+        #: THIS run's live quantizer (None if the run has none) -- the gate reports the
+        #: difference in ITS LSB units (`.lsb`, resolved per frame from `.bits` and the
+        #: live full scale), not the storage codec's own scale.
+        self.quantizer_block = quantizer_block
+        self.bits = int(quantizer_block.bits) if quantizer_block is not None else None
+        #: Total representable codes of this run's converter (2**bits) -- the "of N"
+        #: half of the "N of TOTAL LSB" phrasing; None with no live quantizer.
+        self.lsb_total = (2 ** self.bits) if self.bits is not None else None
         self.frame_counter = 0
         self.n_compared = 0
-        self.max_code_diff = 0
+        self.max_lsb_diff = 0
         self.max_abs_diff = 0.0
         self.problem = None
 
@@ -386,13 +449,25 @@ class _StoredADCGateBlock:
                 self.problem = f"shape {live.shape} vs stored {stored.shape}"
                 return {}
             self.max_abs_diff = max(self.max_abs_diff, float(_np.abs(live - stored).max()))
-            scale = float(((meta.get("codec_meta") or {}).get("scale") or 0.0))
-            if scale > 0.0:
-                def _codes(arr):
-                    return _np.clip(_np.round(arr / scale), -32768, 32767).astype(_np.int64)
-                diff = max(int(_np.abs(_codes(live.real) - _codes(stored.real)).max()),
-                           int(_np.abs(_codes(live.imag) - _codes(stored.imag)).max()))
-                self.max_code_diff = max(self.max_code_diff, diff)
+            if self.quantizer_block is not None:
+                # `.lsb` is resolved from THIS FRAME's own full scale (the quantizer
+                # stage already ran earlier in this same apply cycle -- see
+                # QuantizerBlock.apply), so an AGC full scale that moves frame to frame
+                # is tracked rather than pinned to frame 0's.
+                lsb = float(self.quantizer_block.lsb)
+                half_range = 2 ** (self.bits - 1)
+                if lsb > 0.0:
+                    def _codes(arr):
+                        # Clipped to [-half_range, half_range - 1]: the converter's OWN
+                        # representable code range (matches QuantizerBlock.apply's own
+                        # clamp), so the reported figure can never exceed what a
+                        # converter of this bit depth can express -- unlike the old
+                        # int16-clipped storage-codec figure, which could (and did).
+                        return _np.clip(_np.round(arr / lsb), -half_range,
+                                        half_range - 1).astype(_np.int64)
+                    diff = max(int(_np.abs(_codes(live.real) - _codes(stored.real)).max()),
+                               int(_np.abs(_codes(live.imag) - _codes(stored.imag)).max()))
+                    self.max_lsb_diff = max(self.max_lsb_diff, diff)
             self.n_compared += 1
         except Exception as e:      # a gate must never take the run down with it
             self.problem = f"{type(e).__name__}: {e}"
@@ -405,11 +480,17 @@ class _StoredADCGateBlock:
         has to answer on its own."""
         if self.problem is not None or not self.n_compared:
             return "live vs stored ADC: NOT COMPARED"
+        if self.quantizer_block is None:
+            # No live quantizer this run -- LSB units don't apply; fall back to the
+            # physical figure alone.
+            return (f"live vs stored ADC: max |diff| {self.max_abs_diff:.3e} absolute"
+                    + (" (bit-identical)" if self.max_abs_diff == 0.0 else " (differs)"))
         # "(differs)", not "(knob moved)": on a corpus generated with a chain this
         # replay cannot reconstruct, nobody moved anything (see the class docstring).
         # The banner states the fact; the run notes carry the attribution.
-        return (f"live vs stored ADC: max |diff| {self.max_code_diff} codes"
-                + (" (bit-identical)" if self.max_code_diff == 0 else " (differs)"))
+        return (f"live vs stored ADC: max |diff| {self.max_lsb_diff} of {self.lsb_total} "
+                f"LSB ({self.bits}-bit)"
+                + (" (bit-identical)" if self.max_lsb_diff == 0 else " (differs)"))
 
     def note(self) -> str:
         """The one line this gate contributes to the run notes."""
@@ -418,7 +499,14 @@ class _StoredADCGateBlock:
                     f"({self.problem}) -- the live cube is UNVERIFIED against the corpus")
         if not self.n_compared:
             return "live-vs-stored ADC gate compared no frames"
-        if self.max_code_diff == 0:
+        if self.quantizer_block is None:
+            verdict = ("bit-identical, so the live chain IS the chain that wrote them"
+                       if self.max_abs_diff == 0.0 else
+                       "DIFFERS -- this run's cube is not the stored one"
+                       + (f" (this run: {self.knobs})" if self.knobs else ""))
+            return (f"live chain vs stored ADC over {self.n_compared} frame(s): "
+                    f"max |diff| = {self.max_abs_diff:.3e} absolute -- {verdict}")
+        if self.max_lsb_diff == 0:
             verdict = "bit-identical, so the live chain IS the chain that wrote them"
         else:
             # NOT "a knob was moved": the same reading appears when the corpus was
@@ -427,8 +515,8 @@ class _StoredADCGateBlock:
             verdict = ("DIFFERS -- this run's cube is not the stored one"
                        + (f" (this run: {self.knobs})" if self.knobs else ""))
         return (f"live chain vs stored ADC over {self.n_compared} frame(s): "
-                f"max |diff| = {self.max_code_diff} ADC codes "
-                f"({self.max_abs_diff:.3e} absolute) -- {verdict}")
+                f"max |diff| = {self.max_lsb_diff} of {self.lsb_total} LSB "
+                f"({self.bits}-bit) ({self.max_abs_diff:.3e} absolute) -- {verdict}")
 
 
 def _detector_meta(state: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -822,7 +910,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # DechirpBlock's antenna-axis handling needs the raw RX/TX axes, not the
         # aperture-grid reshape GridStage would produce (see e2e/chain/dechirp.py).
         serial_stages_override = []
-        thermal_block = impairment_block = if_hpf_block = None
+        thermal_block = impairment_block = if_hpf_block = quantizer_block = None
 
         # The transmit tributary, if the user enabled it: generate the waveform, distort
         # it in the amplifier, then merge its spectrum into the channel response. These
@@ -929,10 +1017,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             # sit near 1e-7 and quantize to exactly zero against a fixed 1.0, silently.
             # See that block's "FULL SCALE DEFAULTS TO AUTOMATIC GAIN" docstring.
             quant_full_scale = float(_p(state, "quantizer", "full_scale"))
-            serial_stages_override.append(QuantizerBlock(
+            quantizer_block = QuantizerBlock(
                 bits=int(_p(state, "quantizer", "bits")),
                 full_scale=(None if quant_full_scale <= 0.0 else quant_full_scale),
-            ))
+            )
+            serial_stages_override.append(quantizer_block)
 
         if corpus_live_cfr:
             # FIRST in the list: hand each frame's own stored seeds/severities to the
@@ -941,9 +1030,16 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             # on the first one. The transmit tributary, if someone enabled it, sits
             # after this and is NOT part of the chain that wrote these frames -- the
             # gate below will report the resulting divergence rather than hide it.
+            chain_flags = {
+                "use_rffe": _enabled(state, "rffe"),
+                "use_interconnect": _enabled(state, "interconnect"),
+                "use_link_budget": _enabled(state, "thermal_noise"),
+                "quant_bits": (int(_p(state, "quantizer", "bits"))
+                              if quantizer_block is not None else None),
+            }
             meta_stage = _StoredFrameSettingsStage(
                 [circuit_block, thermal_block, impairment_block], impairment_block,
-                if_hpf_block=if_hpf_block)
+                if_hpf_block=if_hpf_block, chain_flags=chain_flags)
             serial_stages_override.insert(0, meta_stage)
 
         # None of the frequency-domain products above apply once the chain has
@@ -1120,7 +1216,8 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             if _enabled(state, "if_hpf") else "no IF high-pass",
             "front end on" if _enabled(state, "rffe") else "front end OFF",
         ])
-        adc_gate = _StoredADCGateBlock(getattr(environment_block, "_files", []), knobs)
+        adc_gate = _StoredADCGateBlock(getattr(environment_block, "_files", []), knobs,
+                                       quantizer_block=quantizer_block)
         downstream_blocks.append(adc_gate)
 
     sim = Simulation(
@@ -1231,14 +1328,27 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 + (f", order {stored_order}" if stored_order is not None else "")
                 + f"; this run applies {this_run} -- that alone puts the live cube off "
                   "the stored one")
-        if adc_gate is not None and adc_gate.max_code_diff and mismatch is None:
-            run_notes.append(
-                "the live cube differs, and every setting these frames RECORD matches "
-                "this run -- so the difference is in what a frame does NOT record: the "
-                "ADC's bit depth (the usual answer: it is the knob the A/B turns) or "
-                "whether the RF front end, interconnect and link budget ran at "
-                "generation (a corpus made with chain_generate --no-rffe / "
-                "--no-interconnect replays through a chain that never wrote it)")
+        if adc_gate is not None and adc_gate.max_lsb_diff and mismatch is None:
+            if meta_stage.chain_flags_mismatch:
+                # A frame generated after e2e.ml.chain_generate._ChainFlagsStage names
+                # its own chain topology, so the SPECIFIC setting a mismatch is in is
+                # known rather than guessed -- see that stage's docstring.
+                run_notes.append(
+                    "the live cube differs, and the frames' own recorded chain "
+                    "topology names why: "
+                    + "; ".join(_describe_chain_flag_diff(*d)
+                               for d in meta_stage.chain_flags_mismatch))
+            else:
+                # A frame written before that provenance existed (every corpus
+                # generated before 2026-09-23, including b1_demo_cfr) carries none of
+                # these keys, so the cause stays a guess -- unchanged wording.
+                run_notes.append(
+                    "the live cube differs, and every setting these frames RECORD matches "
+                    "this run -- so the difference is in what a frame does NOT record: the "
+                    "ADC's bit depth (the usual answer: it is the knob the A/B turns) or "
+                    "whether the RF front end, interconnect and link budget ran at "
+                    "generation (a corpus made with chain_generate --no-rffe / "
+                    "--no-interconnect replays through a chain that never wrote it)")
         if meta_stage.frames_without_seed:
             run_notes.append(
                 f"{meta_stage.frames_without_seed} replayed frame(s) recorded no noise "
