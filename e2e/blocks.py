@@ -162,9 +162,10 @@ class RFFEBlock:
         return s_pars_dist, PRX
 
 
-# Packaged interconnect transfer-function data (a Tessera TSV S21(f) sweep; the model
-# that produced it is external and not vendored -- only this derived CSV ships). See
-# e2e/data/interconnect/README.md.
+# Packaged interconnect transfer-function data (a Tessera TSV S21(f) sweep; the surrogate
+# architecture is public (BSD-3, github.com/HiPerCAS/tessera) but not vendored here, and
+# the specific finetuned checkpoint that produced this CSV was not released -- only this
+# derived CSV ships). See e2e/data/interconnect/README.md.
 TESSERA_INTERCONNECT_CSV = (
     Path(__file__).resolve().parent / "data" / "interconnect" / "tessera_tsv_s21.csv"
 )

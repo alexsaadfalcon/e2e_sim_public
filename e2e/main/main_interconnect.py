@@ -8,9 +8,10 @@ simulated interconnect transfer functions S21(f) that ship as CSV data
 both as a raw |S21|(f) response and as a radar RANGE PROFILE (what actually reaches a
 downstream detector).
 
-The CSVs were produced by an external collaborator's models (not vendored here -- only
-the derived data is committed; see the data README). This tutorial needs only the
-committed CSVs + numpy/torch, so it is fully reproducible.
+The CSVs were produced by the collaborators' models (the TSV surrogate is public, BSD-3,
+github.com/HiPerCAS/tessera, but not vendored here; the six-case HFSS projects are not
+public -- only the derived data is committed; see the data README). This tutorial needs
+only the committed CSVs + numpy/torch, so it is fully reproducible.
 
 Run:  python -m e2e.main.main_interconnect
 """

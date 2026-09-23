@@ -340,10 +340,13 @@ automotive designs — every one of them from HFSS/surrogate S-parameter simulat
 The figure below deliberately plots only Case3 of the six, so the comparison stays
 readable; `main_interconnect` draws all six in its own figure.
 
-The interconnects were simulated by **Mohamed Gharib and Prof. Inna Partin-Vaisband
-(University of Illinois Chicago)**. What ships here is their simulation output; the
-simulation code is not distributed with this repository and is available on request to
-those authors. See `e2e/data/interconnect/README.md` for per-dataset provenance.
+The interconnects were simulated by **Mohamed Gharib, Leonid Popryho, and Prof. Inna
+Partin-Vaisband (University of Illinois Chicago)**; see Gharib, Popryho & Partin-Vaisband,
+IEEE TCAD 2026, doi 10.1109/TCAD.2026.3718807. What ships here is their simulation output.
+The TSV surrogate that produced the Ka-band file is public (BSD 3-Clause,
+github.com/HiPerCAS/tessera); the six 77 GHz automotive HFSS projects are not in that
+repository and are available on request to those authors. See
+`e2e/data/interconnect/README.md` for per-dataset provenance.
 
 ```bash
 python -m e2e.main.main_interconnect     # writes the two README figures (gallery + below) and a
