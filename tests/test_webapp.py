@@ -1585,3 +1585,27 @@ def test_core_modules_do_not_import_e2e_ml_at_module_scope():
     assert not offenders, (
         "core modules import e2e.ml at module scope (make them function-local, or "
         "update the documented rule):\n  " + "\n  ".join(offenders))
+
+
+def test_gui_offers_only_loadable_sionna_scenarios(tmp_path):
+    """The Scenario dropdown must list only scenarios whose .pkl exists (2026-09-23:
+    'etoile' was offered with no file and raised FileNotFoundError on selection)."""
+    from webapp import corpus_catalog as cc
+    assert cc.discover_sionna_scenarios(tmp_path) == []
+    (tmp_path / "munich.pkl").write_bytes(b"x")
+    assert cc.discover_sionna_scenarios(tmp_path) == ["munich"]
+    (tmp_path / "etoile.pkl").write_bytes(b"x")
+    assert cc.discover_sionna_scenarios(tmp_path) == ["munich", "etoile"]
+    from webapp.pipeline_registry import BLOCKS
+    env = next(b for b in BLOCKS if b.id == "environment")
+    spec = next(p for p in env.params if p.key == "scenario_name")
+    for name in spec.choices:
+        assert (cc.SIONNA_SIMS_DIR / f"{name}.pkl").is_file() or not cc.SIONNA_SCENARIOS
+
+
+def test_corpus_replay_split_excludes_train():
+    """One click on 'train' would show the learned detector its own training frames."""
+    from webapp.pipeline_registry import BLOCKS
+    blk = next(b for b in BLOCKS if b.id == "corpus_environment")
+    spec = next(p for p in blk.params if p.key == "split")
+    assert "train" not in spec.choices and spec.default == "test"

@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
-from webapp.corpus_catalog import CORPUS_MANIFESTS, DEFAULT_CORPUS
+from webapp.corpus_catalog import (CORPUS_MANIFESTS, DEFAULT_CORPUS, DEFAULT_SIONNA_SCENARIO,
+                                   SIONNA_SCENARIOS)
 
 
 @dataclass
@@ -82,9 +83,10 @@ BLOCKS: List[BlockSpec] = [
         toggleable=False,
         category="source",
         params=[
-            ParamSpec("scenario_name", "Scenario", "choice", "munich",
-                      choices=["munich", "etoile"],
-                      help="Precomputed Sionna RT .pkl frame source."),
+            ParamSpec("scenario_name", "Scenario", "choice", DEFAULT_SIONNA_SCENARIO,
+                      choices=SIONNA_SCENARIOS or ["munich"],
+                      help="Precomputed Sionna RT .pkl frame source. Only scenarios whose "
+                           ".pkl exists under e2e/environment/sionna_sims are listed."),
         ],
         blurb="Yields S-parameter frames from a precomputed Sionna RT simulation.",
     ),
@@ -336,7 +338,7 @@ BLOCKS: List[BlockSpec] = [
                            + (", ".join(CORPUS_MANIFESTS) if CORPUS_MANIFESTS
                               else "none -- corpora are generated locally, not tracked")),
             ParamSpec("split", "Split", "choice", "test",
-                      choices=["test", "val", "train"],
+                      choices=["test", "val"],
                       help="'test' is the held-out split every published detection "
                            "number was scored on."),
             ParamSpec("start_frame", "First frame index", "int", 0, step=1, min=0,
