@@ -173,13 +173,16 @@ def build_chain_simulation(
     with the flag off not one byte of the corpus differs.
 
     `store_paths=True` additionally writes each frame's RAY-TRACED PATH LIST to a
-    `<stem>.paths.npz` sidecar (~0.7-1.6 MB/frame vs the dense CFR's 64 MiB): the
-    owner's preferred durable form, from which the channel can be re-synthesised
-    without re-tracing. It requires the environment block to EMIT that list from
-    `get_state_updates()` under `blocks.PATHS_CAPTURE_KEY`; `RTEnvironmentBlock` does
-    not do so yet (the capture hook lives in `e2e/environment/`), so today this flag
-    raises on the first frame rather than silently writing nothing. Re-synthesis
-    itself is deliberately NOT implemented here.
+    `<stem>.paths.npz` sidecar (MEASURED ~1-2 MiB/frame on a `benchmark_v1`/D2 scene,
+    ~30x smaller than the dense CFR's 64 MiB): the owner's preferred durable form, from
+    which the channel can be re-synthesised without re-tracing. It requires the
+    environment block to EMIT that list from `get_state_updates()` under
+    `blocks.PATHS_CAPTURE_KEY`; `RTEnvironmentBlock` does so via `rt_cfr_frame`'s
+    `capture=` out-parameter (`e2e.environment.rt_signal_chain._fill_rt_paths_capture`,
+    landed 2026-09-23). Re-synthesis FROM the sidecar is a separate, not-yet-built
+    step -- the sidecar only carries what the closed-form `range_migration=True`
+    branch (`cfr_from_paths` + `coherent_target_cfr`) would need; nothing here or in
+    `RTEnvironmentBlock` reads it back yet.
 
     `k` is `Simulation`'s required subspace-tracking-rank argument; this composition
     has no `subspace_block`, so `k` only sizes the (otherwise-unused) `U_true`/rank
@@ -532,11 +535,12 @@ def build_arg_parser():
                         "benchmark_v1 (measured); the .npz files are unchanged")
     p.add_argument("--store-paths", action="store_true",
                    help="also store each frame's RAY-TRACED PATH LIST as a compressed "
-                        "'<stem>.paths.npz' sidecar (~0.7-1.6 MB/frame): the durable "
-                        "form the dense CFR can be re-synthesised from. REQUIRES the "
-                        "environment-side capture hook (RTEnvironmentBlock emitting "
-                        "PATHS_CAPTURE_KEY from get_state_updates), which does not "
-                        "exist yet -- until it lands this flag fails loudly on frame 0")
+                        "'<stem>.paths.npz' sidecar (measured ~1-2 MiB/frame, ~30x "
+                        "smaller than the dense CFR): the durable form the channel's "
+                        "closed-form (range_migration=True) branch can be "
+                        "re-synthesised from -- re-synthesis itself is a separate, "
+                        "not-yet-built step. RTEnvironmentBlock emits the capture via "
+                        "PATHS_CAPTURE_KEY")
     p.add_argument("--dry-run", action="store_true",
                    help="print the generation plan without ray-tracing/writing anything")
     return p
