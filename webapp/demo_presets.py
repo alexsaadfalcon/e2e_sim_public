@@ -68,17 +68,47 @@ DEMO_CFR_CORPUS = "e2e/ml/datasets/b1_demo_cfr/benchmark_v1_D2/manifest.json"
 #: Shared Results-tab screen note for the three Thrust 5 detector presets. The opening
 #: sentence is the owner's wording (2026-09-23) for the live-chain screens: it states
 #: what is stored, what is computed, which corpus the OFFLINE numbers belong to, and
-#: that a live count is a demonstration rather than a re-measurement. "{VMAX_CLAUSE}"
-#: is filled in (or dropped, if the manifest cannot be read) at render time -- see
+#: that a live count is a demonstration rather than a re-measurement. Reworded tighter
+#: (same 2026-09-23, owner course-correction) to make room for the mandatory corpus-band
+#: disclosure clause -- these corpora were traced with the `benchmark_v1` RadarConfig
+#: preset at 77 GHz, a DIFFERENT band from the munich frames (Ka, 28.5-31.5 GHz) every
+#: other thrust's screen shows; a Ka-band regeneration of this corpus is scheduled, so
+#: the clause is a disclosure of today's state, not a permanent fact. "{VMAX_CLAUSE}" is
+#: filled in (or dropped, if the manifest cannot be read) at render time -- see
 #: `_read_corpus_v_max` in webapp/app.py -- so the number is never typed here. It no
 #: longer fits one 16 px line on the 1600 px results page and wraps to two; that was
-#: read on the rendered PNG and accepted, the content being mandatory.
+#: read on the rendered PNG and accepted, the content being mandatory. (The banner, the
+#: OTHER place the owner asked for this "if there is room": there isn't, safely --
+#: `outputs["_axis_meta"]["source"]` (pipeline_runner.py) is pinned byte-for-byte by
+#: `tests/test_webapp_live_chain.py`'s `.startswith("Corpus Replay (live chain from
+#: stored channel)")` / `"Corpus Replay (ADC replay)"` checks, owned by another coder's
+#: shard; inserting the band clause there breaks those on sight. So this screen note is
+#: the only place it appears; recorded here rather than silently dropped.)
 _T5_SCREEN_NOTE = (
-    "frames: stored ray-traced channel (b1_demo_cfr), the ADC chain runs LIVE with the "
-    "knobs; the offline numbers (beat_cfar.json) were scored on b1_bench_v3 at 12-bit "
-    "default impairments -- the live count is a demonstration, not a re-measurement; "
-    "the ML arm leaves its training distribution when a knob moves; 40 m{VMAX_CLAUSE}."
+    "frames: stored ray-traced channel (b1_demo_cfr); ADC chain LIVE; offline numbers "
+    "(beat_cfar.json, b1_bench_v3, 12-bit) are a demo when live, not a re-measurement; "
+    "ML leaves training distribution on any knob change; corpus traced at 77 GHz "
+    "(legacy preset; Ka-band regeneration scheduled); 40 m{VMAX_CLAUSE}."
 )
+
+
+#: Thrust 4's A/B runs the LIVE Tessera surrogate at its canonical (arm A) vs. TSV
+#: height dropped to the low end of its presented envelope (arm B) -- NOT hand-typed:
+#: read off the same ParamSpec the GUI slider uses (webapp/pipeline_registry.py
+#: `_tessera_presented_range`), so a re-measured envelope moves both together. Height
+#: is the biggest single-knob mover of the range-profile skirt of the five continuous
+#: knobs, measured through this same InterconnectBlock(source='tessera') on the real
+#: munich Ka band (2026-09-23: baseline skirt -53.90 dB -> height-low -57.43 dB, a
+#: 3.53 dB native flat-frame metric move; notes/TESSERA_KNOB_MEASUREMENT_2026-09-23.md
+#: found the same direction/order-of-magnitude at scale=1). See `screen_note` below for
+#: whether that move is actually visible on the rendered figure.
+_TESSERA_HEIGHT_SPEC = next(p for p in BLOCKS_BY_ID["interconnect"].params
+                           if p.key == "tessera_height_um")
+_TESSERA_ARM_B_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.min
+_TESSERA_CANONICAL_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.default
+#: Display-rounded copy for card text -- the override itself (`ab=` below) uses the
+#: exact `.min`, so validation against the ParamSpec's own bound cannot drift.
+_TESSERA_ARM_B_HEIGHT_DISPLAY = round(_TESSERA_ARM_B_HEIGHT_UM, 2)
 
 
 @dataclass(frozen=True)
@@ -377,66 +407,67 @@ PRESETS: List[DemoPreset] = [
         thrust=4,
         n_steps=3,
         overrides=_merge(
-            {"interconnect": {"enabled": True, "params": {
-                "case": "passthrough", "normalize_gain": True}}},
+            {"interconnect": {"enabled": True, "params": {"source": "tessera"}}},
             _only_products("range_profile", "range_az"),
         ),
-        blurb=("A SYNTHETIC bad interconnect: the 11-tap boxcar placeholder, normalized to a "
-               "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
-               "in-band ripple. Press Run once: both arms appear as before "
-               "(A, top, passthrough) / after (B, bottom, SYNTHETIC boxcar), each panel "
-               "printing its own median-floor statistic (about -49 dB for A, -34 dB for "
-               "B, measured 2026-09-23). "
-               "On the heatmap the filter streaks each bright return along the range "
-               "axis: the 11-tap boxcar is applied along frequency unwindowed, the worst "
-               "possible filter shape (first sidelobe -13 dB, 6 dB per octave), so one "
-               "clean point target's sidelobes reach -40 dB over 14.4 m of the 25 m axis "
-               "(72 of 126 gates) -- measured through the real InterconnectBlock and "
-               "RangeProfileBlock. That, not the main-lobe smear, is what the audience "
-               "sees; the floor rise is the same energy. Lead with the floor: the two "
-               "streaks are its sidelobes on the two strongest returns."),
-        live_knobs=[("interconnect", "case", "passthrough -> default (synthetic boxcar)")],
-        # A/B (hostile-expert fourth read, 2026-09-23: polarity was inverted relative to
-        # T1/T2, where "after"/B is always the degraded arm -- here "after" used to be
-        # the HEALTHY passthrough arm). As-loaded IS passthrough; run B swaps to the
-        # synthetic boxcar, the ~14 dB floor-rise direction the card's headline quotes,
-        # so "after" is the degraded arm on every A/B screen, same as T1/T2.
-        ab=("interconnect", "case", "default"),
-        # Labels carry "SYNTHETIC" explicitly (owner ballot 3A: labelled synthetic
-        # wherever it appears) -- before 2026-09-23 the banner read "Case default
-        # (boxcar)" with no hint the filter is a placeholder, not a measured part.
-        ab_label_a="passthrough (no interconnect)",
-        ab_label_b="SYNTHETIC 11-tap boxcar placeholder -- added",
-        screen_note=("SYNTHETIC filter: the real Tessera/UIC responses differ by <= 0.021 "
-                     "dB in band, invisible on this display -- for the real parts "
-                     "the honest result is a null."),
+        blurb=("The LIVE public Tessera/UIC TSV surrogate, not a synthetic placeholder: "
+               "InterconnectBlock(source='tessera'), scale model x2 geometry / half "
+               "frequency at our Ka band (banner describe() says so every run). Arm A "
+               "(top) is the canonical geometry (upstream's own demo point). Arm B "
+               "(bottom) drops TSV height to its presented low end -- the biggest "
+               "single-knob mover of the range-profile skirt of the five (measured "
+               "through this block on the real munich frames: skirt -53.90 -> "
+               "-57.43 dB). That move is bulk DELAY, not a shape change: |S21| itself "
+               "only moves hundredths of a dB. See the screen note for whether it is "
+               "even visible next to real returns."),
+        live_knobs=[("interconnect", "tessera_height_um",
+                     f"{_TESSERA_CANONICAL_HEIGHT_UM:g} -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um "
+                     "(the A/B above)"),
+                    ("interconnect", "source",
+                     "manual third option, not part of the A/B: source='default' + "
+                     "case='default' selects the old SYNTHETIC 11-tap boxcar placeholder")],
+        ab=("interconnect", "tessera_height_um", _TESSERA_ARM_B_HEIGHT_UM),
+        ab_label_a="canonical Tessera geometry (h 100 um / scale x2)",
+        ab_label_b=f"TSV height -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um presented (largest skirt mover)",
+        screen_note=("LIVE Tessera surrogate, scale model x2 (see banner); in-band |S21| "
+                     "moves <0.03 dB across every knob -- invisible on a peak-normalized "
+                     "display. The 3.5 dB skirt move above is bulk delay, not distortion, "
+                     "and sits ~50 dB below this display's real noise floor: read both "
+                     "panels and say so if they look identical. Crosstalk (NEXT/FEXT) is "
+                     "modelled for a multi-via arrangement, not this default single-via "
+                     "one: worst-pair band mean, checker3x3, 28.5-31.5 GHz, pitch 40 um "
+                     "(in training box) NEXT -31.5 / FEXT -39.2 dB; pitch 60 um (our "
+                     "shipped geometry) NEXT -30.3 / FEXT -34.5 dB -- the pitch trend "
+                     "itself inverts above ~23 GHz on this public checkpoint (F89), so "
+                     "these are fixed reference numbers, not a live pitch sweep."),
         say=[
-            "This filter is synthetic, labelled as such wherever it appears (owner "
-            "ballot 3A); it stands in for a bad interconnect, not a model of any "
-            "hardware.",
+            "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- "
+            "banner describe() names the scale factor and the frequency it ran at.",
             "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
-            "doi 10.1109/TCAD.2026.3718807): the interconnect thrust, the Interconnect "
-            "block and the six Tessera S21 responses shipped in e2e/data/interconnect are "
-            "theirs. The boxcar is our placeholder, not derived from their designs.",
-            "The real Tessera/UIC designs are INVISIBLE on a peak-normalized display: the "
-            "actual Case3 response in-band gives correlation 0.999999, max 0.021 dB "
-            "difference. Flat insertion loss divides out. That is why the demo uses a "
-            "shaped filter and the range profile, not the image.",
-            "Crosstalk -- the dominant real array-interconnect impairment -- is structurally "
-            "absent: one S21 is broadcast to all 1024 elements. Say it up front.",
-            "The 77 GHz parts are not reconciled with the 30 GHz frames; today's "
-            "reconciliation is 'relabel the axis'. Caption real-data results as shape-only.",
-            "The brightest band at range 0-2 m is not a target: Sionna's "
-            "normalize_delays=True subtracts the shortest path's delay, so range 0 is "
-            "the earliest arrival (47.6 dB above the frame-0 median). The 20-22 m stripe "
-            "is real drifting multipath (2-21 m across frames), not fixed.",
+            "doi 10.1109/TCAD.2026.3718807): the interconnect thrust, the block, the "
+            "surrogate wrapper and the six Tessera S21 CSVs are theirs.",
+            "In-band |S21| is invisible on this display for every knob (<0.03 dB span); "
+            "the A/B moves TSV height because it is the one that measurably moves the "
+            "skirt, and even that is bulk delay, not a shape change.",
+            "Crosstalk is now modelled -- NEXT/FEXT between vias, multi-signal "
+            "arrangement -- with F89's numbers and caveat on the screen note; the "
+            "per-ELEMENT broadcast across all 1024 array elements is still unmodelled, "
+            "a separate limitation.",
+            "The 77 GHz shipped CSVs are still not reconciled with the 30 GHz frames; "
+            "caption real-CSV results as shape-only.",
+            "Range 0-2 m is not a target: Sionna's normalize_delays=True makes range 0 "
+            "the earliest arrival. The 20-22 m stripe is real drifting multipath.",
         ],
         do_not_say=[
+            "That crosstalk is structurally absent -- RETRACTED: the surrogate models "
+            "NEXT/FEXT for a multi-via arrangement (F89); one S21 broadcast to all "
+            "1024 elements is still true and separate.",
+            "'Drag pitch, watch crosstalk change' at our band: the public checkpoint's "
+            "pitch trend is physical only below ~23 GHz (F89) and runs backwards here.",
+            "That the A/B skirt movement is the surrogate finding a worse shape: the "
+            "measurement note attributes nearly all of it to a delay artifact.",
             "'Case3' from the dropdown as the UIC Case3: a legacy alias for "
-            "passthrough. The real CSV is not reachable from this screen yet.",
-            "That the boxcar is physically legitimate: unnormalized, +20.8 dB gain.",
-            "That the real designs 'do nothing' -- they are invisible on THIS display, which "
-            "is a statement about the display.",
+            "passthrough, not reachable from this screen.",
         ],
     ),
     DemoPreset(

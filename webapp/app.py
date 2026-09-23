@@ -50,6 +50,7 @@ from webapp.pipeline_runner import (
     PipelineError,
     figures_from_outputs,
     placeholder_figure,
+    prewarm_tessera_interconnect,
     run_pipeline,
     scenario_topdown_figure,
 )
@@ -417,6 +418,13 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
                     text=pr_fig.layout.title.text
                         + "<br><sup>scored offline; identical on both arms, the "
                           "knob cannot move it</sup>"))
+                # The appended line makes this a THREE-line title (main + the base
+                # figure's own subline + this one); the base top margin only budgets
+                # for two, so the new line sat a few pixels into the plot's top tick
+                # (rehearsal 2026-09-23, wave 6 cosmetic carry-over). Give it room
+                # without touching anything else about the figure.
+                m = pr_fig.layout.margin
+                pr_fig.update_layout(margin=dict(l=m.l, r=m.r, b=m.b, t=(m.t or 0) + 25))
             figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
@@ -738,6 +746,15 @@ def _load_preset(n_clicks, preset_id, node_data):
         # rather than loading half of it.
         return (no_update, no_update, html.Span(str(e), style={"color": "#eb3b5a"}),
                 no_update, no_update, no_update)
+    # Pay any Tessera surrogate cold-start cost NOW (preset load), not when Run is
+    # pressed in front of an audience (build item 5). Both A/B arms, since either one
+    # may be Run first; best-effort -- see `prewarm_tessera_interconnect`.
+    prewarm_tessera_interconnect(state)
+    if preset.ab is not None:
+        try:
+            prewarm_tessera_interconnect(apply_preset(preset, arm="b"))
+        except PresetError:
+            pass
     # Open the editor on the block whose knob the card says to turn, so the operator
     # is one click from the live demo; fall back to the tapped node.
     if preset.live_knobs:

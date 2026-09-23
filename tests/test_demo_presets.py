@@ -102,14 +102,29 @@ def test_thrust5_screen_notes_state_the_live_chain_and_scope_the_offline_numbers
     reading only the Results-tab note must see WHAT IS STORED (the ray-traced
     channel), WHAT IS COMPUTED (the ADC chain, live, at the knobs on screen), which
     corpus the offline numbers belong to, and that a live count is a demonstration
-    rather than a re-measurement."""
-    prefix = ("frames: stored ray-traced channel (b1_demo_cfr), the ADC chain runs "
-              "LIVE with the knobs; the offline numbers (beat_cfar.json) were scored "
-              "on b1_bench_v3 at 12-bit default impairments -- the live count is a "
-              "demonstration, not a re-measurement; the ML arm leaves its training "
-              "distribution when a knob moves")
+    rather than a re-measurement. Checked by substring, not an exact-prefix pin
+    (2026-09-23 owner course-correction reworded/tightened the note to make room for
+    the mandatory corpus-band disclosure -- see the test below -- so the exact string
+    is no longer stable; the required CONTENT is)."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
-        assert PRESETS_BY_ID[pid].screen_note.startswith(prefix), pid
+        note = PRESETS_BY_ID[pid].screen_note.lower()
+        assert "stored ray-traced channel" in note and "b1_demo_cfr" in note, pid
+        assert "adc chain" in note and "live" in note, pid
+        assert "beat_cfar.json" in note and "b1_bench_v3" in note, pid
+        assert "demo" in note and "re-measurement" in note, pid
+        assert "training distribution" in note, pid
+
+
+def test_thrust5_screen_notes_disclose_the_corpus_band():
+    """Owner course-correction, 2026-09-23: these ML corpora were traced with the
+    `benchmark_v1` RadarConfig preset at 77 GHz, a different band from the munich
+    frames (Ka, 28.5-31.5 GHz) every other thrust's screen shows, and a re-trace at
+    Ka-band is scheduled -- so a visitor must not assume the two match, and the
+    disclosure must not read as permanent (it names what is scheduled to change)."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        note = PRESETS_BY_ID[pid].screen_note
+        assert "77 GHz" in note, pid
+        assert "Ka-band" in note and "scheduled" in note, pid
 
 
 def test_thrust5_ml_label_and_note_admit_it_loses():
@@ -245,23 +260,45 @@ def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
               for s in p.say)
 
 
-def test_thrust4_synthetic_filter_is_normalized_and_labelled():
-    """Hostile-expert fourth read (2026-09-23): as-loaded (A) is now passthrough, the
-    HEALTHY arm, and the A/B override (B) swaps in the synthetic boxcar -- the
-    degraded arm -- so "after"/B is degraded on every A/B screen, matching T1/T2."""
+def test_thrust4_runs_the_live_tessera_surrogate_ab_on_height():
+    """2026-09-23 rebuild: Thrust 4 moved off the synthetic boxcar onto the LIVE
+    public Tessera surrogate (InterconnectBlock(source='tessera')). Arm A is the
+    canonical geometry (source='tessera' with every knob at its ParamSpec default,
+    i.e. the wrapper's shipped design through the scale model); arm B changes ONLY
+    the TSV height knob, to the low end of its presented envelope -- the largest
+    single-knob mover of the range-profile skirt of the five (measured through the
+    same block on the real munich frames, see the preset's own comment)."""
+    from webapp.demo_presets import _TESSERA_ARM_B_HEIGHT_UM, _TESSERA_CANONICAL_HEIGHT_UM
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+
     p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
     st = apply_preset(p)
-    assert st["interconnect"]["enabled"] and st["interconnect"]["params"]["normalize_gain"] is True
-    assert st["interconnect"]["params"]["case"] == "passthrough"
+    assert st["interconnect"]["enabled"]
+    assert st["interconnect"]["params"]["source"] == "tessera"
+    assert st["interconnect"]["params"]["case"] == "default"  # not passthrough: the
+    # surrogate must actually be evaluated, not bypassed
+    assert st["interconnect"]["params"]["tessera_height_um"] == _TESSERA_CANONICAL_HEIGHT_UM
     st_b = apply_preset(p, arm="b")
-    assert st_b["interconnect"]["params"]["case"] == "default"
+    assert st_b["interconnect"]["params"]["tessera_height_um"] == _TESSERA_ARM_B_HEIGHT_UM
+    # Only the height knob differs between the two arms.
+    for key in st["interconnect"]["params"]:
+        if key != "tessera_height_um":
+            assert st_b["interconnect"]["params"][key] == st["interconnect"]["params"][key]
+    height_spec = next(ps for ps in BLOCKS_BY_ID["interconnect"].params
+                       if ps.key == "tessera_height_um")
+    assert _TESSERA_ARM_B_HEIGHT_UM == height_spec.min  # the low end, not an arbitrary drop
     assert st["range_profile"]["enabled"]
-    assert "synthetic" in p.blurb.lower()
-    # Owner ballot 3A: labelled synthetic wherever it appears -- including the A/B
-    # banner (the concrete finding: it used to read "Case default (boxcar)"). It now
-    # lives on ab_label_b, the arm that carries the synthetic boxcar.
-    assert "synthetic" in p.ab_label_b.lower()
-    assert "passthrough" in p.ab_label_a.lower()
+    assert "tessera" in p.blurb.lower() and "live" in p.blurb.lower()
+    assert "canonical" in p.ab_label_a.lower()
+    # The retracted "structurally absent" crosstalk claim must not be ASSERTED as true
+    # anywhere the operator would say it (build item 3: F89 gave real, if caveated,
+    # crosstalk numbers) -- `do_not_say` is exempt, since flagging the retracted claim
+    # BY NAME as something not to say is the whole point of that list.
+    for text in [p.blurb, p.screen_note, *p.say]:
+        assert "structurally absent" not in text.lower()
+    assert any("structurally absent" in s.lower() and "retracted" in s.lower()
+              for s in p.do_not_say)
+    assert "next" in p.screen_note.lower() and "fext" in p.screen_note.lower()
 
 
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():

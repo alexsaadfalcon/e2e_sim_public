@@ -7,9 +7,15 @@ connect, which params are editable, sensible defaults) is *derived* from the
 parameter editor, and the pipeline runner all read from here so there are no
 duplicated, hand-maintained strings scattered across the codebase.
 
-This module imports NOTHING heavy (no torch / sionna / e2e). It is pure data so
-the UI can be constructed and tested on any machine. The actual block classes
-are imported lazily, by id, inside :mod:`webapp.pipeline_runner`.
+This module imports NOTHING heavy (no torch / sionna / e2e), with one deliberate
+exception: `e2e.interconnect_surrogate` is itself torch-free by contract (see its
+own module docstring, pinned by
+`tests/test_interconnect_surrogate.py::test_import_does_not_import_torch`), and is
+imported here so the Tessera knob ranges below are read from the surrogate's own
+recovered training envelope, never hand-typed duplicates that can drift from it.
+It is pure data so the UI can be constructed and tested on any machine. The actual
+block classes (including `e2e.blocks`, which imports torch) are imported lazily,
+by id, inside :mod:`webapp.pipeline_runner`.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from e2e.interconnect_surrogate import ARRANGEMENTS, SHIPPED_TSV_DESIGN, VALID_RANGES
 
 from webapp.corpus_catalog import (CORPUS_MANIFESTS, DEFAULT_CORPUS, DEFAULT_SIONNA_SCENARIO,
                                    SIONNA_SCENARIOS)
@@ -65,6 +72,31 @@ class BlockSpec:
 # ParamSpec had no max at all, so the GUI happily offered k=512 and the resulting
 # ValueError escaped run_pipeline's error handling entirely.
 SUBSPACE_M = 512
+
+# The Ka-band scale factor `InterconnectBlock(source='tessera')` auto-derives for the
+# pipeline's default band (28.5-31.5 GHz munich frames): see e2e/blocks.py
+# `_resolve_tessera_scale`/`_TESSERA_SCALE_TARGET_HZ` and F89 (notes/ESTABLISHED_FACTS.md).
+# Duplicated as a constant (not imported -- `e2e.blocks` pulls in torch) so the GUI's
+# presented knob ranges below can divide the surrogate's own model-space envelope by it;
+# `tests/test_webapp.py` cross-checks this against the block's own resolved scale.
+_TESSERA_KA_SCALE = 2.0
+
+#: Length parameters the scale model above multiplies/divides (`TESSERA_SCALED_PARAMS`
+#: in e2e/blocks.py); `temperature_k` is a material property and is never scaled.
+_TESSERA_LENGTH_PARAMS = ("radius_um", "pitch_um", "height_um", "liner_um")
+
+
+def _tessera_presented_range(name: str) -> tuple:
+    """(lo, hi, default) for a Tessera design parameter, PRESENTED (GUI-facing) units:
+    the surrogate's own recovered training envelope (`VALID_RANGES`) and shipped demo
+    point (`SHIPPED_TSV_DESIGN`), divided by `_TESSERA_KA_SCALE` for the four length
+    parameters -- never hand-typed, so a re-measured envelope (e.g. a fresh upstream
+    checkout) changes the GUI bounds automatically."""
+    lo, hi = VALID_RANGES[name]
+    default = SHIPPED_TSV_DESIGN[name]
+    if name in _TESSERA_LENGTH_PARAMS:
+        lo, hi, default = lo / _TESSERA_KA_SCALE, hi / _TESSERA_KA_SCALE, default / _TESSERA_KA_SCALE
+    return lo, hi, default
 
 
 # --------------------------------------------------------------------------------
@@ -165,6 +197,68 @@ BLOCKS: List[BlockSpec] = [
                            "interconnect can have; with this on, only its in-band shape "
                            "(59.7 dB ripple) reaches the chain. Off by default so "
                            "existing runs are unchanged."),
+            # Orthogonal to `case`: 'default' keeps the boxcar/CSV behaviour above;
+            # 'tessera' evaluates the LIVE public Tessera TSV surrogate instead (see
+            # e2e/blocks.py InterconnectBlock's `source=` and F89/F90 in
+            # notes/ESTABLISHED_FACTS.md). `case` still gates it: 'passthrough'/'case3'
+            # pass the frame through untouched regardless of source.
+            ParamSpec("source", "Source", "choice", "default",
+                      choices=["default", "tessera"],
+                      help="'default' = the boxcar placeholder / transfer_csv above. "
+                           "'tessera' = the live public Tessera/UIC TSV surrogate, "
+                           "evaluated from the five knobs below over a geometric scale "
+                           "model (the run banner's describe() names the factor and the "
+                           "frequency it was evaluated at)."),
+            # The five continuous design parameters TesseraTSV.s21 takes (TESSERA_DESIGN_
+            # PARAMS in e2e/blocks.py), PRESENTED units -- bounds and defaults come from
+            # `_tessera_presented_range`, i.e. the surrogate's own recovered training
+            # envelope divided by the Ka-band scale factor, never hand-typed here.
+            ParamSpec("tessera_radius_um", "Tessera: via radius (um)", "number",
+                      _tessera_presented_range("radius_um")[2], step=0.1,
+                      min=_tessera_presented_range("radius_um")[0],
+                      max=_tessera_presented_range("radius_um")[1],
+                      help="TSV via radius. Only applied when source='tessera'; "
+                           "presented range is the surrogate's training envelope / "
+                           f"{_TESSERA_KA_SCALE:g} (the scale model's Ka-band factor)."),
+            ParamSpec("tessera_pitch_um", "Tessera: via pitch (um)", "number",
+                      _tessera_presented_range("pitch_um")[2], step=0.5,
+                      min=_tessera_presented_range("pitch_um")[0],
+                      max=_tessera_presented_range("pitch_um")[1],
+                      help="Centre-to-centre via spacing. The public checkpoint's "
+                           "NEXT/FEXT-vs-pitch trend is only physical below ~23 GHz "
+                           "(F89) -- inverted at our band, so this knob's crosstalk is "
+                           "shown as fixed reference numbers on the demo card, not a "
+                           "live sweep."),
+            # Biggest genuine in-band-shape mover of the five (measured through this
+            # same block on the munich Ka band, notes/TESSERA_KNOB_MEASUREMENT_2026-
+            # 09-23.md): most of what any knob moves on a peak-normalized range profile
+            # is sub-milli-bin bulk DELAY, not distortion -- see that note before adding
+            # a "watch the image change shape" claim to a card.
+            ParamSpec("tessera_height_um", "Tessera: TSV height (um)", "number",
+                      _tessera_presented_range("height_um")[2], step=0.5,
+                      min=_tessera_presented_range("height_um")[0],
+                      max=_tessera_presented_range("height_um")[1],
+                      help="Through-silicon via height/depth. The largest single-knob "
+                           "mover of the range-profile skirt of the five (measured "
+                           "2026-09-23); the movement is bulk delay (it shifts the "
+                           "target), not an in-band shape change."),
+            ParamSpec("tessera_liner_um", "Tessera: liner oxide thickness (um)", "number",
+                      _tessera_presented_range("liner_um")[2], step=0.05,
+                      min=_tessera_presented_range("liner_um")[0],
+                      max=_tessera_presented_range("liner_um")[1],
+                      help="Oxide liner thickness around each via."),
+            ParamSpec("tessera_temperature_k", "Tessera: temperature (K)", "number",
+                      _tessera_presented_range("temperature_k")[2], step=5.0,
+                      min=_tessera_presented_range("temperature_k")[0],
+                      max=_tessera_presented_range("temperature_k")[1],
+                      help="Die temperature. Not scaled by the geometric scale model "
+                           "(a material property, not a length)."),
+            ParamSpec("tessera_arrangement", "Tessera: arrangement", "choice",
+                      "ring3x3", choices=sorted(ARRANGEMENTS),
+                      help="Signal/ground via grid. 'ring3x3'/'ring5x5' have one signal "
+                           "via (no crosstalk terms); 'checker3x3'/'checker5x5' have "
+                           "several and expose NEXT/FEXT, at the cost of a bigger S-"
+                           "matrix per frequency point."),
         ],
         blurb="Interconnect filtering applied in the frequency domain.",
     ),

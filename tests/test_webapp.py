@@ -166,6 +166,22 @@ def test_subspace_m_is_the_value_the_tracker_is_actually_built_with(monkeypatch)
     assert seen["k"] < seen["m"], "the default k must satisfy the constraint it advertises"
 
 
+def test_tessera_ka_scale_matches_the_block_it_presents_for():
+    """`pipeline_registry._TESSERA_KA_SCALE` (a duplicate constant, kept local because
+    `e2e.blocks` pulls in torch -- see that module's comment) must equal what
+    `InterconnectBlock(source='tessera')` actually resolves for the pipeline's default
+    Ka band, or the GUI's presented knob ranges silently drift from the model-space
+    envelope the block itself validates against."""
+    pytest.importorskip("torch")
+    from e2e.blocks import _resolve_tessera_scale
+    from webapp.pipeline_registry import _TESSERA_KA_SCALE
+
+    # (28.5e9, 31.5e9): the munich frames' band, also what
+    # `pipeline_runner._resolve_interconnect_band_hz` falls back to for a legacy pkl
+    # (no `freq_plan`) at the registry's default 3 GHz rffe span.
+    assert _resolve_tessera_scale(None, (28.5e9, 31.5e9)) == _TESSERA_KA_SCALE
+
+
 def test_param_editor_k_input_has_min_and_max():
     from webapp import block_diagram
     from webapp.pipeline_registry import default_block_state, SUBSPACE_M

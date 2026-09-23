@@ -111,6 +111,84 @@ def _resolve_freq_span_hz(state: Dict[str, Dict[str, Any]], env_block: Any) -> f
     return float(_p_positive(state, "rffe", "freq_span_hz"))
 
 
+def _resolve_interconnect_band_hz(state: Dict[str, Dict[str, Any]], env_block: Any):
+    """``(start_hz, stop_hz)`` the frame's frequency axis spans -- what
+    ``InterconnectBlock(source='tessera')`` needs as ``band_hz`` to auto-derive its
+    scale factor and to place its response on the real axis (see
+    `e2e.blocks._resolve_tessera_scale`). Mirrors `_resolve_freq_span_hz`: prefers the
+    environment block's own ``freq_plan`` (v2 pkls); legacy pkls (no ``freq_plan``,
+    e.g. munich.pkl) fall back to a span centered at 30 GHz, matching `_comms_freqs`'s
+    same fallback carrier.
+    """
+    freq_plan = getattr(env_block, "freq_plan", None)
+    if freq_plan:
+        return float(freq_plan["start_hz"]), float(freq_plan["stop_hz"])
+    span = _resolve_freq_span_hz(state, env_block)
+    carrier = 30e9
+    return carrier - span / 2.0, carrier + span / 2.0
+
+
+#: Last-resort fallback for `_corpus_live_interconnect_band_hz`, when `corpus_cfg` is
+#: missing or its own resolution raises: the literal every corpus generated at
+#: f0=77 GHz used before 2026-09-23 (see `e2e.ml.chain_generate.
+#: _LEGACY_77GHZ_INTERCONNECT_BAND_HZ`, which this equals bit-for-bit).
+_LEGACY_77GHZ_INTERCONNECT_BAND_HZ = (75e9, 81e9)
+
+
+def _corpus_live_interconnect_band_hz(corpus_cfg: Any):
+    """``(start_hz, stop_hz)`` the live-chain replay path resamples the corpus's own
+    interconnect `transfer_csv` onto.
+
+    Reads it straight off the corpus's own `RadarConfig` (its recorded carrier
+    `f0_hz`) via `e2e.ml.chain_generate._interconnect_band_hz` -- the SAME function
+    the generator used when it built these frames -- rather than a re-typed literal
+    that could silently drift from it. A prior version hardcoded `(75e9, 81e9)`
+    unconditionally; that function still returns exactly that for every existing
+    f0=77 GHz corpus, so this is a no-op for every corpus generated before the
+    2026-09-23 Ka-band re-founding, and follows a re-traced corpus's carrier
+    automatically once one exists. Falls back to that same literal only if
+    `corpus_cfg` is unavailable or the import/call itself fails -- never lets a
+    provenance lookup take the run down.
+    """
+    if corpus_cfg is None:
+        return _LEGACY_77GHZ_INTERCONNECT_BAND_HZ
+    try:
+        from e2e.ml.chain_generate import _interconnect_band_hz
+
+        return _interconnect_band_hz(corpus_cfg)
+    except Exception:
+        return _LEGACY_77GHZ_INTERCONNECT_BAND_HZ
+
+
+def prewarm_tessera_interconnect(state: Dict[str, Dict[str, Any]]) -> None:
+    """Evaluate the interconnect's Tessera surrogate response once for `state`, through
+    its on-disk cache, so a later `run_pipeline` call on the SAME state does not pay
+    the cold model-forward cost (~10.9 s, notes/TESSERA_KNOB_MEASUREMENT_2026-09-23.md)
+    on its first frame. Meant to be called from a preset-load UI hook, before Run is
+    pressed -- best-effort and exception-swallowing throughout: `run_pipeline` is the
+    only authority on whether a state can actually run here, and a warm-up must never
+    block or fail a preset load.
+    """
+    if not (_enabled(state, "interconnect")
+            and _p(state, "interconnect", "source") == "tessera"):
+        return
+    if _p(state, "interconnect", "case") in ("passthrough", "case3"):
+        return
+    try:
+        from e2e.blocks import SionnaEnvironmentBlock, TESSERA_DESIGN_PARAMS, tessera_s21_for_axis
+
+        env_block = SionnaEnvironmentBlock(_p(state, "environment", "scenario_name"))
+        band_hz = _resolve_interconnect_band_hz(state, env_block)
+        n_freqs = int(env_block.get_S_pars().shape[-1])
+        freqs = np.linspace(band_hz[0], band_hz[1], n_freqs)
+        params = {name: float(_p(state, "interconnect", f"tessera_{name}"))
+                 for name in TESSERA_DESIGN_PARAMS}
+        tessera_s21_for_axis(freqs, params=params,
+                             arrangement=_p(state, "interconnect", "tessera_arrangement"))
+    except Exception:
+        pass
+
+
 def _comms_freqs(state: Dict[str, Dict[str, Any]], env_block: Any) -> np.ndarray:
     """Frequency grid (Hz) for the comms head's `ModemBlock`.
 
@@ -609,6 +687,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             SionnaEnvironmentBlock,
             RFFEBlock,
             InterconnectBlock,
+            TESSERA_DESIGN_PARAMS,
             AFEBlock,
             AdaOjaBlock,
             FFTBlock,
@@ -769,9 +848,9 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # still mean pass-through, because removing the interconnect IS a real
         # experiment and the live-vs-stored gate will show exactly what it costs.
         if corpus_live_cfr and case not in ("passthrough", "case3"):
-            # Built the way `e2e.ml.chain_generate` builds it (that CSV, mapped over
-            # 75-81 GHz) -- imported from there rather than re-typed, so the live chain
-            # cannot drift from the chain that wrote the frames it replays.
+            # Built the way `e2e.ml.chain_generate` builds it (that CSV) -- imported
+            # from there rather than re-typed, so the live chain cannot drift from the
+            # chain that wrote the frames it replays.
             try:
                 from e2e.ml.chain_generate import DEFAULT_INTERCONNECT_CSV
             except ImportError as e:
@@ -779,9 +858,37 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     "Could not import the corpus interconnect response "
                     "(e2e.ml.chain_generate). Underlying error: " + str(e))
             interconnect_block = InterconnectBlock(
-                transfer_csv=str(DEFAULT_INTERCONNECT_CSV), band_hz=(75e9, 81e9),
+                transfer_csv=str(DEFAULT_INTERCONNECT_CSV),
+                band_hz=_corpus_live_interconnect_band_hz(corpus_cfg),
                 normalize_gain=bool(_p(state, "interconnect", "normalize_gain")),
             )
+        elif _p(state, "interconnect", "source") == "tessera" and case not in ("passthrough", "case3"):
+            # Live Tessera TSV surrogate (F89/F90/F91, notes/ESTABLISHED_FACTS.md):
+            # `case` still gates it above (a passthrough choice means no interconnect at
+            # all, regardless of source); band_hz drives both the scale-model factor and
+            # the axis the response is placed on, so it must be the frame's REAL band,
+            # matching how `_resolve_freq_span_hz` feeds RFFE.
+            tessera_params = {name: float(_p(state, "interconnect", f"tessera_{name}"))
+                              for name in TESSERA_DESIGN_PARAMS}
+            try:
+                interconnect_block = InterconnectBlock(
+                    case=None if case == "default" else case,
+                    source="tessera",
+                    tessera_params=tessera_params,
+                    tessera_arrangement=_p(state, "interconnect", "tessera_arrangement"),
+                    band_hz=_resolve_interconnect_band_hz(state, environment_block),
+                    normalize_gain=bool(_p(state, "interconnect", "normalize_gain")),
+                )
+            except ValueError as e:
+                # Construction validates the knobs eagerly (out-of-range geometry, an
+                # unknown arrangement) -- caught here, not left to escape past every
+                # other PipelineError handler below (the AdaOjaBlock k>=m comment above
+                # documents the same failure mode for a different block).
+                raise PipelineError(f"Interconnect (Tessera surrogate): {e}")
+            # Surfaced in the Results banner (outputs["_axis_meta"]["notes"]) so the
+            # scale factor and evaluated frequency are on screen, not only in the code
+            # (build item 1: "the run banner shows describe()").
+            run_notes.append(interconnect_block.describe())
         else:
             interconnect_block = InterconnectBlock(
                 case=None if case == "default" else case,
