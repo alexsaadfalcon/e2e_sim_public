@@ -334,18 +334,22 @@ approximations -> evidence breakdown, see [`docs/PHYSICS.md`](docs/PHYSICS.md).
 ### Interconnect: placeholder vs. simulated
 
 Pass `transfer_csv=` to `InterconnectBlock` and the interconnect stops being a stand-in:
-the block loads a simulated |S21|(f) and resamples it onto the scenario's band. Seven
+the block loads a simulated |S21|(f) and resamples it onto the scenario's band. Nine
 derived datasets ship in `e2e/data/interconnect/` — a Ka-band TSV plus all six 77 GHz
-automotive designs — every one of them from HFSS/surrogate S-parameter simulation.
-The figure below deliberately plots only Case3 of the six, so the comparison stays
-readable; `main_interconnect` draws all six in its own figure.
+automotive designs — every one of them from HFSS/surrogate S-parameter simulation. The
+Ka-band TSV comes in three files: a legacy one (not reproducible from the public
+release; kept for continuity — see the data README) and two regenerated directly from
+the public Tessera checkpoint (`tessera_tsv_s21_public.csv`, which is what the figure
+below plots, and a Ka-band scale-model variant). The figure below deliberately plots
+only Case3 of the six 77 GHz designs, so the comparison stays readable;
+`main_interconnect` draws all six in its own figure.
 
 The interconnects were simulated by **Mohamed Gharib, Leonid Popryho, and Prof. Inna
 Partin-Vaisband (University of Illinois Chicago)**; see Gharib, Popryho & Partin-Vaisband,
 IEEE TCAD 2026, doi 10.1109/TCAD.2026.3718807. What ships here is their simulation output.
-The TSV surrogate that produced the Ka-band file is public (BSD 3-Clause,
-github.com/HiPerCAS/tessera); the six 77 GHz automotive HFSS projects are not in that
-repository and are available on request to those authors. See
+The TSV surrogate is public (BSD 3-Clause, github.com/HiPerCAS/tessera) and is what
+produced the two regenerated Ka-band files above; the six 77 GHz automotive HFSS
+projects are not in that repository and are available on request to those authors. See
 `e2e/data/interconnect/README.md` for per-dataset provenance.
 
 ```bash
@@ -360,7 +364,11 @@ against its own band. Bottom left: all four range profiles at native resolution 
 data-driven arm keeps a 1-bin mainlobe, while the legacy boxcar smears it to 11 bins.
 Bottom right: the same data with the y-axis stretched over the sidelobe skirt, where the
 differences actually live. In-band ripple sets the skirt height, exactly as it should:
-0.80 dB p-p of ripple gives a −34.5 dB sidelobe, 0.03 dB gives −64.4 dB.
+0.0033 dB p-p of ripple (Tessera TSV, public checkpoint) gives a −48.1 dB sidelobe, 0.03 dB
+(Case3) gives −64.4 dB. (An earlier version of this caption quoted 0.80 dB / −34.5 dB for
+the TSV arm, measured from the legacy `tessera_tsv_s21.csv` — retracted 2026-09-23: that
+file is not reproducible from the public Tessera release, see the data README; the TSV
+arm now plots the checkpoint's own direct evaluation.)
 
 Two honesty notes, because this figure is easy to over-read. The two models sit in
 **different bands** (Ka-band and 77 GHz automotive), so this is not a head-to-head ranking

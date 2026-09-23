@@ -1,8 +1,8 @@
 # Interconnect transfer-function data
 
-Seven derived datasets ship here: one Ka-band TSV line, and six 77 GHz automotive designs.
-All are DATA. No collaborator source code, model, or HFSS project is reproduced anywhere in
-this repository.
+Nine derived datasets ship here: three Ka-band TSV files (one legacy, two regenerated from
+the public Tessera checkpoint), and six 77 GHz automotive designs. All are DATA. No
+collaborator source code, model, or HFSS project is reproduced anywhere in this repository.
 
 ## Attribution
 
@@ -61,13 +61,27 @@ reconstruction: do not read the phase column as measured data.
 Load one with `InterconnectBlock(transfer_csv=..., band_hz=...)`, or by number via
 `e2e.main.main_interconnect.case_csv(n)`.
 
-## `tessera_tsv_s21.csv` — the Ka-band TSV line
+## `tessera_tsv_s21.csv` — the Ka-band TSV line (LEGACY, kept for continuity)
+
+> **Provenance (added 2026-09-23, F89/F90 in `notes/ESTABLISHED_FACTS.md`):** supplied by
+> the authors in **August 2026**, ahead of the public release. A fresh-context
+> investigation found it is an **exactly lossless, closed-form reciprocal two-port**
+> (|S21|²+|S11|²=1 to 1.4e-9 at every row; arg S11 − arg S21 = −90.000000°) that **no
+> checkpoint of this architecture could have produced** — four regressed head outputs
+> cannot satisfy an identity at 1e-9. It is **not reproducible from the public release**
+> (unit/convention/renormalization searches all rejected; best match 3.14 dB RMS, wrong
+> shape). It is kept in this repository **only for continuity with v1.0 figures** that
+> already cite it; new work should use `tessera_tsv_s21_public.csv` below, which *is*
+> the public checkpoint's own output at its own canonical geometry.
 
 A frequency-swept scattering-parameter transfer function for a
 **single Through-Silicon-Via (TSV) interconnect line** (one center signal via surrounded by
 a ground ring). `InterconnectBlock(transfer_csv=...)` in `e2e/blocks.py` loads it and
 resamples it onto a frame's frequency grid, as a physically-grounded alternative to the
-default placeholder boxcar response.
+default placeholder boxcar response. It is still the **default** value of
+`e2e.blocks.TESSERA_INTERCONNECT_CSV`; `e2e/main/main_interconnect.py` no longer plots it
+(it plots `tessera_tsv_s21_public.csv` instead) but still loads it in the tests that pin
+its own numbers.
 
 ### TSV columns
 
@@ -80,32 +94,68 @@ default placeholder boxcar response.
 
 `InterconnectBlock` uses `s21_re + 1j*s21_im` as the interconnect's frequency response.
 
-### TSV geometry
+### TSV geometry (as documented; not independently verifiable — see provenance above)
 
-Single signal line, ground ring; default TSV geometry: radius 5 µm, pitch 60 µm,
+Single signal line, ground ring; nominal TSV geometry: radius 5 µm, pitch 60 µm,
 height 100 µm, liner 0.5 µm. Over the pipeline's 28.5–31.5 GHz band the insertion loss is
 ≈ −7.0 to −7.9 dB (rising with frequency); there is a reflection resonance near ~8 GHz.
 
 ### TSV provenance and caveats
 
-- These numbers were produced by the authors' **physics-informed GNN surrogate for TSV
-  networks** (an HFSS-finetuned model that predicts the S-matrix from array layout +
-  geometry) — a different instrument from the direct HFSS export behind the six 77 GHz
-  cases, though the same group. The surrogate's architecture and training code are public
-  (github.com/HiPerCAS/tessera, BSD 3-Clause) — only the specific finetuned checkpoint that
-  produced this file is not; see "Regenerating the TSV" below.
-- **Frequency-validity caveat:** the surrogate's documented demo point is ~15 GHz. It
-  produces smooth, well-behaved output across the full 1–40 GHz sweep (no extrapolation
-  artifacts), but whether it is *validated* at the pipeline's 28.5–31.5 GHz band is a
-  question for the model's authors. Treat the >~20 GHz region as indicative pending
-  confirmation.
+- **Phase is NOT minimum-phase.** An earlier version of this README claimed the phase
+  column was "reconstructed as minimum phase" (`arg H = −Hilbert(ln|H|)`); that is FALSE
+  for this file (measured 2026-09-23: 32.1° rms residual against a minimum-phase
+  reconstruction of the same |S21|, while the same estimator reproduces the Case3 77 GHz
+  file's phase to 0.000°). The phase in this file is whatever the authors supplied; do not
+  assume any reconstruction method for it. (Minimum-phase reconstruction genuinely is used
+  for the six 77 GHz case files below — that claim is correct there, just not here.)
+- These numbers were said to come from the authors' **physics-informed GNN surrogate for
+  TSV networks** (an HFSS-finetuned model that predicts the S-matrix from array layout +
+  geometry). The public checkpoint (`models/best_model.pth`,
+  github.com/HiPerCAS/tessera) is a **different instrument** and does not reproduce this
+  file — see "Regenerating the TSV" below.
 - **Attribution:** settled 2026-08-29, updated 2026-09-23 — see the Attribution section at
   the top of this file. The paper is now published: doi 10.1109/TCAD.2026.3718807.
 
 ### Regenerating the TSV
 
-**Not reproducible from the public repository.** This file was generated by the authors
-with a finetuned checkpoint that is not in the public release; the public checkpoint
-(`models/best_model.pth` in github.com/HiPerCAS/tessera) gives about −0.6 dB at 30 GHz
-where this file has −7.5 dB (measured 2026-09-23). The file is what the authors supplied
-and is not regenerable from the public code.
+**Not reproducible from the public repository** (see the provenance note above — an
+exactly lossless closed-form two-port, not a checkpoint's output). The public checkpoint
+(`models/best_model.pth` in github.com/HiPerCAS/tessera) gives about −0.57 dB at 30 GHz
+where this file has −7.48 dB (measured 2026-09-23). Use `tessera_tsv_s21_public.csv`
+below for a version of this file that *is* regenerable from a clean clone.
+
+## `tessera_tsv_s21_public.csv` / `tessera_tsv_s21_public_ka_scaled.csv` — the public checkpoint
+
+**Fully reproducible** from a clean clone: `python -m e2e.interconnect_surrogate.fetch`
+(pulls the pinned public checkpoint) then
+`python -m e2e.data.interconnect.regenerate_tessera_tsv` (writes both files below). Each
+file's own `#`-comment header records the exact geometry, arrangement, checkpoint commit +
+sha256, wrapper version, scale factor, generation date and command line — see
+`e2e/data/interconnect/regenerate_tessera_tsv.py`. Same column layout as the legacy TSV
+file above; **phase is the surrogate's own phase, not a minimum-phase reconstruction**, in
+both files.
+
+- **`tessera_tsv_s21_public.csv`** — the **direct** evaluation: upstream's own canonical
+  demo geometry (radius 5 µm, pitch 60 µm, height 100 µm, liner 0.5 µm, 300 K, `ring3x3`
+  arrangement — `SHIPPED_TSV_DESIGN`), `scale=1.0`, over a 1–90 GHz sweep (0.25 GHz step).
+  This is what `InterconnectBlock(transfer_csv=...)` (the CSV/interpolation mode) reads,
+  and what `e2e/main/main_interconnect.py` now plots as "Tessera TSV". Over the pipeline's
+  28.5–31.5 GHz band: **−0.574 dB mean insertion loss, 0.0033 dB p-p ripple**
+  (measured 2026-09-23, F90 in `notes/ESTABLISHED_FACTS.md`) — very different from the
+  legacy file's −7.0 to −7.9 dB, because the legacy file is not this checkpoint's output.
+- **`tessera_tsv_s21_public_ka_scaled.csv`** — the **scale-model** evaluation at the
+  pipeline's Ka band: what `InterconnectBlock(source='tessera')` (the *live surrogate*
+  mode) actually applies over 28.5–31.5 GHz **by default** (`scale=None` auto-resolves to
+  x2 for this band — `e2e.blocks._resolve_tessera_scale`, F91 in
+  `notes/ESTABLISHED_FACTS.md`): the same canonical geometry evaluated at 2x its lengths
+  and half the frequency, reported back at the real Ka frequencies. This is **not** the
+  same number as the direct file's in-band slice above — −0.551 dB mean, 0.0075 dB p-p
+  ripple (measured 2026-09-23) — because the two `InterconnectBlock` modes do not evaluate
+  the same thing over this band; neither is "more correct," they are different declared
+  approximations and both are recorded for that reason.
+
+**Caveats carried over from the legacy file:** these are simulated, not measured; cite the
+same TCAD 2026 paper (Attribution, above); a passivity guard is enforced by
+`TesseraTSV(passivity="raise")`, the default the regeneration script uses, so a future
+re-run over an out-of-range geometry fails loudly rather than writing a fabricated curve.

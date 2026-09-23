@@ -89,3 +89,13 @@ What is NOT covered by the public release
 * The 77 GHz automotive HFSS projects behind
   e2e/data/interconnect/tessera_case{1..6}_s21_77ghz.csv. Those are a different
   structure and are not producible by this package at all.
+
+What IS covered (added 2026-09-23)
+-----------------------------------
+e2e/data/interconnect/tessera_tsv_s21_public.csv and
+tessera_tsv_s21_public_ka_scaled.csv ARE this package's own output (the public
+checkpoint above, at its own canonical geometry) and are fully reproducible from a
+clean clone: `python -m e2e.interconnect_surrogate.fetch` then
+`python -m e2e.data.interconnect.regenerate_tessera_tsv`. See
+e2e/data/interconnect/README.md for what each file evaluates and their measured
+numbers.

@@ -29,6 +29,51 @@ def test_shipped_csv_loads_and_is_physical():
     assert np.all(np.abs(s21) <= 1.0 + 1e-6)
 
 
+def test_legacy_csv_still_loadable_under_its_explicit_name():
+    """5AA (F89/F90): the legacy file -- not reproducible from the public release --
+    is kept beside the new public file, at its old name, so anyone loading it
+    explicitly still gets it. See e2e/data/interconnect/README.md."""
+    from pathlib import Path
+
+    assert Path(TESSERA_INTERCONNECT_CSV).name == "tessera_tsv_s21.csv"
+    freq, s21 = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
+    assert len(freq) > 0
+
+
+def test_public_csv_exists_and_is_passive():
+    """The regenerated public checkpoint's direct evaluation (F90): a real csv on
+    disk, ascending frequency, and passive (|S21| <= 0 dB) everywhere -- unlike the
+    legacy file, this one actually comes from a checkpoint, so passivity is a real
+    property of the model's output, not a closed-form guarantee."""
+    from e2e.main.main_interconnect import TESSERA_TSV_PUBLIC_CSV
+
+    freq, s21 = load_interconnect_transfer(TESSERA_TSV_PUBLIC_CSV)
+    assert len(freq) > 0
+    assert np.all(np.diff(freq) > 0)
+    s21_db = 20 * np.log10(np.abs(s21) + 1e-15)
+    assert np.all(s21_db <= 1e-9)
+
+
+def test_public_csv_matches_surrogate_at_three_frequencies():
+    """The regenerated file must actually BE the public checkpoint's output, not a
+    stale or hand-edited copy: re-evaluate the same geometry at three frequencies
+    spanning the file and require agreement to 1e-6 dB. Skipped where the surrogate
+    (tessera/torch_geometric or the checkpoint) is not importable/resolvable."""
+    from e2e.interconnect_surrogate import SHIPPED_TSV_DESIGN, TesseraTSV, available
+
+    if not available():
+        pytest.skip("Tessera surrogate/checkpoint not available on this machine")
+    from e2e.main.main_interconnect import TESSERA_TSV_PUBLIC_CSV
+
+    freq, s21 = load_interconnect_transfer(TESSERA_TSV_PUBLIC_CSV)
+    tsv = TesseraTSV(passivity="ignore", warn_out_of_range=False)
+    for idx in (0, len(freq) // 2, len(freq) - 1):
+        got = tsv.s21(np.array([freq[idx]]), grid="ring3x3", **SHIPPED_TSV_DESIGN)[0]
+        got_db = 20 * np.log10(abs(got) + 1e-15)
+        exp_db = 20 * np.log10(abs(s21[idx]) + 1e-15)
+        assert got_db == pytest.approx(exp_db, abs=1e-6)
+
+
 def _ones_frame(n_freqs):
     # [az, el, chirp, n_freqs] all-ones so `frame * H` returns H per element directly
     return torch.ones(2, 2, 1, n_freqs, dtype=torch.complex64, device=device)
@@ -210,14 +255,20 @@ def test_case3_csv_loads_and_is_physical():
 
 def test_range_profile_comparison_insertion_loss_and_ripple():
     """Re-derives the two headline numbers the owner already measured directly from
-    the shipped CSVs (mean/peak-to-peak |S21| in dB over each pipeline band)."""
+    the shipped CSVs (mean/peak-to-peak |S21| in dB over each pipeline band).
+
+    `tessera_tsv` numbers are the PUBLIC checkpoint's direct evaluation at its own
+    canonical geometry (F90, notes/ESTABLISHED_FACTS.md): -0.574 dB mean, 0.0033 dB
+    p-p ripple over 28.5-31.5 GHz -- not the legacy CSV's -7.46 dB / 0.80 dB (that file
+    is not reproducible from the public release; see e2e/data/interconnect/README.md).
+    """
     import e2e.main.main_interconnect as mi
 
     res = mi.range_profile_comparison(show=False, n_freqs=64)
     il = res["insertion_loss_db"]
     ripple = res["ripple_db"]
-    assert il["tessera_tsv"] == pytest.approx(-7.46, abs=0.05)
-    assert ripple["tessera_tsv"] == pytest.approx(0.80, abs=0.05)
+    assert il["tessera_tsv"] == pytest.approx(-0.574, abs=0.01)
+    assert ripple["tessera_tsv"] == pytest.approx(0.0033, abs=0.002)
     assert il["tessera_case3"] == pytest.approx(-0.53, abs=0.05)
     assert ripple["tessera_case3"] == pytest.approx(0.03, abs=0.02)
     # Case3 is the most demanding of the six IN OUR BAND, not necessarily better than TSV --
