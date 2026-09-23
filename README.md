@@ -633,3 +633,25 @@ via Playwright — `playwright install chromium` first). CI runs the default sui
 (`.github/workflows/tests.yml`). See `tests/README.md` for details, and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow (device
 conventions, the block/frame API contract, PR etiquette).
+
+## Running the demo
+
+Before presenting live (e.g. over RDP), run the pre-flight check:
+
+```bash
+python -m webapp.preflight          # full check, ~2 min: assets, env, port, one
+                                     # warm-up run, every preset, a timing pass
+python -m webapp.preflight --quick  # skips the warm-up + timing runs, seconds
+```
+
+It checks (in order) that every preset's corpus/checkpoint files and `munich.pkl`
+exist, torch/CUDA/dash import and the app module imports cleanly, the app's port is
+free, a warm-up run pays the ~10 s torch cold start now instead of on stage, every
+preset validates, and — full run only — every preset's wall time (WARN above 15 s).
+It exits non-zero on any FAIL and prints a RUNBOOK (launch command, URL, RDP tips,
+preset order, and the PDF-fallback location) either way.
+
+Then: `python -m webapp.app`, open `http://127.0.0.1:8050`, and load/Run one
+throwaway preset before the audience arrives. The PDF deck under
+`e2e/main/figures/rehearsal/` (via `python -m webapp.rehearse`) is a last resort —
+preflight exists so it is never needed.
