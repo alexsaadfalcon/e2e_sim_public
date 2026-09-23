@@ -1,283 +1,227 @@
-# %%
-# Import or install Sionna
-import sionna.rt
+"""Re-trace the Munich scenario at Ka-band and write a v2 `{"meta", "links"}` pkl.
 
-# Other imports
-import matplotlib.pyplot as plt
+Fixes the defect recorded in `notes/ESTABLISHED_FACTS.md` F93: the original script set
+`scene.frequency` on a `simple_street_canyon` scene it then discarded (line 66 rebound
+`scene` to a freshly loaded, still-3.5-GHz `munich`), so the shipped `munich.pkl` was
+traced at Sionna's 3.5 GHz default (4.28 cm array spacing) while everything downstream
+labelled it "30 GHz". This module sets `scene.frequency` on the scene it actually solves,
+and does so BEFORE building `PlanarArray`s -- Sionna sizes element spacing in
+wavelengths at construction time (see F92's note on upstream issue 470), so an array
+built before the frequency assignment silently keeps the wrong physical spacing even if
+`scene.frequency` is later corrected.
+
+Usage::
+
+    python -m e2e.environment.sionna_simple_channel [--carrier-hz 30e9]
+        [--band-hz 28.5e9 31.5e9] [--num-freqs 1000] [--num-frames 100]
+        [--out e2e/environment/sionna_sims/munich_ka.pkl] [--seed 41]
+
+The output is the SAME v2 payload format `e2e.environment.scenario_runner` writes and
+`e2e.environment.sionna_iterator.SionnaIterator` reads (`{"meta": {...}, "links":
+{name: ndarray}}`), so the frames load through `SionnaEnvironmentBlock` unchanged --
+this is a generated artifact (`sionna_sims/` is gitignored), not a committed one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import os
+import pickle
+import subprocess
+import sys
+
 import numpy as np
 
-import os
-from tqdm import tqdm
-no_preview = False # Toggle to False to use the preview widget
+_C = 299_792_458.0  # m/s
 
-# Import relevant components from Sionna RT
-from sionna.rt import load_scene, PlanarArray, Transmitter, Receiver, Camera,\
-                      PathSolver, RadioMapSolver, subcarrier_frequencies
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# %%
-# Load integrated scene
-scene = load_scene(sionna.rt.scene.munich) # Try also sionna.rt.scene.etoile
+DEFAULT_CARRIER_HZ = 30e9
+DEFAULT_BAND_HZ = (28.5e9, 31.5e9)
+DEFAULT_NUM_FREQS = 1000  # keeps the runtime frame shape (n_rx, 1, 1, 1000) legacy munich.pkl ships
+DEFAULT_NUM_FRAMES = 100
+DEFAULT_SEED = 41
+DEFAULT_OUT = os.path.join(_THIS_DIR, "sionna_sims", "munich_ka.pkl")
+LINK_NAME = "munich"
 
-# %%
-if not no_preview:
-    scene.preview();
 
-# %%
-# Only availabe if a preview is open
-if not no_preview:
-    scene.render(camera="preview", num_samples=512);
+def _git_head():
+    """Best-effort HEAD sha for provenance; None if git is unavailable (never fatal)."""
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=_THIS_DIR,
+                                       stderr=subprocess.DEVNULL)
+        return out.decode().strip()
+    except Exception:
+        return None
 
-# %%
-# Only availabe if a preview is open
-if not no_preview:
-    scene.render_to_file(camera="preview",
-                         filename="scene.png",
-                         resolution=[650,500]);
 
-# %%
-# Create new camera with different configuration
-my_cam = Camera(position=[150,275,150], look_at=[30,70,28])
-# Render scene with new camera*
-scene.render(camera=my_cam, resolution=[650, 500], num_samples=512); # Increase num_samples to increase image quality
+def build_frequencies(carrier_hz: float, band_hz, num_freqs: int) -> np.ndarray:
+    """`num_freqs` points spanning `band_hz` (absolute Hz), relative to `carrier_hz`.
 
-# %%
-scene = load_scene(sionna.rt.scene.simple_street_canyon, merge_shapes=False)
-scene.objects
+    Sionna's `paths.cfr(frequencies=...)` wants frequencies RELATIVE to the carrier
+    Sionna's array/materials were built at (`scene.frequency`), not absolute Hz.
+    """
+    start_hz, stop_hz = band_hz
+    return np.linspace(start_hz - carrier_hz, stop_hz - carrier_hz, num_freqs)
 
-# %%
-floor = scene.get("floor")
 
-# %%
-print("Position (x,y,z) [m]: ", floor.position)
-print("Orientation (alpha, beta, gamma) [rad]: ", floor.orientation)
-print("Scaling: ", floor.scaling)
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="Re-trace the Sionna 'munich' scene at a given carrier/band.")
+    p.add_argument("--carrier-hz", type=float, default=DEFAULT_CARRIER_HZ,
+                   help="Carrier frequency in Hz; sets scene.frequency (default 30e9).")
+    p.add_argument("--band-hz", type=float, nargs=2, default=list(DEFAULT_BAND_HZ),
+                   metavar=("START_HZ", "STOP_HZ"),
+                   help="Absolute band edges in Hz (default 28.5e9 31.5e9).")
+    p.add_argument("--num-freqs", type=int, default=DEFAULT_NUM_FREQS)
+    p.add_argument("--num-frames", type=int, default=DEFAULT_NUM_FRAMES)
+    p.add_argument("--out", default=DEFAULT_OUT)
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    return p.parse_args(argv)
 
-# %%
-print("Velocity (x,y,z) [m/s]: ", floor.velocity)
 
-# %%
-floor.radio_material
+def build_scene(carrier_hz: float):
+    """Load munich, set `scene.frequency` on the scene that will actually be solved,
+    THEN attach the tx/rx `PlanarArray`s and place tx/rx -- see the module docstring for
+    why the order matters. Returns `(scene, tx, rx, wavelength, rx_spacing_m, aperture_m)`.
 
-# %%
-scene.frequency = 31.5e9 # in Hz; implicitly updates RadioMaterials that implement frequency dependent properties
-floor.radio_material # Note that the conductivity (sigma) changes automatically
+    Split out from `generate()` so a test can check the scene's own `.frequency` and its
+    rx array spacing directly, not just the meta values `generate()` derives from them.
+    """
+    import sionna.rt
+    from sionna.rt import Camera, PlanarArray, Receiver, Transmitter, load_scene
 
-# %%
-scene = load_scene(sionna.rt.scene.munich, merge_shapes=True) # Merge shapes to speed-up computations
+    scene = load_scene(sionna.rt.scene.munich, merge_shapes=True)  # merge -> faster solves
+    # Set frequency on THE SCENE THAT IS ACTUALLY SOLVED, before building arrays (see
+    # module docstring / F92 / F93).
+    scene.frequency = float(carrier_hz)
+    # scene.frequency is a DrJit array, not a python float/np.float32 -- .numpy() pulls
+    # the scalar off the device before any float()/f-string formatting touches it.
+    scene_frequency_hz = float(scene.frequency.numpy()[0])
 
-# Configure antenna array for all transmitters
-scene.tx_array = PlanarArray(num_rows=1,
-                             num_cols=1,
-                             vertical_spacing=0.5,
-                             horizontal_spacing=0.5,
-                             pattern="tr38901",
-                             polarization="V")
+    wavelength = _C / scene_frequency_hz
+    rx_spacing_m = 0.5 * wavelength
+    aperture_m = 31 * rx_spacing_m  # 32-element ULA per axis -> 31 inter-element gaps
+    print(f"scene.frequency  = {scene_frequency_hz:.6e} Hz")
+    print(f"wavelength       = {wavelength:.6e} m")
+    print(f"rx element spacing = {rx_spacing_m:.6e} m")
+    print(f"rx aperture (per axis, 32 elements) = {aperture_m:.6e} m")
 
-# Configure antenna array for all receivers
-scene.rx_array = PlanarArray(num_rows=32,
-                             num_cols=32,
-                             vertical_spacing=0.5,
-                             horizontal_spacing=0.5,
-                             pattern="iso",
-                             polarization="V")
+    # Arrays built AFTER the frequency assignment above -- PlanarArray sizes its
+    # `vertical_spacing`/`horizontal_spacing` (given in wavelengths) at construction time.
+    scene.tx_array = PlanarArray(num_rows=1, num_cols=1, vertical_spacing=0.5,
+                                 horizontal_spacing=0.5, pattern="tr38901", polarization="V")
+    scene.rx_array = PlanarArray(num_rows=32, num_cols=32, vertical_spacing=0.5,
+                                 horizontal_spacing=0.5, pattern="iso", polarization="V")
 
-# Create transmitter
-tx = Transmitter(name="tx",
-                 position=[8.5,21,27],
-                 display_radius=10)
+    tx = Transmitter(name="tx", position=[8.5, 21, 27], display_radius=10)
+    scene.add(tx)
+    rx = Receiver(name="rx", position=[45, 90, 1.5], display_radius=10)
+    scene.add(rx)
+    tx.look_at(rx)
+    rx.look_at(tx)
 
-# Add transmitter instance to scene
-scene.add(tx)
+    # Kept for parity with the original interactive script (a camera angle used for
+    # scene.render()/preview()); this module runs headless (no display), so it is
+    # constructed but never rendered.
+    Camera(position=[150, 275, 150], look_at=[30, 70, 28])
 
-# Create a receiver
-rx = Receiver(name="rx",
-              position=[45,90,1.5],
-              display_radius=10)
+    return scene, tx, rx, wavelength, rx_spacing_m, aperture_m
 
-# Add receiver instance to scene
-scene.add(rx)
 
-tx.look_at(rx) # Transmitter points towards receiver
-rx.look_at(tx)
+def generate(args) -> tuple[np.ndarray, dict]:
+    """Ray-trace `args.num_frames` and return `(stacked_s_pars, meta)`.
 
-# %%
-scene.preview(show_devices=True, show_orientations=True)
+    Sionna is imported here (via `build_scene`, not at module scope) so `python -m
+    e2e.environment.sionna_simple_channel --help` and unit tests that only exercise
+    `build_frequencies`/`parse_args`/the pkl writer never need Sionna/DrJit installed.
+    """
+    import sionna.rt
+    from sionna.rt import PathSolver
 
-# %%
-# move receive across Munich square
-rx.position += [-50, 0, 0]
+    scene, tx, rx, wavelength, rx_spacing_m, aperture_m = build_scene(args.carrier_hz)
 
-# %%
-# animation
-# p_solver = PathSolver()
-# os.makedirs('sionna_frames', exist_ok=True)
-# for i in tqdm(range(100)):
-#     paths = p_solver(scene=scene,
-#                  max_depth=5,
-#                  los=True,
-#                  specular_reflection=True,
-#                  diffuse_reflection=False,
-#                  refraction=True,
-#                  synthetic_array=True,
-#                  seed=41)
-#     scene.render_to_file(camera=my_cam,
-#                          paths=paths,
-#                          filename=f"sionna_frames/scene{i}.png",
-#                          resolution=[650,500])
-#     rx.position += [1, 0, 0]
-# rx.position += [-100, 0, 0]
-# from visualization.gif_utils import gif_folder
-# gif_folder('sionna_frames/', 'scene', 40)
-# exit()
+    frequencies = build_frequencies(args.carrier_hz, args.band_hz, args.num_freqs)
+    p_solver = PathSolver()
 
-# %%
-# Instantiate a path solver
-# The same path solver can be used with multiple scenes
-p_solver = PathSolver()
+    # Physics decisions the validation campaign will revisit -- unchanged from the
+    # original script, but now recorded in `meta` (see the module docstring) rather
+    # than silently baked into the array.
+    normalize = True
+    normalize_delays = True
 
-# Compute propagation paths
-paths = p_solver(scene=scene,
-                 max_depth=5,
-                 los=True,
-                 specular_reflection=True,
-                 diffuse_reflection=False,
-                 refraction=True,
-                 synthetic_array=False,
-                 seed=41)
+    all_s_pars = []
+    for _ in range(args.num_frames):
+        rx.position += [1, 0, 0]  # same per-frame motion as the original script
+        paths = p_solver(scene=scene, max_depth=5, los=True, specular_reflection=True,
+                         diffuse_reflection=False, refraction=True, synthetic_array=False,
+                         seed=args.seed)
+        cfr = paths.cfr(frequencies=frequencies, normalize=normalize,
+                        normalize_delays=normalize_delays, out_type="numpy")
+        # [num_rx, num_rx_ant, num_tx, num_tx_ant, num_time_steps, num_freqs] ->
+        # [num_rx_ant, num_tx_ant, num_time_steps, num_freqs] (one rx, one tx node).
+        s_pars = cfr[0, :, 0, :, :, :]
+        all_s_pars.append(s_pars)
 
-# %%
-if no_preview:
-    scene.render(camera=my_cam, paths=paths, clip_at=20);
-else:
-    scene.preview(paths=paths, clip_at=20);
+    all_s_pars = np.stack(all_s_pars, axis=0).astype(np.complex64)
 
-# %%
-a, tau = paths.cir(normalize_delays=True, out_type="numpy")
-# Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time_steps]
-print("Shape of a: ", a.shape)
-# Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]
-print("Shape of tau: ", tau.shape)
+    try:
+        sionna_version = sionna.rt.__version__
+    except AttributeError:
+        sionna_version = getattr(sys.modules.get("sionna"), "__version__", None)
 
-# %%
-t = tau[0,0,0,0,:]/1e-9 # Scale to ns
-a_abs = np.abs(a)[0,0,0,0,:,0]
-a_max = np.max(a_abs)
-# And plot the CIR
-plt.figure()
-plt.title("Channel impulse response")
-plt.stem(t, a_abs)
-plt.xlabel(r"$\tau$ [ns]")
-plt.ylabel(r"$|a|$");
+    meta = {
+        "version": 2,
+        "scenario_name": "munich",
+        "scene": "munich",
+        "carrier_hz": float(args.carrier_hz),
+        "freq_plan": {
+            "carrier_hz": float(args.carrier_hz),
+            "start_hz": float(args.band_hz[0]),
+            "stop_hz": float(args.band_hz[1]),
+            "num_freqs": int(args.num_freqs),
+        },
+        "rx_spacing_m": float(rx_spacing_m),
+        "aperture_m": float(aperture_m),
+        "normalize": normalize,
+        "normalize_delays": normalize_delays,
+        "sionna_version": sionna_version,
+        "git_head": _git_head(),
+        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "seed": int(args.seed),
+        "links": {
+            LINK_NAME: {
+                "tx_node": "tx",
+                "rx_node": "rx",
+                "rx_array_shape": [32, 32],
+                "n_tx_ant": 1,
+                "kind": "radar",
+                "tx_power_dbm": None,
+                "physical_scale": False,
+            },
+        },
+    }
+    return all_s_pars, meta
 
-# %%
-# OFDM system parameters
-num_subcarriers = 10000
-subcarrier_spacing = 3e9 / num_subcarriers
 
-# Compute frequencies of subcarriers relative to the carrier frequency
-frequencies = subcarrier_frequencies(num_subcarriers, subcarrier_spacing)
-frequencies = frequencies[:num_subcarriers//2]
+def write_payload(all_s_pars: np.ndarray, meta: dict, out_path: str) -> None:
+    """Write the `{"meta": ..., "links": {name: ndarray}}` v2 payload `SionnaIterator`
+    understands (see `e2e.environment.sionna_iterator` / `scenario_runner`'s writer)."""
+    payload = {"meta": meta, "links": {LINK_NAME: all_s_pars}}
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    print(f"dumping to file {out_path}")
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f)
+    print("done dumping")
 
-# Compute channel frequency response
-h_freq = paths.cfr(frequencies=frequencies,
-                   normalize=True, # Normalize energy
-                   normalize_delays=True,
-                   out_type="numpy")
-# Shape: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_time_steps, num_subcarriers]
-print("Shape of h_freq: ", h_freq.shape)
 
-# Plot absolute value
-plt.figure()
-plt.plot(np.abs(h_freq)[0,0,0,0,0,:]);
-plt.xlabel("Subcarrier index");
-plt.ylabel(r"|$h_\text{freq}$|");
-plt.title("Channel frequency response");
+def main(argv=None):
+    args = parse_args(argv)
+    all_s_pars, meta = generate(args)
+    write_payload(all_s_pars, meta, args.out)
+    return all_s_pars, meta
 
-# %%
-taps = paths.taps(bandwidth=100e6, # Bandwidth to which the channel is low-pass filtered
-                  l_min=-6,        # Smallest time lag
-                  l_max=100,       # Largest time lag
-                  sampling_frequency=None, # Sampling at Nyquist rate, i.e., 1/bandwidth
-                  normalize=True,  # Normalize energy
-                  normalize_delays=True,
-                  out_type="numpy")
-print("Shape of taps: ", taps.shape)
 
-plt.figure()
-plt.stem(np.arange(-6, 101), np.abs(taps)[0,0,0,0,0]);
-plt.xlabel(r"Tap index $\ell$");
-plt.ylabel(r"|$h[\ell]|$");
-plt.title("Discrete channel taps");
-
-all_s_pars = []
-for _ in range(100):
-    rx.position += [1, 0, 0]
-    paths = p_solver(scene=scene,
-                 max_depth=5,
-                 los=True,
-                 specular_reflection=True,
-                 diffuse_reflection=False,
-                 refraction=True,
-                 synthetic_array=False,
-                 seed=41)
-    cfr = paths.cfr(frequencies=frequencies,
-                   normalize=True, # Normalize energy
-                   normalize_delays=True,
-                   out_type="numpy")
-    s_pars = cfr[0, :, 0, :, :, :]
-    all_s_pars.append(s_pars)
-
-all_s_pars = np.stack(all_s_pars, axis=0)
-
-import os, pickle
-this_dir = os.path.dirname(os.path.abspath(__file__))
-os.makedirs(os.path.join(this_dir, 'sionna_sims'), exist_ok=True)
-
-out_fname = os.path.join(this_dir, 'sionna_sims', 'munich.pkl')
-print('dumping to file', out_fname)
-pickle.dump(all_s_pars, open(out_fname, 'wb'))
-print('done dumping')
-exit()
-
-# %%
-scene.get("tx").velocity = [10, 0, 0]
-
-# Recompute propagation paths
-paths_mob = p_solver(scene=scene,
-                     max_depth=5,
-                     los=True,
-                     specular_reflection=True,
-                     diffuse_reflection=False,
-                     refraction=True,
-                     synthetic_array=True,
-                     seed=41)
-
-# Compute CIR with time-evolution
-num_time_steps=100
-sampling_frequency = 1e4
-a_mob, _ = paths_mob.cir(sampling_frequency=sampling_frequency,
-                         num_time_steps=num_time_steps,
-                         out_type="numpy")
-
-# Inspect time-evolution of a single path coefficient
-plt.figure()
-plt.plot(np.arange(num_time_steps)/sampling_frequency*1000,
-         a_mob[0,0,0,0,0].real);
-plt.xlabel("Time [ms]");
-plt.ylabel(r"$\Re\{a_0(t) \}$");
-plt.title("Time-evolution of a path coefficient");
-
-# %%
-rm_solver = RadioMapSolver()
-
-rm = rm_solver(scene=scene,
-               max_depth=5,
-               cell_size=[1,1],
-               samples_per_tx=10**6)
-
-# %%
-if no_preview:
-    scene.render(camera=my_cam, radio_map=rm);
-else:
-    scene.preview(radio_map=rm);
-# %%
+if __name__ == "__main__":
+    main()

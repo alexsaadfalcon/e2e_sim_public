@@ -92,7 +92,19 @@ class SionnaIterator:
 
 _this_dir = os.path.abspath(os.path.dirname(__file__))
 SIONNA_ETOILE_PATH = os.path.join(_this_dir, 'sionna_sims', 'etoile.pkl')
-SIONNA_MUNICH_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich.pkl')
+# Legacy artifact (traced at Sionna's 3.5 GHz default -- see notes/ESTABLISHED_FACTS.md
+# F93). Never modified/deleted by this module; kept selectable for comparison.
+SIONNA_MUNICH_LEGACY_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich.pkl')
+# Ka-band re-trace (28.5-31.5 GHz around a 30 GHz carrier, the owner's band decision
+# 2026-09-23) written by `e2e.environment.sionna_simple_channel`. This is what plain
+# 'munich' now resolves to, when present.
+SIONNA_MUNICH_KA_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich_ka.pkl')
+# Back-compat alias some call sites may still reference.
+SIONNA_MUNICH_PATH = SIONNA_MUNICH_LEGACY_PATH
+# Special `link` value that selects the legacy 3.5 GHz file through the same
+# `SionnaMunichIterator(link=...)`/`SionnaEnvironmentBlock('munich', link=...)` call site
+# -- lets a caller pick the legacy artifact without a second scenario name.
+MUNICH_LEGACY_LINK = 'munich_legacy_3p5ghz'
 
 
 # Factories forward an optional `link` selector to SionnaIterator so a multi-link pkl can
@@ -103,5 +115,12 @@ def SionnaEtoileIterator(link=None):
 
 
 def SionnaMunichIterator(link=None):
-    return SionnaIterator(SIONNA_MUNICH_PATH, link=link)
+    # `link=MUNICH_LEGACY_LINK` is a FILE selector here, not a pkl-internal link name
+    # (the legacy pkl is a bare ndarray with no links at all) -- it exists so the legacy
+    # 3.5 GHz artifact stays reachable through 'munich' without a second scenario name.
+    if link == MUNICH_LEGACY_LINK:
+        return SionnaIterator(SIONNA_MUNICH_LEGACY_PATH, link=None)
+    if os.path.exists(SIONNA_MUNICH_KA_PATH):
+        return SionnaIterator(SIONNA_MUNICH_KA_PATH, link=link)
+    return SionnaIterator(SIONNA_MUNICH_LEGACY_PATH, link=link)
 
