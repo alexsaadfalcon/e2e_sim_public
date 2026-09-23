@@ -87,7 +87,8 @@ class RFFEBlock:
     RX_CONFIG_IF_BW = 6         # Hz
 
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
-                 physical_scale=False, chirp_dur=None, lna_bias_ma=None, if_bw_mhz=None):
+                 physical_scale=False, chirp_dur=None, lna_bias_ma=None, if_bw_mhz=None,
+                 seed=None):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
         # still pass it don't break.
         # fs (= freq_span_hz) is the complex-baseband buffer's true sample rate (the
@@ -116,6 +117,19 @@ class RFFEBlock:
         self.if_filter = if_filter
         self.physical_scale = physical_scale
         self.n = n
+        # None (default): the thermal-noise draw in circuit_model_bb_approx comes from
+        # the global torch RNG, unseeded -- bit-for-bit unchanged from before this
+        # option existed. An int seeds a per-instance torch.Generator, advanced by
+        # frame index (seed + self._frame_idx) each call, in the same style as
+        # ImpairmentBlock/ThermalNoiseBlock (e2e/chain/receive.py, link_budget.py):
+        # same seed -> bit-identical noise across repeated runs; different seed/frame
+        # -> a fresh draw.
+        self.seed = seed
+        self._frame_idx = 0
+
+    def reset(self):
+        """Rewind the per-frame counter (and hence the seed sequence) to frame 0."""
+        self._frame_idx = 0
 
     def apply_circuit(self, s_pars):
         # Chirp/pol dim size is inferred (-1) rather than hardcoded to 2: this makes
@@ -133,8 +147,16 @@ class RFFEBlock:
         # physical_scale=True: skip the normalization above -- the frame is already
         # in volts at the LNA input (the generation layer produces volts via
         # sqrt(N*P_tx*Z0) scaling; see e2e/environment/scenario_runner.py).
-        frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
-                                              if_filter=self.if_filter)
+        if self.seed is None:
+            frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
+                                                  if_filter=self.if_filter)
+        else:
+            generator = torch.Generator(device=frame.device)
+            generator.manual_seed(int(self.seed) + self._frame_idx)
+            self._frame_idx += 1
+            frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
+                                                  if_filter=self.if_filter,
+                                                  generator=generator)
         s_pars_dist = torch.fft.fft(frame_dist, dim=-1)
         s_pars_dist = s_pars_dist.view(s_pars_shape)
         return s_pars_dist, PRX
@@ -557,6 +579,12 @@ class CircuitStage:
         self.rffe_block = rffe_block
         self.frame_capabilities = frames.capabilities_of(rffe_block)
         self.frame_contract_name = f"CircuitStage[{type(rffe_block).__name__}]"
+
+    def reset(self):
+        """Rewind a seeded RFFEBlock's per-frame noise counter so a reused Simulation
+        replays the same noise sequence (D1, 2026-09-23); a no-op for unseeded blocks."""
+        if hasattr(self.rffe_block, "reset"):
+            self.rffe_block.reset()
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])

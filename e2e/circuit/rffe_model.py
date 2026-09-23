@@ -60,7 +60,7 @@ def get_RX_config(nRx):
     return RX_config
 
 
-def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
+def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False, generator=None):
     '''
         Input values - V_bias_BB +- V1
         V1 --> 10^-5 t0 10^-6
@@ -68,6 +68,11 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
                plan the buffer's IFFT was built from). Used ONLY to size the optional
                IF filter's boxcar width; the noise floor is band-referenced to the
                BW config column (15 MHz IF), not to fs.
+        generator --> optional torch.Generator (on bb_IQ's device) the thermal-noise
+               draw below is sampled from. None (default) keeps drawing from the
+               global RNG, so every existing caller is bit-for-bit unchanged; passing
+               a seeded generator makes the draw reproducible without altering its
+               statistics (still iid standard normal, same variance).
     '''
 
     '''
@@ -216,14 +221,20 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False):
     # frequency bin instead of the intended NBB*BW -- so the per-sample variance
     # injected here must be pre-divided by nt.
     nt = orig_shape[-1]
-    RBBI += torch.randn_like(RBBI) * torch.sqrt(NBB * BW / nt)
-    RBBQ += torch.randn_like(RBBQ) * torch.sqrt(NBB * BW / nt)
+    if generator is None:
+        noise_i = torch.randn_like(RBBI)
+        noise_q = torch.randn_like(RBBQ)
+    else:
+        noise_i = torch.randn(RBBI.shape, generator=generator, dtype=RBBI.dtype, device=RBBI.device)
+        noise_q = torch.randn(RBBQ.shape, generator=generator, dtype=RBBQ.dtype, device=RBBQ.device)
+    RBBI += noise_i * torch.sqrt(NBB * BW / nt)
+    RBBQ += noise_q * torch.sqrt(NBB * BW / nt)
     PRX = Pdclna + Plo + PdcBB
     RxBB = RBBI + 1j * RBBQ
 
     return RxBB.reshape(orig_shape), PRX
 
-def circuit_model_batch(rx_config, input_signals, fs, if_filter=False):
+def circuit_model_batch(rx_config, input_signals, fs, if_filter=False, generator=None):
     '''
         Vectorized replacement for the old nrx*ntx*ns Python loop: every (rx,tx,s)
         slice is elementwise-independent in circuit_model_bb_approx (the only
@@ -231,6 +242,9 @@ def circuit_model_batch(rx_config, input_signals, fs, if_filter=False):
         flatten the whole [nrx, ntx, ns, nt] signal to a [batch, nt] matrix and each
         RX_config column to a broadcastable [batch, 1], and call
         circuit_model_bb_approx once for the entire batch.
+
+        generator --> optional torch.Generator, forwarded to circuit_model_bb_approx's
+               thermal-noise draw; see that function for the reproducibility contract.
     '''
     device = input_signals.device
     assert len(input_signals.shape) == 4, 'Input signals must have 4 dimensions'
@@ -245,7 +259,8 @@ def circuit_model_batch(rx_config, input_signals, fs, if_filter=False):
     cfg_batch = cfg_batch.reshape(batch, n_cfg).t().unsqueeze(-1)
 
     sig_flat = input_signals.reshape(batch, nt)
-    out_flat, PRX_flat = circuit_model_bb_approx(cfg_batch, sig_flat, fs, if_filter=if_filter)
+    out_flat, PRX_flat = circuit_model_bb_approx(cfg_batch, sig_flat, fs, if_filter=if_filter,
+                                                 generator=generator)
     input_signals_circuit = out_flat.reshape(nrx, ntx, ns, nt)
 
     # PRX (Pdclna + Plo + PdcBB) depends only on RX_config, not on the signal or s/t,

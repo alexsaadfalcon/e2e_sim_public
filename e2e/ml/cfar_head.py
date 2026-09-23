@@ -73,7 +73,7 @@ rounding, and `tests/test_ml_cfar_head.py::test_cfar_from_rad_matches_the_classi
 asserts it on synthetic frames rather than leaving it as an argument.
 
 ONE WRINKLE, found by measuring rather than by reasoning (2026-09-22): the CFAR FIELD
-agrees to ~5e-7 always, but `group_peaks` keeps a cell iff `obj >= pooled`, an EXACT
+agrees to ~5e-7 on synthetic frames and ~3e-6 on real b1_bench_v3 test frames (verified 2026-09-23), but `group_peaks` keeps a cell iff `obj >= pooled`, an EXACT
 comparison, and `_to_grid`'s azimuth axis is a nearest-neighbour upsample that replicates
 each angle-FFT bin into `n_azimuth / n_angle` identical columns. On those plateaus a
 last-bit difference between the two computation orders decides which replica wins, so the
