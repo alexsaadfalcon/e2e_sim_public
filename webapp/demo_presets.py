@@ -50,6 +50,15 @@ CFAR_THRESHOLD = 0.66
 #: again on the real frames. Pinned here so the figure is never blank.
 ML_THRESHOLD = 0.22
 
+#: Shared Results-tab screen note for the three Thrust 5 detector presets (hostile-
+#: expert third read, 2026-09-23). "{VMAX_CLAUSE}" is filled in (or dropped, if the
+#: manifest cannot be read) at render time -- see `_read_corpus_v_max` in webapp/app.py
+#: -- so the number is never typed here.
+_T5_SCREEN_NOTE = (
+    "Labels and scoring stop at 40 m; in-distribution (held-out scenes of the "
+    "training corpus); one training seed{VMAX_CLAUSE}."
+)
+
 
 @dataclass(frozen=True)
 class DemoPreset:
@@ -78,6 +87,15 @@ class DemoPreset:
     #: Required whenever `ab` is set (apply_preset does not check this; the webapp does).
     ab_label_a: str = ""
     ab_label_b: str = ""
+    #: A visitor photographs the Results-tab card, not the presenter (hostile-expert
+    #: third read, 2026-09-23): the operator's card (`say`/`do_not_say`) lives on the
+    #: Block Diagram tab and never reaches whoever looks at the screenshot later. One
+    #: legible line rendered on the Results tab itself, directly under the run
+    #: banner(s), shared once by both A/B panels when this preset's run is on screen
+    #: (webapp/app.py `_resolve_screen_note`/`_render_results`). May contain the
+    #: literal token "{VMAX_CLAUSE}", filled in (or dropped) at render time from the
+    #: corpus manifest -- see `_read_corpus_v_max` in webapp/app.py.
+    screen_note: str = ""
 
 
 def _only_products(*keep: str) -> Dict[str, Dict[str, Any]]:
@@ -116,13 +134,12 @@ PRESETS: List[DemoPreset] = [
         ),
         blurb=("Press Run once: both arms run and appear as before (A, top, 8 mA) / after "
                "(B, bottom, 0.5 mA), each panel printing its own peak-median statistic "
-               "(about 42 vs 30 dB, measured on screen 2026-09-23). The range-azimuth "
-               "image loses dynamic range as the front-end's own noise rises. The signal "
-               "is deliberately set just below the model's input-referred noise (1e-7 vs "
-               "1.36e-7 V) -- where a real 1024-element radar operates: per-element SNR "
-               "below 0 dB, recovered by coherent gain. Manual path: LNA bias is the A/B "
-               "above; manual second knob: IF bandwidth 15 -> 50 MHz and run again (about "
-               "-5 dB; 1 -> 50 MHz is -16 dB, measured 2026-09-21)."),
+               "(about 42 vs 30 dB). The range-azimuth image loses dynamic range as the "
+               "front-end's own noise rises. The signal is deliberately set just below "
+               "the model's input-referred noise (1e-7 vs 1.36e-7 V) -- a real "
+               "1024-element radar's per-element SNR, recovered by coherent gain. Manual "
+               "path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz "
+               "(about -5 dB; 1 -> 50 MHz is -16 dB)."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
                                           "(about -5 dB; 1 -> 50 MHz is -16 dB, measured "
@@ -131,43 +148,47 @@ PRESETS: List[DemoPreset] = [
         # run B drops to 0.5 mA, the direction the card's headline (+12 dB) quotes.
         ab=("rffe", "lna_bias_ma", 0.5),
         ab_label_a="8 mA", ab_label_b="0.5 mA",
+        screen_note=("dB rel. peak on every panel; range 0 = earliest arrival (delays "
+                     "normalised at generation); all 1024 elements share one front-end "
+                     "config."),
         say=[
-            "LNA bias 0.5->8 mA is worth about +12 dB here (two sig figs; +-0.6-0.9 dB "
-            "between operating points).",
-            "At default signal level (1e-5) these knobs correctly do nothing (0.5 dB, "
-            "under the 40 dB floor) -- show it as the control if asked.",
-            "Below ~4 mA the modelled LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the "
-            "12 dB is it leaving the attenuator regime. Defensible sub-claim: 4->8 mA = "
-            "+1.6 dB (measured 2026-09-22).",
-            "There is no trade-off today: nothing clips, and the IF filter only sets noise "
-            "variance. Missing half: 1000 points at 1 MHz IF is a 1 ms sweep vs 20 us at "
-            "50 MHz; a 20 m/s car moves two wavelengths in that time.",
+            "LNA bias 0.5->8 mA is worth about +12 dB (+-0.6-0.9 dB).",
+            "At default signal level (1e-5) these knobs do nothing (0.5 dB, under the "
+            "40 dB floor); show it if asked.",
+            "Below ~4 mA the LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the 12 dB "
+            "is leaving the attenuator regime. Sub-claim: 4->8 mA = +1.6 dB (measured "
+            "2026-09-22).",
+            "There is no trade-off today: nothing clips; the IF filter only sets noise "
+            "variance. Missing half: 1 MHz IF is a 1 ms sweep vs 20 us at 50 MHz; a "
+            "20 m/s car moves two wavelengths in that time.",
             "The brightest band at range 0-2 m is not a target: Sionna's "
-            "normalize_delays=True (sionna_simple_channel.py) subtracts the shortest "
-            "path's delay, so range 0 is the earliest arrival (47.6 dB above the frame-0 "
-            "median). The 20-22 m stripe is real drifting multipath (2-21 m across "
+            "normalize_delays=True subtracts the shortest path's delay (see the screen "
+            "note); the 20-22 m stripe is real drifting multipath (2-21 m across "
             "frames), not fixed.",
-            "Noise figure IS quotable: the analytic Friis cascade gives 11.97 dB and the "
-            "measured end-to-end floor 11.80 dB, a 0.17 dB agreement through 1024 "
-            "elements, the FFT chain, the AFE and the tracker (notes/STATE.md section 5, "
-            "measured 2026-09-21). Absolute sensitivity in dBm is NOT: the input level is "
-            "a free parameter (signal_scaling), so quote noise figure and relative dB "
-            "only.",
+            "Noise figure IS quotable: Friis gives 11.97 dB, the measured end-to-end "
+            "floor is 11.80 dB -- a 0.17 dB agreement through 1024 elements, the FFT "
+            "chain, the AFE and the tracker (2026-09-21). Absolute sensitivity in dBm "
+            "is NOT: the input level is a free parameter, so quote noise figure and "
+            "relative dB only.",
+            "Channel mismatch: all 1024 elements share one config (get_RX_config "
+            "broadcasts one value), so element-to-element gain/phase mismatch is "
+            "structurally zero here; rx_config is already per-element, so adding a "
+            "spread is a small change and is on the list.",
+            "What the end-to-end run buys over Friis: the 0.17 dB agreement validates "
+            "the noise mechanism; what Friis cannot give is the coupling downstream -- "
+            "the same knob's effect on the AFE, the tracker (Thrust 2/3) and the "
+            "detector.",
         ],
         do_not_say=[
             "Any DC power readout: PRX is U-shaped, MINIMUM at best quality, implying an "
             "8.45 V rail in a 100-200 mV chain.",
-            "The compression regime (scaling 1e-1..1e-3): explained, but worse live than "
-            "silence.",
+            "The compression regime (scaling 1e-1..1e-3): worse live than silence.",
             "That gm scales linearly with bias -- true only at 8 mA (a weak-inversion "
             "law); say 'constant-overdrive power scaling'.",
             "Anything about IIP3: constant to five decimals across 0.5-10 mA here, unlike "
             "a real LNA whose IIP3 improves with bias.",
             "Any gain knob: peak normalization removes it.",
             "Any absolute dBm sensitivity: the input scale is arbitrary.",
-            "That the 1024 receivers are modelled individually: every config column "
-            "holds one value, broadcast to all elements; channel mismatch is "
-            "structurally absent.",
         ],
     ),
     DemoPreset(
@@ -178,23 +199,30 @@ PRESETS: List[DemoPreset] = [
         overrides=_merge(
             {"afe": {"enabled": True, "params": {"exp": 5, "mantissa": 6}}},
             {"interconnect": {"enabled": False}},
-            _only_products("range_az", "subspace_err"),
+            _only_products("range_az", "range_el", "subspace_err"),
         ),
+        # INTEGRITY (hostile-expert third read, 2026-09-23): the FFT range-elevation
+        # panel used to be deliberately off because it contradicts the "image barely
+        # moves" framing -- hiding a contradicting panel is worse than showing it. It
+        # is back on; the card now tells the three-number version below.
         blurb=("Press Run once: both arms run and appear as before (A, top, mantissa 6 "
                "bit) / after (B, bottom, mantissa 1 bit), each panel printing its "
                "subspace-error statistic (about 0.06 for A vs about 0.63 for B, measured "
-               "on screen 2026-09-23). The subspace error rises sharply (0.06 -> 0.63 "
-               "measured on this preset) while the range-azimuth image barely moves ON "
-               "THE DISPLAYED 40 dB RANGE -- the changes sit 40-80 dB below the peak, "
-               "under the colour floor. The tracker is far more sensitive to weight "
-               "precision than the picture is. The FFT az-el panel is deliberately off "
-               "(it contradicts this framing). The manual path still works: lower the AFE "
-               "weight mantissa 6 -> 1 bit and run again."),
+               "on screen 2026-09-23). Three numbers carry the story: the range-azimuth "
+               "image barely moves (peak-median about 0.6 dB, 61.2 -> 60.6), the "
+               "elevation cut moves about 2.7 dB (mean, unclipped dB, handoff 2026-09-22), "
+               "and the tracker error moves 10x (0.06 -> 0.63). The tracker is far more "
+               "sensitive to weight precision than either picture is; the elevation cut "
+               "is on screen precisely because it is the one that moves. The manual path "
+               "still works: lower the AFE weight mantissa 6 -> 1 bit and run again."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
         # to 1 bit, the 0.63 arm the card's headline quotes.
         ab=("afe", "mantissa", 1),
         ab_label_a="6 bit", ab_label_b="1 bit",
+        screen_note=("The range-azimuth image barely moves; the elevation cut moves "
+                     "~2.7 dB; the tracker error moves 10x -- subspace error is "
+                     "unnormalised, ceiling sqrt(k) = 2.83 for k = 8."),
         say=[
             "As loaded the curve starts at 0.04 and settles at 0.06 within two frames: "
             "the tracker is warm-started from a perturbed copy of the true subspace and "
@@ -203,27 +231,26 @@ PRESETS: List[DemoPreset] = [
             "Say the headline in ANGLES: subspace error 0.63 -> 0.06 is an unnormalized "
             "distance bounded by sqrt(k); converted, the average principal angle goes "
             "12.8 deg -> 1.3 deg.",
-            "The AFE is doing something real but modest: the printed peak-median statistic "
-            "moves about 0.6 dB (61.2 -> 60.6, measured 2026-09-23) for mantissa 6 -> 1 "
-            "while the error rises 10x. The card's older '0.04 dB' is a DIFFERENT metric "
-            "-- mean image move in UNCLIPPED dB (handoff 2026-09-22 Sec 2); AFE on vs "
-            "fully removed moves that metric 0.14 dB.",
+            "The three numbers together: range-azimuth barely moves (about 0.6 dB, "
+            "61.2 -> 60.6), the elevation cut moves about 2.7 dB (mean, unclipped dB, "
+            "handoff 2026-09-22 Sec 2), and the tracker error moves 10x. The AFE does "
+            "something real; the range-azimuth picture just is not where it shows.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
-            "The brightest band at range 0-2 m across all azimuth is not a target: the "
-            "munich frames were generated with Sionna's normalize_delays=True "
-            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
-            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
-            "scale on these screens is referenced to it (47.6 dB above the profile median "
-            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
-            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
+            "The brightest band at range 0-2 m is not a target: Sionna's "
+            "normalize_delays=True subtracts the shortest path's delay, so range 0 is "
+            "the earliest arrival (47.6 dB above the frame-0 median). The 20-22 m stripe "
+            "is real drifting multipath (2-21 m across frames), not fixed.",
+            "Read with Thrust 3: at 1 bit the tracker's steady state (0.62) is worse than "
+            "a cold start's FIRST frame (0.58) -- at that precision it never acquires "
+            "(measured on screen 2026-09-23).",
         ],
         do_not_say=[
             "That the mantissa sweep models analog hardware error: AFEBlock uses "
             "WEIGHT_FLOAT, which compress.py's own docstring calls 'right for a compute "
             "datapath and wrong for an analog control'.",
-            "The FFT az-elevation panel: it moves 2.70 dB mean while range-azimuth moves "
-            "0.05 dB, and undoes the 'image barely moves' story.",
+            "That the picture does not respond: the elevation cut does, by about 2.7 dB "
+            "(mean, unclipped dB) for the same 6 -> 1 bit sweep.",
             "That a higher compression ratio would look better: 512 of 1024 was chosen so "
             "the tracker can observe drift; observability drops from 0.50 to 0.055 at 16x, "
             "unmeasured.",
@@ -257,7 +284,13 @@ PRESETS: List[DemoPreset] = [
         # do_not_say list both already assumed a reader could see.
         ab=("subspace", "warm_start", "warm"),
         ab_label_a="cold start (random basis)", ab_label_b="warm start (perturbed truth)",
+        screen_note=("Frames are 1 m of platform travel each (no time base); warm start = "
+                     "perturbed copy of the true subspace, so its curve is tracking lag "
+                     "only."),
         say=[
+            "Three frames are three metres of platform travel: the frames carry no time "
+            "base (1 m per frame at generation), so quote convergence in frames, never "
+            "seconds.",
             "There is deliberately no image on this screen: the range-azimuth product does "
             "not change visibly during acquisition on the displayed 40 dB range (it is the "
             "same panel Thrusts 1 and 2 show), and the point of the error curve is that the "
@@ -318,6 +351,9 @@ PRESETS: List[DemoPreset] = [
         # (boxcar)" with no hint the filter is a placeholder, not a measured part.
         ab_label_a="SYNTHETIC 11-tap boxcar placeholder",
         ab_label_b="passthrough (no interconnect)",
+        screen_note=("SYNTHETIC filter: the real Tessera/UIC responses differ by <= 0.021 "
+                     "dB in band and are invisible on this display -- for the real parts "
+                     "the honest result is a null."),
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
             "ballot 3A). It stands in for a bad interconnect; it is not a model of any "
@@ -365,27 +401,29 @@ PRESETS: List[DemoPreset] = [
         blurb=("Replays the held-out TEST frames every published number was scored on, "
                "labels included, and runs the classical CA-CFAR baseline on them: the "
                "range-Doppler cube, then the objectness map with detections (red x) over "
-               "ground truth drawn as its match-tolerance box (white: a cross inside the box "
-               "is a hit; the scoreboard beside it counts them). The threshold is CFAR's "
-               "recall-0.5 operating point "
-               "(0.66), the same operating point the two network presets sit at, so the "
-               "cross counts across the three screens ARE the false-alarm comparison. Run "
-               "this first, then load the RADDetNet preset on the same frames: the previous "
-               "run stays on the Results tab underneath."),
+               "ground truth's match-tolerance box (white; a cross inside is a hit, scored "
+               "beside it). The threshold is CFAR's recall-0.5 point (0.66), matching the "
+               "two network presets, so the cross counts across the three screens ARE the "
+               "false-alarm comparison. Run this first, then load RADDetNet on the same "
+               "frames: the previous run stays on the Results tab underneath."),
         live_knobs=[("detector", "threshold", "0.66 -> 0.8 (fewer detections; the knob "
                                               "that moves the way it sounds)")],
+        screen_note=_T5_SCREEN_NOTE,
         say=[
+            "Unambiguous velocity is +-v_max from the manifest (read it: ~9.7 m/s); the "
+            "corpus targets are slower by construction, so a 20 m/s car would alias here "
+            "-- say so if asked.",
             "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich frames "
-            "through the RF front end, interconnect and tracker (25 m scene, range-azimuth). "
-            "This is the benchmark corpus: stored ADC frames (100 m, range-Doppler cube) "
-            "already impaired at generation; on replay the ADC-cube blocks are SKIPPED "
-            "(the run note says so) and the Thrust 1-4 blocks are off.",
+            "(25 m, range-azimuth); this is the benchmark corpus: stored ADC frames "
+            "(100 m, range-Doppler cube), already impaired at generation. On replay the "
+            "ADC-cube blocks are SKIPPED (the run note says so) and the Thrust 1-4 blocks "
+            "are off.",
             "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
             "0.081. Both numbers reproduced today from the public repo.",
             "At this operating point CFAR averages 6.2 false alarms per frame over the 172 "
-            "test frames; a single frame can show more or fewer. The objectness map is a "
-            "clipped CFAR ratio, so away from detections it is genuinely near zero -- the "
-            "map looks dark because CFAR is a threshold test, not a probability field.",
+            "test frames (a single frame can show more or fewer). The objectness map is a "
+            "clipped CFAR ratio, near zero away from detections -- it looks dark because "
+            "CFAR is a threshold test, not a probability field.",
             "The top 60 m of the map is empty because the labels stop at 40 m, which is "
             "also the scoring crop; say it before someone asks what is up there.",
             "Range-azimuth heatmaps elsewhere in the demo come from the munich frames' "
@@ -394,10 +432,10 @@ PRESETS: List[DemoPreset] = [
             "Ground truth omits about 3 real strongly-scattering objects per frame inside "
             "40 m, so any detector that fires on every real object has a precision ceiling "
             "of 0.64. Some of the 'false alarms' are real objects.",
-            "Streaked targets in Doppler: ANSWERED, measured 2026-09-23. True mainlobe is "
-            "6-8 of 64 bins (~2 m/s at 0.303 m/s per bin); ambient floor sits at median "
-            "-41.6 dB / p95 -40.6 dB, within 1 dB of the fixed -40 dB clip -- floor "
-            "fluctuation lights up whole rows, a display-threshold coincidence.",
+            "Streaked targets in Doppler: ANSWERED. True mainlobe is 6-8 of 64 bins "
+            "(~2 m/s at 0.303 m/s/bin); ambient floor sits at median -41.6 dB / p95 "
+            "-40.6 dB, within 1 dB of the -40 dB clip -- floor fluctuation lights up "
+            "whole rows, a display-threshold coincidence.",
         ],
         do_not_say=[
             "Any learned-detector number from before 2026-09-22 except the rd-format 0.127 "
@@ -428,6 +466,7 @@ PRESETS: List[DemoPreset] = [
                "operating point (0.22), matching the CFAR and RADDetNet presets; at the "
                "default 0.5 this checkpoint draws nothing."),
         live_knobs=[("detector", "threshold", "0.22 -> 0.5 (the figure goes blank -- that is the point)")],
+        screen_note=_T5_SCREEN_NOTE,
         say=[
             "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say it "
             "first; the diagnosis is the result.",
@@ -482,6 +521,7 @@ PRESETS: List[DemoPreset] = [
                "neither corpus is unseen, and it is one training seed. Owner decision: "
                "LEADS Thrust 5, caveat volunteered."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
+        screen_note=_T5_SCREEN_NOTE,
         say=[
             "The defensible sentence, verbatim from the verifier: a learned head on the "
             "classical front end beats a CFAR threshold on the same cube, in-distribution "

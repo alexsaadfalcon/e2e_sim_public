@@ -152,7 +152,7 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
     fig = figures_from_outputs(outputs)["cfar_detection"]
 
     shapes = fig.layout.shapes
-    assert len(shapes) == 1
+    assert len([sh for sh in shapes if sh.type == "rect"]) == 1  # wave 4 adds a 40 m limit line
     s = shapes[0]
     cx, cy = -0.2, 20.0  # (sin_azimuth, surface_range_m) -- see d[1]/d[3] convention
     assert s.type == "rect"
@@ -184,4 +184,4 @@ def test_no_ground_truth_no_shapes():
         "_axis_meta": {"detector": {"mode": "cfar", "threshold": 0.5, "label": "x"}},
     }
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    assert not fig.layout.shapes
+    assert not [sh for sh in (fig.layout.shapes or ()) if sh.type == "rect"]  # wave 4: only the limit line remains

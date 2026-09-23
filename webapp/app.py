@@ -284,15 +284,14 @@ def _with_param(block_state, bid, pkey, val):
     return block_state
 
 
-def _matching_ab_preset(block_state: Dict[str, Any]):
-    """The loaded preset, IF `block_state` is exactly its as-loaded ("arm a") state
-    and it defines an A/B comparison (`DemoPreset.ab`, Change 1) -- i.e. the operator
-    has not hand-edited anything since Load preset. A manual edit changes
-    `block_state` away from `apply_preset(p)`, so this returns None and Run falls
-    back to the ordinary single-run path (the "turn one knob and run again" flow
-    every card also documents keeps working, ab-enabled preset or not)."""
+def _matching_preset(block_state: Dict[str, Any], *, require_ab: bool = False):
+    """The loaded preset, IF `block_state` is exactly its as-loaded ("arm a") state --
+    i.e. the operator has not hand-edited anything since Load preset. A manual edit
+    changes `block_state` away from `apply_preset(p)`, so this returns None (used both
+    to find an A/B pairing and, more generally, to attach a preset's `screen_note` to
+    whatever is on the Results tab)."""
     for p in PRESETS:
-        if p.ab is None:
+        if require_ab and p.ab is None:
             continue
         try:
             if apply_preset(p) == block_state:
@@ -300,6 +299,55 @@ def _matching_ab_preset(block_state: Dict[str, Any]):
         except PresetError:
             continue
     return None
+
+
+def _matching_ab_preset(block_state: Dict[str, Any]):
+    """The loaded preset, IF it defines an A/B comparison (`DemoPreset.ab`, Change 1).
+    A manual edit changes `block_state` away from `apply_preset(p)`, so this returns
+    None and Run falls back to the ordinary single-run path (the "turn one knob and
+    run again" flow every card also documents keeps working, ab-enabled preset or
+    not)."""
+    return _matching_preset(block_state, require_ab=True)
+
+
+def _read_corpus_v_max(block_state: Dict[str, Any]):
+    """The unambiguous Doppler velocity (+-v_max, m/s) of the Corpus Replay manifest
+    `block_state` points at, read fresh at render time -- never typed into a preset,
+    per the hostile-expert finding that a stored number drifts while the manifest does
+    not. Returns None (never raises) when there is no manifest, the file cannot be
+    read, or its config does not parse, so a screen note can drop the clause instead
+    of showing a stale or crashed one."""
+    manifest = ((block_state or {}).get("corpus_environment", {})
+                .get("params", {}).get("manifest"))
+    if not manifest:
+        return None
+    try:
+        import json
+        from pathlib import Path
+
+        from e2e.radar_config import RadarConfig  # dependency-free, stdlib only
+        from webapp.corpus_catalog import REPO_ROOT
+        path = Path(manifest)
+        if not path.is_absolute():
+            path = REPO_ROOT / manifest
+        manifest_dict = json.loads(path.read_text(encoding="utf-8"))
+        cfg = RadarConfig.from_dict(manifest_dict["config"])
+        return cfg.max_velocity_mps
+    except Exception:
+        return None
+
+
+def _resolve_screen_note(preset: "DemoPreset", block_state: Dict[str, Any]) -> str:
+    """`preset.screen_note` with its "{VMAX_CLAUSE}" token (if any) filled in from the
+    corpus manifest, or dropped if the manifest cannot be read (see
+    `_read_corpus_v_max`) -- so the sentence still reads cleanly with the clause gone."""
+    note = preset.screen_note if preset is not None else ""
+    if note and "{VMAX_CLAUSE}" in note:
+        v_max = _read_corpus_v_max(block_state)
+        clause = (f"; unambiguous velocity ±{v_max:.2f} m/s from the manifest"
+                  if v_max is not None else "")
+        note = note.replace("{VMAX_CLAUSE}", clause)
+    return note
 
 
 def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
@@ -491,6 +539,13 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
 
         ab_preset = _matching_ab_preset(block_state)
         state_b = apply_preset(ab_preset, arm="b") if ab_preset is not None else None
+        # The loaded preset's screen note (if any), shown ONCE at the top of the
+        # Results tab regardless of whether this is a single run or an A/B pair --
+        # `block_state` is always arm A / the as-loaded state, so this only needs
+        # computing once per click.
+        matched_preset = ab_preset or _matching_preset(block_state)
+        screen_note = (_resolve_screen_note(matched_preset, block_state)
+                      if matched_preset is not None else "")
         cancel = _cancel_event(session_id)
         try:
             cancel.clear()
@@ -537,6 +592,8 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
                 data_a["_banner"] = f"{line_a} -- B did not run (cancelled)  ||  {result_a['banner']}"
                 data_a["_ab"] = True
+                if screen_note:
+                    data_a["_screen_note"] = screen_note
                 if prev_results:
                     data_a["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
                 return data_a, html.Span(
@@ -549,6 +606,10 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             data_a["_ab"] = True
             data_b["_banner"] = f"{line_b}  ||  {result_b['banner']}"
             data_b["_ab"] = True
+            if screen_note:
+                # Shown ONCE, above both A and B -- on `data_a` (the top-level payload),
+                # never duplicated onto `data_b`/`_previous`.
+                data_a["_screen_note"] = screen_note
             data_a["_previous"] = data_b
             if result_b["cancelled"]:
                 msg = html.Span(
@@ -566,6 +627,8 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
         # Ordinary single-run path: unchanged behaviour.
         data = {k: f.to_dict() for k, f in result_a["figs"].items()}
         data["_banner"] = result_a["banner"]
+        if screen_note:
+            data["_screen_note"] = screen_note
         if prev_results:
             data["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
         return data, result_a["msg"], "tab-results", sink
@@ -815,6 +878,14 @@ def _render_results(results_data, active_tab):
         children.append(html.Div(f"{prefix}{banner}",
                                  style={"color": "#2d3a4a", "fontWeight": "bold",
                                         "marginBottom": "4px"}))
+    screen_note = results_data.get("_screen_note")
+    if screen_note:
+        # The preset's own caveat, for whoever photographs this tab rather than hears
+        # the presenter (hostile-expert third read, 2026-09-23): one legible, muted
+        # line shown ONCE, shared by both A/B panels below it.
+        children.append(html.Div(screen_note,
+                                 style={"color": "#576574", "fontSize": "16px",
+                                        "marginBottom": "8px"}))
     children.append(_grid(figs))
     if prev_figs:
         # The before/after every card asks for: the previous run stays on screen

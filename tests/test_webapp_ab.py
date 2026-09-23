@@ -592,3 +592,101 @@ def test_detection_markers_are_enlarged_for_podium_distance():
     # wave 2: ground truth is drawn as its match-tolerance box (a layout shape) with a small
     # centre dot, so the marker is deliberately small; the box carries the size.
     assert fig.layout.shapes, 'ground-truth tolerance boxes expected'
+
+
+# ------------------------------------------------------------------------------------
+# screen_note: the audience-facing caveat, rendered on the Results tab (hostile-expert
+# third read, 2026-09-23) -- a visitor photographs the card, not the presenter.
+# ------------------------------------------------------------------------------------
+def test_resolve_screen_note_empty_for_a_preset_with_none():
+    import webapp.app as appmod
+    from webapp.demo_presets import DemoPreset
+
+    p = DemoPreset(id="x", label="x", thrust=1, n_steps=1, overrides={}, blurb="b")
+    assert appmod._resolve_screen_note(p, {}) == ""
+
+
+def test_resolve_screen_note_fills_vmax_clause_from_the_real_manifest():
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
+    state = apply_preset(preset)
+    note = appmod._resolve_screen_note(preset, state)
+    assert "{VMAX_CLAUSE}" not in note
+    assert "unambiguous velocity" in note and "m/s from the manifest" in note
+    # Cross-check: the number matches RadarConfig computed directly from the same
+    # manifest, not a value typed into the preset.
+    v_max = appmod._read_corpus_v_max(state)
+    assert v_max is not None
+    assert f"{v_max:.2f}" in note
+
+
+def test_resolve_screen_note_drops_vmax_clause_when_manifest_is_unreadable():
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
+    state = apply_preset(preset)
+    state["corpus_environment"]["params"]["manifest"] = "does/not/exist/manifest.json"
+    note = appmod._resolve_screen_note(preset, state)
+    assert "{VMAX_CLAUSE}" not in note and "unambiguous velocity" not in note
+    assert note.endswith("one training seed.")
+
+
+def test_read_corpus_v_max_returns_none_without_a_manifest():
+    import webapp.app as appmod
+
+    assert appmod._read_corpus_v_max({}) is None
+    assert appmod._read_corpus_v_max({"corpus_environment": {"params": {}}}) is None
+
+
+def test_render_results_shows_the_screen_note_once_directly_under_the_banner():
+    import webapp.app as appmod
+
+    data = {"range_az": go.Figure().to_dict(), "_banner": "run #1",
+           "_screen_note": "a caveat the audience must see"}
+    tree = appmod._render_results(data, "tab-results")
+    text = _all_text(tree)
+    assert "a caveat the audience must see" in text
+    # Appears exactly once even though a before/after pair would render two banners.
+    assert text.count("a caveat the audience must see") == 1
+
+
+def test_render_results_omits_screen_note_when_absent():
+    import webapp.app as appmod
+
+    data = {"range_az": go.Figure().to_dict(), "_banner": "run #1"}
+    tree = appmod._render_results(data, "tab-results")
+    text = _all_text(tree)
+    assert "caveat" not in text
+
+
+def test_run_pipeline_attaches_the_matching_presets_screen_note(monkeypatch):
+    """Integration: loading and running a preset that has a screen_note carries it
+    into the results store, resolved (no leftover "{VMAX_CLAUSE}" token)."""
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    state_a = apply_preset(preset)
+    calls = []
+    _fake_runner(monkeypatch, calls, fig_key="range_profile")
+
+    data, *_ = appmod._run_pipeline(1, state_a, preset.n_steps, "", None)
+
+    assert data["_screen_note"] == preset.screen_note
+    assert "{VMAX_CLAUSE}" not in data["_screen_note"]
+    # Shown once at the top: not duplicated onto the B arm ("_previous").
+    assert "_screen_note" not in data["_previous"]
+
+
+def test_run_pipeline_omits_screen_note_for_a_manual_hand_edited_state(monkeypatch):
+    """No preset matches a hand-edited state, so no (possibly misleading) caveat is
+    attached to a run the operator built themselves."""
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
+    state = appmod._with_param(apply_preset(preset), "detector", "threshold", 0.9)
+    calls = []
+    _fake_runner(monkeypatch, calls, fig_key="subspace_err")
+
+    data, *_ = appmod._run_pipeline(1, state, preset.n_steps, "", None)
+    assert "_screen_note" not in data

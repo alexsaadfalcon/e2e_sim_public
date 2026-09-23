@@ -1466,6 +1466,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         g = rx.get("grid") or {}
         max_r = float(g.get("max_range_m") or n_r)
         y = (np.arange(n_r) + 0.5) * max_r / n_r     # range-bin centres, m
+        # The range CROP scoring is actually done at (e2e.ml.compare_detectors'
+        # `--max-range-m`, e.g. 40 m) is far smaller than the label grid's own
+        # physical extent (max_r above, ~102 m) -- labels themselves are sparse past
+        # it (F83, notes/ESTABLISHED_FACTS.md), so ~60% of this panel's range axis was
+        # empty (hostile-expert re-read, 2026-09-23, finding 5). Read from
+        # beat_cfar.json rather than a literal so this cannot silently drift from what
+        # the offline scoring actually used; `None` (file missing) leaves the axis at
+        # its old, uncropped behaviour rather than inventing a crop.
+        scoring_max_r = detector_scoreboard.scoring_max_range_m()
         x = -1.0 + (np.arange(n_a) + 0.5) * 2.0 / n_a  # sin(azimuth) bin centres
         fig = go.Figure(data=go.Heatmap(
             z=obj, x=x, y=y, zmin=0.0, zmax=1.0, colorscale="Viridis",
@@ -1524,6 +1533,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             legend=dict(orientation="h", y=-0.32, bgcolor="#2d3436",
                         font=dict(color="#ffffff")),
         )
+        if scoring_max_r is not None:
+            # 50 m is a fixed display margin above the scoring crop (not itself a
+            # claim about anything); the crop value drawn/labelled below IS one, so
+            # only it comes from `scoring_max_r`.
+            fig.update_yaxes(range=[0.0, 50.0])
+            fig.add_hline(
+                y=scoring_max_r, line_dash="dash", line_color="#ffffff",
+                annotation_text=f"labels & scoring stop at {scoring_max_r:g} m",
+                annotation_position="bottom right",
+                annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#ffffff"),
+            )
         figs[key] = _make_legible(fig)
 
         # Scoreboard: TP/FP/FN this frame + cumulative hits/false alarms/FA-per-frame/

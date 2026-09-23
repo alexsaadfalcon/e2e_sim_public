@@ -125,6 +125,14 @@ def _table(fig):
     return table
 
 
+def _content_row_height(table) -> int:
+    """Total data-row height: `cells.height` is one scalar for the whole table (a
+    Plotly Table constraint -- there is no per-row height), raised to the tallest
+    row's line count when a multi-line row (the CI-caveat/OOD rows) is present, so
+    every row here is that same height."""
+    return len(table.cells.values[0]) * table.cells.height
+
+
 def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     target = (10.0, 0.0, "vehicle")
     hit = (10.0, 0.0, 0.9, 10.0)
@@ -137,17 +145,21 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     row = dict(zip(labels, values))
     # Last frame (index 1) was a total miss: tp=0, fp=1, fn=1.
     assert row["this frame: TP"] == "0"
-    assert row["this frame: FP"] == "1"
+    assert row["this frame: unmatched (FP)"] == "1"
     assert row["this frame: FN"] == "1"
     # Cumulative over both frames: 1 hit, 1 false alarm.
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
     assert row[hits_key] == "1"
-    assert row["cumulative false alarms"] == "1"
-    assert row["FA / frame"] == "0.50"
-    # Renamed (Change 1b, 2026-09-23): "hit rate" alone read as a cross-detector
-    # quality ranking even though every detector's threshold is independently
-    # calibrated to land near recall 0.5 -- the label now says so in place.
-    assert row["hit rate (matched ~0.5 by design)"] == "0.50"
+    assert row["cumulative unmatched detections"] == "1"
+    assert row["unmatched / frame (FA)"] == "0.50"
+    # Renamed (finding 1, 2026-09-23 hostile-expert re-read): "false alarm"/"FA" rows
+    # count UNMATCHED detections against labels that themselves omit real objects
+    # (F83's precision ceiling) -- "FA" now survives only in parentheses.
+    hit_rate_key = next(k for k in row if k.startswith("hit rate"))
+    assert row[hit_rate_key] == "0.50"
+    # This run scored 2 frames -- the row states ITS OWN frame count, not the offline
+    # split size, so a 5-frame hit rate can't be misread as a stable per-arm number.
+    assert "2 frames" in hit_rate_key
     # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
     # wrapped to two lines inside the header's declared height and clipped the
     # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
@@ -177,7 +189,7 @@ def test_scoreboard_figure_fonts_are_legible_at_distance():
     assert len(values) <= 8
 
 
-def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length():
+def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cfar_data):
     """The bug this pins: a long header ("CA-CFAR (guard 2, train 6) -- threshold
     0.66") wrapped to two lines inside its declared single-line height, stealing
     room from the bottom of the table and clipping the last ("hit rate") row --
@@ -191,15 +203,25 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length():
                                match_rule_text="rule")
     table = _table(fig)
     domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
-    content_height = table.header.height + len(table.cells.values[0]) * table.cells.height
+    content_height = table.header.height + _content_row_height(table)
     assert domain_height >= content_height
     # All 7 rows are always present in the underlying data, for every arm -- the
     # rendering bug above was purely geometric, not a difference in what is computed.
+    # Target recall / split size come from the real beat_cfar.json (never hardcoded
+    # here, see CLAUDE.md's provenance rule -- they can drift with the file).
+    target_recall = beat_cfar_data["target_recall"]
+    n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
+                    if a.get("operating_point"))
+    # Every label is now pre-wrapped to fit the column (see `scoreboard_figure`'s
+    # `_TABLE_COL_LABEL_CHARS` comment) -- reassemble before comparing, same
+    # convention the subline tests already use for `_wrap_text`'s output.
     labels, _values = table.cells.values
-    assert labels == ["this frame: TP", "this frame: FP", "this frame: FN",
+    labels = [l.replace("<br>", " ") for l in labels]
+    assert labels == ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
                       "cumulative hits (0/1 frames scored)",
-                      "cumulative false alarms", "FA / frame",
-                      "hit rate (matched ~0.5 by design)"]
+                      "cumulative unmatched detections", "unmatched / frame (FA)",
+                      f"hit rate (0 frames; recall {target_recall:g} by design over "
+                      f"the {n_frames}-frame split)"]
 
 
 def test_scoreboard_figure_header_count_label_and_threshold_in_title():
@@ -221,8 +243,12 @@ def test_scoreboard_figure_match_rule_is_wrapped_to_fit_the_card():
     lines = ann.text.split("<br>")
     assert len(lines) >= 2, "the real match rule sentence is too long for one line"
     assert all(len(line) <= 70 for line in lines)
-    # Wrapping must not drop or reorder any word.
-    assert " ".join(lines) == long_rule
+    # Wrapping must not drop or reorder any word. The annotation now also carries the
+    # precision-ceiling caveat (finding 1) appended after the match rule -- split it
+    # back off before comparing, since that sentence is this test's own concern
+    # (see test_scoreboard_annotation_states_the_precision_ceiling_caveat).
+    match_rule_part = ann.text.split("<br>labels omit")[0]
+    assert " ".join(match_rule_part.split("<br>")) == long_rule
 
 
 def test_wrap_text_never_exceeds_max_chars_and_preserves_words():
@@ -444,7 +470,7 @@ def test_scoreboard_offline_block_rows_never_clip_the_table():
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
     table = _table(fig)
     domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
-    content_height = table.header.height + len(table.cells.values[0]) * table.cells.height
+    content_height = table.header.height + _content_row_height(table)
     assert domain_height >= content_height
 
 
@@ -489,3 +515,128 @@ def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
     trace = next(tr for tr in fig.data if tr.name.startswith("classical CFAR"))
     assert "vs CFAR" not in trace.name
     assert trace.name.startswith("classical CFAR (AP=")
+
+
+# --------------------------------------------------------------------------------
+# Finding 3 (hostile-expert 3rd read, 2026-09-23): the null arm's stored name reads
+# as "random INSIDE the ground-truth boxes" (the detector gets the answer); it is
+# actually blind to the eval labels entirely -- uniform-random cells inside the
+# bounding box of the TRAIN split's own targets (e2e/ml/compare_detectors.py:189-192,
+# `score_null`'s docstring). Display-only remap, checked against that exact text.
+# --------------------------------------------------------------------------------
+def test_display_arm_name_remaps_only_the_null_arm():
+    assert (ds._display_arm_name("null (random-in-GT-box)") ==
+           "null: random cells within the train-label bounding box (chance floor)")
+    assert ds._display_arm_name("classical CFAR") == "classical CFAR"
+    assert ds._display_arm_name("raddetnet") == "raddetnet"
+
+
+def test_stored_pr_figure_null_arm_shows_the_real_definition_not_the_stored_name():
+    fig = ds.stored_pr_figure()
+    names = [tr.name for tr in fig.data]
+    assert any(n.startswith("null: random cells within the train-label bounding box")
+              for n in names)
+    assert not any("random-in-GT-box" in n for n in names)
+
+
+# --------------------------------------------------------------------------------
+# Finding 1 (hostile-expert 3rd read, 2026-09-23): "false positive"/"false alarm"
+# rows count UNMATCHED detections against labels that themselves omit real objects
+# (F83's precision ceiling) -- renamed above, and the caption below the table states
+# the ceiling itself, read off a constant with its own provenance comment, not typed
+# into this test as a bare number either.
+# --------------------------------------------------------------------------------
+def test_scoreboard_annotation_states_the_precision_ceiling_caveat():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text="rule")
+    ann = fig.layout.annotations[0]
+    text = ann.text.replace("<br>", " ")
+    assert f"precision ceiling {ds.PRECISION_CEILING_F83:.2f}" in text
+    assert "labels omit ~3 real scatterers per frame inside 40 m" in text
+    assert "unmatched is an upper bound on false alarms" in text
+    # The match rule sentence must still be present, unmerged/undropped.
+    assert "rule" in text
+
+
+def test_scoreboard_annotation_geometry_still_fits_with_two_sentences():
+    """The new caveat sentence lengthens the annotation the table's own bottom margin
+    must leave room for -- same geometric contract as the row-clipping tests above,
+    now covering the annotation block instead of the row block."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text=ds.match_rule_text())
+    assert fig.layout.margin.b >= 5 * ds._TABLE_ANNOTATION_LINE_PX
+
+
+# --------------------------------------------------------------------------------
+# Finding 2 (hostile-expert 3rd read, 2026-09-23): the CI row's scene-bootstrap band
+# hides the variance that has actually been measured to matter (a second training
+# seed), and an out-of-distribution row is added for any arm a SEPARATE OOD-scored
+# JSON also covers -- both numbers read from real files at test time, never typed.
+# --------------------------------------------------------------------------------
+def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    labels, _values = _table(fig).cells.values
+    ci_idx = labels.index("delta AP vs CFAR, 95% CI")
+    caveat = labels[ci_idx + 1].replace("<br>", " ")
+    assert f"seed-to-seed spread {ds.SEED_TO_SEED_AP_SPREAD_F86:.3f} AP" in caveat
+    assert "ONE training seed" in caveat
+    assert "F86" in caveat
+
+
+def test_default_ood_json_exists():
+    assert ds.DEFAULT_OOD_JSON.is_file()
+
+
+def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
+    import json
+    ood_arms = {a["name"]: a for a in json.loads(ds.DEFAULT_OOD_JSON.read_text())["arms"]}
+    s42, s43 = ood_arms["raddetnet_s42"], ood_arms["raddetnet_s43"]
+    cfar = ood_arms["classical CFAR"]
+
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    labels, _values = _table(fig).cells.values
+    ood_header = next(l for l in labels if l.startswith("out of distribution"))
+    assert "b1_bench_v2" in ood_header
+    value_row = labels[labels.index(ood_header) + 1].replace("<br>", " ")
+    assert f"OOD AP {s42['AP']:.3f} (seed 42)" in value_row
+    assert f"{s43['AP']:.3f} (seed 43)" in value_row
+    assert f"vs CFAR {cfar['AP']:.3f}" in value_row
+    # F86: CFAR's OOD AP sits between the two seeds' -- computed from the numbers
+    # above at call time, not asserted as a hardcoded conclusion here.
+    lo, hi = sorted((s42["AP"], s43["AP"]))
+    if lo < cfar["AP"] < hi:
+        assert "the two seeds straddle CFAR" in value_row
+
+
+def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat_cfar_data):
+    import json
+    path = tmp_path / "beat_cfar.json"
+    path.write_text(json.dumps(beat_cfar_data))
+    missing_ood = tmp_path / "no_such_ood.json"
+
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_json_path=path,
+                               beat_cfar_arm_name="raddetnet", ood_json_path=missing_ood)
+    labels, _values = _table(fig).cells.values
+    assert not any(l.startswith("out of distribution") for l in labels)
+
+
+# --------------------------------------------------------------------------------
+# Finding 5: the detector objectness panel's "labels & scoring stop at X m" line
+# reads X from beat_cfar.json (webapp/pipeline_runner.py owns drawing the line
+# itself -- see tests/test_webapp_figures_wave4.py).
+# --------------------------------------------------------------------------------
+def test_scoring_max_range_m_reads_the_real_beat_cfar_json(beat_cfar_data):
+    expected = beat_cfar_data["arms"][0]["max_range_m"]
+    assert ds.scoring_max_range_m() == pytest.approx(expected)
+
+
+def test_scoring_max_range_m_none_when_file_missing(tmp_path):
+    assert ds.scoring_max_range_m(tmp_path / "no_such.json") is None

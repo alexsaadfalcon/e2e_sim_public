@@ -74,6 +74,29 @@ def _wc(text: str) -> int:
     return len(text.split())
 
 
+# ------------------------------------------------------------------------------------
+# screen_note: the audience-facing caveat (hostile-expert third read, 2026-09-23) --
+# every preset the finding named carries one; the dataclass default keeps it optional.
+# ------------------------------------------------------------------------------------
+def test_every_preset_carries_a_screen_note():
+    for p in PRESETS:
+        assert p.screen_note and isinstance(p.screen_note, str), p.id
+
+
+def test_demo_preset_screen_note_defaults_to_empty_string():
+    p = _preset()
+    assert p.screen_note == ""
+
+
+def test_thrust5_screen_notes_share_the_vmax_placeholder():
+    """The three Thrust 5 detector presets share one screen note whose velocity clause
+    is filled in from the corpus manifest at render time, not typed here."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        note = PRESETS_BY_ID[pid].screen_note
+        assert "{VMAX_CLAUSE}" in note
+        assert "40 m" in note and "one training seed" in note
+
+
 @pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])
 def test_card_word_count_ceiling(preset):
     """The presenter cannot glance at a card while talking (927-word RADDetNet card,
@@ -107,11 +130,18 @@ def test_thrust1_sits_at_the_weak_signal_operating_point():
     assert st["rffe"]["params"]["lna_bias_ma"] == 8.0 and st["rffe"]["params"]["if_bw_mhz"] == 15.0
 
 
-def test_thrust2_hides_the_az_el_panel_that_contradicts_the_story():
-    """DO-NOT-SHOW #8."""
+def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
+    """INTEGRITY fix (hostile-expert third read, 2026-09-23): the FFT range-elevation
+    panel used to be turned off because it contradicted the "image barely moves"
+    story (former DO-NOT-SHOW #8). Hiding a contradicting panel is worse than showing
+    it -- range_el is back on, and the card tells the three-number version instead."""
     st = apply_preset(PRESETS_BY_ID["thrust2_feature_reduction_error"])
-    assert st["fft"]["enabled"] is False and st["range_el"]["enabled"] is False
-    assert st["subspace_err"]["enabled"] and st["range_az"]["enabled"]
+    assert st["fft"]["enabled"] is False
+    assert st["range_el"]["enabled"] and st["subspace_err"]["enabled"] and st["range_az"]["enabled"]
+    p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
+    assert not any("deliberately off" in d.lower() and "range_el" in d.lower()
+                  for d in p.do_not_say)
+    assert any("2.7 db" in s.lower() for s in p.say)
 
 
 def test_thrust3_is_a_cold_start_at_2_to_1():
