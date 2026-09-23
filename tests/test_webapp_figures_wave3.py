@@ -99,7 +99,10 @@ def test_range_az_subline_states_earliest_arrival_not_bare_range():
     assert fig.layout.yaxis.title.text == "range (m)"
     # The subline is long enough here (qualifier + peak-median stat + this note)
     # that `_wrap_text` line-breaks it -- reassemble before substring-checking.
-    assert "range 0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
+    # Wording shortened (pipeline_runner shard, wave 8): "range 0 = ..." -> "0 = ...",
+    # to keep the common (shared-floor) case to 3 total title lines -- see that
+    # module's `_heatmap_margin_t`.
+    assert "0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
 
 
 def test_range_el_subline_states_earliest_arrival_too():
@@ -114,7 +117,7 @@ def test_range_el_subline_states_earliest_arrival_too():
         "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
     assert fig.layout.yaxis.title.text == "range (m)"
-    assert "range 0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
+    assert "0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
 
 
 def test_range_az_ylabel_falls_back_to_bins_without_axis_metadata():

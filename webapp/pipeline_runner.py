@@ -1733,32 +1733,33 @@ def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
 
 #: `_heatmap`'s own margin/height -- named so `_add_frame_animation` (which
 #: overrides this same figure's margin/height to make room for its slider row) can
-#: reuse the top margin and plot-domain height instead of hardcoding a second copy
-#: that silently drifts from this one (see that function's own comment for the
+#: reuse the top-margin sizing and plot-domain height instead of hardcoding a second
+#: copy that silently drifts from this one (see that function's own comment for the
 #: regression this caused, 2026-09-23: its old hardcoded t=40 undid this t=90).
 _HEATMAP_MARGIN_L = 40
 _HEATMAP_MARGIN_R = 20
-#: t=40 (pre-2026-09-23) fit a ONE-line title; every caller here now hands a
-#: two-line "<br><sup>...</sup>" title (main + qualifier subline), and the podium-
-#: font-size re-check raised the base font further -- an insufficient top margin
-#: does not clip the title text, it lets Plotly overflow it DOWN into the plot
-#: domain, overlapping the top of the heatmap (measured, thrust5_detector_cfar
-#: rehearsal PNG, 2026-09-23).
-#: Raised again, from 90 (Change 4, 2026-09-23): the range-azimuth panel's subline
-#: gained a third clause ("; range 0 = earliest arrival") on top of its qualifier
-#: and peak-median stat, which now wraps to 2 lines at two-card width (see
-#: `_wrap_text` used on that subline below) -- 3 total lines (main title + 2 wrapped
-#: subline lines) need more headroom than the 2-line case the other heatmap panels
-#: (radar_cube, detector, fft) still use.
-#: Raised again, from 120 (wave 7, X4/X6/X7): the range-azimuth/range-elevation
-#: subline gained the gate-calibration clause ("m/gate, unambig ... m") and the
-#: adaptive-clip clause on top of the three above, which wraps to 3 lines at
-#: two-card width -- 4 total lines. Every other `_heatmap` caller's shorter subline
-#: just leaves the extra headroom unused.
-_HEATMAP_MARGIN_T = 160
+#: The top margin used to be ONE constant, bumped by hand every time a caller's
+#: title grew another line (40 -> 90 -> 120 -> 160, 2026-09-23) -- each bump was
+#: sized against whatever ONE subline was longest that day, and the range-azimuth/
+#: range-elevation subline (qualifier + peak-median stat + earliest-arrival note +
+#: gate-calibration clause + adaptive-clip clause) kept outgrowing it: at 160 its
+#: last wrapped word ("floor)") still overflowed DOWN into the plot's top-left
+#: corner on both the Thrust 1 (single wide panel) and Thrust 2 (two half-width
+#: panels) rehearsal PNGs. Sized from the title's OWN line count instead
+#: (`_heatmap_margin_t`), so a wording change that adds or removes a wrapped line
+#: cannot silently under-provision the margin again.
+_HEATMAP_MARGIN_T_BASE = 40       # one-line title, no subline (pre-2026-09-23 default)
+_HEATMAP_MARGIN_T_PER_LINE = 45  # each further wrapped title/subline line
 _HEATMAP_MARGIN_B = 40
 _HEATMAP_PLOT_DOMAIN_HEIGHT = 280
-_HEATMAP_HEIGHT = _HEATMAP_PLOT_DOMAIN_HEIGHT + _HEATMAP_MARGIN_T + _HEATMAP_MARGIN_B
+
+
+def _heatmap_margin_t(title: str) -> int:
+    """Top margin sized from how many lines `title` (a Plotly "<br>"-joined title,
+    possibly with a "<br><sup>...</sup>" subline that `_wrap_text` may itself have
+    wrapped further) actually renders as -- see `_HEATMAP_MARGIN_T_BASE`."""
+    n_lines = (title or "").count("<br>") + 1
+    return _HEATMAP_MARGIN_T_BASE + _HEATMAP_MARGIN_T_PER_LINE * (n_lines - 1)
 
 
 def _heatmap(data_db, title: str, *, x=None, y=None,
@@ -1779,13 +1780,14 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
             colorbar=dict(title=colorbar_title)
         )
     )
+    margin_t = _heatmap_margin_t(title)
     fig.update_layout(
         title=title,
         xaxis_title=xlabel,
         yaxis_title=ylabel,
         margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
-                    t=_HEATMAP_MARGIN_T, b=_HEATMAP_MARGIN_B),
-        height=_HEATMAP_HEIGHT,
+                    t=margin_t, b=_HEATMAP_MARGIN_B),
+        height=_HEATMAP_PLOT_DOMAIN_HEIGHT + margin_t + _HEATMAP_MARGIN_B,
     )
     return fig
 
@@ -1877,17 +1879,19 @@ _SLIDER_LEN = 0.98 - _SLIDER_X
 #: (rehearsal, 2026-09-23) and a standalone reproduction. Pushing the whole row
 #: further down (and growing the margin/height that makes room for it) fixes both
 #: collisions at once; every caller of `_add_frame_animation` builds its figure via
-#: `_heatmap`, so overriding it here to `_SLIDER_FIG_HEIGHT` is safe for all of them.
-#: The top margin reuses `_HEATMAP_MARGIN_T` (rather than a second hardcoded number)
+#: `_heatmap`, so overriding the top margin/height here is safe for all of them.
+#: The top margin reuses `_heatmap_margin_t` (rather than a second hardcoded number)
 #: because this `update_layout` call used to hardcode t=40, silently undoing
-#: `_heatmap`'s later (2026-09-23) bump to t=90 for its two-line title -- the title
-#: then overflowed DOWN into the plot instead of clipping (measured,
-#: thrust5_detector_cfar rehearsal PNG; every one of this function's callers is
-#: animated, so this was not a corner case). `_SLIDER_FIG_HEIGHT` keeps `_heatmap`'s
-#: own plot-domain height and adds this function's bottom margin on top of it.
+#: `_heatmap`'s own sizing for the title it was actually given -- the title then
+#: overflowed DOWN into the plot instead of clipping (measured, thrust5_detector_cfar
+#: rehearsal PNG; every one of this function's callers is animated, so this was not a
+#: corner case). Read from `fig`'s OWN title (set by `_heatmap` before this function
+#: runs), not a shared constant, for the same reason `_heatmap_margin_t` exists: a
+#: module-wide constant sized for one caller's worst-case subline (last measured at
+#: t=160) still overflowed the range-azimuth/range-elevation panels once wave 7 grew
+#: their subline further (rehearsal, thrust1/thrust2 PNGs).
 _SLIDER_ROW_Y = -0.35
 _SLIDER_MARGIN_B = 130
-_SLIDER_FIG_HEIGHT = _HEATMAP_PLOT_DOMAIN_HEIGHT + _HEATMAP_MARGIN_T + _SLIDER_MARGIN_B
 
 
 def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap",
@@ -1910,6 +1914,10 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
     n = len(per_frame)
     if n < 2:
         return fig
+
+    # Sized from `fig`'s OWN title (set by `_heatmap` before this function runs) --
+    # see `_heatmap_margin_t` and this module's own comment above `_SLIDER_ROW_Y`.
+    _slider_margin_t = _heatmap_margin_t(fig.layout.title.text)
 
     # `type` is REQUIRED: without it Plotly infers Scatter for the frame's trace and
     # rejects "z" as an invalid property.
@@ -1950,8 +1958,8 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                                                            frame=dict(duration=0,
                                                                       redraw=True))])])],
         margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
-                    t=_HEATMAP_MARGIN_T, b=_SLIDER_MARGIN_B),
-        height=_SLIDER_FIG_HEIGHT,
+                    t=_slider_margin_t, b=_SLIDER_MARGIN_B),
+        height=_HEATMAP_PLOT_DOMAIN_HEIGHT + _slider_margin_t + _SLIDER_MARGIN_B,
     )
     return fig
 
@@ -2028,7 +2036,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # DIFFERENT, absolute range axis from the ADC dechirp geometry and
                 # must NOT carry this note -- webapp/demo_presets.py's thrust5
                 # scripts already say the absolute-range story for those on screen.
-                earliest_arrival_note = "; range 0 = earliest arrival"
+                earliest_arrival_note = "; 0 = earliest arrival"
                 # Calibration nobody stated on screen (wave 7, X6/X7): a hostile-expert
                 # read found the "20-22 m stripe" quoted on three cards was off the
                 # true delays because no panel said what a display gate is worth in
@@ -2078,12 +2086,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # rather than a floating annotation (which collided with the title at
             # this font size).
             # Wrapped (Change 4, 2026-09-23): with `earliest_arrival_note` appended,
-            # range_az's subline (qualifier + peak-median stat + note) runs to ~82
-            # chars, well past what a two-card (~700 px) panel fits on one line --
-            # it clipped mid-word ("...range 0 = earliest arriv", rehearsal PNG,
-            # thrust4_interconnect_range_profile). `_HEATMAP_MARGIN_T` already
-            # budgets for the multi-line subline this produces (raised again, wave 7,
-            # for the gate-calibration/clip clauses added here).
+            # range_az's subline (qualifier + peak-median stat + note) is well past
+            # what a two-card (~700 px) panel fits on one line -- it clipped mid-word
+            # ("...range 0 = earliest arriv", rehearsal PNG,
+            # thrust4_interconnect_range_profile). Shortened again (wave 8) to drop
+            # "range " from the earliest-arrival clause, keeping the common (shared-
+            # floor) case to 3 total lines; `_heatmap_margin_t` sizes the top margin
+            # from however many lines this actually wraps to (up to 4, on the
+            # adaptive-clip branch's longer "(median floor + 3 dB)" wording), rather
+            # than a fixed budget tuned for one wording snapshot.
             sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
                        f"{earliest_arrival_note}{gate_note}{clip_note}" for d in dyn_range_db]
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
