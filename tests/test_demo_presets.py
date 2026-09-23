@@ -94,7 +94,9 @@ def test_thrust5_screen_notes_share_the_vmax_placeholder():
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         note = PRESETS_BY_ID[pid].screen_note
         assert "{VMAX_CLAUSE}" in note
-        assert "40 m" in note and "seed 42 of two" in note
+        assert "40 m" in note
+        # the seed clause is RADDetNet's; the losing-network screen drops it on purpose
+        assert ("seed 42 of two" in note) == (pid != "thrust5_detector_ml")
 
 
 def test_thrust5_screen_notes_all_admit_the_frames_are_replayed():
