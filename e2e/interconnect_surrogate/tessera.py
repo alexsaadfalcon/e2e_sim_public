@@ -73,47 +73,13 @@ import numpy as np
 
 from e2e.interconnect_surrogate.cache import SurrogateCache, cache_key
 
-# ---------------------------------------------------------------------------
-# Valid parameter ranges (what the GUI should bound its knobs to)
-# ---------------------------------------------------------------------------
-# Upstream's README states no training ranges. These are RECOVERED from the shipped
-# input scaler (``models/input_scaler.pt``), which stores the per-feature mean and
-# standard deviation of the training set. Assuming each geometric parameter was
-# sampled uniformly over an interval, the interval is ``mean +- std*sqrt(3)``; five of
-# the six features land on round engineering numbers under that assumption, which is
-# the evidence that it holds:
-#
-#   feature      mean        std         -> implied uniform interval
-#   radius     4.014 um    1.161 um         2.00 - 6.02 um     -> 2-6 um
-#   pitch     30.008 um    5.820 um        19.93 - 40.09 um     -> 20-40 um
-#   height    79.972 um   11.596 um        59.89 - 100.06 um    -> 60-100 um
-#   liner      2.010 um    0.578 um         1.01 - 3.01 um      -> 1-3 um
-#   temp      448.88 K    86.558 K        298.96 - 598.80 K     -> 300-600 K
-#   freq       34.44 GHz  31.944 GHz      -20.9 - 89.8 GHz      -> NOT uniform
-#
-# Frequency alone does not fit (the implied lower bound is negative), so it was
-# sampled some other way; the band below is the positive part of that interval, and is
-# consistent with upstream running their own examples at 15 GHz and 100 GHz. Our
-# pipeline band, 28.5-31.5 GHz, sits just under the training mean either way.
-#
-# Measured 2026-09-23 from checkpoint e53bb88; re-derive with
-#   torch.load('models/input_scaler.pt', weights_only=True)['node_mean' / 'node_std']
-# if the checkpoint ever changes.
-VALID_RANGES = {
-    "radius_um": (2.0, 6.0),
-    "pitch_um": (20.0, 40.0),
-    "height_um": (60.0, 100.0),
-    "liner_um": (1.0, 3.0),
-    "temperature_k": (300.0, 600.0),
-    "freq_hz": (1.0e9, 89.8e9),
-}
+_ENV_MODELS_DIR = "E2E_TESSERA_MODELS_DIR"
+_ENV_REPO = "TESSERA_REPO"
 
-#: The geometry our shipped ``tessera_tsv_s21.csv`` documents (e2e/data/interconnect/
-#: README.md, "TSV geometry"). NOTE: ``pitch_um`` and ``liner_um`` sit OUTSIDE
-#: :data:`VALID_RANGES` -- so does upstream's own README quickstart and the
-#: ``optimization.fixed_params`` block of their ``config.yaml``, which use the same
-#: numbers. Treat predictions at this point as the authors' own extrapolation; the
-#: passivity guard is what stops that becoming silent nonsense.
+#: Upstream's own canonical design point: their README quickstart, ``examples/
+#: predict_smatrix.py`` DESIGN, and ``config.yaml`` ``optimization.fixed_params`` all
+#: run the checkpoint exactly here. Also documents our shipped ``tessera_tsv_s21.csv``
+#: (e2e/data/interconnect/README.md, "TSV geometry").
 SHIPPED_TSV_DESIGN = {
     "radius_um": 5.0,
     "pitch_um": 60.0,
@@ -121,6 +87,120 @@ SHIPPED_TSV_DESIGN = {
     "liner_um": 0.5,
     "temperature_k": 300.0,
 }
+
+# ---------------------------------------------------------------------------
+# Valid parameter ranges (what the GUI should bound its knobs to)
+# ---------------------------------------------------------------------------
+# RETRACTED (2026-09-23): the ranges here used to be inferred from the shipped input
+# scaler under a uniform-sampling assumption (mean +- std*sqrt(3)). That inference was
+# wrong in a way that mattered: it placed SHIPPED_TSV_DESIGN -- upstream's OWN canonical
+# demo point -- outside the "valid" box, so this wrapper refused to evaluate the one
+# geometry upstream itself runs.
+#
+# Replaced by the ACTUAL envelope of the 40 real training specs upstream ships at
+# ``examples/arrangements_sample.csv`` (Radius/Pitch/Height/Liner/Frequency/Temperature
+# columns, SI units), measured 2026-09-23 from checkout e53bb88, WIDENED per parameter
+# to also cover SHIPPED_TSV_DESIGN (min(csv_lo, demo), max(csv_hi, demo)) so that point
+# always validates:
+#
+#   feature         40-sample envelope       widened for the demo point   demo value
+#   radius_um       2.053 - 5.943                  (unchanged)               5.0
+#   pitch_um        20.723 - 57.716              20.723 - 60.0               60.0
+#   height_um       60.021 - 99.910              60.021 - 100.0              100.0
+#   liner_um        0.561 - 2.947                  0.5 - 2.947                0.5
+#   temperature_k   338.118 - 594.969             300.0 - 594.969             300.0
+#   freq_hz         1.695e9 - 97.664e9              (unchanged -- the pipeline band and
+#                                                     upstream's own demo frequency,
+#                                                     15 GHz, both already sit inside)
+#
+# Computed live at import time from that CSV when a checkout is available (see
+# _measure_valid_ranges / _find_arrangements_csv below, which search the same
+# candidates as checkpoint_dir()); _FALLBACK_VALID_RANGES below is that same 40-sample
+# measurement, frozen, for when no checkout is present (e.g. CI, or a bare
+# ``pip install --no-deps`` with neither $TESSERA_REPO nor a fetched checkout).
+_FALLBACK_VALID_RANGES = {
+    "radius_um": (2.053, 5.943),
+    "pitch_um": (20.723, 60.0),
+    "height_um": (60.021, 100.0),
+    "liner_um": (0.5, 2.947),
+    "temperature_k": (300.0, 594.969),
+    "freq_hz": (1.695e9, 97.664e9),
+}
+
+_ARRANGEMENTS_SAMPLE_COLUMNS = {
+    "radius_um": ("Radius", 1e6), "pitch_um": ("Pitch", 1e6),
+    "height_um": ("Height", 1e6), "liner_um": ("Liner", 1e6),
+    "temperature_k": ("Temperature", 1.0), "freq_hz": ("Frequency", 1.0),
+}
+
+
+def _find_arrangements_csv():
+    """Locate upstream's ``examples/arrangements_sample.csv``, or ``None``.
+
+    Mirrors ``checkpoint_dir()``'s candidate order but for the ``examples/`` directory
+    that sits beside ``models/`` in a checkout (never shipped by a bare pip install).
+    Never raises -- a missing/unreadable file just means `VALID_RANGES` falls back to
+    the frozen measurement in `_FALLBACK_VALID_RANGES`.
+    """
+    candidates = []
+    env_repo = os.environ.get(_ENV_REPO)
+    if env_repo:
+        candidates.append(Path(env_repo))
+    env_models = os.environ.get(_ENV_MODELS_DIR)
+    if env_models:
+        candidates.append(Path(env_models).parent)
+    try:
+        spec = importlib.util.find_spec("tessera")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.origin:
+        candidates.append(Path(spec.origin).resolve().parents[1])
+    try:
+        from e2e.interconnect_surrogate.fetch import DEFAULT_CHECKOUT_DIR
+
+        candidates.append(DEFAULT_CHECKOUT_DIR)
+    except Exception:
+        pass
+    for cand in candidates:
+        try:
+            csv_path = cand / "examples" / "arrangements_sample.csv"
+            if csv_path.is_file():
+                return csv_path
+        except OSError:
+            continue
+    return None
+
+
+def _measure_valid_ranges():
+    """``{name: (lo, hi)}`` from the 40-sample CSV, widened to `SHIPPED_TSV_DESIGN`.
+
+    Returns ``None`` (never raises) when no checkout is available or the CSV cannot be
+    parsed; the caller falls back to `_FALLBACK_VALID_RANGES`.
+    """
+    csv_path = _find_arrangements_csv()
+    if csv_path is None:
+        return None
+    try:
+        import csv as _csv
+
+        with open(csv_path, newline="") as fh:
+            rows = list(_csv.DictReader(fh))
+        if not rows:
+            return None
+        ranges = {}
+        for name, (col, factor) in _ARRANGEMENTS_SAMPLE_COLUMNS.items():
+            values = [float(row[col]) * factor for row in rows]
+            lo, hi = min(values), max(values)
+            demo = SHIPPED_TSV_DESIGN.get(name)
+            if demo is not None:
+                lo, hi = min(lo, demo), max(hi, demo)
+            ranges[name] = (lo, hi)
+        return ranges
+    except Exception:
+        return None
+
+
+VALID_RANGES = _measure_valid_ranges() or dict(_FALLBACK_VALID_RANGES)
 
 
 def ring_arrangement(size=3):
@@ -154,9 +234,6 @@ ARRANGEMENTS = {
 
 _DEFAULT_ARRANGEMENT = "ring3x3"
 
-_ENV_MODELS_DIR = "E2E_TESSERA_MODELS_DIR"
-_ENV_REPO = "TESSERA_REPO"
-
 
 class PassivityError(RuntimeError):
     """Raised when the surrogate returns |S21| > 0 dB, i.e. gain from a passive TSV.
@@ -184,11 +261,16 @@ def checkpoint_dir(models_dir=None):
     2. ``$E2E_TESSERA_MODELS_DIR``;
     3. ``$TESSERA_REPO/models`` -- a checkout of the upstream repo;
     4. ``<parent of the installed tessera package>/models`` -- the editable-install /
-       ``pip install -e .`` case, where the repo root really is on the path.
+       ``pip install -e .`` case, where the repo root really is on the path;
+    5. :data:`e2e.interconnect_surrogate.fetch.DEFAULT_CHECKOUT_DIR` / ``models`` -- the
+       checkout ``python -m e2e.interconnect_surrogate.fetch`` makes. This is the
+       fallback that needs no environment variable at all, so a demo box that only ran
+       ``pip install --no-deps -r requirements-tessera.txt`` (which cases 2-4 all miss,
+       per the module docstring) still resolves a checkpoint after that one command.
 
     Case 4 does **not** fire for ``pip install git+...``: that wheel carries the
     Python package only, no weights (see the module docstring). Something must point
-    at a checkout, which is why (2) and (3) exist.
+    at a checkout, which is why (2), (3) and (5) exist.
     """
     candidates = []
     if models_dir is not None:
@@ -205,6 +287,9 @@ def checkpoint_dir(models_dir=None):
         spec = None
     if spec is not None and spec.origin:
         candidates.append(Path(spec.origin).resolve().parents[1] / "models")
+    from e2e.interconnect_surrogate.fetch import DEFAULT_CHECKOUT_DIR
+
+    candidates.append(DEFAULT_CHECKOUT_DIR / "models")
 
     for cand in candidates:
         try:

@@ -219,12 +219,159 @@ INTERCONNECT_BOXCAR_CASES = frozenset({None, 'synthetic'})
 
 INTERCONNECT_CASES = INTERCONNECT_PASSTHROUGH_CASES | INTERCONNECT_BOXCAR_CASES
 
+# `source` values `InterconnectBlock` accepts, orthogonal to `case`/`transfer_csv`: the
+# default `None` keeps the boxcar/CSV behaviour above; `'tessera'` evaluates the live
+# Tessera TSV surrogate (e2e/interconnect_surrogate/) instead of reading a CSV.
+INTERCONNECT_SOURCES = frozenset({None, 'tessera'})
+
+# The five continuous design parameters the Tessera surrogate takes (see VALID_RANGES /
+# SHIPPED_TSV_DESIGN in e2e/interconnect_surrogate/tessera.py). Kept local so validating
+# them does not require importing that module.
+TESSERA_DESIGN_PARAMS = ('radius_um', 'pitch_um', 'height_um', 'liner_um', 'temperature_k')
+
+TESSERA_DEFAULT_ARRANGEMENT = 'ring3x3'
+
+
+# Geometric parameters that a scale-model factor rescales; `temperature_k` is a material
+# property, not a length, and is deliberately excluded (Maxwell's equations are
+# invariant under length x s / frequency / s, conductivities excepted -- scaling a
+# temperature has no such correspondence). ALL FOUR must scale together, never a
+# subset: the scale-invariance oracle F91 (notes/ESTABLISHED_FACTS.md) found the
+# surrogate's crosstalk is only preserved under scaling when height moves with the
+# lateral geometry (radius/pitch/liner) -- scaling a subset is not a validated regime.
+TESSERA_SCALED_PARAMS = ('radius_um', 'pitch_um', 'height_um', 'liner_um')
+
+# Above this, the surrogate's crosstalk-vs-pitch trend is inverted (F89); `scale=None`
+# (auto) picks the smallest integer factor that brings the block's frequency axis at or
+# near this ceiling.
+_TESSERA_SCALE_TARGET_HZ = 20e9
+
+
+def _resolve_tessera_scale(scale, freq_hint):
+    """Resolve `scale=None` into a concrete factor from a frequency hint (a `band_hz`
+    pair or a frequency array); an explicit value always wins (validated `> 0`).
+
+    Auto: 1.0 with no hint or a hint already at/under `_TESSERA_SCALE_TARGET_HZ`;
+    otherwise the integer factor nearest `max(freq_hint) / _TESSERA_SCALE_TARGET_HZ`
+    -- 2 for the pipeline's Ka band (28.5-31.5 GHz -> 14.25-15.75 GHz) and 4 for the ML
+    corpora's 75-81 GHz band (-> ~19-20 GHz), both landing in F89's right-signed
+    crosstalk regime.
+    """
+    if scale is not None:
+        scale = float(scale)
+        if scale <= 0:
+            raise ValueError(f"scale must be > 0, got {scale!r}")
+        return scale
+    if freq_hint is None:
+        return 1.0
+    max_hz = float(np.max(freq_hint))
+    if max_hz <= _TESSERA_SCALE_TARGET_HZ:
+        return 1.0
+    return float(round(max_hz / _TESSERA_SCALE_TARGET_HZ))
+
+
+def _default_presented_tessera_params(scale):
+    """The PRESENTED (user-facing) knob defaults: the wrapper's shipped geometry,
+    divided by `scale` for the four length parameters (temperature untouched)."""
+    from e2e.interconnect_surrogate import SHIPPED_TSV_DESIGN
+
+    return {
+        name: (value / scale if name in TESSERA_SCALED_PARAMS else value)
+        for name, value in SHIPPED_TSV_DESIGN.items()
+    }
+
+
+def _presented_to_model_tessera_params(presented, scale):
+    """PRESENTED knob values -> what is actually fed to the surrogate: geometry x scale,
+    temperature unchanged (see `TESSERA_SCALED_PARAMS`)."""
+    return {
+        name: (value * scale if name in TESSERA_SCALED_PARAMS else value)
+        for name, value in presented.items()
+    }
+
+
+def _validate_tessera_design(presented, model, arrangement, scale):
+    """Raise ``ValueError`` naming the parameter, its PRESENTED and MODEL values, and
+    the model's valid range -- or an unknown arrangement.
+
+    Range validation applies to the MODEL geometry (what the surrogate actually sees):
+    `presented x scale` must fall inside the training box. Imports
+    `e2e.interconnect_surrogate` lazily (repo-local, torch-free -- no third-party
+    `tessera`/`torch_geometric` import happens here). No silent extrapolation: an
+    out-of-range value is a loud error, not a warning, even though the wrapper itself
+    (built for sweeps) only warns.
+    """
+    from e2e.interconnect_surrogate import ARRANGEMENTS, VALID_RANGES
+
+    unknown = set(presented) - set(TESSERA_DESIGN_PARAMS)
+    if unknown:
+        raise ValueError(
+            f"unknown Tessera parameter(s) {sorted(unknown)}; expected a subset of "
+            f"{TESSERA_DESIGN_PARAMS}"
+        )
+    for name, model_value in model.items():
+        lo, hi = VALID_RANGES[name]
+        if not (lo <= float(model_value) <= hi):
+            presented_value = presented[name]
+            raise ValueError(
+                f"Tessera parameter {name}: presented value {float(presented_value):g} "
+                f"(scale x{scale:g} -> model value {float(model_value):g}) is outside "
+                f"the model's recovered training range [{lo:g}, {hi:g}]; no silent "
+                f"extrapolation -- pass a presented value inside the range (see "
+                f"VALID_RANGES in e2e/interconnect_surrogate/tessera.py)."
+            )
+    if arrangement not in ARRANGEMENTS:
+        raise ValueError(
+            f"unknown Tessera arrangement {arrangement!r}; known: {sorted(ARRANGEMENTS)}"
+        )
+
+
+def tessera_s21_for_axis(freqs_hz, params=None, arrangement=TESSERA_DEFAULT_ARRANGEMENT,
+                          cache=None, scale=None):
+    """Complex S21(f) from the Tessera TSV surrogate on an arbitrary frequency axis.
+
+    Pure function (no torch): `params` overrides a subset of `TESSERA_DESIGN_PARAMS`,
+    PRESENTED values, on top of the wrapper's shipped-geometry defaults (divided by
+    `scale`). `scale` (see `_resolve_tessera_scale`; `None` auto-derives one from
+    `freqs_hz`) runs a geometric scale model when `!= 1.0`: Maxwell's equations are
+    invariant under length x s, frequency / s (conductivities excepted), so the
+    surrogate is evaluated at `scale x` the presented geometry (ALL FOUR lengths
+    together -- F91, see `TESSERA_SCALED_PARAMS`) and `freqs_hz / scale`, and the
+    result is applied at the caller's real `freqs_hz`. `scale=1.0` reproduces the
+    unscaled behaviour exactly.
+
+    Validated against the recovered training ranges (`ValueError` naming the offending
+    parameter's PRESENTED and MODEL value and the range on a miss, or an unknown
+    `arrangement`). Goes through `e2e.interconnect_surrogate.SurrogateCache` -- pass one
+    explicitly (e.g. a pre-warmed one) or leave `cache=None` for the default on-disk
+    cache, so a repeated call at the same parameters costs a cache lookup, not a model
+    forward pass. Raises `ImportError` (subclassed as `ModuleNotFoundError`, with the
+    `pip install -r requirements-tessera.txt` line) when the optional third-party
+    `tessera`/`torch_geometric` dependency is not usable here.
+
+    This is what `InterconnectBlock(source='tessera')` calls internally; exposed so a
+    caller (e.g. the webapp) can draw the response without constructing a pipeline block.
+    """
+    from e2e.interconnect_surrogate import TesseraTSV
+
+    freqs = np.asarray(freqs_hz, dtype=np.float64)
+    scale = _resolve_tessera_scale(scale, freqs)
+    presented = _default_presented_tessera_params(scale)
+    if params:
+        presented.update(params)
+    model = _presented_to_model_tessera_params(presented, scale)
+    _validate_tessera_design(presented, model, arrangement, scale)
+    # Ranges are already enforced above (louder than the wrapper's own warn-only
+    # default), so silence its duplicate warning.
+    tsv = TesseraTSV(cache=cache, warn_out_of_range=False)
+    return tsv.s21(freqs / scale, grid=arrangement, **model)
+
 
 # RF Interconnect Model Block
 class InterconnectBlock:
     """Interconnect filtering, applied multiplicatively across the frequency axis.
 
-    Two modes:
+    Three modes:
 
     - **Placeholder (default):** a fixed 11-tap boxcar impulse response. `apply_interconnect`
       zero-pads an 11-tap all-ones window to the frame length and FFTs it, giving a
@@ -238,6 +385,25 @@ class InterconnectBlock:
       is the physical span the frame's `n_freqs` samples cover (e.g. the FrequencyPlan's
       band); when omitted the CSV's own frequency span is mapped across the frame's samples
       (band-agnostic). Grid points outside the CSV's frequency range clamp to its endpoints.
+
+    - **Live surrogate (`source='tessera'`):** evaluates the public Tessera TSV_PhGNN
+      surrogate (`e2e/interconnect_surrogate/`, an OPTIONAL dependency -- see
+      `requirements-tessera.txt`) over the frame's frequency grid for `tessera_params`
+      (a subset of `TESSERA_DESIGN_PARAMS`, PRESENTED/user-facing values, defaulting to
+      the wrapper's shipped geometry) and `tessera_arrangement` (a key of
+      `e2e.interconnect_surrogate.ARRANGEMENTS`), then applies the resulting S21(f) the
+      same way `transfer_csv` does. `scale` runs a geometric scale model (`None`, the
+      default, auto-derives a factor from `band_hz`; see `_resolve_tessera_scale`):
+      the surrogate is evaluated at `scale x` ALL FOUR length parameters together
+      (never a subset -- F91, notes/ESTABLISHED_FACTS.md, found crosstalk is only
+      preserved when height scales with the lateral geometry) and `band_hz / scale`,
+      with the result applied at the block's real frequency axis. Out-of-range
+      (post-scale, MODEL-space) parameters or an unknown arrangement raise `ValueError`
+      at construction time, naming both the PRESENTED and MODEL value (no silent
+      extrapolation); if the surrogate itself is not importable, evaluating the
+      response raises `ImportError` naming the install line. Repeated evaluation with
+      the same parameters/frequency axis costs a `SurrogateCache` lookup, not a model
+      forward pass -- see `tessera_s21_for_axis`, the pure function this delegates to.
 
     `case` names which of those to use, and only the names in `INTERCONNECT_CASES` are
     accepted:
@@ -257,7 +423,10 @@ class InterconnectBlock:
 
     frame_capabilities = _ELEMENTWISE
 
-    def __init__(self, case=None, transfer_csv=None, band_hz=None, normalize_gain=False):
+    def __init__(self, case=None, transfer_csv=None, band_hz=None, normalize_gain=False,
+                 source=None, tessera_params=None,
+                 tessera_arrangement=TESSERA_DEFAULT_ARRANGEMENT, tessera_cache=None,
+                 scale=None):
         if case not in INTERCONNECT_CASES:
             raise ValueError(
                 f"case must be one of "
@@ -267,6 +436,12 @@ class InterconnectBlock:
                 f"placeholder. To apply a real interconnect response pass "
                 f"transfer_csv=<path> (see e2e/data/interconnect/), not a case name."
             )
+        if source not in INTERCONNECT_SOURCES:
+            raise ValueError(f"source must be one of {sorted(INTERCONNECT_SOURCES, key=str)}, "
+                              f"got {source!r}")
+        if source == 'tessera' and transfer_csv is not None:
+            raise ValueError("InterconnectBlock: pass either transfer_csv or "
+                              "source='tessera', not both")
         self.case = case
         self.transfer_csv = transfer_csv
         self.band_hz = band_hz
@@ -283,6 +458,45 @@ class InterconnectBlock:
         self._csv_s21 = None
         if transfer_csv is not None:
             self._csv_freq, self._csv_s21 = load_interconnect_transfer(transfer_csv)
+        self.source = source
+        self.tessera_arrangement = tessera_arrangement
+        self.tessera_cache = tessera_cache
+        self.tessera_params = None
+        self.scale = None
+        if source == 'tessera':
+            # Resolved and validated eagerly (cheap: no third-party import), so a bad
+            # knob value -- or an out-of-box scaled geometry -- fails at construction,
+            # not on the first frame through the pipeline. Derived from `band_hz` (not
+            # the eventual frame axis) so it is known even before any frame is seen --
+            # `None`/no band always resolves to 1.0, matching `_resolve_tessera_scale`.
+            self.scale = _resolve_tessera_scale(scale, band_hz)
+            presented = _default_presented_tessera_params(self.scale)
+            if tessera_params:
+                presented.update(tessera_params)
+            model = _presented_to_model_tessera_params(presented, self.scale)
+            _validate_tessera_design(presented, model, tessera_arrangement, self.scale)
+            self.tessera_params = presented
+
+    def describe(self):
+        """A one-line human summary for GUI banners; only meaningful for `source='tessera'`."""
+        if self.source != 'tessera':
+            return f"Interconnect: case={self.case!r}" if self.transfer_csv is None \
+                else f"Interconnect: transfer_csv={Path(self.transfer_csv).name}"
+        p = self.tessera_params
+        scale_note = ""
+        if self.scale != 1.0:
+            if self.band_hz is not None:
+                lo_ghz = self.band_hz[0] / self.scale / 1e9
+                hi_ghz = self.band_hz[1] / self.scale / 1e9
+                freq_note = f"evaluated at {lo_ghz:g}-{hi_ghz:g} GHz"
+            else:
+                freq_note = f"evaluated at 1/{self.scale:g}x frequency"
+            scale_note = (f", scale model x{self.scale:g} ({self.scale:g}x geometry, "
+                          f"{freq_note})")
+        return (f"Tessera TSV surrogate{scale_note}: radius {p['radius_um']:g} um, "
+                f"pitch {p['pitch_um']:g} um, height {p['height_um']:g} um, "
+                f"liner {p['liner_um']:g} um, {p['temperature_k']:g} K, "
+                f"{self.tessera_arrangement} arrangement")
 
     def frequency_response(self, n_freqs, dev):
         """The complex response `H[f]` this block multiplies a frame by, `[n_freqs]`.
@@ -293,7 +507,9 @@ class InterconnectBlock:
         """
         if self.case in INTERCONNECT_PASSTHROUGH_CASES:
             return torch.ones(n_freqs, dtype=torch.complex64, device=dev)
-        if self.transfer_csv is not None:
+        if self.source == 'tessera':
+            H = self._tessera_response(n_freqs, dev)
+        elif self.transfer_csv is not None:
             H = self._resampled_response(n_freqs, dev)
         else:
             window = torch.ones(11, device=dev)
@@ -317,6 +533,22 @@ class InterconnectBlock:
         re = np.interp(grid, self._csv_freq, self._csv_s21.real)
         im = np.interp(grid, self._csv_freq, self._csv_s21.imag)
         return torch.tensor(re + 1j * im, dtype=torch.complex64, device=dev)
+
+    def _tessera_response(self, n_freqs, dev):
+        """Evaluate the live Tessera surrogate over `band_hz` (or its own valid
+        frequency span if `band_hz` is unset, mirroring `_resampled_response`'s
+        CSV-span fallback), going through the on-disk cache."""
+        if self.band_hz is not None:
+            freqs = np.linspace(self.band_hz[0], self.band_hz[1], n_freqs)
+        else:
+            from e2e.interconnect_surrogate import VALID_RANGES
+
+            flo, fhi = VALID_RANGES["freq_hz"]
+            freqs = np.linspace(flo, fhi, n_freqs)
+        s21 = tessera_s21_for_axis(freqs, params=self.tessera_params,
+                                    arrangement=self.tessera_arrangement,
+                                    cache=self.tessera_cache, scale=self.scale)
+        return torch.tensor(s21, dtype=torch.complex64, device=dev)
 
     def apply_interconnect(self, frame):
         if self.case in INTERCONNECT_PASSTHROUGH_CASES:

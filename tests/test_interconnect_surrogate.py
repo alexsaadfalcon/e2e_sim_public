@@ -32,6 +32,7 @@ from e2e.interconnect_surrogate import (
     ring_arrangement,
 )
 from e2e.interconnect_surrogate import cache as cache_mod
+from e2e.interconnect_surrogate import fetch as fetch_mod
 from e2e.interconnect_surrogate import tessera as tessera_mod
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -141,6 +142,10 @@ def test_available_false_when_checkpoint_missing(tmp_path, monkeypatch):
     monkeypatch.delenv("TESSERA_REPO", raising=False)
     monkeypatch.setattr(tessera_mod.importlib.util, "find_spec",
                         lambda name, *a, **k: None if name == "tessera" else object())
+    # Candidate 5 (the `fetch()` checkout) must not resolve here either, or this
+    # "nothing is configured" scenario would pass on a box that happens to have
+    # already run `python -m e2e.interconnect_surrogate.fetch`.
+    monkeypatch.setattr(fetch_mod, "DEFAULT_CHECKOUT_DIR", tmp_path / "no_such_fetch_checkout")
     assert checkpoint_dir(tmp_path) is None
     assert available(tmp_path) is False
 
@@ -156,6 +161,7 @@ def test_checkpoint_dir_finds_explicit_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("TESSERA_REPO", raising=False)
     monkeypatch.setattr(tessera_mod.importlib.util, "find_spec",
                         lambda name, *a, **k: None)
+    monkeypatch.setattr(fetch_mod, "DEFAULT_CHECKOUT_DIR", tmp_path / "no_such_fetch_checkout")
     (tmp_path / "best_model.pth").write_bytes(b"not a real checkpoint")
     assert checkpoint_dir(tmp_path) is None
     (tmp_path / "input_scaler.pt").write_bytes(b"nor is this")
@@ -192,17 +198,20 @@ def test_valid_ranges_are_ordered_and_complete():
         assert lo < hi, f"{name} range is inverted"
 
 
-def test_shipped_geometry_is_documented_as_partly_out_of_range():
-    """Our own shipped TSV geometry sits outside the recovered training box.
-
-    Pinned as a test because it is the fact most likely to be forgotten: pitch 60 um
-    and liner 0.5 um are extrapolation, and a GUI that clamps sliders to
-    VALID_RANGES cannot reach the geometry our CSV documents.
+def test_shipped_geometry_is_inside_valid_ranges():
+    """RETRACTED 2026-09-23 (was `..._is_documented_as_partly_out_of_range`): the old
+    VALID_RANGES was inferred from the input scaler under a uniform-sampling
+    assumption, which placed pitch=60um/liner=0.5um outside the "valid" box. That was
+    wrong -- SHIPPED_TSV_DESIGN is upstream's OWN canonical demo point (README
+    quickstart, examples/predict_smatrix.py, config.yaml optimization.fixed_params) --
+    so VALID_RANGES is now measured from upstream's 40-sample
+    examples/arrangements_sample.csv and WIDENED to always include it (see tessera.py).
+    Pinned as a test because a false "this needs extrapolation" belief is the failure
+    mode most likely to recur if this ever regresses.
     """
-    assert not (VALID_RANGES["pitch_um"][0] <= SHIPPED_TSV_DESIGN["pitch_um"]
-                <= VALID_RANGES["pitch_um"][1])
-    assert not (VALID_RANGES["liner_um"][0] <= SHIPPED_TSV_DESIGN["liner_um"]
-                <= VALID_RANGES["liner_um"][1])
+    for name, value in SHIPPED_TSV_DESIGN.items():
+        lo, hi = VALID_RANGES[name]
+        assert lo <= value <= hi, f"{name}={value} outside widened VALID_RANGES {(lo, hi)}"
 
 
 def test_our_band_is_inside_the_frequency_range():
@@ -211,9 +220,11 @@ def test_our_band_is_inside_the_frequency_range():
 
 
 def test_out_of_range_parameters_warn():
+    """pitch=80 um is outside VALID_RANGES even after the widening above (max 60 um);
+    SHIPPED_TSV_DESIGN no longer is, so it can't be used to exercise this path."""
     obj = TesseraTSV()
     with pytest.warns(UserWarning, match="outside"):
-        obj._check_ranges({"radius_um": 5.0, "pitch_um": 60.0, "height_um": 100.0,
+        obj._check_ranges({"radius_um": 5.0, "pitch_um": 80.0, "height_um": 100.0,
                            "liner_um": 0.5, "temperature_k": 300.0}, TINY_GRID)
 
 
@@ -221,7 +232,7 @@ def test_out_of_range_warning_can_be_silenced():
     obj = TesseraTSV(warn_out_of_range=False)
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # any warning becomes an error
-        obj._check_ranges(dict(SHIPPED_TSV_DESIGN), TINY_GRID)
+        obj._check_ranges(dict(SHIPPED_TSV_DESIGN, pitch_um=80.0), TINY_GRID)
 
 
 # =============================================================================

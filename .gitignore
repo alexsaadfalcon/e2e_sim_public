@@ -48,3 +48,8 @@ notes/
 # checkpoint binaries into a push-pending public history.
 e2e/ml/runs/
 *.pt
+
+# Tessera TSV surrogate checkpoint, fetched by `python -m
+# e2e.interconnect_surrogate.fetch` (see requirements-tessera.txt): a full third-party
+# git checkout (weights + code), never ours to redistribute.
+e2e/interconnect_surrogate/_models/
