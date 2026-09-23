@@ -886,6 +886,17 @@ def _nonnegative_range(axis) -> np.ndarray:
     return np.ones(axis.shape, dtype=bool)
 
 
+def _cropped_nonneg_range_axis(n_bins: int, freq_span_hz: float, n_freqs: int) -> np.ndarray:
+    """`_range_axis` restricted to its physical (range >= 0) half, exactly as the
+    range-azimuth/range-elevation/range-profile panels below each crop it -- factored
+    out so those panels can share ONE computed extent (see `range_az_yaxis_extent` in
+    `figures_from_outputs`) instead of each independently computing and cropping the
+    same numbers and then relying on Plotly to autorange them identically (it does
+    not -- see that variable's comment)."""
+    axis = _range_axis(n_bins, freq_span_hz, n_freqs)
+    return axis[_nonnegative_range(axis)]
+
+
 def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     """fftshifted range DISPLAY-gate index -> physical range (meters).
 
@@ -916,11 +927,16 @@ def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
 #: Podium-distance legibility floor (fresh-context review, 2026-09-22: every figure's
 #: browser-default 12-13 px text reads fine on a laptop and fails at the ~2 m a demo
 #: audience actually reads from). Applied, as the LAST step, to every figure this
-#: module hands back to the UI via `_make_legible`.
-_LEGIBLE_FONT_SIZE = 16
-_LEGIBLE_TICK_SIZE = 15
-_LEGIBLE_COLORBAR_TICK_SIZE = 14
-_LEGIBLE_COLORBAR_TITLE_SIZE = 15
+#: module hands back to the UI via `_make_legible`. Raised again (pixel-measured
+#: re-check, 2026-09-23): the first pass's 14-15 px tick/colorbar sizes still
+#: rendered at 8-13 px of actual ink height against this same 20 px standing
+#: threshold, and sat visibly smaller than the Detector scoreboard beside them
+#: (webapp/detector_scoreboard.py's table, already at 18-20 px) on a Thrust 5 screen
+#: -- the two halves of one screen must not visibly differ in type scale.
+_LEGIBLE_FONT_SIZE = 18
+_LEGIBLE_TICK_SIZE = 20
+_LEGIBLE_COLORBAR_TICK_SIZE = 20
+_LEGIBLE_COLORBAR_TITLE_SIZE = 20
 
 #: Minimum y-axis upper bound for the subspace-error plot (Change 3, 2026-09-22
 #: review), so a near-floor curve reads as flat rather than filling the plot height.
@@ -988,6 +1004,31 @@ def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
                 font=dict(size=_LEGIBLE_TICK_SIZE, color="#2d3a4a"))
 
 
+#: `_heatmap`'s own margin/height -- named so `_add_frame_animation` (which
+#: overrides this same figure's margin/height to make room for its slider row) can
+#: reuse the top margin and plot-domain height instead of hardcoding a second copy
+#: that silently drifts from this one (see that function's own comment for the
+#: regression this caused, 2026-09-23: its old hardcoded t=40 undid this t=90).
+_HEATMAP_MARGIN_L = 40
+_HEATMAP_MARGIN_R = 20
+#: t=40 (pre-2026-09-23) fit a ONE-line title; every caller here now hands a
+#: two-line "<br><sup>...</sup>" title (main + qualifier subline), and the podium-
+#: font-size re-check raised the base font further -- an insufficient top margin
+#: does not clip the title text, it lets Plotly overflow it DOWN into the plot
+#: domain, overlapping the top of the heatmap (measured, thrust5_detector_cfar
+#: rehearsal PNG, 2026-09-23).
+#: Raised again, from 90 (Change 4, 2026-09-23): the range-azimuth panel's subline
+#: gained a third clause ("; range 0 = earliest arrival") on top of its qualifier
+#: and peak-median stat, which now wraps to 2 lines at two-card width (see
+#: `_wrap_text` used on that subline below) -- 3 total lines (main title + 2 wrapped
+#: subline lines) need more headroom than the 2-line case the other heatmap panels
+#: (radar_cube, detector, fft) still use.
+_HEATMAP_MARGIN_T = 120
+_HEATMAP_MARGIN_B = 40
+_HEATMAP_PLOT_DOMAIN_HEIGHT = 280
+_HEATMAP_HEIGHT = _HEATMAP_PLOT_DOMAIN_HEIGHT + _HEATMAP_MARGIN_T + _HEATMAP_MARGIN_B
+
+
 def _heatmap(data_db, title: str, *, x=None, y=None,
              xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0,
              colorbar_title: str = None) -> go.Figure:
@@ -1010,8 +1051,9 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
         title=title,
         xaxis_title=xlabel,
         yaxis_title=ylabel,
-        margin=dict(l=40, r=20, t=40, b=40),
-        height=360,
+        margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
+                    t=_HEATMAP_MARGIN_T, b=_HEATMAP_MARGIN_B),
+        height=_HEATMAP_HEIGHT,
     )
     return fig
 
@@ -1103,11 +1145,17 @@ _SLIDER_LEN = 0.98 - _SLIDER_X
 #: (rehearsal, 2026-09-23) and a standalone reproduction. Pushing the whole row
 #: further down (and growing the margin/height that makes room for it) fixes both
 #: collisions at once; every caller of `_add_frame_animation` builds its figure via
-#: `_heatmap`'s fixed height=360, so overriding it here to `_SLIDER_FIG_HEIGHT` is
-#: safe for all of them.
+#: `_heatmap`, so overriding it here to `_SLIDER_FIG_HEIGHT` is safe for all of them.
+#: The top margin reuses `_HEATMAP_MARGIN_T` (rather than a second hardcoded number)
+#: because this `update_layout` call used to hardcode t=40, silently undoing
+#: `_heatmap`'s later (2026-09-23) bump to t=90 for its two-line title -- the title
+#: then overflowed DOWN into the plot instead of clipping (measured,
+#: thrust5_detector_cfar rehearsal PNG; every one of this function's callers is
+#: animated, so this was not a corner case). `_SLIDER_FIG_HEIGHT` keeps `_heatmap`'s
+#: own plot-domain height and adds this function's bottom margin on top of it.
 _SLIDER_ROW_Y = -0.35
 _SLIDER_MARGIN_B = 130
-_SLIDER_FIG_HEIGHT = 420
+_SLIDER_FIG_HEIGHT = _HEATMAP_PLOT_DOMAIN_HEIGHT + _HEATMAP_MARGIN_T + _SLIDER_MARGIN_B
 
 
 def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap",
@@ -1169,7 +1217,8 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                                         args=[[None], dict(mode="immediate",
                                                            frame=dict(duration=0,
                                                                       redraw=True))])])],
-        margin=dict(l=40, r=20, t=40, b=_SLIDER_MARGIN_B),
+        margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
+                    t=_HEATMAP_MARGIN_T, b=_SLIDER_MARGIN_B),
         height=_SLIDER_FIG_HEIGHT,
     )
     return fig
@@ -1199,6 +1248,27 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             ),
             [_to_numpy_abs_db(f) for f in outputs["fft"]]))
 
+    # Shared range extent for the range-azimuth heatmap and the range-profile line
+    # plot below (Change 4, 2026-09-23 hostile-expert re-read): both compress the
+    # SAME physical range axis and, at the UI's default matching bin counts, cover
+    # the identical physical span -- but a Heatmap trace's autorange pads its axis
+    # differently than a Scatter trace's, so a screen showing both side by side
+    # displayed 0-22 m on the heatmap and 0-25 m on the profile despite identical
+    # underlying data (measured, thrust4_interconnect_range_profile rehearsal PNG).
+    # Pin the heatmap to the profile's own computed extent (arbitrarily the profile,
+    # since the finding named it) rather than let each panel autorange independently.
+    # `None` (no forcing -- range_az keeps its historical autorange) whenever the
+    # profile panel is not part of this run or axis metadata is unavailable: there is
+    # then no extent to share.
+    range_az_yaxis_extent = None
+    if outputs.get("range_profile_agg") and n_freqs and freq_span_hz:
+        _bins_rp_for_extent = meta.get("range_profile_bins")
+        if _bins_rp_for_extent:
+            _cropped_for_extent = _cropped_nonneg_range_axis(
+                _bins_rp_for_extent, freq_span_hz, n_freqs)
+            if _cropped_for_extent.size:
+                range_az_yaxis_extent = float(_cropped_for_extent.max())
+
     for key, title, qualifier, aperture_label in [
         ("range_az", "Range-azimuth power", "non-coherent over elevation", "azimuth sin(θ)"),
         ("range_el", "Range-elevation power", "non-coherent over azimuth", "elevation sin(θ)"),
@@ -1212,11 +1282,27 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # _range_axis); only needs the frame's band + freq-sample count.
                 y = _range_axis(bins, freq_span_hz, n_freqs)
                 ylabel = "range (m)"
+                # 0 is not "no range" here: the .pkl frames these two panels ever run
+                # on (the plain frequency-domain path -- see CLAUDE.md's classic-
+                # products/corpus-mode split) were generated with Sionna's
+                # normalize_delays=True (sionna_simple_channel.py), which subtracts
+                # the shortest path's delay, so range 0 is the earliest arrival, not
+                # literally zero range -- the bright full-azimuth band there read as
+                # an unlabelled target (hostile-expert re-read, 2026-09-23). Stated in
+                # the title SUBLINE below rather than the y-axis title itself: the
+                # rotated axis-title text ran into the heatmap's own title at podium
+                # font size (fresh-context re-check, 2026-09-23). The corpus-replay
+                # panels below (radar_cube/cfar_detection/ml_detection) use a
+                # DIFFERENT, absolute range axis from the ADC dechirp geometry and
+                # must NOT carry this note -- webapp/demo_presets.py's thrust5
+                # scripts already say the absolute-range story for those on screen.
+                earliest_arrival_note = "<br>range 0 = earliest arrival"
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
+                earliest_arrival_note = ""
             # Peak-median dB, per frame, on the UNCLIPPED map BEFORE the nonneg-range
             # crop below -- matches notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4
             # cards' own dynamic-range definition (Change 2). range_az only: it is the
@@ -1235,13 +1321,24 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # "<br><sup>" subline, alongside the peak-median stat where there is one,
             # rather than a floating annotation (which collided with the title at
             # this font size).
+            # Wrapped (Change 4, 2026-09-23): with `earliest_arrival_note` appended,
+            # range_az's subline (qualifier + peak-median stat + note) runs to ~82
+            # chars, well past what a two-card (~700 px) panel fits on one line --
+            # it clipped mid-word ("...range 0 = earliest arriv", rehearsal PNG,
+            # thrust4_interconnect_range_profile). `_HEATMAP_MARGIN_T` already
+            # budgets for the 2-line-subline case this produces.
             if dyn_range_db is not None:
-                titles = [f"{title}<br><sup>({qualifier}); peak - median, dB: {d:.1f}</sup>"
-                         for d in dyn_range_db]
+                sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
+                           f"{earliest_arrival_note}" for d in dyn_range_db]
             else:
-                titles = [f"{title}<br><sup>({qualifier})</sup>"] * len(outputs[key])
+                sublines = [f"({qualifier}){earliest_arrival_note}"] * len(outputs[key])
+            titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
+                     for s in sublines]
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
                            ylabel=ylabel)
+            if key == "range_az" and range_az_yaxis_extent is not None:
+                # See `range_az_yaxis_extent`'s definition above the loop.
+                fig.update_yaxes(range=[0.0, range_az_yaxis_extent])
             frame_layouts = [dict(title=dict(text=t)) for t in titles]
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
@@ -1254,7 +1351,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         bins_rp = meta.get("range_profile_bins") or prof.shape[0]
         if n_freqs and freq_span_hz:
             x = _range_axis(bins_rp, freq_span_hz, n_freqs)
-            xlabel = "range (m)"
+            # Same "0 = earliest arrival" caveat as the range-azimuth/range-elevation
+            # panels above (see that loop's comment) -- this panel only ever runs on
+            # the same delay-normalised munich frames, never a corpus-replay frame.
+            xlabel = "range (m; 0 = earliest arrival)"
         else:
             x = np.arange(bins_rp)
             xlabel = "range (bins)"
@@ -1265,6 +1365,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if prof_db.shape[0] == keep.size:
             x, prof_db = x[keep], prof_db[keep]
         fig = go.Figure(data=go.Scatter(x=x, y=prof_db, mode="lines"))
+        if x.size:
+            # Explicit, rather than Scatter's own autorange padding -- this panel IS
+            # the reference `range_az_yaxis_extent` (above) pins the heatmap to; a
+            # padded autorange here would defeat that match (Change 4, 2026-09-23).
+            fig.update_xaxes(range=[0.0, float(x.max())])
         # Fixed display floor, like the heatmaps' -40 dB: an exactly-zero bin
         # (the notched DC bin) otherwise drops to -120 dB and autoscale hangs the
         # whole profile off that one cliff (seen on the Thrust 4 preset, 2026-09-22).
@@ -1319,12 +1424,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # title: a long colorbar title squeezed the heat map to a sliver at two-card
         # width (rehearsal 2026-09-23, all three Thrust 5 screens).
         rd_clip_title = f"dB rel. peak<br>(clipped at {rd_clip:.1f})"
+        # Shortened (Change 3, 2026-09-23 hostile-expert re-read): the previous
+        # subline ("(non-coherent over channels); clip -36.2 dB = this frame's median
+        # floor + 3 dB") ran past the two-card (~600 px) panel edge and was clipped
+        # mid-sentence ("...median floor + "). Dropping the "(non-coherent over
+        # channels)" qualifier keeps this under 60 characters even at the worst case
+        # (a negative two-digit clip); see test_webapp_figures_wave3.py for the
+        # length pin. The qualifier itself is not lost -- radar_cube's own block
+        # comment above and the docstring still state it.
         if rd_clip > -40.0:
-            rd_panel_title = ("Range-Doppler power<br><sup>(non-coherent over channels); "
-                              f"clip {rd_clip:.1f} dB = this frame's median floor + 3 dB</sup>")
+            rd_panel_title = (f"Range-Doppler power<br><sup>clip {rd_clip:.1f} dB "
+                              "(median floor + 3 dB)</sup>")
         else:
-            rd_panel_title = ("Range-Doppler power<br><sup>(non-coherent over channels); "
-                              f"clip {rd_clip:.1f} dB (shared floor)</sup>")
+            rd_panel_title = (f"Range-Doppler power<br><sup>clip {rd_clip:.1f} dB "
+                              "(shared floor)</sup>")
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             _heatmap(first, rd_panel_title,
                      x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
@@ -1398,10 +1511,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             ))
         fig.update_layout(
             title=title, xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
-            margin=dict(l=40, r=20, t=40, b=40), height=420,
+            # t=40/height=420 (pre-2026-09-23) fit a one-line title; `title` here is
+            # two lines (name -- label, then a "<br><sup>" operating-point subline)
+            # and the podium-font-size re-check raised the base font further -- an
+            # insufficient top margin overflows the title DOWN into the plot domain
+            # instead of clipping it (measured, thrust5_detector_cfar rehearsal PNG).
+            margin=dict(l=40, r=20, t=90, b=40), height=470,
             # Dark legend: the ground-truth marker is a white open circle (visible
             # on the Viridis map) and had no visible swatch on a white legend.
-            legend=dict(orientation="h", y=-0.2, bgcolor="#2d3436",
+            # y=-0.2 covered the x-axis title at the 20 px tick size (rehearsal
+            # 2026-09-23); sit the legend below it.
+            legend=dict(orientation="h", y=-0.32, bgcolor="#2d3436",
                         font=dict(color="#ffffff")),
         )
         figs[key] = _make_legible(fig)
@@ -1414,10 +1534,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         det_scores = detector_scoreboard.score_frames(
             outputs.get(key + "s") or [], outputs.get("gt_detections"),
             threshold=det_meta.get("threshold"))
+        # Which beat_cfar.json arm (if any) this on-screen detector corresponds to --
+        # feeds the scoreboard's offline AP/FA/stripe/CI block (Change 1c, 2026-09-23
+        # hostile-expert re-read). Best-effort: a missing/malformed beat_cfar.json
+        # must not break the live run, only skip that block (arm_name_for_detector
+        # itself already returns None for a detector outside the comparison).
+        try:
+            beat_cfar_arm_name = detector_scoreboard.arm_name_for_detector(det_meta)
+        except (FileNotFoundError, ValueError):
+            beat_cfar_arm_name = None
         figs[key + "_scoreboard"] = _make_legible(detector_scoreboard.scoreboard_figure(
             det_scores, arm_name=det_meta.get("label", title),
             threshold=det_meta.get("threshold"),
-            match_rule_text=detector_scoreboard.match_rule_text()))
+            match_rule_text=detector_scoreboard.match_rule_text(),
+            beat_cfar_arm_name=beat_cfar_arm_name))
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
@@ -1442,10 +1572,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                      annotation_position="top left",
                      annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(
-            title="Subspace error (Frobenius) per frame",
+            title=("Subspace error (Frobenius) per frame<br><sup>unnormalised distance; "
+                   "grows ~sqrt(k), not a fraction</sup>"),
             xaxis_title="frame",
-            # Unnormalised: the cards say it grows ~sqrt(k) and is not a fraction.
-            yaxis_title="subspace error (Frobenius, unnormalised)",
+            # Unnormalised: said in the subline; the rotated axis title at 20 px
+            # clipped when it carried the word (rehearsal 2026-09-23).
+            yaxis_title="subspace error (Frobenius)",
             margin=dict(l=70, r=20, t=40, b=40),
             # Taller than the other 360px panels: this y-axis title (40 characters,
             # rotated) is LONGER than a 360px-tall plot at the 16px legibility floor,

@@ -139,7 +139,12 @@ def _app_layout() -> Any:
             dcc.Tab(label="Results", value="tab-results",
                     children=html.Div(id="results-tab-content", style={"padding": "12px"})),
         ]),
-    ], style={"maxWidth": "1280px", "margin": "0 auto", "fontFamily": "Segoe UI, Arial, sans-serif",
+    # 1600px, not the original 1280px: on the 1920x1080 conference monitor the narrower
+    # cap wasted ~338px of margin per side and bought the lone-figure Thrust 3 screen
+    # nothing from the bigger display (coordinator finding, 2026-09-23). Figures scale
+    # with their container; the podium-distance font floor (pipeline_runner._make_legible)
+    # is independent of this and unaffected.
+    ], style={"maxWidth": "1600px", "margin": "0 auto", "fontFamily": "Segoe UI, Arial, sans-serif",
               "padding": "12px"})
 
 

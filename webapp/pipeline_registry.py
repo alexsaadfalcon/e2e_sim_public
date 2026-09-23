@@ -148,7 +148,8 @@ BLOCKS: List[BlockSpec] = [
             # honest label; the alias is kept so old saved states still load.
             ParamSpec("case", "Case", "choice", "default",
                       choices=["default", "passthrough", "case3"],
-                      help="'default' = the 11-tap boxcar PLACEHOLDER (smears a target "
+                      help="'default' = SYNTHETIC 11-tap boxcar PLACEHOLDER (owner ballot "
+                           "3A: labelled synthetic wherever it appears; smears a target "
                            "across 11 range bins -- not a real interconnect). "
                            "'passthrough' = no interconnect at all. 'case3' is a legacy "
                            "alias for 'passthrough' and does NOT load the simulated "

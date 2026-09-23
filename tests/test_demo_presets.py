@@ -120,6 +120,16 @@ def test_thrust3_is_a_cold_start_at_2_to_1():
     assert st["subspace"]["params"]["k"] == 8 and st["afe"]["enabled"]
 
 
+def test_thrust3_is_an_ab_preset_naming_its_own_knob():
+    """Hostile-expert finding: the screen never named its own knob ('cold' with no
+    warm curve to compare against). A now names the cold arm, B the warm arm."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    assert p.ab == ("subspace", "warm_start", "warm")
+    st_b = apply_preset(p, arm="b")
+    assert st_b["subspace"]["params"]["warm_start"] == "warm"
+    assert "cold" in p.ab_label_a.lower() and "warm" in p.ab_label_b.lower()
+
+
 def test_thrust4_synthetic_filter_is_normalized_and_labelled():
     p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
     st = apply_preset(p)
@@ -127,6 +137,9 @@ def test_thrust4_synthetic_filter_is_normalized_and_labelled():
     assert st["interconnect"]["params"]["case"] == "default"
     assert st["range_profile"]["enabled"]
     assert "synthetic" in p.blurb.lower()
+    # Owner ballot 3A: labelled synthetic wherever it appears -- including the A/B
+    # banner (the concrete finding: it used to read "Case default (boxcar)").
+    assert "synthetic" in p.ab_label_a.lower()
 
 
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():

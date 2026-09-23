@@ -30,8 +30,9 @@ from webapp.pipeline_registry import BLOCKS_BY_ID
 # Change 1: A/B presets run the pipeline twice, override applied only to B
 # ------------------------------------------------------------------------------------
 @pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error",
+                                 "thrust3_cold_start_acquisition",
                                  "thrust4_interconnect_range_profile"])
-def test_ab_is_wired_on_the_three_presets_the_review_named(pid):
+def test_ab_is_wired_on_the_presets_the_review_named(pid):
     p = PRESETS_BY_ID[pid]
     assert p.ab is not None and p.ab_label_a and p.ab_label_b
     bid, key, _value_b = p.ab
@@ -45,6 +46,7 @@ def test_ab_is_wired_on_the_three_presets_the_review_named(pid):
 def test_presets_without_ab_are_unaffected():
     for p in PRESETS:
         if p.id in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error",
+                    "thrust3_cold_start_acquisition",
                     "thrust4_interconnect_range_profile"):
             continue
         assert p.ab is None
@@ -151,8 +153,7 @@ def test_manual_edit_after_loading_ab_preset_falls_back_to_single_run(monkeypatc
 def test_matching_ab_preset_none_for_presets_without_ab():
     import webapp.app as appmod
 
-    for pid in ("thrust3_cold_start_acquisition", "thrust5_detector_cfar",
-               "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         st = apply_preset(PRESETS_BY_ID[pid])
         assert appmod._matching_ab_preset(st) is None
 
@@ -160,7 +161,7 @@ def test_matching_ab_preset_none_for_presets_without_ab():
 def test_single_run_path_unchanged_for_non_ab_preset(monkeypatch):
     """Loading/running a preset with no `ab` behaves exactly as before this change:
     one run_pipeline call, no automatic pairing."""
-    preset = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
     state = apply_preset(preset)
     calls = []
     appmod = _fake_runner(monkeypatch, calls, fig_key="subspace_err")
@@ -209,7 +210,7 @@ def test_render_results_single_run_keeps_generic_prefix(monkeypatch):
     """Non-AB single-run/manual before-after path keeps today's wording unchanged."""
     import webapp.app as appmod
 
-    preset = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    preset = PRESETS_BY_ID["thrust5_detector_cfar"]
     state = apply_preset(preset)
     calls = []
     appmod2 = _fake_runner(monkeypatch, calls, fig_key="subspace_err")
@@ -422,7 +423,7 @@ def test_subspace_err_has_a_minimum_upper_bound_and_settled_reference_line():
     fig = figures_from_outputs({"subspace_err": [0.04, 0.05, 0.06]})["subspace_err"]
     assert fig.layout.yaxis.range[0] == 0.0
     assert fig.layout.yaxis.range[1] >= _SUBSPACE_ERR_MIN_YMAX
-    assert "Frobenius" in fig.layout.yaxis.title.text and "unnormalised" in fig.layout.yaxis.title.text
+    assert "Frobenius" in fig.layout.yaxis.title.text and "unnormalised" in fig.layout.title.text
     shapes = fig.layout.shapes or ()
     assert any(abs(float(s.y0) - _SUBSPACE_ERR_SETTLED_LEVEL) < 1e-9 and s.line.dash == "dash"
               for s in shapes), "expected a dashed reference line at the settled level"
@@ -518,7 +519,10 @@ def test_run_lock_blocks_a_second_concurrent_run_for_the_same_session(monkeypatc
 
     monkeypatch.setattr(appmod, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {"range_az": go.Figure()})
-    state = apply_preset(PRESETS_BY_ID["thrust3_cold_start_acquisition"])
+    # A non-ab preset: thrust3 now has its own A/B (cold vs warm start), which would
+    # make run_pipeline fire twice here and break the len(calls) == 1 assertion below
+    # -- this test is about the run lock, not the A/B mechanism.
+    state = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
 
     data, status, tab, _sink = appmod._run_pipeline(1, state, 3, "", None, None, session)
     assert len(calls) == 1
@@ -532,7 +536,7 @@ def test_run_lock_released_after_a_run_so_the_next_click_is_not_blocked(monkeypa
     monkeypatch.setattr(appmod, "run_pipeline", lambda state, n_steps, should_stop=None: {
         "range_az": [], "_axis_meta": {"source": "x", "n_steps_run": n_steps, "cancelled": False}})
     monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {"range_az": go.Figure()})
-    state = apply_preset(PRESETS_BY_ID["thrust3_cold_start_acquisition"])
+    state = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
 
     appmod._run_pipeline(1, state, 3, "", None, None, session)
     # A second, SEQUENTIAL run for the same session must proceed normally.
@@ -556,6 +560,18 @@ def test_bad_frame_count_message_distinguishes_blank_from_out_of_range(monkeypat
     _data, status, _tab, _sink = appmod._run_pipeline(1, None, None, "", None, "0", None)
     assert "0" in str(status) and "below the minimum" in str(status)
     assert not calls
+
+
+def test_app_layout_max_width_fits_the_conference_monitor():
+    """Coordinator finding, 2026-09-23: 1280px wasted ~338px of margin per side on a
+    1920x1080 conference monitor and bought the lone-figure Thrust 3 screen nothing
+    from the bigger display. Figures scale with their container; only the wrapper's
+    own cap needed raising."""
+    import webapp.app as appmod
+
+    style = appmod._app_layout().style or {}
+    width = float(str(style.get("maxWidth", "0")).rstrip("px"))
+    assert width >= 1600
 
 
 def test_detection_markers_are_enlarged_for_podium_distance():

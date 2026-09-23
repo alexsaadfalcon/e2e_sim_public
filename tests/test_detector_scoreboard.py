@@ -144,7 +144,10 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     assert row[hits_key] == "1"
     assert row["cumulative false alarms"] == "1"
     assert row["FA / frame"] == "0.50"
-    assert row["hit rate"] == "0.50"
+    # Renamed (Change 1b, 2026-09-23): "hit rate" alone read as a cross-detector
+    # quality ranking even though every detector's threshold is independently
+    # calibrated to land near recall 0.5 -- the label now says so in place.
+    assert row["hit rate (matched ~0.5 by design)"] == "0.50"
     # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
     # wrapped to two lines inside the header's declared height and clipped the
     # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
@@ -195,7 +198,8 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length():
     labels, _values = table.cells.values
     assert labels == ["this frame: TP", "this frame: FP", "this frame: FN",
                       "cumulative hits (0/1 frames scored)",
-                      "cumulative false alarms", "FA / frame", "hit rate"]
+                      "cumulative false alarms", "FA / frame",
+                      "hit rate (matched ~0.5 by design)"]
 
 
 def test_scoreboard_figure_header_count_label_and_threshold_in_title():
@@ -316,3 +320,172 @@ def test_arm_name_for_detector_ml_mode_maps_checkpoint_parent_dir(beat_cfar_data
 
 def test_arm_name_for_detector_ml_mode_unknown_checkpoint_is_none():
     assert ds.arm_name_for_detector({"mode": "ml", "label": "not_a_real_run"}) is None
+
+
+# --------------------------------------------------------------------------------
+# Change 1a/1c, 2026-09-23 hostile-expert re-read: the scoreboard subline states the
+# recall-matching calibration, and the offline block reads AP/FA/stripe/CI off the
+# real beat_cfar.json / raddetnet_ci.json -- never a number typed in here.
+# --------------------------------------------------------------------------------
+def test_scoreboard_subline_states_the_recall_matched_calibration(beat_cfar_data):
+    """The bug this fixes: hit rate 0.56 (a weak detector) > 0.50 (CFAR) > 0.47 (the
+    strongest detector) reads as a ranking, when every threshold is independently
+    that detector's own recall-0.5 point -- the subline must say so, with the real
+    recall target and split size, not a hardcoded copy of them."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule")
+    # The sentence is long enough that `_wrap_text` line-breaks it (like every other
+    # multi-line subline in this module) -- reassemble before substring-checking so
+    # this test doesn't depend on exactly where the wrap falls.
+    subline = fig.layout.title.text.replace("<br>", " ")
+    target_recall = beat_cfar_data["target_recall"]
+    n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
+                    if a.get("operating_point"))
+    assert f"recall-{target_recall:g}" in subline
+    assert f"{n_frames}-frame test split (beat_cfar.json)" in subline
+    assert "MATCHED recall" in subline
+    assert "compare false alarms, not hits" in subline
+    assert "0.44" in subline
+
+
+def test_scoreboard_subline_falls_back_when_beat_cfar_json_missing(tmp_path):
+    """No recall/split numbers to state -> a shorter subline, never an invented one."""
+    scores = ds.score_frames([[]], None)
+    missing = tmp_path / "no_such_beat_cfar.json"
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text="rule", beat_cfar_json_path=missing)
+    assert fig.layout.title.text == "Detector scoreboard<br><sup>threshold 0.50</sup>"
+
+
+def test_scoreboard_offline_block_reads_ap_fa_and_stripe_for_a_scored_arm(beat_cfar_data):
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    table = _table(fig)
+    labels, values = table.cells.values
+    row = dict(zip(labels, values))
+    arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
+    assert row["AP"] == f"{arm['AP']:.3f}"
+    fa_label = next(k for k in row if k.startswith("FA/frame at recall"))
+    assert row[fa_label] == f"{arm['operating_point']['fp_per_frame']:.2f}"
+    stripe = beat_cfar_data["beat_cfar"]["stripe_rank1"]["raddetnet"]
+    stripe_gt = beat_cfar_data["beat_cfar"]["stripe_ground_truth"]
+    assert row["rank-1 stripe vs ground truth"] == f"{stripe:.3f} vs {stripe_gt:.3f}"
+    header_row = next(k for k in row if k.startswith("offline,"))
+    assert str(arm["operating_point"]["n_frames"]) in header_row
+    # More than the base 7 rows now -- the table's height must have grown to match
+    # (see the geometric check below), not silently clipped the new rows.
+    assert len(labels) > 7
+
+
+def test_scoreboard_offline_block_omits_stripe_row_for_classical_cfar(beat_cfar_data):
+    """classical CFAR has no rank-1 stripe artifact -- beat_cfar.json's stripe_rank1
+    has no entry for it, and the row must be omitted, not shown as 0 or 'n/a'."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="CFAR", threshold=0.66,
+                               match_rule_text="rule",
+                               beat_cfar_arm_name="classical CFAR")
+    labels, _values = _table(fig).cells.values
+    assert "AP" in labels
+    assert "rank-1 stripe vs ground truth" not in labels
+    assert "delta AP vs CFAR, 95% CI" not in labels
+
+
+def test_scoreboard_offline_block_includes_ci_when_raddetnet_ci_json_has_a_row():
+    """`raddetnet_ci.json` scores raddetnet against CFAR; the row's numbers are read
+    from the file at test time (never a copy pasted into this assertion), so this
+    cannot silently drift from what the file stores (CLAUDE.md's provenance rule)."""
+    import json
+    ci_data = json.loads(ds.DEFAULT_RADDETNET_CI_JSON.read_text())
+    comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    labels, values = _table(fig).cells.values
+    row = dict(zip(labels, values))
+    expected = (f"{comp['delta_AP']:+.3f} [{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]")
+    assert row["delta AP vs CFAR, 95% CI"] == expected
+
+
+def test_scoreboard_offline_block_omits_ci_row_when_ci_file_missing(tmp_path, beat_cfar_data):
+    """No `raddetnet_ci.json` for this deployment -> the row is dropped, not filled
+    with an invented interval."""
+    import json
+    path = tmp_path / "beat_cfar.json"
+    path.write_text(json.dumps(beat_cfar_data))
+    missing_ci = tmp_path / "no_such_ci.json"
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_json_path=path,
+                               beat_cfar_arm_name="raddetnet",
+                               raddetnet_ci_json_path=missing_ci)
+    labels, _values = _table(fig).cells.values
+    assert "delta AP vs CFAR, 95% CI" not in labels
+
+
+def test_scoreboard_offline_block_absent_by_default():
+    """No `beat_cfar_arm_name` -> the table stays at its base 7 rows, exactly the
+    pre-existing behaviour every other test in this file exercises."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text="rule")
+    labels, _values = _table(fig).cells.values
+    assert len(labels) == 7
+
+
+def test_scoreboard_offline_block_rows_never_clip_the_table():
+    """Same geometric check as
+    `test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length`, extended
+    to the offline block: its extra rows must grow the declared table height, not
+    just get appended past where the domain ends."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    table = _table(fig)
+    domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
+    content_height = table.header.height + len(table.cells.values[0]) * table.cells.height
+    assert domain_height >= content_height
+
+
+# --------------------------------------------------------------------------------
+# Change 2, 2026-09-23: stored_pr_figure's in-distribution qualifier + the
+# highlighted arm's bootstrap CI vs CFAR, read from raddetnet_ci.json.
+# --------------------------------------------------------------------------------
+def test_stored_pr_figure_states_in_distribution_qualifier():
+    fig = ds.stored_pr_figure()
+    subline = fig.layout.title.text
+    assert "in-distribution: held-out scenes of the training corpus" in subline
+    assert "one training seed per curve" in subline
+
+
+def test_stored_pr_figure_highlighted_arm_legend_carries_the_ci(beat_cfar_data):
+    import json
+    ci_data = json.loads(ds.DEFAULT_RADDETNET_CI_JSON.read_text())
+    comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
+    arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
+    fig = ds.stored_pr_figure(highlight_arm="raddetnet")
+    trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
+    assert f"AP {arm['AP']:.3f}" in trace.name
+    assert f"{comp['delta_AP']:+.3f} vs CFAR" in trace.name
+    assert f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]" in trace.name
+
+
+def test_stored_pr_figure_non_highlighted_arm_never_gets_a_ci_legend(beat_cfar_data):
+    """Only the highlighted (bold) arm's legend gets the CI treatment -- every other
+    curve keeps the plain "(AP=...)" legend even though raddetnet_ci.json also scores
+    it (as the baseline every OTHER arm is compared against)."""
+    fig = ds.stored_pr_figure(highlight_arm="classical CFAR")
+    trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
+    assert "vs CFAR" not in trace.name
+    assert trace.name == "raddetnet (AP=0.476)"
+
+
+def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
+    """The CI file is absent for this call -> the legend falls back to the plain
+    format, never an invented interval."""
+    fig = ds.stored_pr_figure(highlight_arm="classical CFAR",
+                              raddetnet_ci_json_path=tmp_path / "no_such_ci.json")
+    trace = next(tr for tr in fig.data if tr.name.startswith("classical CFAR"))
+    assert "vs CFAR" not in trace.name
+    assert trace.name.startswith("classical CFAR (AP=")

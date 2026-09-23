@@ -120,18 +120,20 @@ PRESETS: List[DemoPreset] = [
                "image loses dynamic range as the front-end's own noise rises. The signal "
                "is deliberately set just below the model's input-referred noise (1e-7 vs "
                "1.36e-7 V) -- where a real 1024-element radar operates: per-element SNR "
-               "below 0 dB, recovered by coherent gain. Manual path: turn ONE knob (LNA "
-               "bias 8 -> 0.5 mA, or IF bandwidth 15 -> 50 MHz) and run again."),
+               "below 0 dB, recovered by coherent gain. Manual path: LNA bias is the A/B "
+               "above; manual second knob: IF bandwidth 15 -> 50 MHz and run again (about "
+               "-5 dB; 1 -> 50 MHz is -16 dB, measured 2026-09-21)."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
-                    ("rffe", "if_bw_mhz", "15 -> 50 MHz (about -5 dB; 1 -> 50 is -16 dB)")],
+                    ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
+                                          "(about -5 dB; 1 -> 50 MHz is -16 dB, measured "
+                                          "2026-09-21)")],
         # A/B (Change 1, 2026-09-22 hostile-expert read): as-loaded IS the 8 mA arm;
         # run B drops to 0.5 mA, the direction the card's headline (+12 dB) quotes.
         ab=("rffe", "lna_bias_ma", 0.5),
         ab_label_a="8 mA", ab_label_b="0.5 mA",
         say=[
-            "LNA bias 0.5->8 mA is worth about +12 dB of dynamic range here; IF bandwidth "
-            "1->50 MHz costs about -16 dB (two sig figs; +-0.6-0.9 dB between operating "
-            "points).",
+            "LNA bias 0.5->8 mA is worth about +12 dB here (two sig figs; +-0.6-0.9 dB "
+            "between operating points).",
             "At default signal level (1e-5) these knobs correctly do nothing (0.5 dB, "
             "under the 40 dB floor) -- show it as the control if asked.",
             "Below ~4 mA the modelled LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the "
@@ -197,13 +199,15 @@ PRESETS: List[DemoPreset] = [
             "As loaded the curve starts at 0.04 and settles at 0.06 within two frames: "
             "the tracker is warm-started from a perturbed copy of the true subspace and "
             "relaxes to its steady tracking error. The knob compares the SETTLED level, "
-            "0.06 against 0.63, and the previous run stays on the Results tab for that.",
-            "Say the headline in ANGLES: subspace error 0.63 -> 0.06 (measured on this preset "
-            "2026-09-22: 0.626 -> 0.062) is an unnormalized distance bounded by sqrt(k); "
-            "converted, the average principal angle goes 12.8 deg -> 1.3 deg.",
-            "The AFE is doing something real but modest: on vs fully removed moves the "
-            "displayed range-azimuth image 0.14 dB -- bigger than the mantissa knob's own "
-            "0.04 dB on the same displayed range.",
+            "0.06 against 0.63.",
+            "Say the headline in ANGLES: subspace error 0.63 -> 0.06 is an unnormalized "
+            "distance bounded by sqrt(k); converted, the average principal angle goes "
+            "12.8 deg -> 1.3 deg.",
+            "The AFE is doing something real but modest: the printed peak-median statistic "
+            "moves about 0.6 dB (61.2 -> 60.6, measured 2026-09-23) for mantissa 6 -> 1 "
+            "while the error rises 10x. The card's older '0.04 dB' is a DIFFERENT metric "
+            "-- mean image move in UNCLIPPED dB (handoff 2026-09-22 Sec 2); AFE on vs "
+            "fully removed moves that metric 0.14 dB.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
             "The brightest band at range 0-2 m across all azimuth is not a target: the "
@@ -241,11 +245,18 @@ PRESETS: List[DemoPreset] = [
         blurb=("The tracker starts from a RANDOM basis with no peek at ground truth and "
                "acquires the scene's 8-dimensional subspace from 512 adaptive measurements "
                "of 1024 elements. Watch subspace_err: 0.57 -> 0.15 -> 0.07 -> 0.06, at the "
-               "warm-started floor by frame 3. Flip 'Tracker initialisation' back to warm "
-               "to show the historical curve, which starts at 0.04 -- already below the "
-               "0.06 tracking floor it then settles to, because it begins from a perturbed "
-               "copy of the true subspace."),
+               "warm-started floor by frame 3. Press Run once: both arms run and appear as "
+               "before (A, top, cold start) / after (B, bottom, warm start), so the cold "
+               "curve's acquisition sits above the historical warm curve, which starts at "
+               "0.04 -- already below the dashed 0.06 line both curves converge to, because "
+               "it begins from a perturbed copy of the true subspace."),
         live_knobs=[("subspace", "warm_start", "cold <-> warm")],
+        # A/B (2026-09-23 hostile-expert read #1): the screen never named its own knob
+        # ("tracker initialisation = cold" with no warm curve to compare against). As
+        # loaded IS the cold arm; run B flips to warm, the historical curve the blurb and
+        # do_not_say list both already assumed a reader could see.
+        ab=("subspace", "warm_start", "warm"),
+        ab_label_a="cold start (random basis)", ab_label_b="warm start (perturbed truth)",
         say=[
             "There is deliberately no image on this screen: the range-azimuth product does "
             "not change visibly during acquisition on the displayed 40 dB range (it is the "
@@ -302,7 +313,11 @@ PRESETS: List[DemoPreset] = [
         # A/B (Change 1): as-loaded IS the synthetic boxcar ("default"); run B swaps to
         # passthrough, the ~14 dB floor-drop direction the card's headline quotes.
         ab=("interconnect", "case", "passthrough"),
-        ab_label_a="default (boxcar)", ab_label_b="passthrough",
+        # Labels carry "SYNTHETIC" explicitly (owner ballot 3A: labelled synthetic
+        # wherever it appears) -- before 2026-09-23 the banner read "Case default
+        # (boxcar)" with no hint the filter is a placeholder, not a measured part.
+        ab_label_a="SYNTHETIC 11-tap boxcar placeholder",
+        ab_label_b="passthrough (no interconnect)",
         say=[
             "This filter is synthetic and labelled as such wherever it appears (owner "
             "ballot 3A). It stands in for a bad interconnect; it is not a model of any "
@@ -363,8 +378,8 @@ PRESETS: List[DemoPreset] = [
             "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich frames "
             "through the RF front end, interconnect and tracker (25 m scene, range-azimuth). "
             "This is the benchmark corpus: stored ADC frames (100 m, range-Doppler cube) "
-            "replayed through the ADC-cube chain on the diagram; the Thrust 1-4 blocks are "
-            "off. The detector sees the corpus's cube, not the Thrust 1-4 output.",
+            "already impaired at generation; on replay the ADC-cube blocks are SKIPPED "
+            "(the run note says so) and the Thrust 1-4 blocks are off.",
             "Classical CFAR scores AP 0.301 on this split; the data-blind chance floor is "
             "0.081. Both numbers reproduced today from the public repo.",
             "At this operating point CFAR averages 6.2 false alarms per frame over the 172 "
@@ -379,6 +394,10 @@ PRESETS: List[DemoPreset] = [
             "Ground truth omits about 3 real strongly-scattering objects per frame inside "
             "40 m, so any detector that fires on every real object has a precision ceiling "
             "of 0.64. Some of the 'false alarms' are real objects.",
+            "Streaked targets in Doppler: ANSWERED, measured 2026-09-23. True mainlobe is "
+            "6-8 of 64 bins (~2 m/s at 0.303 m/s per bin); ambient floor sits at median "
+            "-41.6 dB / p95 -40.6 dB, within 1 dB of the fixed -40 dB clip -- floor "
+            "fluctuation lights up whole rows, a display-threshold coincidence.",
         ],
         do_not_say=[
             "Any learned-detector number from before 2026-09-22 except the rd-format 0.127 "
@@ -469,7 +488,7 @@ PRESETS: List[DemoPreset] = [
             "-- say that, not 'beats CFAR' (F85 addendum).",
             "Every number comes from e2e/ml/runs/beat_cfar.json (seed 42, deterministic); "
             "independently re-scored bit-identically, controls re-implemented to 1e-6. "
-            "Paired scene-level bootstrap: +0.176 AP, 95% CI [+0.145, +0.208] "
+            "Paired scene-level bootstrap: +0.175 AP, 95% CI [+0.145, +0.208] "
             "(raddetnet_ci.json, F85 addendum).",
             "The controls are F83's, which the shipped nets FAILED: deranged-label "
             "retention 12% (CFAR 10%, shipped FFTRadNets 48-51%), azimuth-only AP 0.657 "

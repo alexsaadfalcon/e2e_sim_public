@@ -56,6 +56,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 #: The stored offline scoring this module reads by default (e2e.ml.compare_detectors'
 #: output format) -- overridable per call, never edited by this module.
 DEFAULT_BEAT_CFAR_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "beat_cfar.json"
+#: Bootstrap AP-delta-vs-CFAR confidence intervals (e2e.ml's paired-bootstrap CI tool),
+#: keyed by arm name -- optional: a checkpoint scored in beat_cfar.json need not have a
+#: CI entry here yet (F85 addendum). Overridable per call; never edited by this module.
+DEFAULT_RADDETNET_CI_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "raddetnet_ci.json"
 
 
 def match_rule_text(criterion=None) -> str:
@@ -156,7 +160,7 @@ def score_frames(
     }
 
 
-#: Table geometry (px): header + 7 data rows must fit inside the domain the figure's
+#: Table geometry (px): header + data rows must fit inside the domain the figure's
 #: own `height`/`margin` leaves for the table trace, or the LAST rows get silently cut
 #: off by the renderer -- not resized, not scrolled (rehearsal, 2026-09-23: a long
 #: header ("CA-CFAR (guard 2, train 6) -- threshold 0.66") wrapped to two lines inside
@@ -166,15 +170,24 @@ def score_frames(
 #: the title, below) specifically so the header text stays short enough not to wrap;
 #: the extra header/margin slack below is a second, independent guard for arm names
 #: this module does not control the length of (e.g. an ML checkpoint's directory name).
-_TABLE_N_ROWS = 7
+#: Row COUNT is no longer fixed (see `scoreboard_figure`'s `beat_cfar_arm_name`): the
+#: offline-scored block appends up to 5 more rows for an arm found in beat_cfar.json,
+#: so the table height below is computed from the actual row count at call time,
+#: never from a hardcoded row count -- the same clipping bug this comment describes
+#: would otherwise recur the moment that block's row count changed.
 _TABLE_HEADER_HEIGHT = 40
 _TABLE_ROW_HEIGHT = 30
-_TABLE_MARGIN_T = 50
+#: Base top margin: one title line ("Detector scoreboard") + a ONE-line subtitle
+#: ("threshold 0.44"). The real subline (see `scoreboard_figure`) is usually longer
+#: and wraps to several lines -- each one needs `_TABLE_SUBLINE_LINE_PX` more margin
+#: or Plotly overflows the title DOWN into the table's own header row instead of
+#: clipping it (measured, thrust5_detector_cfar rehearsal PNG, 2026-09-23 pixel
+#: re-check).
+_TABLE_MARGIN_T = 90
+_TABLE_SUBLINE_LINE_PX = 32
 #: Room for the (possibly multi-line, see `_wrap_text`) match-rule annotation below
 #: the table.
 _TABLE_MARGIN_B = 120
-_TABLE_HEIGHT = (_TABLE_MARGIN_T + _TABLE_HEADER_HEIGHT
-                + _TABLE_N_ROWS * _TABLE_ROW_HEIGHT + _TABLE_MARGIN_B)
 
 
 def _wrap_text(text: str, max_chars: int = 70) -> str:
@@ -200,14 +213,111 @@ def _wrap_text(text: str, max_chars: int = 70) -> str:
     return "<br>".join(lines)
 
 
+def _load_recall_target_and_n_frames(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON):
+    """`(target_recall, n_frames)` every arm's threshold in beat_cfar.json was picked
+    at -- read from the JSON so the scoreboard's threshold subline (see
+    `scoreboard_figure`) cannot state a recall target or split size that has drifted
+    from what the file actually stores. `(None, None)` if the JSON is missing or
+    carries neither field -- the caller then falls back to a shorter, context-free
+    subline rather than inventing either number."""
+    try:
+        data = _load_beat_cfar(beat_cfar_json_path)
+    except (FileNotFoundError, ValueError):
+        return None, None
+    target_recall = data.get("target_recall")
+    n_frames = next(
+        (a["operating_point"]["n_frames"] for a in data.get("arms", [])
+         if a.get("operating_point") and a["operating_point"].get("n_frames")),
+        None,
+    )
+    return target_recall, n_frames
+
+
+def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON,
+                      raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON
+                      ) -> List[Tuple[str, str]]:
+    """`(label, value)` rows for the offline scoring of ONE beat_cfar.json arm: a
+    section-header row naming the split, then AP, FA/frame at that arm's recall
+    target, and -- only when the arm has one (CFAR does not) -- its rank-1 stripe
+    statistic against the stored ground-truth reference. Appends a bootstrap AP-delta-
+    vs-CFAR row too, but ONLY when `raddetnet_ci_json_path` exists AND carries a
+    `comparisons` entry for this exact arm -- never invented for an arm the CI file
+    hasn't scored yet.
+
+    Returns `[]` if `beat_cfar_json_path` is missing/malformed or the arm is not one
+    of its scored arms -- nothing invented for an arm this file never scored.
+    """
+    try:
+        data = _load_beat_cfar(beat_cfar_json_path)
+    except (FileNotFoundError, ValueError):
+        return []
+    arm = next((a for a in data.get("arms", []) if a.get("name") == beat_cfar_arm_name), None)
+    if arm is None:
+        return []
+
+    op = arm.get("operating_point") or {}
+    n_frames = op.get("n_frames")
+    target_recall = op.get("target_recall", data.get("target_recall"))
+    header_label = (f"offline, {n_frames}-frame test split (beat_cfar.json)"
+                    if n_frames is not None else "offline (beat_cfar.json)")
+    rows: List[Tuple[str, str]] = [(header_label, "")]
+
+    ap = arm.get("AP")
+    if ap is not None:
+        rows.append(("AP", f"{ap:.3f}"))
+
+    fa_pf = op.get("fp_per_frame")
+    if fa_pf is not None:
+        label = (f"FA/frame at recall {target_recall:g}" if target_recall is not None
+                 else "FA/frame")
+        rows.append((label, f"{fa_pf:.2f}"))
+
+    beat_cfar_block = data.get("beat_cfar") or {}
+    stripe = (beat_cfar_block.get("stripe_rank1") or {}).get(beat_cfar_arm_name)
+    stripe_gt = beat_cfar_block.get("stripe_ground_truth")
+    if stripe is not None and stripe_gt is not None:
+        rows.append(("rank-1 stripe vs ground truth", f"{stripe:.3f} vs {stripe_gt:.3f}"))
+
+    ci_path = Path(raddetnet_ci_json_path)
+    if ci_path.is_file():
+        try:
+            ci_data = json.loads(ci_path.read_text())
+        except (OSError, ValueError):
+            ci_data = {}
+        comp = next((c for c in ci_data.get("comparisons", [])
+                    if c.get("arm") == beat_cfar_arm_name), None)
+        if comp and all(k in comp for k in ("delta_AP", "ci_low", "ci_high")):
+            rows.append(("delta AP vs CFAR, 95% CI",
+                        f"{comp['delta_AP']:+.3f} "
+                        f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]"))
+    return rows
+
+
 def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
-                      threshold: Optional[float], match_rule_text: str) -> go.Figure:
+                      threshold: Optional[float], match_rule_text: str,
+                      beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON,
+                      beat_cfar_arm_name: Optional[str] = None,
+                      raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON) -> go.Figure:
     """A compact table: this frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
     hit-rate, and the match rule stated in words -- the numbers the hostile-expert read
     (see the module docstring) said were missing from the objectness panel entirely.
 
-    `scores` is `score_frames`'s return value. Legible at ~2 m: >=18px table font, 7
-    numbers total (<=8, per spec).
+    `scores` is `score_frames`'s return value. Legible at ~2 m: >=18px table font.
+
+    `beat_cfar_arm_name` (typically `arm_name_for_detector(det_meta)`'s return) adds
+    an offline-scored block for that beat_cfar.json arm -- see `_offline_arm_rows`.
+    `None` (the default) leaves the table at its base 7 rows: a caller with no mapped
+    arm (e.g. a checkpoint outside the scored comparison) gets no offline block rather
+    than a table of blanks.
+
+    Why the "hit rate"/"FA per frame" comparison across screens is misleading without
+    context (hostile-expert re-read, 2026-09-23): every detector's on-screen threshold
+    is ITS OWN recall-0.5 operating point from beat_cfar.json, so hit rate reads
+    ~0.5 for every arm by construction -- a viewer comparing 0.56 (a weak detector) >
+    0.50 (CFAR) > 0.47 (the strongest detector) is reading threshold-matching noise,
+    not detector quality. The subline below states the calibration explicitly and
+    says what IS comparable at matched recall (false alarms); the row label repeats
+    the caveat so it survives being read in isolation.
     """
     frames = scores.get("frames") or []
     last = frames[-1] if frames else None
@@ -232,31 +342,70 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     n_scored = scores["n_frames_scored"]
     n_total = scores["n_frames"]
 
+    target_recall, n_frames_split = _load_recall_target_and_n_frames(beat_cfar_json_path)
+    if threshold is not None and target_recall is not None and n_frames_split is not None:
+        # Exact wording from the hostile-expert finding this fixes (2026-09-23): says
+        # WHERE the threshold came from and what IS comparable across arms at a
+        # threshold each one picked independently.
+        subline = (
+            f"threshold {thr_txt} = this detector's recall-{target_recall:g} operating "
+            f"point on the {n_frames_split}-frame test split (beat_cfar.json); "
+            "detectors are compared at MATCHED recall, so compare false alarms, not hits"
+        )
+    else:
+        subline = f"threshold {thr_txt}"
+
+    base_labels = ["this frame: TP", "this frame: FP", "this frame: FN",
+                  f"cumulative hits ({n_scored}/{n_total} frames scored)",
+                  "cumulative false alarms", "FA / frame",
+                  # Renamed (Change 1b): "hit rate" alone read as a quality ranking;
+                  # every arm's threshold is independently calibrated to land near
+                  # 0.5, so the label states that in place rather than only in the
+                  # subline above, which a viewer can miss reading this table cold.
+                  "hit rate (matched ~0.5 by design)"]
+    base_values = this_frame + cum_values
+    offline_rows = (_offline_arm_rows(beat_cfar_arm_name, beat_cfar_json_path,
+                                      raddetnet_ci_json_path)
+                    if beat_cfar_arm_name else [])
+    labels = base_labels + [r[0] for r in offline_rows]
+    values = base_values + [r[1] for r in offline_rows]
+    n_rows = len(labels)
+
     fig = go.Figure(data=[go.Table(
-        columnwidth=[220, 90],
+        # Widened from [220, 90] (Change 1c): the offline block's longest label
+        # ("rank-1 stripe vs ground truth") and value ("+0.176 [+0.145, +0.208]")
+        # need more room than the original 4-row table did.
+        columnwidth=[280, 160],
         # Second column used to be an empty dark cell -- it labels the counts below it.
         header=dict(values=[arm_name, "count"],
                    fill_color="#2d3436", font=dict(color="white", size=18),
                    height=_TABLE_HEADER_HEIGHT, align="left"),
         cells=dict(
-            values=[
-                ["this frame: TP", "this frame: FP", "this frame: FN",
-                 f"cumulative hits ({n_scored}/{n_total} frames scored)",
-                 "cumulative false alarms", "FA / frame", "hit rate"],
-                this_frame + cum_values,
-            ],
-            fill_color=[["#f5f6fa"] * _TABLE_N_ROWS, ["#ffffff"] * _TABLE_N_ROWS],
+            values=[labels, values],
+            fill_color=[["#f5f6fa"] * n_rows, ["#ffffff"] * n_rows],
             font=dict(size=18), height=_TABLE_ROW_HEIGHT, align="left",
         ),
     )])
+    # Wrapped like the match-rule annotation below (same `_wrap_text`, same 70-char
+    # budget): this sentence is far wider than a two-card panel. The wrap's line
+    # COUNT then drives the top margin below -- an insufficient one does not clip
+    # the title, it overflows it down into the table (see `_TABLE_SUBLINE_LINE_PX`).
+    subline_wrapped = _wrap_text(subline)
+    n_subline_lines = subline_wrapped.count("<br>") + 1
+    margin_t = _TABLE_MARGIN_T + max(0, n_subline_lines - 1) * _TABLE_SUBLINE_LINE_PX
+    # Height computed from the ACTUAL row count (base 7, or 7 + up to 5 offline rows)
+    # -- see the geometry comment above `_TABLE_HEADER_HEIGHT` for why this must never
+    # go back to a hardcoded row count.
+    table_height = (margin_t + _TABLE_HEADER_HEIGHT
+                    + n_rows * _TABLE_ROW_HEIGHT + _TABLE_MARGIN_B)
     fig.update_layout(
         # Threshold moved here (out of the header -- see `_TABLE_HEADER_HEIGHT`'s
         # comment) as a "<br><sup>" subline, the same pattern pipeline_runner.py uses
         # for every other panel's headline statistic.
-        title=dict(text=f"Detector scoreboard<br><sup>threshold {thr_txt}</sup>",
+        title=dict(text=f"Detector scoreboard<br><sup>{subline_wrapped}</sup>",
                   font=dict(size=20)),
-        margin=dict(l=10, r=10, t=_TABLE_MARGIN_T, b=_TABLE_MARGIN_B),
-        height=_TABLE_HEIGHT,
+        margin=dict(l=10, r=10, t=margin_t, b=_TABLE_MARGIN_B),
+        height=table_height,
     )
     # The match rule, in words with its numbers -- see match_rule_text(). Below the
     # table rather than in it: it is a sentence, not one of the counted numbers.
@@ -318,8 +467,28 @@ def _downsample(xs: List[float], ys: List[float], max_points: int = 400):
     return [xs[i] for i in idx], [ys[i] for i in idx]
 
 
+def _raddetnet_ci_for_arm(arm_name: str, raddetnet_ci_json_path) -> Optional[Dict[str, float]]:
+    """This arm's bootstrap AP-delta-vs-CFAR row from `raddetnet_ci_json_path`
+    (`{"delta_AP", "ci_low", "ci_high"}`), or `None` if the file is absent, unreadable,
+    or has no `comparisons` entry for this arm -- e.g. a checkpoint scored in
+    beat_cfar.json before the CI tool covered it. Never invented: the caller omits the
+    interval entirely rather than showing a placeholder."""
+    path = Path(raddetnet_ci_json_path)
+    if not path.is_file():
+        return None
+    try:
+        ci_data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    comp = next((c for c in ci_data.get("comparisons", []) if c.get("arm") == arm_name), None)
+    if comp and all(k in comp for k in ("delta_AP", "ci_low", "ci_high")):
+        return comp
+    return None
+
+
 def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
-                     highlight_arm: Optional[str] = None) -> go.Figure:
+                     highlight_arm: Optional[str] = None,
+                     raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON) -> go.Figure:
     """The offline-scored PR curve for every arm in `beat_cfar.json`, so a live run's
     single operating point sits next to the whole curve it was read off.
 
@@ -329,6 +498,10 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     (2026-09-22 `e2e/ml/runs/beat_cfar.json`) has a full curve for every arm, so this is
     a documented fallback, not the observed case; re-verify against a fresh
     `beat_cfar.json` before assuming it never fires.
+
+    `highlight_arm`'s legend entry also carries its bootstrap AP-delta-vs-CFAR 95% CI
+    from `raddetnet_ci_json_path`, when that file has a row for it (see
+    `_raddetnet_ci_for_arm`) -- omitted, never invented, otherwise.
 
     Raises if the JSON is missing `arms`, or `arms` is empty -- there is nothing
     invented in place of a genuinely absent scoring artifact.
@@ -361,8 +534,14 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         pr = a.get("pr_curve")
         if pr and pr.get("recall") and pr.get("precision") is not None:
             x, y = _downsample(pr["recall"], pr["precision"])
+            ci = _raddetnet_ci_for_arm(name, raddetnet_ci_json_path) if bold else None
+            if ci is not None:
+                trace_name = (f"{name} AP {ap:.3f}, {ci['delta_AP']:+.3f} vs CFAR "
+                             f"[{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]")
+            else:
+                trace_name = f"{name} (AP={ap:.3f})"
             fig.add_trace(go.Scatter(
-                x=x, y=y, mode="lines", name=f"{name} (AP={ap:.3f})",
+                x=x, y=y, mode="lines", name=trace_name,
                 line=dict(width=5 if bold else 2),
             ))
         else:
@@ -384,10 +563,16 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # Short enough to fit a two-card (~600 px) panel -- the old single-line
         # "scored offline over the {n} test frames of {corpus} (beat_cfar.json)" ran
         # off the card edge as "... (b..." (rehearsal, 2026-09-23); the source file
-        # name moves to a subline, like every other panel's qualifier text.
+        # name moves to a subline, like every other panel's qualifier text. The
+        # in-distribution/seed qualifier (owner-volunteered, 2026-09-23 re-read) says
+        # what this curve does and does NOT generalize to: held-out SCENES of the
+        # training corpus, not a held-out corpus, and one training seed per curve --
+        # neither varies run to run the way the CI band on the highlighted arm might
+        # suggest.
         title=dict(
             text=f"scored offline: {n_frames} test frames, {corpus_name}"
-                 "<br><sup>beat_cfar.json</sup>",
+                 "<br><sup>beat_cfar.json; in-distribution: held-out scenes of the "
+                 "training corpus; one training seed per curve</sup>",
             font=dict(size=18),
         ),
         legend=dict(font=dict(size=15)),
