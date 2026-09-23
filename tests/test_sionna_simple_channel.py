@@ -116,9 +116,42 @@ def test_write_payload_creates_output_directory(tmp_path):
 
 
 # --------------------------------------------------------------------------- registry
+#
+# `SionnaMunichIterator`'s default (non-legacy-link) branch consults ONLY the plain
+# `SIONNA_MUNICH_PATH` module attribute -- never a live ka-vs-legacy existence check --
+# because `tests/test_blocks.py` monkeypatches that exact attribute to point at a temp
+# multi-link pkl and relies on it being the sole authority (an earlier version of this
+# file re-checked `SIONNA_MUNICH_KA_PATH.exists()` at call time, which silently loaded
+# the real generated munich_ka.pkl over the monkeypatched path and broke that contract).
+# So the ka-preferred/legacy-fallback RESOLUTION LOGIC is tested directly against the
+# pure `_resolve_munich_default_path` helper, and the FACTORY's use of the resulting
+# `SIONNA_MUNICH_PATH` attribute (plus the legacy-link override) is tested by
+# monkeypatching that attribute -- exactly as tests/test_blocks.py does.
 
 
-def test_munich_iterator_prefers_ka_file_when_present(tmp_path, monkeypatch):
+def test_resolve_munich_default_path_prefers_ka_when_present(tmp_path):
+    from e2e.environment.sionna_iterator import _resolve_munich_default_path
+
+    ka_path = tmp_path / "munich_ka.pkl"
+    ka_path.write_bytes(b"x")
+    legacy_path = tmp_path / "munich.pkl"  # deliberately absent
+    resolved = _resolve_munich_default_path(str(ka_path), str(legacy_path))
+    assert resolved == str(ka_path)
+
+
+def test_resolve_munich_default_path_falls_back_to_legacy_when_ka_absent(tmp_path):
+    from e2e.environment.sionna_iterator import _resolve_munich_default_path
+
+    ka_path = tmp_path / "does_not_exist.pkl"
+    legacy_path = tmp_path / "munich.pkl"
+    legacy_path.write_bytes(b"x")
+    resolved = _resolve_munich_default_path(str(ka_path), str(legacy_path))
+    assert resolved == str(legacy_path)
+
+
+def test_munich_iterator_default_uses_sionna_munich_path(tmp_path, monkeypatch):
+    """SionnaMunichIterator(link=None) must consult SIONNA_MUNICH_PATH directly -- the
+    same attribute tests/test_blocks.py monkeypatches for its own multi-link fixtures."""
     from e2e.environment import sionna_iterator as si
 
     arr = np.zeros((1, 4, 1, 1, 4), dtype=np.complex64)
@@ -127,26 +160,23 @@ def test_munich_iterator_prefers_ka_file_when_present(tmp_path, monkeypatch):
     ka_path = tmp_path / "munich_ka.pkl"
     write_payload(arr, meta, str(ka_path))
 
-    legacy_path = tmp_path / "munich.pkl"
-    legacy_arr = np.ones((1, 4, 1, 1, 4), dtype=np.complex64)
-    with open(legacy_path, "wb") as f:
-        pickle.dump(legacy_arr, f)
-
-    monkeypatch.setattr(si, "SIONNA_MUNICH_KA_PATH", str(ka_path))
-    monkeypatch.setattr(si, "SIONNA_MUNICH_LEGACY_PATH", str(legacy_path))
+    monkeypatch.setattr(si, "SIONNA_MUNICH_PATH", str(ka_path))
 
     it = si.SionnaMunichIterator()
     assert it.freq_plan is not None
     np.testing.assert_array_equal(np.asarray(it[0]), arr[0])
 
 
-def test_munich_iterator_legacy_link_selects_legacy_file(tmp_path, monkeypatch):
+def test_munich_iterator_legacy_link_selects_legacy_file_regardless_of_default_path(
+        tmp_path, monkeypatch):
+    """link=MUNICH_LEGACY_LINK always selects SIONNA_MUNICH_LEGACY_PATH, independent of
+    whatever SIONNA_MUNICH_PATH currently resolves to."""
     from e2e.environment import sionna_iterator as si
 
+    ka_path = tmp_path / "munich_ka.pkl"
     arr = np.zeros((1, 4, 1, 1, 4), dtype=np.complex64)
     meta = _synthetic_meta(num_freqs=4)
     meta["links"]["munich"]["rx_array_shape"] = [2, 2]
-    ka_path = tmp_path / "munich_ka.pkl"
     write_payload(arr, meta, str(ka_path))
 
     legacy_path = tmp_path / "munich.pkl"
@@ -154,27 +184,11 @@ def test_munich_iterator_legacy_link_selects_legacy_file(tmp_path, monkeypatch):
     with open(legacy_path, "wb") as f:
         pickle.dump(legacy_arr, f)
 
-    monkeypatch.setattr(si, "SIONNA_MUNICH_KA_PATH", str(ka_path))
+    monkeypatch.setattr(si, "SIONNA_MUNICH_PATH", str(ka_path))
     monkeypatch.setattr(si, "SIONNA_MUNICH_LEGACY_PATH", str(legacy_path))
 
     it = si.SionnaMunichIterator(link=si.MUNICH_LEGACY_LINK)
     assert it.freq_plan is None  # legacy pkl carries no metadata
-    np.testing.assert_array_equal(np.asarray(it[0]), legacy_arr[0])
-
-
-def test_munich_iterator_falls_back_to_legacy_when_ka_absent(tmp_path, monkeypatch):
-    from e2e.environment import sionna_iterator as si
-
-    legacy_path = tmp_path / "munich.pkl"
-    legacy_arr = np.ones((1, 4, 1, 1, 4), dtype=np.complex64)
-    with open(legacy_path, "wb") as f:
-        pickle.dump(legacy_arr, f)
-
-    monkeypatch.setattr(si, "SIONNA_MUNICH_KA_PATH", str(tmp_path / "does_not_exist.pkl"))
-    monkeypatch.setattr(si, "SIONNA_MUNICH_LEGACY_PATH", str(legacy_path))
-
-    it = si.SionnaMunichIterator()
-    assert it.freq_plan is None
     np.testing.assert_array_equal(np.asarray(it[0]), legacy_arr[0])
 
 

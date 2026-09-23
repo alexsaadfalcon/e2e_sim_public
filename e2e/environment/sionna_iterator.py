@@ -99,8 +99,26 @@ SIONNA_MUNICH_LEGACY_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich.pkl')
 # 2026-09-23) written by `e2e.environment.sionna_simple_channel`. This is what plain
 # 'munich' now resolves to, when present.
 SIONNA_MUNICH_KA_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich_ka.pkl')
-# Back-compat alias some call sites may still reference.
-SIONNA_MUNICH_PATH = SIONNA_MUNICH_LEGACY_PATH
+
+
+def _resolve_munich_default_path(ka_path=None, legacy_path=None):
+    """Ka-preferred, legacy-fallback resolution, pulled out as a pure function so tests
+    can exercise the logic directly (see the docstring on SIONNA_MUNICH_PATH below for
+    why the module attribute itself is resolved once, not re-checked per call)."""
+    ka_path = SIONNA_MUNICH_KA_PATH if ka_path is None else ka_path
+    legacy_path = SIONNA_MUNICH_LEGACY_PATH if legacy_path is None else legacy_path
+    return ka_path if os.path.exists(ka_path) else legacy_path
+
+
+# THE single path SionnaMunichIterator's default (no legacy-link override) branch
+# consults -- resolved ONCE here (ka-preferred, else legacy), so it stays a plain,
+# `monkeypatch.setattr`-able module attribute. This is a pre-existing test contract
+# (tests/test_blocks.py monkeypatches this exact name to point at a temp multi-link pkl
+# and relies on it being the SOLE authority `SionnaMunichIterator` consults for the
+# default case -- checking `SIONNA_MUNICH_KA_PATH.exists()` at call time instead, as an
+# earlier version of this file did, silently loaded the real generated munich_ka.pkl over
+# the monkeypatched path and broke that contract, since the real file exists on disk).
+SIONNA_MUNICH_PATH = _resolve_munich_default_path()
 # Special `link` value that selects the legacy 3.5 GHz file through the same
 # `SionnaMunichIterator(link=...)`/`SionnaEnvironmentBlock('munich', link=...)` call site
 # -- lets a caller pick the legacy artifact without a second scenario name.
@@ -118,9 +136,10 @@ def SionnaMunichIterator(link=None):
     # `link=MUNICH_LEGACY_LINK` is a FILE selector here, not a pkl-internal link name
     # (the legacy pkl is a bare ndarray with no links at all) -- it exists so the legacy
     # 3.5 GHz artifact stays reachable through 'munich' without a second scenario name.
+    # Any OTHER link value (including None) is pkl-internal link semantics, forwarded
+    # untouched to SionnaIterator against SIONNA_MUNICH_PATH -- this must NOT do its own
+    # ka-vs-legacy existence check (see that attribute's docstring above).
     if link == MUNICH_LEGACY_LINK:
         return SionnaIterator(SIONNA_MUNICH_LEGACY_PATH, link=None)
-    if os.path.exists(SIONNA_MUNICH_KA_PATH):
-        return SionnaIterator(SIONNA_MUNICH_KA_PATH, link=link)
-    return SionnaIterator(SIONNA_MUNICH_LEGACY_PATH, link=link)
+    return SionnaIterator(SIONNA_MUNICH_PATH, link=link)
 
