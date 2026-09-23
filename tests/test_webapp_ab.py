@@ -366,9 +366,11 @@ def test_range_az_panel_carries_the_peak_minus_median_statistic():
     ra = torch.from_numpy(power).to(torch.complex64)
     fig = figures_from_outputs({"range_az": [ra], "_axis_meta": {"range_az_bins": 16}})["range_az"]
 
-    title = fig.layout.title.text
+    # Extracted by its own label, not by end-of-string anchoring (wave 7 appended the
+    # gate-calibration/adaptive-clip clauses after this statistic in the same subline).
+    title = fig.layout.title.text.replace("<br>", " ")
     assert "peak - median" in title
-    measured = float(re.search(r"(-?\d+\.\d+)\s*(?:</sup>)?\s*$", title).group(1))
+    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", title).group(1))
     db = 10 * np.log10(np.maximum(power / power.max(), 1e-12))
     expected = round(float(db.max() - np.median(db)), 1)
     assert measured == pytest.approx(expected, abs=0.05)
@@ -389,9 +391,9 @@ def test_range_el_panel_carries_the_peak_minus_median_statistic_too():
     ra = torch.from_numpy(power).to(torch.complex64)
     fig = figures_from_outputs({"range_el": [ra], "_axis_meta": {"range_el_bins": 12}})["range_el"]
 
-    title = fig.layout.title.text
+    title = fig.layout.title.text.replace("<br>", " ")
     assert "peak - median" in title
-    measured = float(re.search(r"(-?\d+\.\d+)\s*(?:</sup>)?\s*$", title).group(1))
+    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", title).group(1))
     db = 10 * np.log10(np.maximum(power / power.max(), 1e-12))
     expected = round(float(db.max() - np.median(db)), 1)
     assert measured == pytest.approx(expected, abs=0.05)

@@ -120,6 +120,20 @@ _TESSERA_ARM_B_HEIGHT_DISPLAY = round(_TESSERA_ARM_B_HEIGHT_UM, 2)
 #: clause is stated from a computed number, once, in the blurb.
 _TESSERA_CANONICAL_HEIGHT_MODEL_UM = _TESSERA_CANONICAL_HEIGHT_UM * 2
 
+#: Wave 7 (X4-X8, hostile-expert read, 2026-09-23): the array disclosures the review
+#: asked every card that mentions the array to carry, read once here from the munich
+#: Ka trace's own stored generation meta (`e2e/environment/sionna_sims/munich_ka.pkl`,
+#: F93/F94: `rx_spacing_m` 4.997e-3, `aperture_m` 0.1549, `boresight_offset_deg` 35.0,
+#: `scattering_coefficient` 0.4 -- the last flagged in that same meta as an ASSUMPTION,
+#: not a measured material property) rather than re-typed per preset. Not read live
+#: from the pkl at import: this module is deliberately torch-free and import-cheap
+#: (module docstring), and the pkl is ~1.2 GB.
+_ARRAY_DISCLOSURE = (
+    "array: 32x32 at 5 mm spacing (15.5 cm aperture), Ka-band 28.5-31.5 GHz, "
+    "boresight 35 deg off the transmitter, diffuse scattering assumed "
+    "(coefficient 0.4)."
+)
+
 
 @dataclass(frozen=True)
 class DemoPreset:
@@ -220,8 +234,9 @@ PRESETS: List[DemoPreset] = [
         ),
         blurb=("Press Run once: both arms run and appear as before (A, top, 8 mA) / after "
                "(B, bottom, 0.5 mA), each panel printing its own peak-median statistic "
-               "(about 42 vs 30 dB). The range-azimuth image loses dynamic range as the "
-               "front-end's own noise rises. The signal is deliberately set just below "
+               "(about 66 vs 54 dB). Both panels look alike; the ~12 dB difference is "
+               "in the statistic, not the picture. The signal is deliberately set "
+               "just below "
                "the model's input-referred noise (1e-7 vs 1.36e-7 V) -- a real "
                "1024-element radar's per-element SNR, recovered by coherent gain. Manual "
                "path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz "
@@ -234,9 +249,18 @@ PRESETS: List[DemoPreset] = [
         # run B drops to 0.5 mA, the direction the card's headline (+12 dB) quotes.
         ab=("rffe", "lna_bias_ma", 0.5),
         ab_label_a="8 mA", ab_label_b="0.5 mA",
-        screen_note=("dB rel. peak on every panel; range 0 = earliest arrival (delays "
-                     "normalised at generation); all 1024 elements share one front-end "
-                     "config."),
+        # Wave 7 (X4/X6/X7, 2026-09-23): clip now follows the frame's own median floor
+        # (it reads "shared floor" here -- the Ka trace's median sits far below -43 dB,
+        # so the adaptive clip has nothing to tighten); gate/unambiguous range are on
+        # the panel itself (pipeline_runner.py); the array disclosure is mandatory on
+        # any card that mentions the array.
+        screen_note=("dB rel. peak; clip follows the frame's median floor + 3 dB, falls "
+                     "back to the shared -40 dB below -43 dB (as here, both arms); range "
+                     "(m; 0 = earliest arrival; 1.00 m/gate; unambiguous 125 m); both "
+                     "panels show the same streaks at the same visible brightness -- "
+                     "the floor difference is in the printed peak-median number, not "
+                     "the picture; all 1024 elements share one front-end config; "
+                     + _ARRAY_DISCLOSURE),
         say=[
             "LNA bias 0.5->8 mA is worth about +12 dB (+-0.6-0.9 dB).",
             "At default signal level (1e-5) these knobs do nothing (0.5 dB, under the "
@@ -247,10 +271,9 @@ PRESETS: List[DemoPreset] = [
             "There is no trade-off today: nothing clips; the IF filter only sets noise "
             "variance. Missing half: 1 MHz IF is a 1 ms sweep vs 20 us at 50 MHz; a "
             "20 m/s car moves two wavelengths in that time.",
-            "The brightest band at range 0-2 m is not a target: Sionna's "
-            "normalize_delays=True subtracts the shortest path's delay (see the screen "
-            "note); the 20-22 m stripe is real drifting multipath (2-21 m across "
-            "frames), not fixed.",
+            "The brightest band at range 0-2 m is not a target: real multipath sits "
+            "near 37 m and 68 m, drifting frame to frame (F93/F94: an earlier axis "
+            "was aliased).",
             "Noise figure IS quotable: Friis gives 11.97 dB, the measured end-to-end "
             "floor is 11.80 dB -- a 0.17 dB agreement through 1024 elements, the FFT "
             "chain, the AFE and the tracker (2026-09-21). Absolute sensitivity in dBm "
@@ -285,6 +308,16 @@ PRESETS: List[DemoPreset] = [
         overrides=_merge(
             {"afe": {"enabled": True, "params": {"exp": 5, "mantissa": 6}}},
             {"interconnect": {"enabled": False}},
+            # Wave 7 tracker re-pick (2026-09-23, F94 measured on the diffuse-scattering
+            # Ka retrace, real multipath restored): k=8 (the old default) is DEGENERATE
+            # at Ka -- effective rank is 3-4 and arm A spikes hard mid-run (frame 3:
+            # 0.00->0.34, >2x its own settled level). k=4 is ALSO unstable on this file
+            # (arm A: 0.00, 0.07, 0.07, 0.70, 0.51, 0.08 -- an 8-10x spike at frame 3,
+            # reproduced across repeated runs). k=2 is the largest k with no spike (arm
+            # A stays 0.00-0.07 across all 6 frames) and the arms still clearly
+            # separate (A ~0.06 vs B ~0.32, both settled). See the preset's `say` list
+            # for the re-measured numbers.
+            {"subspace": {"params": {"k": 2}}},
             _only_products("range_az", "range_el", "subspace_err"),
         ),
         # INTEGRITY (hostile-expert third read, 2026-09-23): the FFT range-elevation
@@ -293,49 +326,53 @@ PRESETS: List[DemoPreset] = [
         # is back on; the card now tells the three-number version below.
         blurb=("Press Run once: both arms run and appear as before (A, top, mantissa 6 "
                "bit) / after (B, bottom, mantissa 1 bit), each panel printing its "
-               "subspace-error statistic (about 0.06 for A vs about 0.63 for B, measured "
-               "on screen 2026-09-23). Three numbers carry the story: the range-azimuth "
-               "image barely moves (peak-median about 0.6 dB, 61.2 -> 60.6), the "
-               "elevation cut moves about 2.7 dB (mean image move in unclipped dB, "
-               "offline measurement 2026-09-22, not the on-screen statistic), and the "
-               "tracker error moves 10x (0.06 -> 0.63). The tracker is far more "
-               "sensitive to weight precision than either picture is; the elevation cut "
-               "is on screen precisely because it is the one that moves. The manual path "
-               "still works: lower the AFE weight mantissa 6 -> 1 bit and run again."),
-        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
+               "subspace-error statistic (about 0.06 for A vs about 0.32 for B, at k=2 "
+               "-- k=8 is degenerate on the Ka retrace, F94). Three numbers carry the "
+               "story: the range-azimuth image barely moves (peak-median about 0.3 dB, "
+               "76.7 -> "
+               "76.4), the elevation cut moves about 2.7 dB (mean image move in "
+               "unclipped dB, offline measurement 2026-09-22, not the on-screen "
+               "statistic), and the tracker error moves about 5x (0.06 -> 0.32). The "
+               "tracker is far more sensitive to weight precision than either picture "
+               "is; the elevation cut is on screen precisely because it is the one that "
+               "moves. The manual path still works: lower the AFE weight mantissa 6 -> "
+               "1 bit and run again."),
+        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.32 at k=2)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
-        # to 1 bit, the 0.63 arm the card's headline quotes.
+        # to 1 bit, the 0.32 arm the card's headline quotes.
         ab=("afe", "mantissa", 1),
         ab_label_a="6 bit", ab_label_b="1 bit",
         # Rewritten (hostile-expert fourth read, 2026-09-23): the old note claimed the
         # elevation cut moves ~2.7 dB, a number no panel on THIS screen shows (that
         # figure is a different, offline metric -- see the card's `say`/`blurb`). The
         # note now claims only what the two displayed images and the tracker curve do.
+        # Numbers re-measured wave 7 at k=2 (see the `overrides` comment above); array
+        # disclosure appended (wave 7, X4-X8: mandatory on any card naming the array).
         screen_note=("range-azimuth and range-elevation images barely move on the "
-                     "displayed -40 dB range (statistics printed on each); the tracker "
-                     "error moves 10x; subspace error is unnormalised, ceiling sqrt(k) "
-                     "= 2.83 for k = 8."),
+                     "adaptive display clip (statistics printed on each; range m/gate "
+                     "and unambiguous range on the panel); the tracker error moves "
+                     "about 5x; subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
+                     "for k = 2. " + _ARRAY_DISCLOSURE),
         say=[
-            "As loaded the curve starts at 0.04 and settles at 0.06 within two frames: "
+            "As loaded the curve starts near 0 and settles at about 0.06 by frame 1: "
             "the tracker is warm-started from a perturbed copy of the true subspace and "
             "relaxes to its steady tracking error. The knob compares the SETTLED level, "
-            "0.06 against 0.63.",
-            "Say the headline in ANGLES: subspace error 0.63 -> 0.06 is an unnormalized "
+            "0.06 against 0.32.",
+            "Say the headline in ANGLES: subspace error 0.32 -> 0.06 is an unnormalized "
             "distance bounded by sqrt(k); converted, the average principal angle goes "
-            "12.8 deg -> 1.3 deg.",
-            "The three numbers together: range-azimuth barely moves (about 0.6 dB, "
-            "61.2 -> 60.6), the elevation cut moves about 2.7 dB (an offline metric, "
-            "not on screen), and the tracker error moves 10x. The AFE does "
-            "something real; the range-azimuth picture just is not where it shows.",
+            "13.1 deg -> 2.6 deg.",
+            "The three numbers together: range-azimuth barely moves (~0.3 dB), the "
+            "elevation cut moves ~2.7 dB (offline, not on screen), and the tracker "
+            "error moves ~5x -- the AFE does something real; the picture just is not "
+            "where it shows.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
-            "The brightest band at range 0-2 m is not a target: Sionna's "
-            "normalize_delays=True subtracts the shortest path's delay, so range 0 is "
-            "the earliest arrival (47.6 dB above the frame-0 median). The 20-22 m stripe "
-            "is real drifting multipath (2-21 m across frames), not fixed.",
-            "Read with Thrust 3: at 1 bit the tracker's steady state (0.62) is worse than "
-            "a cold start's FIRST frame (about 0.6) -- at that precision it never acquires "
-            "(measured on screen 2026-09-23).",
+            "The brightest band at range 0-2 m is not a target: real multipath returns "
+            "sit near 37 m and 68 m, drifting frame to frame (F93/F94 corrected an "
+            "earlier aliased-axis quote).",
+            "Tracker dimension k was re-picked: k=8 (old default) and k=4 both spike "
+            "mid-run on the Ka retrace (effective rank 3-4, F94); k=2 is the largest k "
+            "stable on both arms.",
         ],
         do_not_say=[
             "That the mantissa sweep models analog hardware error: AFEBlock uses "
@@ -348,6 +385,8 @@ PRESETS: List[DemoPreset] = [
             "unmeasured.",
             "Peak-to-median dynamic range as evidence compression is good: it improves as "
             "compression worsens.",
+            "That k=8 still applies: it is degenerate here (F94); this preset runs at "
+            "k=2, not comparable to Thrust 3's k=8 numbers.",
         ],
     ),
     DemoPreset(

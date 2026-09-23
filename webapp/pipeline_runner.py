@@ -1584,6 +1584,26 @@ def _cropped_nonneg_range_axis(n_bins: int, freq_span_hz: float, n_freqs: int) -
     return axis[_nonnegative_range(axis)]
 
 
+def _range_per_gate_m(n_bins: int, freq_span_hz: float, n_freqs: int) -> float:
+    """Physical range (m) spanned by ONE display gate -- the same `per = ceil(n_freqs
+    / n_bins)` grouping `_range_axis` uses, factored out so a card/subline can quote
+    "X m per gate" without re-deriving `_range_axis`'s own math (wave 7, X6/X7: no
+    panel stated this, so a screen's on-screen features had no stated calibration)."""
+    per = -(-n_freqs // n_bins)               # ceil(n_freqs / n_bins); matches _power_bin
+    return per * _C / (2.0 * freq_span_hz)
+
+
+def _native_unambiguous_range_m(freq_span_hz: float, n_freqs: int) -> float:
+    """One-sided unambiguous range (m) of the frame's OWN frequency sampling --
+    independent of the display bin count, unlike `_range_per_gate_m`. This is
+    `(n_freqs // 2)` native (per=1) range steps, matching the generator's own stored
+    `meta['unambiguous_range_m']` exactly for the munich Ka trace (n_freqs=5000,
+    freq_span_hz=3e9 -> 124.9135 m, F94) -- verified against that field rather than
+    re-derived from a radar-equation reference, since `_range_axis` already fixes the
+    zero-gate/fftshift convention this must agree with."""
+    return (n_freqs // 2) * _C / (2.0 * freq_span_hz)
+
+
 def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     """fftshifted range DISPLAY-gate index -> physical range (meters).
 
@@ -1606,7 +1626,7 @@ def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     axis is negated here so physical targets read at positive range.
     """
     per = -(-n_freqs // n_bins)               # ceil(n_freqs / n_bins); matches _power_bin
-    range_per_gate = per * _C / (2.0 * freq_span_hz)
+    range_per_gate = _range_per_gate_m(n_bins, freq_span_hz, n_freqs)
     zero_gate = (n_freqs // 2) // per
     return -(np.arange(n_bins) - zero_gate) * range_per_gate
 
@@ -1710,7 +1730,12 @@ _HEATMAP_MARGIN_R = 20
 #: `_wrap_text` used on that subline below) -- 3 total lines (main title + 2 wrapped
 #: subline lines) need more headroom than the 2-line case the other heatmap panels
 #: (radar_cube, detector, fft) still use.
-_HEATMAP_MARGIN_T = 120
+#: Raised again, from 120 (wave 7, X4/X6/X7): the range-azimuth/range-elevation
+#: subline gained the gate-calibration clause ("m/gate, unambig ... m") and the
+#: adaptive-clip clause on top of the three above, which wraps to 3 lines at
+#: two-card width -- 4 total lines. Every other `_heatmap` caller's shorter subline
+#: just leaves the extra headroom unused.
+_HEATMAP_MARGIN_T = 160
 _HEATMAP_MARGIN_B = 40
 _HEATMAP_PLOT_DOMAIN_HEIGHT = 280
 _HEATMAP_HEIGHT = _HEATMAP_PLOT_DOMAIN_HEIGHT + _HEATMAP_MARGIN_T + _HEATMAP_MARGIN_B
@@ -1984,12 +2009,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # must NOT carry this note -- webapp/demo_presets.py's thrust5
                 # scripts already say the absolute-range story for those on screen.
                 earliest_arrival_note = "; range 0 = earliest arrival"
+                # Calibration nobody stated on screen (wave 7, X6/X7): a hostile-expert
+                # read found the "20-22 m stripe" quoted on three cards was off the
+                # true delays because no panel said what a display gate is worth in
+                # metres, or how far the axis can go before it wraps. Computed from
+                # this frame's own freq_plan + display bin count, not hand-typed.
+                gate_note = (
+                    f"; {_range_per_gate_m(bins, freq_span_hz, n_freqs):.2f} m/gate, "
+                    f"unambig {_native_unambiguous_range_m(freq_span_hz, n_freqs):.0f} m")
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
                 y = np.arange(bins)
                 ylabel = "range (bins)"
                 earliest_arrival_note = ""
+                gate_note = ""
             # Peak-median dB, per frame, on the UNCLIPPED map BEFORE the nonneg-range
             # crop below -- matches notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4
             # cards' own dynamic-range definition (Change 2). Computed for range_el too
@@ -2003,6 +2037,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if frames_db[-1].shape[0] == keep.size:
                 frames_db = [f[keep] for f in frames_db]
                 y = y[keep]
+            # Adaptive display clip (wave 7, X4/X5): on the pre-diffuse-scattering
+            # munich Ka trace the shared -40 dB clip left these screens near-black --
+            # 99%+ of pixels sat below it (F94) -- because nothing followed the
+            # frame's own floor. Same treatment as `_radar_cube_clip_db`, on the
+            # CROPPED (physical-range) last frame so the clip reflects what is
+            # actually on screen; on the re-traced file (real multipath restored,
+            # 2026-09-23) the floor still sits below -43 dB so this reads "shared
+            # floor" (unchanged from -40) -- measured, not assumed either way.
+            clip_db = _radar_cube_clip_db(frames_db[-1])
+            if clip_db > -40.0:
+                clip_note = f"; clip {clip_db:.1f} dB (median floor + 3 dB)"
+            else:
+                clip_note = f"; clip {clip_db:.1f} dB (shared floor)"
+            colorbar_title = f"dB rel. peak<br>(clipped at {clip_db:.1f})"
             # The main title is short enough to fit the two-card layout's ~600 px
             # ("Range-Azimuth power (non-coherent over elevation)" ran off the right
             # edge there, rehearsal 2026-09-23); the qualifier moves into a
@@ -2014,13 +2062,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # chars, well past what a two-card (~700 px) panel fits on one line --
             # it clipped mid-word ("...range 0 = earliest arriv", rehearsal PNG,
             # thrust4_interconnect_range_profile). `_HEATMAP_MARGIN_T` already
-            # budgets for the 2-line-subline case this produces.
+            # budgets for the multi-line subline this produces (raised again, wave 7,
+            # for the gate-calibration/clip clauses added here).
             sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
-                       f"{earliest_arrival_note}" for d in dyn_range_db]
+                       f"{earliest_arrival_note}{gate_note}{clip_note}" for d in dyn_range_db]
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
                      for s in sublines]
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
-                           ylabel=ylabel)
+                           ylabel=ylabel, zmin=clip_db, colorbar_title=colorbar_title)
             if key == "range_az" and range_az_yaxis_extent is not None:
                 # See `range_az_yaxis_extent`'s definition above the loop.
                 fig.update_yaxes(range=[0.0, range_az_yaxis_extent])

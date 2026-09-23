@@ -200,6 +200,58 @@ def test_thrust1_sits_at_the_weak_signal_operating_point():
     assert st["rffe"]["params"]["lna_bias_ma"] == 8.0 and st["rffe"]["params"]["if_bw_mhz"] == 15.0
 
 
+# ------------------------------------------------------------------------------------
+# Wave 7 review, KA-band screens re-traced with diffuse scattering (2026-09-23): X4-X8.
+# ------------------------------------------------------------------------------------
+@pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error"])
+def test_wave7_cards_carry_the_array_disclosure(pid):
+    """X4-X8 (hostile reader): every card that mentions the array states its size,
+    spacing/aperture, band, boresight offset and the diffuse-scattering assumption."""
+    from webapp.demo_presets import _ARRAY_DISCLOSURE
+
+    p = PRESETS_BY_ID[pid]
+    assert _ARRAY_DISCLOSURE in p.screen_note
+    assert "32x32" in _ARRAY_DISCLOSURE and "5 mm" in _ARRAY_DISCLOSURE
+    assert "15.5 cm" in _ARRAY_DISCLOSURE
+    assert "28.5-31.5 ghz" in _ARRAY_DISCLOSURE.lower() or "ka-band" in _ARRAY_DISCLOSURE.lower()
+    assert "35 deg" in _ARRAY_DISCLOSURE
+    assert "0.4" in _ARRAY_DISCLOSURE and "assumed" in _ARRAY_DISCLOSURE.lower()
+
+
+@pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error"])
+def test_wave7_stale_stripe_claim_is_gone(pid):
+    """X6: the old '20-22 m' stripe quote was off the true axis (the 1000-point Ka
+    sweep aliased a 68 m return down to ~18 m, F94); the fix ships 5000 points (125 m
+    unambiguous, no aliasing) and the cards must name the true families instead."""
+    p = PRESETS_BY_ID[pid]
+    for text in [p.blurb, p.screen_note, *p.say, *p.do_not_say]:
+        assert "20-22 m" not in text
+    assert any("37" in s and "68" in s for s in p.say), \
+        f"{pid}: expected the true multipath ranges (37 m / 68 m family) on the card"
+
+
+@pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error"])
+def test_wave7_range_axis_calibration_is_on_the_screen_note(pid):
+    """X6/X7: metres-per-gate and the unambiguous range, computed from the frame's own
+    freq_plan (pipeline_runner._range_per_gate_m / _native_unambiguous_range_m), not
+    hand-typed -- see tests/test_webapp_figures_wave7.py for the panel-level pin."""
+    p = PRESETS_BY_ID[pid]
+    assert "m/gate" in p.screen_note or "m per gate" in p.screen_note
+    assert "125 m" in p.screen_note or "unambiguous" in p.screen_note.lower()
+
+
+def test_thrust2_tracker_k_repicked_for_the_ka_retrace():
+    """X4/X8 (F94): k=8, the pre-retrace default, is degenerate once real multipath is
+    restored (effective rank 3-4; arm A spikes hard mid-run). k=2 is the largest k
+    measured stable on both arms (2026-09-23, six repeated runs) -- see the preset's
+    own `overrides` comment for the numbers."""
+    st = apply_preset(PRESETS_BY_ID["thrust2_feature_reduction_error"])
+    assert st["subspace"]["params"]["k"] == 2
+    p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
+    assert any("k=2" in s or "k = 2" in s.lower() for s in [p.blurb] + p.say)
+    assert any("degenerate" in s.lower() and "k=8" in s.lower() for s in p.say + p.do_not_say)
+
+
 def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
     """INTEGRITY fix (hostile-expert third read, 2026-09-23): the FFT range-elevation
     panel used to be turned off because it contradicted the "image barely moves"
@@ -225,11 +277,15 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
     assert "barely move" in p.screen_note
     assert "not the on-screen statistic" in p.blurb
-    # Card numbers drift against the live nondeterministic run (hostile-expert fourth
-    # read, 2026-09-23): the cross-reference to Thrust 3's cold-start first frame must
-    # say "about 0.6", never the stale fixed "0.58".
+    # Wave 7 (2026-09-23, F94): the old cross-reference to Thrust 3's cold-start first
+    # frame ("about 0.6") compared error values at k=8; this preset now runs at k=2
+    # (k=8/k=4 are both degenerate on the Ka retrace -- see the `overrides` comment),
+    # and an unnormalized subspace-error distance at a different k is not the same
+    # quantity, so the cross-reference is gone rather than silently wrong. The say list
+    # says so explicitly instead.
     assert not any("0.58" in s for s in p.say)
-    assert any("about 0.6" in s for s in p.say)
+    assert not any("about 0.6" in s and "thrust 3" in s.lower() for s in p.say)
+    assert any("not comparable" in s.lower() for s in p.do_not_say)
 
 
 def test_thrust3_is_a_cold_start_at_2_to_1():
