@@ -156,6 +156,50 @@ def score_frames(
     }
 
 
+#: Table geometry (px): header + 7 data rows must fit inside the domain the figure's
+#: own `height`/`margin` leaves for the table trace, or the LAST rows get silently cut
+#: off by the renderer -- not resized, not scrolled (rehearsal, 2026-09-23: a long
+#: header ("CA-CFAR (guard 2, train 6) -- threshold 0.66") wrapped to two lines inside
+#: its declared single-line height, stealing room from the bottom of the table and
+#: clipping the "hit rate" row -- the CFAR and neural-detector arms otherwise run the
+#: same code and must show identical rows). Threshold moved out of the header (into
+#: the title, below) specifically so the header text stays short enough not to wrap;
+#: the extra header/margin slack below is a second, independent guard for arm names
+#: this module does not control the length of (e.g. an ML checkpoint's directory name).
+_TABLE_N_ROWS = 7
+_TABLE_HEADER_HEIGHT = 40
+_TABLE_ROW_HEIGHT = 30
+_TABLE_MARGIN_T = 50
+#: Room for the (possibly multi-line, see `_wrap_text`) match-rule annotation below
+#: the table.
+_TABLE_MARGIN_B = 120
+_TABLE_HEIGHT = (_TABLE_MARGIN_T + _TABLE_HEADER_HEIGHT
+                + _TABLE_N_ROWS * _TABLE_ROW_HEIGHT + _TABLE_MARGIN_B)
+
+
+def _wrap_text(text: str, max_chars: int = 70) -> str:
+    """Greedy word-wrap `text` into `'<br>'`-joined lines no wider than `max_chars`
+    characters, so a long sentence doesn't get silently clipped by its container's
+    fixed pixel width -- the un-wrapped match-rule annotation ran off the right edge
+    of a two-card (~600 px) panel (rehearsal, 2026-09-23: "...+-0.06 in sin(azimu").
+    Word boundaries only (never mid-word), so a URL-like token can still exceed
+    `max_chars` on its own line -- none of this module's callers pass one.
+    """
+    words = text.split()
+    lines: List[str] = []
+    cur = ""
+    for w in words:
+        candidate = f"{cur} {w}".strip()
+        if cur and len(candidate) > max_chars:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = candidate
+    if cur:
+        lines.append(cur)
+    return "<br>".join(lines)
+
+
 def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                       threshold: Optional[float], match_rule_text: str) -> go.Figure:
     """A compact table: this frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
@@ -190,9 +234,10 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
 
     fig = go.Figure(data=[go.Table(
         columnwidth=[220, 90],
-        header=dict(values=[f"{arm_name} -- threshold {thr_txt}", ""],
-                   fill_color="#2d3436", font=dict(color="white", size=18), height=34,
-                   align="left"),
+        # Second column used to be an empty dark cell -- it labels the counts below it.
+        header=dict(values=[arm_name, "count"],
+                   fill_color="#2d3436", font=dict(color="white", size=18),
+                   height=_TABLE_HEADER_HEIGHT, align="left"),
         cells=dict(
             values=[
                 ["this frame: TP", "this frame: FP", "this frame: FN",
@@ -200,20 +245,26 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                  "cumulative false alarms", "FA / frame", "hit rate"],
                 this_frame + cum_values,
             ],
-            fill_color=[["#f5f6fa"] * 7, ["#ffffff"] * 7],
-            font=dict(size=18), height=30, align="left",
+            fill_color=[["#f5f6fa"] * _TABLE_N_ROWS, ["#ffffff"] * _TABLE_N_ROWS],
+            font=dict(size=18), height=_TABLE_ROW_HEIGHT, align="left",
         ),
     )])
     fig.update_layout(
-        title=dict(text="Detector scoreboard", font=dict(size=20)),
-        margin=dict(l=10, r=10, t=50, b=80),
-        height=380,
+        # Threshold moved here (out of the header -- see `_TABLE_HEADER_HEIGHT`'s
+        # comment) as a "<br><sup>" subline, the same pattern pipeline_runner.py uses
+        # for every other panel's headline statistic.
+        title=dict(text=f"Detector scoreboard<br><sup>threshold {thr_txt}</sup>",
+                  font=dict(size=20)),
+        margin=dict(l=10, r=10, t=_TABLE_MARGIN_T, b=_TABLE_MARGIN_B),
+        height=_TABLE_HEIGHT,
     )
     # The match rule, in words with its numbers -- see match_rule_text(). Below the
     # table rather than in it: it is a sentence, not one of the counted numbers.
+    # Wrapped (see `_wrap_text`): unwrapped, this sentence is far wider than a
+    # two-card (~600 px) panel and got clipped at the card edge.
     fig.add_annotation(
-        text=match_rule_text, xref="paper", yref="paper", x=0.0, y=-0.14,
-        showarrow=False, align="left", font=dict(size=15), xanchor="left",
+        text=_wrap_text(match_rule_text), xref="paper", yref="paper", x=0.0, y=-0.14,
+        showarrow=False, align="left", font=dict(size=15), xanchor="left", yanchor="top",
     )
     return fig
 
@@ -330,9 +381,13 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1])
     fig.update_yaxes(title=dict(text="precision", font=dict(size=16)), range=[0, 1])
     fig.update_layout(
+        # Short enough to fit a two-card (~600 px) panel -- the old single-line
+        # "scored offline over the {n} test frames of {corpus} (beat_cfar.json)" ran
+        # off the card edge as "... (b..." (rehearsal, 2026-09-23); the source file
+        # name moves to a subline, like every other panel's qualifier text.
         title=dict(
-            text=(f"scored offline over the {n_frames} test frames of {corpus_name} "
-                  "(beat_cfar.json)"),
+            text=f"scored offline: {n_frames} test frames, {corpus_name}"
+                 "<br><sup>beat_cfar.json</sup>",
             font=dict(size=18),
         ),
         legend=dict(font=dict(size=15)),

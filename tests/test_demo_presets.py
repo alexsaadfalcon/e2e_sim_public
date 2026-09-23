@@ -70,6 +70,33 @@ def test_preset_carries_operator_notes(preset):
         assert key in {p.key for p in BLOCKS_BY_ID[bid].params}, (preset.id, bid, key)
 
 
+def _wc(text: str) -> int:
+    return len(text.split())
+
+
+@pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])
+def test_card_word_count_ceiling(preset):
+    """The presenter cannot glance at a card while talking (927-word RADDetNet card,
+    found reading the rendered screen 2026-09-23). blurb + say + do_not_say together
+    must fit in 450 words for every card."""
+    total = (_wc(preset.blurb) + sum(_wc(s) for s in preset.say)
+             + sum(_wc(s) for s in preset.do_not_say))
+    assert total <= 450, f"{preset.id}: {total} words, over the 450-word card ceiling"
+
+
+def test_raddetnet_card_meets_the_tighter_per_section_budgets():
+    """The RADDetNet card specifically (Defect 3): blurb <= 120 words, at most 6 'say'
+    bullets each <= 45 words, at most 5 'do not say' bullets each <= 35 words."""
+    p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    assert _wc(p.blurb) <= 120
+    assert len(p.say) <= 6
+    for s in p.say:
+        assert _wc(s) <= 45, s
+    assert len(p.do_not_say) <= 5
+    for s in p.do_not_say:
+        assert _wc(s) <= 35, s
+
+
 # ------------------------------------------------------------------------------------
 # The specific promises the review extracted
 # ------------------------------------------------------------------------------------

@@ -297,13 +297,17 @@ def _matching_ab_preset(block_state: Dict[str, Any]):
     return None
 
 
-def _ab_banner_line(preset: "DemoPreset") -> str:
-    """'A: <value> | B: <value>', naming the knob the way the editor labels it --
-    prefixed onto both arms' banners so the comparison the operator asked for a knob
-    turn to show is legible without also reading the operator card."""
+def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
+    """'A (as loaded): <label> <value> -- before' or 'B: <label> <value> -- after',
+    naming the knob the way the editor labels it. ONE arm's value only -- before
+    2026-09-23 both panels' banners printed BOTH arms' values with identical text, so
+    a visitor reading a single panel could not tell which arm was on screen (defect
+    found reading the rendered Results tab)."""
     bid, key, _value_b = preset.ab
     label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
-    return f"A/B -- {label}: A: {preset.ab_label_a or '?'} | B: {preset.ab_label_b or '?'}"
+    if arm == "a":
+        return f"A (as loaded): {label} {preset.ab_label_a or '?'} -- before"
+    return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
 def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str):
@@ -415,8 +419,13 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
 
     A/B presets (Change 1, `DemoPreset.ab`): when `block_state` is exactly an ab-preset's
     as-loaded state, this runs the pipeline TWICE -- run A as loaded, run B with the
-    preset's single override -- and reuses this same before/after mechanism: A becomes
-    ``_previous``, B becomes the current run. One click, two runs, no manual re-run.
+    preset's single override -- and reuses this same before/after mechanism, but with A
+    ON TOP: A is the current-run payload (rendered first), B becomes ``_previous``
+    (rendered second, below the divider). Each arm's ``_banner`` names ONLY its own
+    value ("A (as loaded): ... -- before" / "B: ... -- after"), and both carry
+    ``_ab=True`` so `_render_results` skips the generic "This run"/"Previous run"
+    prefixes (defect found reading the rendered Results tab, 2026-09-23: both panels
+    printed identical "A: .. | B: .." text). One click, two runs, no manual re-run.
 
     `session_id` scopes Cancel and the double-click guard to the browser tab that
     clicked Run (see `_cancel_event`/`_run_lock`): a second click while a run for the
@@ -506,7 +515,14 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 "The Results tab is unchanged.", style={"color": "#f39c12"}), no_update, sink
 
         if state_b is not None:
-            ab_line = _ab_banner_line(ab_preset)
+            # Arm A renders ON TOP (the as-loaded baseline, "before") and arm B below
+            # ("after") -- both used to carry identical "A: .. | B: .." text on both
+            # panels, so a visitor reading one panel could not tell which arm was on
+            # screen (defect found reading the rendered Results tab, 2026-09-23). A is
+            # the top-level store payload (rendered first); B is nested under
+            # "_previous" (rendered second, below the divider) -- reusing the existing
+            # before/after render mechanism, but each banner now names ONLY its own arm.
+            line_a = _ab_arm_line(ab_preset, "a")
             result_b = (_arm_result(n_clicks, outputs_b, n_steps, state_b, scenario_json,
                                     _note_for(state_b, outputs_b.get("_axis_meta") or {}))
                        if outputs_b is not None else None)
@@ -514,16 +530,21 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 # Cancelled between A and B (or before B's first frame): show A alone,
                 # exactly like an ordinary single run -- Cancel still leaves something.
                 data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
-                data_a["_banner"] = f"{ab_line} -- B did not run (cancelled)  ||  {result_a['banner']}"
+                data_a["_banner"] = f"{line_a} -- B did not run (cancelled)  ||  {result_a['banner']}"
+                data_a["_ab"] = True
                 if prev_results:
                     data_a["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
                 return data_a, html.Span(
                     "Cancelled before run B started: showing run A only. See Results tab.",
                     style={"color": "#f39c12"}), "tab-results", sink
-            data_b = {k: f.to_dict() for k, f in result_b["figs"].items()}
+            line_b = _ab_arm_line(ab_preset, "b")
             data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
-            data_b["_banner"] = f"{ab_line}  ||  {result_b['banner']}"
-            data_b["_previous"] = {**data_a, "_banner": f"{ab_line}  ||  {result_a['banner']}"}
+            data_b = {k: f.to_dict() for k, f in result_b["figs"].items()}
+            data_a["_banner"] = f"{line_a}  ||  {result_a['banner']}"
+            data_a["_ab"] = True
+            data_b["_banner"] = f"{line_b}  ||  {result_b['banner']}"
+            data_b["_ab"] = True
+            data_a["_previous"] = data_b
             if result_b["cancelled"]:
                 msg = html.Span(
                     f"A complete, B cancelled after "
@@ -535,7 +556,7 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                     f"A/B run complete ({ab_preset.ab_label_a} vs {ab_preset.ab_label_b}): "
                     f"{result_a['n_products']} / {result_b['n_products']} product(s). "
                     "See Results tab.", style={"color": "#20bf6b"})
-            return data_b, msg, "tab-results", sink
+            return data_a, msg, "tab-results", sink
 
         # Ordinary single-run path: unchanged behaviour.
         data = {k: f.to_dict() for k, f in result_a["figs"].items()}
@@ -781,7 +802,12 @@ def _render_results(results_data, active_tab):
     children = [html.H3("Results")]
     banner = results_data.get("_banner")
     if banner:
-        children.append(html.Div(f"This run: {banner}",
+        # An A/B run's banner already names its own arm in full ("A (as loaded): ..
+        # -- before" / "B: .. -- after", see `_ab_arm_line`); the generic "This run"/
+        # "Previous run" prefix stays for the single-run and manual before/after
+        # paths, where the banner does not name an arm.
+        prefix = "" if results_data.get("_ab") else "This run: "
+        children.append(html.Div(f"{prefix}{banner}",
                                  style={"color": "#2d3a4a", "fontWeight": "bold",
                                         "marginBottom": "4px"}))
     children.append(_grid(figs))
@@ -790,8 +816,9 @@ def _render_results(results_data, active_tab):
         # under its own banner, so "turn one knob and run again" is a comparison
         # the audience can see rather than remember.
         children.append(html.Hr())
+        prev_prefix = "" if prev.get("_ab") else "Previous run (for before/after): "
         children.append(html.Div(
-            f"Previous run (for before/after): {prev.get('_banner') or 'unlabelled'}",
+            f"{prev_prefix}{prev.get('_banner') or 'unlabelled'}",
             style={"color": "#576574", "fontWeight": "bold", "marginTop": "6px",
                    "marginBottom": "4px"}))
         children.append(_grid(prev_figs))

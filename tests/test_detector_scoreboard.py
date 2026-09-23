@@ -145,8 +145,12 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     assert row["cumulative false alarms"] == "1"
     assert row["FA / frame"] == "0.50"
     assert row["hit rate"] == "0.50"
-    assert "classical CFAR" in table.header.values[0]
-    assert "0.50" in table.header.values[0]
+    # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
+    # wrapped to two lines inside the header's declared height and clipped the
+    # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
+    assert table.header.values[0] == "classical CFAR"
+    assert table.header.values[1] == "count"
+    assert "0.50" in fig.layout.title.text
 
 
 def test_scoreboard_figure_no_scored_frames_reads_na_not_zero():
@@ -168,6 +172,66 @@ def test_scoreboard_figure_fonts_are_legible_at_distance():
     # 3 (this-frame) + 4 (cumulative) numbers -- at most 8, per spec.
     _labels, values = table.cells.values
     assert len(values) <= 8
+
+
+def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length():
+    """The bug this pins: a long header ("CA-CFAR (guard 2, train 6) -- threshold
+    0.66") wrapped to two lines inside its declared single-line height, stealing
+    room from the bottom of the table and clipping the last ("hit rate") row --
+    CFAR and the neural-detector arms run the same code and must show identical
+    rows (rehearsal, 2026-09-23). Checked geometrically (the domain the figure's
+    own height/margin leaves for the table must fit header + all data rows), since
+    a Plotly figure object carries no rendered pixel truth to assert on directly."""
+    scores = ds.score_frames([[]], None)
+    long_name = "a very long arm name, e.g. an ML checkpoint's parent directory"
+    fig = ds.scoreboard_figure(scores, arm_name=long_name, threshold=0.5,
+                               match_rule_text="rule")
+    table = _table(fig)
+    domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
+    content_height = table.header.height + len(table.cells.values[0]) * table.cells.height
+    assert domain_height >= content_height
+    # All 7 rows are always present in the underlying data, for every arm -- the
+    # rendering bug above was purely geometric, not a difference in what is computed.
+    labels, _values = table.cells.values
+    assert labels == ["this frame: TP", "this frame: FP", "this frame: FN",
+                      "cumulative hits (0/1 frames scored)",
+                      "cumulative false alarms", "FA / frame", "hit rate"]
+
+
+def test_scoreboard_figure_header_count_label_and_threshold_in_title():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="CA-CFAR (guard 2, train 6)",
+                               threshold=0.66, match_rule_text="rule")
+    table = _table(fig)
+    # The header's second column used to be an empty dark cell.
+    assert table.header.values[1] == "count"
+    assert "0.66" in fig.layout.title.text
+
+
+def test_scoreboard_figure_match_rule_is_wrapped_to_fit_the_card():
+    scores = ds.score_frames([[]], None)
+    long_rule = ds.match_rule_text()
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text=long_rule)
+    ann = fig.layout.annotations[0]
+    lines = ann.text.split("<br>")
+    assert len(lines) >= 2, "the real match rule sentence is too long for one line"
+    assert all(len(line) <= 70 for line in lines)
+    # Wrapping must not drop or reorder any word.
+    assert " ".join(lines) == long_rule
+
+
+def test_wrap_text_never_exceeds_max_chars_and_preserves_words():
+    text = ("a detection counts as a hit within a fixed range and azimuth tolerance "
+           "of a ground-truth target; one detection claims at most one target")
+    wrapped = ds._wrap_text(text, max_chars=30)
+    lines = wrapped.split("<br>")
+    assert all(len(line) <= 30 for line in lines)
+    assert " ".join(lines) == text
+
+
+def test_wrap_text_is_a_no_op_for_a_short_string():
+    assert ds._wrap_text("short text", max_chars=70) == "short text"
 
 
 # --------------------------------------------------------------------------------

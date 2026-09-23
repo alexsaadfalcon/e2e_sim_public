@@ -4,7 +4,9 @@ legibility floor -- all from the 2026-09-22/23 hostile-expert and legibility rev
 
 Three of seven demo cards (Thrust 1, 2, 4) claimed a before/after number that no single
 screen ever showed. These tests pin: (a) an `ab` preset runs the pipeline twice, the
-override applied ONLY to run B; (b) the Results banner names both arms' values; (c) a
+override applied ONLY to run B; (b) each panel's banner names ONLY its own arm's value,
+with A rendered on top ("before") and B below ("after") -- a defect found reading the
+rendered Results tab, where both panels used to carry identical text; (c) a
 before/after pair shares one heatmap colour scale and axis extent, and one y-range
 floor for line plots; (d) the range-azimuth/range-profile panels print the exact
 statistic notes/tools/demo_thrust1_rescue.py::q defines; (e) the subspace-error plot
@@ -85,7 +87,11 @@ def test_ab_preset_runs_pipeline_twice_override_only_on_b(monkeypatch):
     assert "_previous" in data
 
 
-def test_ab_banner_names_both_arms_values(monkeypatch):
+def test_ab_banner_shows_arm_a_on_top_and_arm_b_below(monkeypatch):
+    """Defect fix (2026-09-23 rendered-screen read): both panels used to carry
+    identical 'A: .. | B: ..' text, so a visitor reading one panel could not tell
+    which arm it was. Each banner now names ONLY its own arm, A renders on top (the
+    as-loaded baseline, "before") and B renders below (the turned-knob arm, "after")."""
     preset = PRESETS_BY_ID["thrust1_circuit_knobs"]
     state_a = apply_preset(preset)
     calls = []
@@ -93,12 +99,20 @@ def test_ab_banner_names_both_arms_values(monkeypatch):
 
     data, *_ = appmod._run_pipeline(1, state_a, preset.n_steps, "", None)
 
-    assert preset.ab_label_a in data["_banner"] and preset.ab_label_b in data["_banner"]
-    assert preset.ab_label_a in data["_previous"]["_banner"]
-    assert preset.ab_label_b in data["_previous"]["_banner"]
-    # Names the knob by its editor label, not the raw param key.
+    # A (the top-level, first-rendered payload) names only its own value.
+    assert preset.ab_label_a in data["_banner"] and "before" in data["_banner"]
+    assert preset.ab_label_b not in data["_banner"]
+    assert data["_banner"].startswith("A (as loaded):")
+    assert data["_ab"] is True
+    # B (nested under "_previous", rendered second/below) names only its own value.
+    prev_banner = data["_previous"]["_banner"]
+    assert preset.ab_label_b in prev_banner and "after" in prev_banner
+    assert preset.ab_label_a not in prev_banner
+    assert prev_banner.startswith("B:")
+    assert data["_previous"]["_ab"] is True
+    # Names the knob by its editor label, not the raw param key, on BOTH banners.
     label = next(ps.label for ps in BLOCKS_BY_ID["rffe"].params if ps.key == "lna_bias_ma")
-    assert label in data["_banner"]
+    assert label in data["_banner"] and label in prev_banner
 
 
 def test_ab_preset_skips_run_b_when_a_is_cancelled(monkeypatch):
@@ -156,6 +170,54 @@ def test_single_run_path_unchanged_for_non_ab_preset(monkeypatch):
     assert len(calls) == 1
     assert "_previous" not in data
     assert "A/B" not in data["_banner"]
+
+
+def _all_text(component) -> str:
+    """Every string found anywhere in a Dash component tree, joined -- used to check
+    rendered banner wording without depending on exact tree shape."""
+    if isinstance(component, str):
+        return component
+    parts = []
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        parts.extend(_all_text(c) for c in children if c is not None)
+    elif children is not None:
+        parts.append(_all_text(children))
+    return " ".join(parts)
+
+
+def test_render_results_ab_run_has_no_generic_this_run_prefix(monkeypatch):
+    """An A/B run's banners already name their own arm in full (see `_ab_arm_line`);
+    the generic 'This run:'/'Previous run (for before/after):' prefix -- kept for the
+    single-run and manual before/after paths -- must not also be prepended."""
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    state_a = apply_preset(preset)
+    calls = []
+    appmod2 = _fake_runner(monkeypatch, calls)
+    data, *_ = appmod2._run_pipeline(1, state_a, preset.n_steps, "", None)
+
+    tree = appmod._render_results(data, "tab-results")
+    text = _all_text(tree)
+    assert "This run:" not in text
+    assert "Previous run (for before/after):" not in text
+    assert "A (as loaded):" in text and "B:" in text
+
+
+def test_render_results_single_run_keeps_generic_prefix(monkeypatch):
+    """Non-AB single-run/manual before-after path keeps today's wording unchanged."""
+    import webapp.app as appmod
+
+    preset = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    state = apply_preset(preset)
+    calls = []
+    appmod2 = _fake_runner(monkeypatch, calls, fig_key="subspace_err")
+    data, *_ = appmod2._run_pipeline(1, state, preset.n_steps, "", None)
+
+    tree = appmod._render_results(data, "tab-results")
+    text = _all_text(tree)
+    assert "This run:" in text
 
 
 # ------------------------------------------------------------------------------------
@@ -347,7 +409,7 @@ def test_radar_cube_panel_clip_matches_its_own_colorbar_label():
     expected_clip = _radar_cube_clip_db(db)
 
     assert fig.data[0].zmin == pytest.approx(expected_clip)
-    assert f"{expected_clip:g}" in fig.data[0].colorbar.title.text
+    assert f"{expected_clip:.1f}" in fig.data[0].colorbar.title.text  # wave 2: one decimal on screen
 
 
 # ------------------------------------------------------------------------------------
@@ -511,4 +573,6 @@ def test_detection_markers_are_enlarged_for_podium_distance():
     det_trace = next(t for t in fig.data if (t.name or "").startswith("detections"))
     gt_trace = next(t for t in fig.data if (t.name or "").startswith("ground truth"))
     assert det_trace.marker.size == 14
-    assert gt_trace.marker.size == 18
+    # wave 2: ground truth is drawn as its match-tolerance box (a layout shape) with a small
+    # centre dot, so the marker is deliberately small; the box carries the size.
+    assert fig.layout.shapes, 'ground-truth tolerance boxes expected'

@@ -989,15 +989,21 @@ def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
 
 
 def _heatmap(data_db, title: str, *, x=None, y=None,
-             xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0) -> go.Figure:
+             xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0,
+             colorbar_title: str = None) -> go.Figure:
+    if colorbar_title is None:
+        # Peak-relative, and `zmin` is a display clip, not the data floor; the
+        # colorbar title says both so it is not read as absolute dB. Every caller
+        # but the range-Doppler panel uses this default (-40 dB, or whatever `zmin`
+        # is passed); that panel passes its own `colorbar_title` instead, because its
+        # clip is a computed float (e.g. -36.233...) that reads as false precision
+        # and says nothing about WHY it differs from the shared -40 dB (rehearsal,
+        # 2026-09-23) -- see the `radar_cube` branch of `figures_from_outputs`.
+        colorbar_title = f"dB rel. peak<br>(clipped at {zmin:g})"
     fig = go.Figure(
         data=go.Heatmap(
-            # Peak-relative, and `zmin` is a display clip, not the data floor; the
-            # colorbar title says both so it is not read as absolute dB. Every caller
-            # but the range-Doppler panel uses the -40 dB default; that panel picks its
-            # own clip per `_radar_cube_clip_db` (Change: physics review 2026-09-23).
             z=data_db, x=x, y=y, zmin=zmin, zmax=0,
-            colorbar=dict(title=f"dB rel. peak<br>(clipped at {zmin:g})")
+            colorbar=dict(title=colorbar_title)
         )
     )
     fig.update_layout(
@@ -1080,6 +1086,30 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
     return _make_legible(fig)
 
 
+#: Assumed paper-x extent of the play/pause button row (two icon buttons, from
+#: x=0.0, at the podium-distance 16 px font -- see updatemenus in
+#: `_add_frame_animation`). The slider's own x is required to clear this (Change,
+#: rehearsal 2026-09-23); a small margin is added on top for the currentvalue
+#: label's own width even though it is left-anchored (defense in depth against a
+#: future font-size bump).
+_SLIDER_BUTTONS_X_EXTENT = 0.16
+_SLIDER_X = _SLIDER_BUTTONS_X_EXTENT + 0.08
+_SLIDER_LEN = 0.98 - _SLIDER_X
+#: The button/slider row's own y (paper fraction, below the plot) and the bottom
+#: margin/figure height that give it room. Moving `x` alone (above) cleared the
+#: buttons but only exposed a SECOND collision at the same font size: the row sat
+#: close enough below the plot to overlap the x-axis title text ("azimuth sin(theta)")
+#: rather than sitting under it -- confirmed by rendering both a browser screenshot
+#: (rehearsal, 2026-09-23) and a standalone reproduction. Pushing the whole row
+#: further down (and growing the margin/height that makes room for it) fixes both
+#: collisions at once; every caller of `_add_frame_animation` builds its figure via
+#: `_heatmap`'s fixed height=360, so overriding it here to `_SLIDER_FIG_HEIGHT` is
+#: safe for all of them.
+_SLIDER_ROW_Y = -0.35
+_SLIDER_MARGIN_B = 130
+_SLIDER_FIG_HEIGHT = 420
+
+
 def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap",
                          frame_layouts=None):
     """Attach a frame slider + play control to `fig`, leaving its initial view alone.
@@ -1114,13 +1144,20 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                                        transition=dict(duration=0))])
              for i in range(n)]
     fig.update_layout(
-        # The slider starts to the right of the play/pause buttons: at two-card
-        # width its "frame N" label sat behind them.
-        sliders=[dict(active=n - 1, x=0.2, len=0.78, y=-0.02,
-                      currentvalue=dict(prefix="frame ", font=dict(size=_LEGIBLE_FONT_SIZE)),
+        # The slider starts clear of the play/pause buttons (x >= their extent,
+        # below), and its currentvalue label is explicitly LEFT-anchored so it
+        # extends right (away from the buttons) rather than growing left into them
+        # as the font size increases -- x=0.2 was "clear of the buttons" at the old
+        # 12 px currentvalue font, but the bump to the 16 px podium-distance floor
+        # widened "frame N" enough to draw it behind the buttons again (handoff
+        # regression, rehearsal 2026-09-23). The whole row also moves further below
+        # the plot (see `_SLIDER_ROW_Y`'s comment) to clear the x-axis title too.
+        sliders=[dict(active=n - 1, x=_SLIDER_X, len=_SLIDER_LEN, y=_SLIDER_ROW_Y,
+                      currentvalue=dict(prefix="frame ", font=dict(size=_LEGIBLE_FONT_SIZE),
+                                       xanchor="left"),
                       pad=dict(t=30, b=4), steps=steps)],
         updatemenus=[dict(type="buttons", showactive=False, direction="left",
-                          x=0.0, y=-0.02, xanchor="left", yanchor="top",
+                          x=0.0, y=_SLIDER_ROW_Y, xanchor="left", yanchor="top",
                           pad=dict(t=30, r=6),
                           buttons=[dict(label="▶", method="animate",
                                         args=[None, dict(mode="immediate",
@@ -1132,7 +1169,8 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                                         args=[[None], dict(mode="immediate",
                                                            frame=dict(duration=0,
                                                                       redraw=True))])])],
-        margin=dict(l=40, r=20, t=40, b=70),
+        margin=dict(l=40, r=20, t=40, b=_SLIDER_MARGIN_B),
+        height=_SLIDER_FIG_HEIGHT,
     )
     return fig
 
@@ -1161,9 +1199,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             ),
             [_to_numpy_abs_db(f) for f in outputs["fft"]]))
 
-    for key, title, aperture_label in [
-        ("range_az", "Range-Azimuth power (non-coherent over elevation)", "azimuth sin(θ)"),
-        ("range_el", "Range-Elevation power (non-coherent over azimuth)", "elevation sin(θ)"),
+    for key, title, qualifier, aperture_label in [
+        ("range_az", "Range-azimuth power", "non-coherent over elevation", "azimuth sin(θ)"),
+        ("range_el", "Range-elevation power", "non-coherent over azimuth", "elevation sin(θ)"),
     ]:
         if outputs.get(key):
             bins = meta.get(f"{key}_bins") or outputs[key][-1].shape[0]
@@ -1191,16 +1229,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if frames_db[-1].shape[0] == keep.size:
                 frames_db = [f[keep] for f in frames_db]
                 y = y[keep]
-            # The stat lives in the TITLE (a "<br><sup>" subline, like the detector
-            # panel below) rather than a floating annotation: an annotation anchored
-            # near the top of the plot's own paper coordinates collided with the title
-            # text at this font size (found in the 2026-09-23 rehearsal screenshot).
-            titles = ([f"{title}<br><sup>peak - median, dB: {d:.1f}</sup>" for d in dyn_range_db]
-                     if dyn_range_db is not None else [title] * len(outputs[key]))
+            # The main title is short enough to fit the two-card layout's ~600 px
+            # ("Range-Azimuth power (non-coherent over elevation)" ran off the right
+            # edge there, rehearsal 2026-09-23); the qualifier moves into a
+            # "<br><sup>" subline, alongside the peak-median stat where there is one,
+            # rather than a floating annotation (which collided with the title at
+            # this font size).
+            if dyn_range_db is not None:
+                titles = [f"{title}<br><sup>({qualifier}); peak - median, dB: {d:.1f}</sup>"
+                         for d in dyn_range_db]
+            else:
+                titles = [f"{title}<br><sup>({qualifier})</sup>"] * len(outputs[key])
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
                            ylabel=ylabel)
-            frame_layouts = ([dict(title=dict(text=t)) for t in titles]
-                            if dyn_range_db is not None else None)
+            frame_layouts = [dict(title=dict(text=t)) for t in titles]
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
 
@@ -1268,9 +1310,25 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # One clip for the whole animation, from the LAST frame (same convention as
         # every other stat/annotation this module attaches to the animated view).
         rd_clip = _radar_cube_clip_db(first)
+        # The computed clip is a float (e.g. -36.233...); the raw value both read as
+        # false precision and said nothing about where it came from. Round to one
+        # decimal, and say what it is -- but ONLY when it actually came from "3 dB
+        # above median" (rd_clip > -40): a quiet frame keeps the plain shared -40 dB
+        # clip, which is not median-derived (rehearsal, 2026-09-23).
+        # The provenance of the clip goes in the panel's title subline, NOT the colorbar
+        # title: a long colorbar title squeezed the heat map to a sliver at two-card
+        # width (rehearsal 2026-09-23, all three Thrust 5 screens).
+        rd_clip_title = f"dB rel. peak<br>(clipped at {rd_clip:.1f})"
+        if rd_clip > -40.0:
+            rd_panel_title = ("Range-Doppler power<br><sup>(non-coherent over channels); "
+                              f"clip {rd_clip:.1f} dB = this frame's median floor + 3 dB</sup>")
+        else:
+            rd_panel_title = ("Range-Doppler power<br><sup>(non-coherent over channels); "
+                              f"clip {rd_clip:.1f} dB (shared floor)</sup>")
         figs["radar_cube"] = _make_legible(_add_frame_animation(
-            _heatmap(first, "Range-Doppler power (non-coherent over channels)",
-                     x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip),
+            _heatmap(first, rd_panel_title,
+                     x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
+                     colorbar_title=rd_clip_title),
             [_rd_db(c) for c in outputs["radar_cube"]]))
 
     det_meta = meta.get("detector") or {}
@@ -1312,11 +1370,31 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             ))
         gt = (outputs.get("gt_detections") or [[]])[-1]
         if gt:
+            # Ground truth drawn as its own match-tolerance BOX, in DATA coordinates,
+            # rather than a fixed-pixel circle: a fixed 18 px circle drew LARGER than
+            # what the scoreboard actually scores with (+-2 m range / +-0.06 sin-az is
+            # ~5x12 px on this axis), so a cross sitting on the circle could still be a
+            # scored miss (adversarial finding, 2026-09-23 -- CFAR frame 5 showed 8
+            # crosses on 7 circles yet scored TP 3 / FP 5). The box IS the tolerance,
+            # so a cross inside it is genuinely a hit. Numbers come from
+            # e2e.ml.metrics.MatchCriterion at call time -- never typed here, so this
+            # cannot silently drift from what score_frames (below) actually enforces.
+            from e2e.ml.metrics import MatchCriterion
+            crit = MatchCriterion()
+            r_tol, az_tol = crit.max_range_err_m, crit.max_sin_az_err
+            for d in gt:
+                cx, cy = d[1], d[3]
+                fig.add_shape(
+                    type="rect", xref="x", yref="y",
+                    x0=cx - az_tol, x1=cx + az_tol, y0=cy - r_tol, y1=cy + r_tol,
+                    line=dict(color="#ffffff", width=2), fillcolor="rgba(0,0,0,0)",
+                )
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in gt], y=[d[3] for d in gt], mode="markers",
-                name=f"ground truth (n={len(gt)})",
-                marker=dict(symbol="circle-open", size=18, color="#ffffff",
-                            line=dict(width=2)),
+                name=(f"ground truth (n={len(gt)}): hit = cross inside the box "
+                      f"(±{r_tol:g} m, ±{az_tol:g} sin az)"),
+                marker=dict(symbol="circle", size=6, color="#ffffff",
+                            line=dict(width=1, color="#2d3436")),
             ))
         fig.update_layout(
             title=title, xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",

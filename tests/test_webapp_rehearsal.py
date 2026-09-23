@@ -178,7 +178,8 @@ def test_detector_figure_title_names_detector_and_threshold_and_legend_is_dark()
     assert "CA-CFAR (guard 2, train 6)" in title and ">= 0.66" in title
     assert fig.layout.legend.bgcolor == "#2d3436"
     names = {t.name for t in fig.data}
-    assert "detections (n=1)" in names and "ground truth (n=1)" in names
+    assert "detections (n=1)" in names
+    assert any(nm.startswith("ground truth (n=1)") for nm in names)  # legend now states the match box
 
 
 def test_subspace_error_frames_are_integers_from_one():

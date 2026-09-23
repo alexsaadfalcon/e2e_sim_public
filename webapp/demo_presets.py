@@ -114,12 +114,14 @@ PRESETS: List[DemoPreset] = [
             {"interconnect": {"enabled": False}},
             _only_products("range_az"),
         ),
-        blurb=("Run once as loaded, then turn ONE knob and run again: LNA bias 8 -> 0.5 mA, "
-               "or IF bandwidth 15 -> 50 MHz. The range-azimuth image loses dynamic range as "
-               "the front-end's own noise rises. The signal is deliberately set just below "
-               "the model's input-referred noise (1e-7 vs 1.36e-7 V), which is where a real "
-               "1024-element radar operates: per-element SNR below 0 dB, recovered by "
-               "coherent gain."),
+        blurb=("Press Run once: both arms run and appear as before (A, top, 8 mA) / after "
+               "(B, bottom, 0.5 mA), each panel printing its own peak-median statistic "
+               "(about 42 vs 30 dB, measured on screen 2026-09-23). The range-azimuth "
+               "image loses dynamic range as the front-end's own noise rises. The signal "
+               "is deliberately set just below the model's input-referred noise (1e-7 vs "
+               "1.36e-7 V) -- where a real 1024-element radar operates: per-element SNR "
+               "below 0 dB, recovered by coherent gain. Manual path: turn ONE knob (LNA "
+               "bias 8 -> 0.5 mA, or IF bandwidth 15 -> 50 MHz) and run again."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "15 -> 50 MHz (about -5 dB; 1 -> 50 is -16 dB)")],
         # A/B (Change 1, 2026-09-22 hostile-expert read): as-loaded IS the 8 mA arm;
@@ -127,43 +129,43 @@ PRESETS: List[DemoPreset] = [
         ab=("rffe", "lna_bias_ma", 0.5),
         ab_label_a="8 mA", ab_label_b="0.5 mA",
         say=[
-            "LNA bias 0.5 -> 8 mA is worth about +12 dB of image dynamic range at this "
-            "operating point; IF bandwidth 1 -> 50 MHz costs about -16 dB. Two significant "
-            "figures; the numbers move 0.6-0.9 dB between operating points.",
-            "The noise mechanism is right: the analytic Friis cascade predicts 11.97 dB and "
-            "the end-to-end chain measures 11.80 dB, through 1024 elements, an FFT, the AFE "
-            "and the subspace tracker. The IF number lands on 10*log10(50) = 17.0.",
-            "At the default signal level (1e-5) these knobs correctly do nothing (0.5 dB, "
-            "under the 40 dB display floor) -- show that as the control if asked.",
-            "Below about 4 mA the modelled LNA is a LOSS stage (-8.5 dB at 0.5 mA), so most "
-            "of the 12 dB is the LNA leaving the attenuator regime. The defensible sub-claim "
-            "is 4 -> 8 mA = +1.6 dB (measured 2026-09-22). Say it before someone does.",
-            "There is no trade-off in the model today: nothing clips and the IF filter only "
-            "sets the noise variance. Volunteer the missing half: 1000 frequency points at "
-            "1 MHz IF is a 1 ms sweep versus 20 us at 50 MHz, and a 20 m/s car moves two "
-            "wavelengths in that time.",
-            "The brightest band at range 0-2 m across all azimuth is not a target: the "
-            "munich frames were generated with Sionna's normalize_delays=True "
-            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
-            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
-            "scale on these screens is referenced to it (47.6 dB above the profile median "
-            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
-            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
+            "LNA bias 0.5->8 mA is worth about +12 dB of dynamic range here; IF bandwidth "
+            "1->50 MHz costs about -16 dB (two sig figs; +-0.6-0.9 dB between operating "
+            "points).",
+            "At default signal level (1e-5) these knobs correctly do nothing (0.5 dB, "
+            "under the 40 dB floor) -- show it as the control if asked.",
+            "Below ~4 mA the modelled LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the "
+            "12 dB is it leaving the attenuator regime. Defensible sub-claim: 4->8 mA = "
+            "+1.6 dB (measured 2026-09-22).",
+            "There is no trade-off today: nothing clips, and the IF filter only sets noise "
+            "variance. Missing half: 1000 points at 1 MHz IF is a 1 ms sweep vs 20 us at "
+            "50 MHz; a 20 m/s car moves two wavelengths in that time.",
+            "The brightest band at range 0-2 m is not a target: Sionna's "
+            "normalize_delays=True (sionna_simple_channel.py) subtracts the shortest "
+            "path's delay, so range 0 is the earliest arrival (47.6 dB above the frame-0 "
+            "median). The 20-22 m stripe is real drifting multipath (2-21 m across "
+            "frames), not fixed.",
+            "Noise figure IS quotable: the analytic Friis cascade gives 11.97 dB and the "
+            "measured end-to-end floor 11.80 dB, a 0.17 dB agreement through 1024 "
+            "elements, the FFT chain, the AFE and the tracker (notes/STATE.md section 5, "
+            "measured 2026-09-21). Absolute sensitivity in dBm is NOT: the input level is "
+            "a free parameter (signal_scaling), so quote noise figure and relative dB "
+            "only.",
         ],
         do_not_say=[
-            "Any DC power readout: PRX is U-shaped with its MINIMUM at the best-quality "
-            "point, and implies an 8.45 V rail in a 100-200 mV chain.",
-            "The compression regime (signal scaling 1e-1..1e-3): explained, but worse on "
-            "stage than silence.",
-            "That gm scales linearly with bias -- it does at 8 mA only because the model "
-            "uses a weak-inversion law; say 'constant-overdrive power scaling'.",
-            "Anything about IIP3: it is constant to five decimals across 0.5-10 mA here. "
-            "A real LNA's IIP3 improves with bias.",
-            "Any gain knob at any level: peak normalization removes it.",
-            "Any absolute dBm sensitivity or noise-figure number for the chain.",
-            "That the 1024 receivers are modelled individually: every column of the "
-            "config table holds one value, broadcast to all elements. Channel mismatch is "
-            "structurally absent (cheap to add; not added).",
+            "Any DC power readout: PRX is U-shaped, MINIMUM at best quality, implying an "
+            "8.45 V rail in a 100-200 mV chain.",
+            "The compression regime (scaling 1e-1..1e-3): explained, but worse live than "
+            "silence.",
+            "That gm scales linearly with bias -- true only at 8 mA (a weak-inversion "
+            "law); say 'constant-overdrive power scaling'.",
+            "Anything about IIP3: constant to five decimals across 0.5-10 mA here, unlike "
+            "a real LNA whose IIP3 improves with bias.",
+            "Any gain knob: peak normalization removes it.",
+            "Any absolute dBm sensitivity: the input scale is arbitrary.",
+            "That the 1024 receivers are modelled individually: every config column "
+            "holds one value, broadcast to all elements; channel mismatch is "
+            "structurally absent.",
         ],
     ),
     DemoPreset(
@@ -176,12 +178,16 @@ PRESETS: List[DemoPreset] = [
             {"interconnect": {"enabled": False}},
             _only_products("range_az", "subspace_err"),
         ),
-        blurb=("Run as loaded, then lower the AFE weight mantissa 6 -> 1 bit and run again. "
-               "The subspace error rises sharply (0.06 -> 0.63 measured on this preset) "
-               "while the range-azimuth image barely moves ON THE DISPLAYED 40 dB RANGE -- "
-               "the changes sit 40-80 dB below the peak, under the colour floor. The "
-               "tracker is far more sensitive to weight precision than the picture is. The "
-               "FFT az-el panel is deliberately off (it contradicts this framing)."),
+        blurb=("Press Run once: both arms run and appear as before (A, top, mantissa 6 "
+               "bit) / after (B, bottom, mantissa 1 bit), each panel printing its "
+               "subspace-error statistic (about 0.06 for A vs about 0.63 for B, measured "
+               "on screen 2026-09-23). The subspace error rises sharply (0.06 -> 0.63 "
+               "measured on this preset) while the range-azimuth image barely moves ON "
+               "THE DISPLAYED 40 dB RANGE -- the changes sit 40-80 dB below the peak, "
+               "under the colour floor. The tracker is far more sensitive to weight "
+               "precision than the picture is. The FFT az-el panel is deliberately off "
+               "(it contradicts this framing). The manual path still works: lower the AFE "
+               "weight mantissa 6 -> 1 bit and run again."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.63)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
         # to 1 bit, the 0.63 arm the card's headline quotes.
@@ -279,19 +285,19 @@ PRESETS: List[DemoPreset] = [
         ),
         blurb=("A SYNTHETIC bad interconnect: the 11-tap boxcar placeholder, normalized to a "
                "0 dB peak so it has no gain a passive part could not have, leaving ~60 dB "
-               "of in-band ripple. Run as loaded, then set Case -> passthrough and run "
-               "again: the range profile's floor drops ~14 dB (the visible effect; the "
-               "previous run stays on the Results tab for the comparison). "
+               "of in-band ripple. Press Run once: both arms run and appear as before "
+               "(A, top, default boxcar) / after (B, bottom, passthrough), each panel "
+               "printing its own median-floor statistic (about -34 dB for A vs about "
+               "-49 dB for B, measured on screen 2026-09-23). "
                "On the heatmap the filter streaks each bright return along the range "
                "axis: the 11-tap boxcar is applied along frequency unwindowed, the worst "
                "possible filter shape (first sidelobe -13 dB, 6 dB per octave), so one "
                "clean point target's sidelobes reach -40 dB over 14.4 m of the 25 m axis "
-               "(72 of 126 gates; 2.8 m without the filter) -- measured 2026-09-23 through "
-               "the real InterconnectBlock and RangeProfileBlock. That, not an 11-cell "
-               "main-lobe smear, is what the audience sees; the range profile's ~14 dB "
-               "floor rise is the same energy. Lead with the floor; when asked about the "
-               "two vertical streaks, they are the filter's range sidelobes on the two "
-               "strongest returns."),
+               "(72 of 126 gates) -- measured through the real InterconnectBlock and "
+               "RangeProfileBlock. That, not the main-lobe smear, is what the audience "
+               "sees; the floor rise is the same energy. Lead with the floor; the two "
+               "vertical streaks are the filter's sidelobes on its two strongest returns. "
+               "Manual path: set Case -> passthrough and run again."),
         live_knobs=[("interconnect", "case", "default (synthetic boxcar) -> passthrough")],
         # A/B (Change 1): as-loaded IS the synthetic boxcar ("default"); run B swaps to
         # passthrough, the ~14 dB floor-drop direction the card's headline quotes.
@@ -314,18 +320,15 @@ PRESETS: List[DemoPreset] = [
             "absent: one S21 is broadcast to all 1024 elements. Say it up front.",
             "The 77 GHz parts are not reconciled with the 30 GHz frames; today's "
             "reconciliation is 'relabel the axis'. Caption real-data results as shape-only.",
-            "The brightest band at range 0-2 m across all azimuth is not a target: the "
-            "munich frames were generated with Sionna's normalize_delays=True "
-            "(sionna_simple_channel.py), which subtracts the shortest path's delay, so "
-            "range 0 is the earliest arrival, near line of sight. Every 'dB rel. peak' "
-            "scale on these screens is referenced to it (47.6 dB above the profile median "
-            "on frame 0). The 20-22 m stripe is real intermittent multipath: it drifts "
-            "2-21 m as the receiver moves across frames, so it is not a fixed ring.",
+            "The brightest band at range 0-2 m is not a target: Sionna's "
+            "normalize_delays=True subtracts the shortest path's delay, so range 0 is "
+            "the earliest arrival (47.6 dB above the frame-0 median). The 20-22 m stripe "
+            "is real drifting multipath (2-21 m across frames), not fixed.",
         ],
         do_not_say=[
             "'Case3' from the dropdown as the UIC Case3: it is a legacy alias for "
             "passthrough. The real CSV is not reachable from this screen yet.",
-            "That the boxcar is physically legitimate: unnormalized it has +20.8 dB of gain.",
+            "That the boxcar is physically legitimate: unnormalized it has +20.8 dB gain.",
             "That the real designs 'do nothing' -- they are invisible on THIS display, which "
             "is a statement about the display.",
         ],
@@ -347,7 +350,9 @@ PRESETS: List[DemoPreset] = [
         blurb=("Replays the held-out TEST frames every published number was scored on, "
                "labels included, and runs the classical CA-CFAR baseline on them: the "
                "range-Doppler cube, then the objectness map with detections (red x) over "
-               "ground truth (white o). The threshold is CFAR's recall-0.5 operating point "
+               "ground truth drawn as its match-tolerance box (white: a cross inside the box "
+               "is a hit; the scoreboard beside it counts them). The threshold is CFAR's "
+               "recall-0.5 operating point "
                "(0.66), the same operating point the two network presets sit at, so the "
                "cross counts across the three screens ARE the false-alarm comparison. Run "
                "this first, then load the RADDetNet preset on the same frames: the previous "
@@ -368,8 +373,9 @@ PRESETS: List[DemoPreset] = [
             "map looks dark because CFAR is a threshold test, not a probability field.",
             "The top 60 m of the map is empty because the labels stop at 40 m, which is "
             "also the scoring crop; say it before someone asks what is up there.",
-            "Range-azimuth heatmaps elsewhere in the demo show a signed range axis; this "
-            "panel is one-sided because the ADC cube is dechirped -- different pipeline.",
+            "Range-azimuth heatmaps elsewhere in the demo come from the munich frames' "
+            "delay-normalised channel (range 0 = earliest arrival); this panel's range is "
+            "absolute because the ADC cube is dechirped -- different pipeline.",
             "Ground truth omits about 3 real strongly-scattering objects per frame inside "
             "40 m, so any detector that fires on every real object has a precision ceiling "
             "of 0.64. Some of the 'false alarms' are real objects.",
@@ -445,93 +451,55 @@ PRESETS: List[DemoPreset] = [
             {"detector": {"params": {"mode": "ml", "checkpoint": RADDETNET_CHECKPOINT,
                                      "threshold": RADDETNET_THRESHOLD}}},
         ),
-        blurb=("The same frames through RADDetNet -- Doppler as channels, range x azimuth "
-               "as the spatial plane, on the beamformed ('rad') input with the classical "
-               "front end. Test AP 0.476 against CFAR's 0.301 under the same protocol, 3.0 "
-               "false alarms per frame at recall 0.5 against CFAR's 6.2, and the F83 "
-               "controls say it reads the frame (deranged-label retention 12%, azimuth-only "
-               "0.657 vs 0.472 for a train-density prior). Threshold pinned at its recall-0.5 "
-               "operating point (0.44). Independently verified 2026-09-22 (F85 addendum): "
-               "reproduces bit-identically, splits scene-disjoint, baseline fair -- and on an "
-               "UNSEEN corpus from an earlier generator the result is SEED-DEPENDENT: seed 42 "
-               "leads CFAR by +0.03 with worse false alarms, seed 43 trails it by -0.03 "
-               "(F86). In-distribution both seeds beat CFAR (0.476 / 0.436 vs 0.301, "
-               "3.0 / 3.6 vs 6.2 false alarms per frame). Trained on BOTH corpora, one "
-               "checkpoint beats CFAR on the held-out scenes of both (0.584 / 1.4 FA and "
-               "0.487 / 2.9 FA; F86 addendum, independently verified 2026-09-23: bit-identical, "
-               "no leakage, paired bootstrap +0.108 / +0.279, controls pass on BOTH corpora) "
-               "-- but neither corpus is unseen, and it is ONE training seed until the "
-               "replicate lands. Owner decision 2026-09-22: this LEADS Thrust 5, caveat "
-               "volunteered."),
+        blurb=("The same frames through RADDetNet (Doppler as channels, range x azimuth as "
+               "the spatial plane) on CFAR's own beamformed cube. Test AP 0.476 vs CFAR's "
+               "0.301, 3.0 FA/frame at recall 0.5 vs CFAR's 6.2, controls pass (F85). "
+               "Threshold pinned at recall-0.5 (0.44). Independently verified (F85/F86 "
+               "addenda): bit-identical, no leakage, baseline fair. On an unseen "
+               "earlier-generator corpus the result is SEED-DEPENDENT (F86): seed 42 leads "
+               "CFAR by +0.03 with worse false alarms, seed 43 trails by -0.03. "
+               "In-distribution both seeds beat CFAR. Trained on both corpora, one "
+               "checkpoint beats CFAR on both held-out splits (F86 addendum) -- but "
+               "neither corpus is unseen, and it is one training seed. Owner decision: "
+               "LEADS Thrust 5, caveat volunteered."),
         live_knobs=[("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         say=[
             "The defensible sentence, verbatim from the verifier: a learned head on the "
-            "classical front end beats a CFAR threshold on the same cube, in-distribution. "
-            "The network is fed CFAR's own beamformed cube, notch and TDM compensation "
-            "included; the ladder on that identical cube is global threshold 0.18-0.22, "
-            "CFAR 0.30, this 0.48. Say that, not 'beats CFAR'.",
-            "Every number comes from one file, e2e/ml/runs/beat_cfar.json (seed 42, "
-            "deterministic kernels); the checkpoint records the fingerprint of the code that "
-            "built its inputs and reproduces its own validation number under current code. "
-            "An independent verifier re-scored it bit-identically and re-implemented the "
-            "controls to 1e-6. Paired scene-level bootstrap: +0.176 AP, 95% CI "
-            "[+0.145, +0.208] (e2e/ml/runs/raddetnet_ci.json).",
-            "The controls are the ones F83 defined and the shipped nets FAILED: AP retention "
-            "under deranged labels 12% (CFAR 10%; the FFTRadNets 48-51%; stable across random "
-            "derangements), and azimuth-only AP 0.657 against 0.472 for the strongest "
-            "frame-independent prior (the mean of all training label maps) -- which the "
-            "shipped nets could not beat (0.421).",
-            "The baseline is honest: nine classical configurations were scored, the best "
-            "reaches 0.328 (Doppler-resolved CFAR, unclamped score), and the shipped "
-            "guard/train beats every alternative tried. The 40 m crop, the score floor and "
-            "the unlabelled clutter move nothing.",
-            "Where the gain is: pedestrians. Hit rate at the decode floor (threshold 0.01) "
-            "0.945 vs CFAR's 0.798; on vehicles 0.983 vs 0.929. Physically sensible, not "
-            "suspicious. On THIS screen the threshold is 0.44 -- the recall-0.5 point by "
-            "construction, AVERAGED over 172 test frames -- so over the whole split half the "
-            "circles carry a cross; on any ONE frame the fraction varies (the rehearsal's "
-            "frame 5 showed 6 crosses on 7 circles). Never read a single frame as recall or "
-            "as a false-alarm rate; the comparison is the cross count against CFAR's over "
-            "the run (3.0 vs 6.2 per frame on average), and the scoreboard states the "
-            "match rule it counts with.",
-            "Same threshold convention as the CFAR screen: both sit at their recall-0.5 "
-            "operating point, so fewer crosses here is fewer false alarms, not fewer hits.",
-            "What changed is the architecture, not the input: the same beamformed input into "
-            "the RADIal-style decoder (b8) scores 0.138 and keeps 47% under deranged labels. "
-            "Range x azimuth had to be the spatial plane.",
-            "THE CAVEAT, volunteered: on b1_bench_v2 test -- 173 unseen scenes, same radar and "
-            "grid, an earlier generator with a different impairment model -- CFAR scores "
-            "0.179 at 13.2 FA/frame; this checkpoint (seed 42) 0.208 at 15.1, and the seed-43 "
-            "replicate 0.153 at 20.7 (e2e/ml/runs/gen_s43_v2_test.json, F86). Out of "
-            "distribution the network does NOT reliably beat CFAR: one seed is +0.03, the "
-            "other -0.03, and both are worse at matched recall. The shipped FFTRadNet "
-            "collapses to 0.063 there, below the 0.065 chance floor: these degrade, that one "
-            "collapses -- but 'degrades' is not 'robust'. The in-distribution win is what "
-            "replicates (0.476 / 0.436 vs 0.301). Trained on both corpora the network beats "
-            "CFAR on both test splits (0.584 / 1.4 FA on v3, 0.487 / 2.9 FA on v2; verified "
-            "bit-identically, leakage-free, controls pass on both corpora) -- say that as a "
-            "data-diversity result, not as generalisation: for that arm no corpus is unseen, "
-            "and a third corpus is the only real test. It is also one training seed; the "
-            "gains (+0.108 / +0.279 AP, paired bootstrap) are 3-5x the seed spread seen on "
-            "the single-corpus arms, so the direction is safe to state, the magnitudes are not.",
-            "The stripe statistic is 0.62 (0.60 over all frames) against 0.31 for ground "
-            "truth: the map is still partly separable. Quote it beside the AP.",
+            "classical front end beats a CFAR threshold on the same cube, in-distribution "
+            "-- say that, not 'beats CFAR' (F85 addendum).",
+            "Every number comes from e2e/ml/runs/beat_cfar.json (seed 42, deterministic); "
+            "independently re-scored bit-identically, controls re-implemented to 1e-6. "
+            "Paired scene-level bootstrap: +0.176 AP, 95% CI [+0.145, +0.208] "
+            "(raddetnet_ci.json, F85 addendum).",
+            "The controls are F83's, which the shipped nets FAILED: deranged-label "
+            "retention 12% (CFAR 10%, shipped FFTRadNets 48-51%), azimuth-only AP 0.657 "
+            "vs 0.472 for the strongest frame-independent prior (F85 addendum).",
+            "The baseline is honest: nine classical configs scored, best reaches 0.328, "
+            "and the shipped CFAR guard/train beats every alternative (F85 addendum).",
+            "THE CAVEAT: on an unseen earlier-generator corpus (b1_bench_v2), CFAR scores "
+            "0.179/13.2 FA; this checkpoint (seed 42) 0.208/15.1; seed 43 0.153/20.7 "
+            "(F86). Out of distribution it does NOT reliably beat CFAR -- one seed +0.03, "
+            "the other -0.03.",
+            "Trained on both corpora, the network beats CFAR on both test splits "
+            "(0.584/1.4 FA v3, 0.487/2.9 FA v2; controls pass -- F86 addendum). Say this "
+            "as a data-diversity result, not generalisation: it is also one training "
+            "seed.",
         ],
         do_not_say=[
-            "'Beats CFAR', unqualified. The verified claim is in-distribution and on CFAR's "
-            "own front end; the first radar person in the room will ask about both.",
+            "'Beats CFAR', unqualified: the verified claim is in-distribution and on "
+            "CFAR's own front end (F85 addendum); the first radar person in the room will "
+            "ask about both.",
             "Anything about generalisation or robustness: out of distribution the two "
-            "single-corpus seeds straddle CFAR (+0.03 / -0.03), and the joint-corpus arm's "
-            "0.487 on v2 is NOT out of distribution -- it trained on v2's train split.",
-            "The joint numbers to three figures: 0.584 and 0.487 are ONE seed (the verifier's "
-            "objection, verbatim: 'you retracted F85's out-of-distribution claim precisely "
-            "because it rested on one seed, and then published a 0.584/0.487 joint result "
-            "from exactly one seed'). Say 'beats CFAR on both by a wide margin' until the "
-            "seed-43 replicate is scored.",
+            "single-corpus seeds straddle CFAR (+0.03/-0.03), and the joint arm's 0.487 "
+            "on v2 is NOT out of distribution -- it trained on v2's train split (F86).",
+            "The joint numbers to three figures: 0.584 and 0.487 are ONE seed -- the "
+            "verifier's own objection (F86 addendum). Say 'beats CFAR on both by a wide "
+            "margin' until the seed-43 replicate is scored.",
             "That this is what the professor asked for in the ML thrust: it is a detector "
             "we designed to the diagnosis, not a port of the collaborators' architectures.",
-            "That the model converged: val AP peaks at epoch 14 of 40 and decays to 0.35-0.41 "
-            "while train loss keeps falling. Early stopping on val is load-bearing.",
+            "That the model converged: val AP peaks at epoch 14 of 40 and decays to "
+            "0.35-0.41 while train loss keeps falling (F85 addendum); early stopping on "
+            "val is load-bearing.",
         ],
     ),
 ]
