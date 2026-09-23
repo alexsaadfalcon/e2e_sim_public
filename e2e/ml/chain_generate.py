@@ -52,7 +52,7 @@ from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
                                RadarCubeBlock)
 from e2e.environment.blocks import RTEnvironmentBlock
-from e2e.ml.blocks import SinkBlock
+from e2e.ml.blocks import CFRCaptureStage, SinkBlock
 from e2e.ml.dataset import DATASETS_DIR, finalize_input_scale
 from e2e.simulation import Simulation
 
@@ -124,6 +124,7 @@ def build_chain_simulation(
     samples_per_src: Optional[int] = None,
     use_link_budget: bool = True,
     use_if_hpf: bool = True, if_hpf_kwargs: Optional[Dict[str, Any]] = None,
+    store_cfr: bool = False, store_paths: bool = False,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
 
@@ -162,6 +163,24 @@ def build_chain_simulation(
     sequence. The block chain runs through `_ImpairmentStage` (see that class) so its
     JSON-unserializable dataclass provenance still reaches the written sample.
 
+    `store_cfr=True` (owner-directed 2026-09-23) inserts a `CFRCaptureStage` as the
+    FIRST serial stage and puts the `SinkBlock` into sidecar mode, so each written
+    sample is accompanied by `<stem>.cfr.npy`: the ray-traced frame exactly as it
+    entered the chain, before the RFFE. That is the expensive half of generation
+    (~11-13 s/scene of ray tracing, vs ~2 s for everything after it), so storing it
+    lets the whole analog/digital chain be re-run live from a corpus frame. Costs 64
+    MiB/frame at `benchmark_v1` and nothing else: the `.npz` keys are unchanged, and
+    with the flag off not one byte of the corpus differs.
+
+    `store_paths=True` additionally writes each frame's RAY-TRACED PATH LIST to a
+    `<stem>.paths.npz` sidecar (~0.7-1.6 MB/frame vs the dense CFR's 64 MiB): the
+    owner's preferred durable form, from which the channel can be re-synthesised
+    without re-tracing. It requires the environment block to EMIT that list from
+    `get_state_updates()` under `blocks.PATHS_CAPTURE_KEY`; `RTEnvironmentBlock` does
+    not do so yet (the capture hook lives in `e2e/environment/`), so today this flag
+    raises on the first frame rather than silently writing nothing. Re-synthesis
+    itself is deliberately NOT implemented here.
+
     `k` is `Simulation`'s required subspace-tracking-rank argument; this composition
     has no `subspace_block`, so `k` only sizes the (otherwise-unused) `U_true`/rank
     diagnostic `Simulation.feed_forward`'s frequency-domain branch always computes --
@@ -176,6 +195,13 @@ def build_chain_simulation(
     )
 
     serial_stages: List[Any] = []
+
+    # FIRST, ahead of even the transmit tributary: the frame as it ENTERS the chain is
+    # what "store the ray-traced channel" means -- anything later would have the RF
+    # front end (or a TX modulation) already folded in, and could not be replayed
+    # through those same stages.
+    if store_cfr:
+        serial_stages.append(CFRCaptureStage())
 
     # The transmit tributary, when enabled: generate the waveform, distort it in the
     # amplifier, then merge its spectrum into the channel response. These come first
@@ -201,6 +227,13 @@ def build_chain_simulation(
         # scale. A caller may still override explicitly, and `ThermalNoiseBlock` will
         # refuse the resulting composition rather than silently produce it.
         kwargs.setdefault("physical_scale", True)
+        # Same base seed ThermalNoiseBlock/ImpairmentBlock take below (impairment_seed):
+        # each block seeds its OWN torch.Generator from it, so the three noise sources
+        # stay independent while a corpus frame's recorded seed alone determines all of
+        # them. Without this, RFFEBlock drew its thermal noise from the global torch RNG,
+        # so replaying a stored s_pars through the composed chain twice reproduced
+        # nothing downstream of it (measured rel-RMSE 0.58-0.62 on the ADC output).
+        kwargs.setdefault("seed", impairment_seed)
         serial_stages.append(CircuitStage(RFFEBlock(**kwargs)))
     if use_interconnect:
         # The block's own default is an unnormalised 11-tap boxcar placeholder, which
@@ -236,7 +269,9 @@ def build_chain_simulation(
         serial_stages.append(IFHighPassBlock(cfg, **(if_hpf_kwargs or {})))
     serial_stages.append(QuantizerBlock(bits=quant_bits))
 
-    downstream_blocks = [RadarCubeBlock(cfg), SinkBlock(out_dir, tag=tag)]
+    downstream_blocks = [RadarCubeBlock(cfg),
+                         SinkBlock(out_dir, tag=tag, store_cfr=store_cfr,
+                                   store_paths=store_paths)]
 
     return Simulation(
         environment_block=env,
@@ -280,6 +315,7 @@ def generate_chain_corpus(
     samples_per_src: Optional[int] = None,
     allow_unanswerable: bool = False,
     use_if_hpf: bool = True, if_hpf_kwargs: Optional[Dict[str, Any]] = None,
+    store_cfr: bool = False, store_paths: bool = False,
 ) -> Path:
     """Generate a radar-ML corpus by RUNNING THE COMPOSED CHAIN, one `Simulation` per
     scene (real ray tracing -- needs Sionna; see `build_chain_simulation`).
@@ -302,6 +338,15 @@ def generate_chain_corpus(
     elements, mirror ground) and its targets sit below their own map background --
     regenerate rather than reuse. Pass `coherent_targets=False, antenna_pattern="iso"`
     only to reproduce one of those deliberately.
+
+    `store_cfr=True` writes each sample's entering ray-traced frame to an uncompressed
+    `<stem>.cfr.npy` sidecar (see `build_chain_simulation` and `e2e.ml.storage.
+    write_cfr_sidecar`): +64 MiB/frame at `benchmark_v1`, and the `.npz` files and the
+    manifest are bit-identical to a run without it.
+
+    `store_paths=True` writes the ray-traced PATH LIST sidecar instead of/alongside the
+    dense one -- see `build_chain_simulation`; it needs an environment-side capture
+    hook that does not exist yet.
 
     `use_transmit_chain` defaults to **False**, and that default changed in v1.1. It used
     to be True, which silently cancelled the target-physics fix above: MEASURED, with the
@@ -381,6 +426,7 @@ def generate_chain_corpus(
             ground_scattering_coefficient=ground_scattering_coefficient,
             samples_per_src=samples_per_src,
             use_if_hpf=use_if_hpf, if_hpf_kwargs=if_hpf_kwargs,
+            store_cfr=store_cfr, store_paths=store_paths,
         )
         sim.run(n_steps=frames_per_scene)
 
@@ -478,6 +524,19 @@ def build_arg_parser():
                         "the (config, tier) pair cannot support a detection benchmark "
                         "(targets alias in Doppler, or the azimuth tolerance outresolves "
                         "the array). For ablations/regressions only")
+    p.add_argument("--store-cfr", action="store_true",
+                   help="also store each frame's RAY-TRACED CFR (the frame entering "
+                        "the chain, before the RFFE) as an uncompressed "
+                        "'<stem>.cfr.npy' sidecar, so the whole analog/digital chain "
+                        "can be re-run live from a stored frame. +64 MiB/frame at "
+                        "benchmark_v1 (measured); the .npz files are unchanged")
+    p.add_argument("--store-paths", action="store_true",
+                   help="also store each frame's RAY-TRACED PATH LIST as a compressed "
+                        "'<stem>.paths.npz' sidecar (~0.7-1.6 MB/frame): the durable "
+                        "form the dense CFR can be re-synthesised from. REQUIRES the "
+                        "environment-side capture hook (RTEnvironmentBlock emitting "
+                        "PATHS_CAPTURE_KEY from get_state_updates), which does not "
+                        "exist yet -- until it lands this flag fails loudly on frame 0")
     p.add_argument("--dry-run", action="store_true",
                    help="print the generation plan without ray-tracing/writing anything")
     return p
@@ -527,6 +586,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                   if args.no_local_assets else
                                   "ON (includes the licence-unestablished local pool)"))
         print(f"seed:         {args.seed}   quant_bits: {args.quant_bits}")
+        print(f"store cfr:    {'ON (+64 MiB/frame sidecars at benchmark_v1)' if args.store_cfr else 'off'}"
+              f"   store paths: {'ON (needs the RT capture hook -- see --store-paths)' if args.store_paths else 'off'}")
         from e2e.environment.rt_scene_build import (DEFAULT_ANTENNA_PATTERN,
                                                     DEFAULT_GROUND_SCATTERING_COEFFICIENT)
         print(f"coherent targets: {'OFF (pre-2026-08-17 bug)' if args.no_coherent_targets else 'on'}"
@@ -565,6 +626,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         use_local_assets=not args.no_local_assets,
         allow_unanswerable=args.allow_unanswerable,
         use_if_hpf=not args.no_if_hpf,
+        store_cfr=args.store_cfr, store_paths=args.store_paths,
         if_hpf_kwargs=(None if args.if_hpf_corner_range is None
                        else {"corner_range_m": args.if_hpf_corner_range}),
     )

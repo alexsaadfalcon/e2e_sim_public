@@ -52,6 +52,14 @@ never has to guess -- and a `.npz` written before this module existed (no "codec
 in `meta`) is, by definition, `CODEC_RAW` with the payload stored under its own key
 unchanged (see `read_payload`'s back-compat branch).
 
+A sample may additionally carry SIDECAR FILES holding the RAY-TRACED CHANNEL it was
+produced from, so the analog/digital chain can be re-run live instead of being frozen
+at generation time: `<stem>.cfr.npy` (`write_cfr_sidecar` -- the dense channel frame,
+uncompressed, fast to replay, 64 MiB/frame at `benchmark_v1`) and `<stem>.paths.npz`
+(`write_paths_sidecar` -- the path list it was synthesised from, ~1 MB/frame, the
+durable form). Both are separate files: none of the `.npz` keys above change, and a
+corpus with neither reads exactly as it always did.
+
 This module is intentionally torch-free (numpy only) -- it has no reason to need
 torch, and staying dependency-light keeps it reusable outside the pipeline (e.g. a
 plain corpus-inspection script).
@@ -60,6 +68,7 @@ plain corpus-inspection script).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -189,6 +198,134 @@ def write_sample_npz(path, arrays: Dict[str, np.ndarray], meta: Dict[str, Any], 
     np.savez_compressed(
         path, meta=np.array(json.dumps(meta, default=json_default)), **out_arrays,
     )
+
+
+# --------------------------------------------------------------------------------
+# CFR sidecar: the ray-traced channel, stored beside the sample it produced
+# --------------------------------------------------------------------------------
+#: Suffix of the sidecar holding a sample's pre-chain CFR frame (`s_pars`), written
+#: next to that sample's `.npz` and named in its `meta["cfr_sidecar"]`.
+CFR_SIDECAR_SUFFIX = ".cfr.npy"
+
+
+def cfr_sidecar_path(npz_path):
+    """Sidecar path for a sample `.npz` (`<stem>.cfr.npy`, same directory)."""
+    return Path(npz_path).with_suffix(CFR_SIDECAR_SUFFIX)
+
+
+def write_cfr_sidecar(npz_path, array: np.ndarray) -> str:
+    """Store `array` (a sample's entering CFR frame) beside its `.npz`; return the
+    sidecar's BASENAME, for `meta["cfr_sidecar"]`.
+
+    Deliberately `np.save` -- uncompressed, and NOT folded into the `.npz` above.
+    MEASURED 2026-09-23 on the boundary array this exists for (`benchmark_v1`
+    `s_pars`, complex64 `[16, 4, 256, 512]` = 64 MiB/frame, the RT/chain boundary of
+    the D2 corpus; see the storage scoping pilot):
+
+        zlib (level 1) ratio        0.92-0.93  -- i.e. ~7% recovered
+        np.savez_compressed cost    ~3.5 s/frame
+        np.save (this)              ~0.35 s write, ~0.08 s read
+
+    A ray-traced CFR is a sum of many complex exponentials: it is essentially
+    full-entropy float noise, so general-purpose compression has nothing to find.
+    Paying 10x the write time for 7% is the wrong trade at 64 MiB x N frames, and
+    the int16 codec above does not apply either -- this array has never been through
+    a quantizer, so it is not on a uniform code grid and `encode_payload` would fall
+    straight back to `CODEC_RAW` after doing the round-trip check.
+
+    Lossy float16 WAS measured (half the bytes, rel-RMSE 2e-3 / 5e-4 on the two
+    pilot scenes) and is NOT used: the point of storing the CFR is that everything
+    downstream can be re-run from it and compared against what was stored, and a
+    lossy boundary would put a floor under every such comparison.
+    """
+    path = cfr_sidecar_path(npz_path)
+    np.save(path, np.asarray(array))
+    return path.name
+
+
+def read_cfr_sidecar(npz_path, meta: Dict[str, Any]) -> np.ndarray:
+    """Load the CFR sidecar `meta` names, resolved next to `npz_path`.
+
+    Raises `FileNotFoundError` -- loudly, naming the flag -- when the sample records
+    no sidecar or the file is gone, rather than silently falling back to the stored
+    ADC cube in a different signal domain.
+    """
+    npz_path = Path(npz_path)
+    name = meta.get("cfr_sidecar")
+    if not name:
+        raise FileNotFoundError(
+            f"{npz_path.name} records no 'cfr_sidecar': it was generated without the "
+            f"CFR store (chain_generate --store-cfr / SinkBlock(store_cfr=True)), so "
+            f"there is no ray-traced frame to replay from."
+        )
+    path = npz_path.parent / str(name)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{npz_path.name} names CFR sidecar {name!r}, which is missing from "
+            f"{npz_path.parent} -- the corpus was copied without its sidecars."
+        )
+    return np.load(path)
+
+
+# --------------------------------------------------------------------------------
+# Paths sidecar: the ray-traced PATH LIST, for re-synthesising the channel later
+# --------------------------------------------------------------------------------
+#: Suffix of the sidecar holding a sample's ray-traced path list and the per-object
+#: geometry the coherent-target term is built from.
+PATHS_SIDECAR_SUFFIX = ".paths.npz"
+
+
+def paths_sidecar_path(npz_path):
+    """Paths-sidecar path for a sample `.npz` (`<stem>.paths.npz`, same directory)."""
+    return Path(npz_path).with_suffix(PATHS_SIDECAR_SUFFIX)
+
+
+def write_paths_sidecar(npz_path, arrays: Dict[str, np.ndarray]) -> str:
+    """Store a frame's ray-traced path list beside its `.npz`; return the BASENAME,
+    for `meta["paths_sidecar"]`.
+
+    `arrays` is a flat `{name: ndarray}` mapping produced by the RT layer (which owns
+    the Sionna `Paths` object; this module never imports Sionna and has no opinion
+    about the key names beyond writing them verbatim). It is the INPUT SIDE of the
+    channel: what `e2e.environment.rt_signal_chain.cfr_from_paths` and
+    `coherent_target_cfr` consume, rather than the dense CFR they produce.
+
+    WHY BOTH sidecars exist (owner preference, notes/TODO.md ~line 824, 2026-08-10):
+    the dense CFR (`write_cfr_sidecar`) is a ~12x storage regression at corpus scale
+    -- 64 MiB/frame at `benchmark_v1` against ~0.7-1.6 MB for the paths that generated
+    it -- so the durable form is the path list plus enough scene geometry to
+    re-synthesise the CFR without re-tracing. The dense sidecar is kept for the demo,
+    where re-synthesis cost matters more than disk.
+
+    `np.savez_compressed`, unlike the CFR sidecar: at ~1 MB the compression time is
+    negligible, and a path list has exploitable structure (padded/invalid path slots,
+    repeated object ids) that the dense CFR does not.
+
+    This function does NOT define the re-synthesis; it only makes sure the inputs
+    survive. See the shard report for the exact fields the RT layer must supply.
+    """
+    path = paths_sidecar_path(npz_path)
+    np.savez_compressed(path, **{k: np.asarray(v) for k, v in arrays.items()})
+    return path.name
+
+
+def read_paths_sidecar(npz_path, meta: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    """Load the paths sidecar `meta` names, as a plain `{name: ndarray}` dict."""
+    npz_path = Path(npz_path)
+    name = meta.get("paths_sidecar")
+    if not name:
+        raise FileNotFoundError(
+            f"{npz_path.name} records no 'paths_sidecar': it was generated without the "
+            f"path store (chain_generate --store-paths / SinkBlock(store_paths=True))."
+        )
+    path = npz_path.parent / str(name)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{npz_path.name} names paths sidecar {name!r}, which is missing from "
+            f"{npz_path.parent} -- the corpus was copied without its sidecars."
+        )
+    with np.load(path, allow_pickle=False) as data:
+        return {k: np.array(data[k]) for k in data.files}
 
 
 def read_payload(npz_data, meta: Dict[str, Any], payload_key: str) -> np.ndarray:

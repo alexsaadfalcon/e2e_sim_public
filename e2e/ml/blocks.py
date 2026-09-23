@@ -110,7 +110,33 @@ _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # RTEnvironmentBlock.get_state_updates -- what makes a frame's
                     # licence status (which mesh?) and scene content auditable from
                     # the artifact alone.
-                    "scene_provenance")
+                    "scene_provenance",
+                    # CFR store (owner-directed 2026-09-23): the BASENAME of the
+                    # `<stem>.cfr.npy` sidecar holding the ray-traced frame this sample
+                    # was produced from (see `SinkBlock(store_cfr=True)` /
+                    # `storage.write_cfr_sidecar`). Present only on corpora generated
+                    # with the store on; absent everywhere else, which is what makes an
+                    # older corpus read exactly as it always did.
+                    "cfr_sidecar",
+                    # ...and the BASENAME of the `<stem>.paths.npz` sidecar holding the
+                    # ray-traced PATH LIST the frame was synthesised from -- the cheap,
+                    # durable form of the same information (see
+                    # `storage.write_paths_sidecar`).
+                    "paths_sidecar")
+
+
+#: State key under which `CFRCaptureStage` parks the frame entering the chain, for a
+#: `SinkBlock(store_cfr=True)` at the far end to write out. Deliberately NOT `s_pars`:
+#: the orchestrator DELETES the previous domain's payload key when a bridge block
+#: crosses domains (`e2e.simulation._advance_domain`), which is precisely where the
+#: expensive ray-traced frame would otherwise be dropped.
+CFR_CAPTURE_KEY = "cfr_entry"
+
+#: State key under which the RAY-TRACED PATH LIST reaches a `SinkBlock(store_paths=
+#: True)`: a flat `{name: ndarray}` mapping, supplied by the environment block's
+#: `get_state_updates()` (it owns the Sionna `Paths` object; nothing under `e2e/ml`
+#: imports Sionna). See `storage.write_paths_sidecar`.
+PATHS_CAPTURE_KEY = "rt_paths"
 
 
 def _json_default(obj):
@@ -145,6 +171,51 @@ def _artifact_path(out_dir, tag, frame_idx):
 
 
 # --------------------------------------------------------------------------------
+# CFRCaptureStage
+# --------------------------------------------------------------------------------
+class CFRCaptureStage:
+    """Pass-through serial stage: stash the CFR frame ENTERING the chain.
+
+    Placed first in `e2e.ml.chain_generate.build_chain_simulation`'s stage list when
+    `store_cfr=True`, it copies `state['s_pars']` -- the ray-traced channel, before
+    the RF front end has touched it -- under `CFR_CAPTURE_KEY`, where a
+    `SinkBlock(store_cfr=True)` at the end of the chain finds it. It rewrites nothing
+    else, so inserting it cannot change a single stored sample.
+
+    WHY a separate key rather than reading `s_pars` at the sink: the dechirp crosses
+    from the frequency domain to RX-time, and `Simulation._advance_domain` deletes the
+    crossed-from payload key by design (so a later block cannot silently compute on a
+    stale pre-dechirp frame). `s_pars` therefore does not exist any more by the time
+    the sink runs.
+
+    WHY the copy: the frame is handed to stages that are free to write into it, and a
+    stored boundary that a later stage mutated would not be the boundary. `.clone()`
+    on the 64 MiB (benchmark_v1) frame is sub-millisecond next to the ~11-13 s the
+    ray tracing itself costs.
+    """
+
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=True, chirps=frames.CHIRP_NATIVE, domain=frames.DOMAIN_CFR,
+    )
+
+    def __init__(self, key: str = CFR_CAPTURE_KEY):
+        self.key = key
+
+    def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        payload_key = frames.DOMAIN_PAYLOAD_KEY[frames.DOMAIN_CFR]
+        if payload_key not in state:
+            raise KeyError(
+                f"CFRCaptureStage: no state[{payload_key!r}] -- this stage belongs "
+                f"FIRST in a chain that starts in the {frames.DOMAIN_CFR!r} domain "
+                f"(an environment block emitting an S-parameter frame)."
+            )
+        s_pars = state[payload_key]
+        captured = (s_pars.detach().clone() if torch.is_tensor(s_pars)
+                    else np.array(s_pars, copy=True))
+        return {self.key: captured}
+
+
+# --------------------------------------------------------------------------------
 # SinkBlock
 # --------------------------------------------------------------------------------
 class SinkBlock:
@@ -169,13 +240,35 @@ class SinkBlock:
     `state.get('signal_domain', self.domain)`, so a `SinkBlock` used directly
     (bypassing `Simulation`'s frame-contract check, e.g. in tests) still
     self-describes correctly even if `domain` wasn't set to match.
+
+    `store_cfr=True` additionally writes the ray-traced frame that ENTERED the chain
+    (stashed by a `CFRCaptureStage`, see that class) to an uncompressed
+    `<stem>.cfr.npy` sidecar next to the `.npz`, and records its basename in
+    `meta["cfr_sidecar"]`. The `.npz` itself is untouched -- same keys, same codec --
+    so every existing reader and scorer is unaffected, and a corpus generated without
+    the flag is byte-for-byte what it was before this option existed. The point of
+    storing it is that the expensive half of generation (ray tracing) is then done
+    once: the analog chain, the impairments and the quantizer can all be re-run live
+    from a stored frame and compared against the `adc` that shipped with it.
+
+    `store_paths=True` does the same for the RAY-TRACED PATH LIST (`<stem>.paths.npz`,
+    `meta["paths_sidecar"]`), which the environment block must supply under
+    `PATHS_CAPTURE_KEY`: ~1 MB/frame against the dense frame's 64 MiB, and the form
+    the channel can be re-synthesised from without re-tracing. The two are
+    independent; a corpus may carry either, both, or neither.
     """
 
-    def __init__(self, out_dir, tag: str = "sample", domain: str = frames.DOMAIN_RX_TIME):
+    def __init__(self, out_dir, tag: str = "sample", domain: str = frames.DOMAIN_RX_TIME,
+                 *, store_cfr: bool = False, cfr_key: str = CFR_CAPTURE_KEY,
+                 store_paths: bool = False, paths_key: str = PATHS_CAPTURE_KEY):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.tag = tag
         self.domain = domain
+        self.store_cfr = bool(store_cfr)
+        self.cfr_key = cfr_key
+        self.store_paths = bool(store_paths)
+        self.paths_key = paths_key
         self.frame_capabilities = FrameCapabilities(
             accepts_mimo=True, chirps=frames.CHIRP_NATIVE, domain=domain,
         )
@@ -232,6 +325,39 @@ class SinkBlock:
         # codec win losslessly instead of guessing from the data (see that module).
         full_scale = state.get("adc_full_scale")
         path = _artifact_path(self.out_dir, self.tag, idx)
+
+        # A REPLAYED frame carries its source sample's 'cfr_sidecar' in state (see
+        # SourceBlock's extras); this sample may only claim a sidecar it wrote itself,
+        # or the name would point at another corpus's file.
+        meta.pop("cfr_sidecar", None)
+        meta.pop("paths_sidecar", None)
+        if self.store_paths:
+            rt_paths = state.get(self.paths_key)
+            if not rt_paths:
+                raise KeyError(
+                    f"SinkBlock(tag={self.tag!r}, store_paths=True): no "
+                    f"state[{self.paths_key!r}] -- the environment block must emit the "
+                    f"ray-traced path list from get_state_updates(); a stand-in "
+                    f"environment (or an RT block without that hook) supplies none."
+                )
+            meta["paths_sidecar"] = storage.write_paths_sidecar(
+                path, {k: (v.detach().cpu().numpy() if torch.is_tensor(v)
+                           else np.asarray(v)) for k, v in dict(rt_paths).items()})
+        if self.store_cfr:
+            cfr = state.get(self.cfr_key)
+            if cfr is None:
+                raise KeyError(
+                    f"SinkBlock(tag={self.tag!r}, store_cfr=True): no "
+                    f"state[{self.cfr_key!r}] -- a CFRCaptureStage must run FIRST in "
+                    f"the chain to stash the entering frame (see that class)."
+                )
+            cfr_np = (cfr.detach().cpu().numpy() if torch.is_tensor(cfr)
+                      else np.asarray(cfr))
+            # Sidecar first, then the npz: a sample must never name a file that is not
+            # there, and this way a crash between the two leaves an orphan .npy (inert)
+            # rather than a sample pointing at nothing.
+            meta["cfr_sidecar"] = storage.write_cfr_sidecar(path, cfr_np)
+
         storage.write_sample_npz(
             path, arrays, meta, payload_key=payload_key, full_scale=full_scale,
             json_default=_json_default,
@@ -242,6 +368,25 @@ class SinkBlock:
 # --------------------------------------------------------------------------------
 # SourceBlock
 # --------------------------------------------------------------------------------
+def _check_replay_domain(domain: Optional[str]) -> Optional[str]:
+    """Validate a `SourceBlock(domain=...)` request.
+
+    `None` (the default) replays each artifact in the domain it was STORED in -- the
+    long-standing behaviour. `frames.DOMAIN_CFR` asks instead for the ray-traced frame
+    from the sample's `.cfr.npy` sidecar, which only exists on a corpus generated with
+    the CFR store on (`chain_generate --store-cfr`); a sample without one raises from
+    `storage.read_cfr_sidecar` rather than quietly serving the ADC cube. No other
+    domain is offered: nothing else is stored twice.
+    """
+    if domain is None or domain == frames.DOMAIN_CFR:
+        return domain
+    raise ValueError(
+        f"SourceBlock domain={domain!r} is not available; pass None (replay the "
+        f"stored payload in its own domain) or frames.DOMAIN_CFR (replay the stored "
+        f"ray-traced frame from the sample's .cfr.npy sidecar)."
+    )
+
+
 class SourceBlock:
     """The inverse of `SinkBlock`: loads stored artifacts and replays them.
 
@@ -264,11 +409,18 @@ class SourceBlock:
     (the SVD and subspace ground truth) applies at all, and `get_state_updates()`
     supplies the stored metadata -- labels included -- so they travel with the
     frame. See `Simulation._environment_state_updates` and `_feed_forward_from`.
+
+    `domain=frames.DOMAIN_CFR` (default `None`) switches the replayed payload from the
+    stored ADC cube to the stored RAY-TRACED frame in the sample's `.cfr.npy` sidecar
+    (`SinkBlock(store_cfr=True)`), so a chain fed by this block runs the WHOLE analog
+    and digital chain live instead of resuming past the dechirp. `signal_domain` then
+    reports `DOMAIN_CFR` and the payload is an `s_pars` frame.
     """
 
-    def __init__(self, in_dir, tag: str = "sample"):
+    def __init__(self, in_dir, tag: str = "sample", *, domain: Optional[str] = None):
         self.in_dir = Path(in_dir)
         self.tag = tag
+        self.replay_domain = _check_replay_domain(domain)
         self._files = sorted(self.in_dir.glob(f"{tag}_frame_*.npz"))
         if not self._files:
             raise FileNotFoundError(
@@ -302,8 +454,17 @@ class SourceBlock:
     def _load(self, path):
         with np.load(path, allow_pickle=False) as data:
             meta = json.loads(str(data["meta"].item()))
-            payload_key = meta["payload_key"]
-            payload_np = storage.read_payload(data, meta, payload_key)
+            if self.replay_domain == frames.DOMAIN_CFR:
+                # Replay the stored RAY-TRACED frame instead of the stored ADC cube, so
+                # the chain runs from the top. The meta is amended (not the file) so
+                # every domain-dependent thing downstream -- `self.signal_domain`, the
+                # state key `Simulation` seeds the payload under -- follows from the
+                # one place that already decides it.
+                payload_np = storage.read_cfr_sidecar(path, meta)
+                meta = dict(meta, domain=frames.DOMAIN_CFR,
+                            payload_key=frames.DOMAIN_PAYLOAD_KEY[frames.DOMAIN_CFR])
+            else:
+                payload_np = storage.read_payload(data, meta, meta["payload_key"])
             # storage.read_payload's CODEC_RAW branch returns the npz's own
             # (read-only, memory-mapped-into-the-zip) array; torch.from_numpy needs a
             # writable buffer, so copy -- the CODEC_INT16 branch already returns a
@@ -377,13 +538,18 @@ class CorpusSourceBlock(SourceBlock):
     riding along (`get_state_updates`), and they load in milliseconds. A live trace would
     show a frame no detector was ever evaluated against, at a cost per frame nobody has
     measured on the demo machine.
+
+    `domain=frames.DOMAIN_CFR` inherits `SourceBlock`'s CFR replay (see there): the
+    same held-out frames, but re-entering the chain at the RF front end rather than at
+    the ADC, which is what corpora generated with `--store-cfr` are for.
     """
 
     def __init__(self, manifest_path, split: str = "test", start: int = 0,
-                 limit: Optional[int] = None):
+                 limit: Optional[int] = None, *, domain: Optional[str] = None):
         from e2e.ml.labels import LabelGrid
         from e2e.radar_config import RadarConfig
 
+        self.replay_domain = _check_replay_domain(domain)
         self.manifest_path = Path(manifest_path)
         manifest = json.loads(self.manifest_path.read_text())
         if split not in manifest.get("files", {}):
