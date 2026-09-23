@@ -47,7 +47,8 @@ def test_presets_without_ab_are_unaffected():
     for p in PRESETS:
         if p.id in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error",
                     "thrust3_cold_start_acquisition",
-                    "thrust4_interconnect_range_profile"):
+                    "thrust4_interconnect_range_profile",
+                    "thrust5_bridge_adc_bits_vs_detections"):  # A/B on the corpus itself
             continue
         assert p.ab is None
 
@@ -352,14 +353,26 @@ def test_range_az_panel_carries_the_peak_minus_median_statistic():
     assert "dB" in title
 
 
-def test_range_el_panel_carries_no_peak_minus_median_statistic():
-    """The statistic is a Thrust-1/2/4 range-AZIMUTH claim; range-elevation gets none."""
+def test_range_el_panel_carries_the_peak_minus_median_statistic_too():
+    """Updated (hostile-expert fourth read, 2026-09-23; owned by the pipeline_runner
+    worker, pipeline_runner.py line ~1308): range-elevation now prints the same
+    peak-median statistic as range-azimuth, because the Thrust 2 screen note claims
+    "statistics printed on each" for BOTH panels -- a screen note about the elevation
+    cut previously had no number beside it while range-azimuth's identical note did."""
     torch = pytest.importorskip("torch")
     from webapp.pipeline_runner import figures_from_outputs
 
-    ra = torch.rand((12, 12)).to(torch.complex64)
+    rng = np.random.default_rng(9)
+    power = rng.random((12, 12)).astype(np.float32)
+    ra = torch.from_numpy(power).to(torch.complex64)
     fig = figures_from_outputs({"range_el": [ra], "_axis_meta": {"range_el_bins": 12}})["range_el"]
-    assert "peak - median" not in fig.layout.title.text
+
+    title = fig.layout.title.text
+    assert "peak - median" in title
+    measured = float(re.search(r"(-?\d+\.\d+)\s*(?:</sup>)?\s*$", title).group(1))
+    db = 10 * np.log10(np.maximum(power / power.max(), 1e-12))
+    expected = round(float(db.max() - np.median(db)), 1)
+    assert measured == pytest.approx(expected, abs=0.05)
 
 
 def test_range_profile_panel_carries_the_median_floor_statistic():
@@ -613,7 +626,10 @@ def test_resolve_screen_note_fills_vmax_clause_from_the_real_manifest():
     state = apply_preset(preset)
     note = appmod._resolve_screen_note(preset, state)
     assert "{VMAX_CLAUSE}" not in note
-    assert "unambiguous velocity" in note and "m/s from the manifest" in note
+    # Kept terse (hostile-expert fourth read, 2026-09-23) so the note leaves room for
+    # the mandatory "frames: ..." prefix and still fits one line at 16 px on the
+    # 1600 px results page.
+    assert "v_max" in note and "m/s" in note
     # Cross-check: the number matches RadarConfig computed directly from the same
     # manifest, not a value typed into the preset.
     v_max = appmod._read_corpus_v_max(state)
@@ -629,7 +645,7 @@ def test_resolve_screen_note_drops_vmax_clause_when_manifest_is_unreadable():
     state["corpus_environment"]["params"]["manifest"] = "does/not/exist/manifest.json"
     note = appmod._resolve_screen_note(preset, state)
     assert "{VMAX_CLAUSE}" not in note and "unambiguous velocity" not in note
-    assert note.endswith("one training seed.")
+    assert note.endswith("seed 42 of two (0.476 / 0.436).")  # the T5 note names the seed pair now
 
 
 def test_read_corpus_v_max_returns_none_without_a_manifest():

@@ -569,8 +569,8 @@ raddetnet_joint=e2e/ml/runs/b9_raddetnet_joint_v2v3/best.pt` and `python -m e2e.
 --manifest <manifest> --checkpoint raddetnet_joint=...`; paired
 scene-level bootstrap +0.108 and +0.279 AP over the single-corpus checkpoint, controls
 pass on both corpora, independently verified) — a data-diversity result, not a
-generalisation one, since neither corpus is then unseen; and one training seed until its
-replicate lands. Weight decay (AdamW, 0.1) leaves the in-distribution number unchanged (0.476)
+generalisation one, since neither corpus is then unseen. Its seed-43 replicate lands within
+0.03 AP on every split (0.577 / 0.514 on `b1_bench_v3` / `b1_bench_v2` test). Weight decay (AdamW, 0.1) leaves the in-distribution number unchanged (0.476)
 and the shifted-corpus number inside the seed spread (0.186); it is not the lever. On a third
 corpus never trained on (`b1_bench_v4`, tier D4: a new ray-traced Munich city backdrop at one
 radar viewpoint, same target prior and impairment model, a 0.9 dB shift at the network input

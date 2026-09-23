@@ -1305,11 +1305,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 earliest_arrival_note = ""
             # Peak-median dB, per frame, on the UNCLIPPED map BEFORE the nonneg-range
             # crop below -- matches notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4
-            # cards' own dynamic-range definition (Change 2). range_az only: it is the
-            # panel the cards quote a number on; range_el gets no annotation.
-            dyn_range_db = ([_peak_minus_median_db(d) for d in
-                             (_to_numpy_abs_db(f) for f in outputs[key])]
-                            if key == "range_az" else None)
+            # cards' own dynamic-range definition (Change 2). Computed for range_el too
+            # (4th hostile-expert read, 2026-09-23): a screen note about the elevation
+            # cut had no number beside it while range_az's identical note did, reading
+            # as if only range_az's dynamic range had been checked.
+            dyn_range_db = [_peak_minus_median_db(d) for d in
+                            (_to_numpy_abs_db(f) for f in outputs[key])]
             frames_db = [_to_numpy_abs_db(f) for f in outputs[key]]
             keep = _nonnegative_range(y)
             if frames_db[-1].shape[0] == keep.size:
@@ -1327,11 +1328,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # it clipped mid-word ("...range 0 = earliest arriv", rehearsal PNG,
             # thrust4_interconnect_range_profile). `_HEATMAP_MARGIN_T` already
             # budgets for the 2-line-subline case this produces.
-            if dyn_range_db is not None:
-                sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
-                           f"{earliest_arrival_note}" for d in dyn_range_db]
-            else:
-                sublines = [f"({qualifier}){earliest_arrival_note}"] * len(outputs[key])
+            sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
+                       f"{earliest_arrival_note}" for d in dyn_range_db]
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
                      for s in sublines]
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
@@ -1586,9 +1584,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_yaxes(range=[0.0, top])
         fig.update_xaxes(dtick=1)
         # The settled warm-start level the cards quote, so "is 0.06 good?" has an
-        # on-screen answer instead of living only in the operator's script.
+        # on-screen answer instead of living only in the operator's script. Labelled
+        # "reference" (4th hostile-expert read, 2026-09-23): on a run whose OWN curve
+        # sits well above this line (e.g. a cold-start/rank-collapse run reaching
+        # ~0.62), an unqualified "settled level (0.06)" reads as if it were THIS run's
+        # level rather than a separate warm-start reference case.
         fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash", line_color="#576574",
-                     annotation_text=f"settled level ({_SUBSPACE_ERR_SETTLED_LEVEL:g})",
+                     annotation_text=(f"warm-start settled level "
+                                      f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference)"),
                      annotation_position="top left",
                      annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(

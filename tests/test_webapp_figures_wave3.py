@@ -114,7 +114,7 @@ def test_range_el_subline_states_earliest_arrival_too():
         "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
     assert fig.layout.yaxis.title.text == "range (m)"
-    assert "range 0 = earliest arrival" in fig.layout.title.text
+    assert "range 0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
 
 
 def test_range_az_ylabel_falls_back_to_bins_without_axis_metadata():

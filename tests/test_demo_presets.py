@@ -94,7 +94,43 @@ def test_thrust5_screen_notes_share_the_vmax_placeholder():
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         note = PRESETS_BY_ID[pid].screen_note
         assert "{VMAX_CLAUSE}" in note
-        assert "40 m" in note and "one training seed" in note
+        assert "40 m" in note and "seed 42 of two" in note
+
+
+def test_thrust5_screen_notes_all_admit_the_frames_are_replayed():
+    """Hostile-expert fourth read (2026-09-23): a visitor reading only the Results-tab
+    note must see, on all three Thrust 5 presets, that the frames are a stored
+    benchmark corpus replay and the RF chain of Thrusts 1-4 is bypassed -- not just
+    hear it from the presenter (the `say` list already carried this)."""
+    prefix = ("frames: stored ADC corpus (benchmark_v1_D2), replayed -- the RF chain "
+              "of Thrusts 1-4 is bypassed;")
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        assert PRESETS_BY_ID[pid].screen_note.startswith(prefix), pid
+
+
+def test_thrust5_ml_label_and_note_admit_it_loses():
+    """This preset is deliberately shown as the losing arm; the label and screen note
+    must say so, not just the `say` list (hostile-expert fourth read, 2026-09-23)."""
+    p = PRESETS_BY_ID["thrust5_detector_ml"]
+    assert "loses" in p.label.lower() and "shown on purpose" in p.label.lower()
+    assert "loses to cfar" in p.screen_note.lower()
+    assert "0.127" in p.screen_note and "0.301" in p.screen_note
+    assert "shown on purpose" in p.screen_note.lower()
+
+
+@pytest.mark.parametrize("pid", ["thrust5_detector_cfar", "thrust5_detector_ml",
+                                 "thrust5_detector_raddetnet"])
+def test_thrust5_screen_note_resolves_within_a_one_line_character_budget(pid):
+    """Proxy for "fits one line at 16 px on the 1600 px results page" (measured
+    against the rendered rehearsal PNGs, 2026-09-23: ~7.1 px/char, ~1550 px usable) --
+    a unit test cannot render the page, but it can catch a future addition that blows
+    the budget again."""
+    from webapp import app as appmod
+
+    preset = PRESETS_BY_ID[pid]
+    state = apply_preset(preset)
+    note = appmod._resolve_screen_note(preset, state)
+    assert len(note) <= 230, f"{pid}: {len(note)} chars, likely wraps to a second line"
 
 
 @pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])
@@ -118,6 +154,15 @@ def test_raddetnet_card_meets_the_tighter_per_section_budgets():
     assert len(p.do_not_say) <= 5
     for s in p.do_not_say:
         assert _wc(s) <= 35, s
+
+
+def test_raddetnet_card_discloses_all_four_screened_arms():
+    """Fix (hostile-expert fourth read, 2026-09-23): the card must say that four
+    learned arms were screened (three ported architectures plus this one) and that
+    none was dropped from beat_cfar.json, so a visitor cannot suspect cherry-picking."""
+    p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    assert any("four learned arms" in s.lower() and "beat_cfar.json" in s
+              for s in p.say)
 
 
 # ------------------------------------------------------------------------------------
@@ -144,6 +189,24 @@ def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
     assert any("2.7 db" in s.lower() for s in p.say)
 
 
+def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
+    """Hostile-expert fourth read (2026-09-23): the note used to claim the elevation
+    cut moves ~2.7 dB, a number no panel on this screen shows (that figure is a
+    different, offline, unclipped-dB metric -- see notes/handoff 2026-09-22). The note
+    now claims only the on-screen range-az/range-el images and the tracker curve; the
+    2.7 dB claim moves to the card (`say`/`blurb`) with its metric named explicitly."""
+    p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
+    assert "2.7" not in p.screen_note
+    assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
+    assert "barely move" in p.screen_note
+    assert "not the on-screen statistic" in p.blurb
+    # Card numbers drift against the live nondeterministic run (hostile-expert fourth
+    # read, 2026-09-23): the cross-reference to Thrust 3's cold-start first frame must
+    # say "about 0.6", never the stale fixed "0.58".
+    assert not any("0.58" in s for s in p.say)
+    assert any("about 0.6" in s for s in p.say)
+
+
 def test_thrust3_is_a_cold_start_at_2_to_1():
     st = apply_preset(PRESETS_BY_ID["thrust3_cold_start_acquisition"])
     assert st["subspace"]["params"]["warm_start"] == "cold"
@@ -160,16 +223,35 @@ def test_thrust3_is_an_ab_preset_naming_its_own_knob():
     assert "cold" in p.ab_label_a.lower() and "warm" in p.ab_label_b.lower()
 
 
+def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
+    """Card numbers drift against the live nondeterministic run (hostile-expert fourth
+    read, 2026-09-23: 0.57 rendered as 0.595 in one rehearsal) -- the blurb now quotes
+    "about 0.6" instead of a fixed third decimal, and the say list tells the operator
+    why, so they never quote the third decimal on stage."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    assert "about 0.6" in p.blurb
+    assert "0.57" not in p.blurb
+    assert any("nondeterministic" in s.lower() and "third decimal" in s.lower()
+              for s in p.say)
+
+
 def test_thrust4_synthetic_filter_is_normalized_and_labelled():
+    """Hostile-expert fourth read (2026-09-23): as-loaded (A) is now passthrough, the
+    HEALTHY arm, and the A/B override (B) swaps in the synthetic boxcar -- the
+    degraded arm -- so "after"/B is degraded on every A/B screen, matching T1/T2."""
     p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
     st = apply_preset(p)
     assert st["interconnect"]["enabled"] and st["interconnect"]["params"]["normalize_gain"] is True
-    assert st["interconnect"]["params"]["case"] == "default"
+    assert st["interconnect"]["params"]["case"] == "passthrough"
+    st_b = apply_preset(p, arm="b")
+    assert st_b["interconnect"]["params"]["case"] == "default"
     assert st["range_profile"]["enabled"]
     assert "synthetic" in p.blurb.lower()
     # Owner ballot 3A: labelled synthetic wherever it appears -- including the A/B
-    # banner (the concrete finding: it used to read "Case default (boxcar)").
-    assert "synthetic" in p.ab_label_a.lower()
+    # banner (the concrete finding: it used to read "Case default (boxcar)"). It now
+    # lives on ab_label_b, the arm that carries the synthetic boxcar.
+    assert "synthetic" in p.ab_label_b.lower()
+    assert "passthrough" in p.ab_label_a.lower()
 
 
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():
@@ -189,6 +271,80 @@ def test_thrust5_ml_threshold_is_pinned_below_the_blank_figure_point():
     assert st["detector"]["params"]["mode"] == "ml"
     assert st["detector"]["params"]["threshold"] == ML_THRESHOLD < 0.5
     assert st["detector"]["params"]["checkpoint"].endswith("best.pt")
+
+
+def test_bridge_corpora_are_discovered_on_this_machine():
+    """The bridge preset only means anything if BOTH regenerated corpora are actually
+    on disk and found by the same discovery `corpus_environment.manifest`'s help text
+    lists (webapp/corpus_catalog.py) -- otherwise the A/B silently falls back to
+    whatever `apply_preset` was handed, with no error until the run itself."""
+    from webapp.corpus_catalog import CORPUS_MANIFESTS
+    from webapp.demo_presets import BRIDGE_CORPUS_12BIT, BRIDGE_CORPUS_4BIT
+
+    assert BRIDGE_CORPUS_12BIT in CORPUS_MANIFESTS
+    assert BRIDGE_CORPUS_4BIT in CORPUS_MANIFESTS
+    assert BRIDGE_CORPUS_12BIT != BRIDGE_CORPUS_4BIT
+
+
+def test_thrust5_bridge_preset_sits_right_after_the_cfar_preset():
+    ids = [p.id for p in PRESETS]
+    i = ids.index("thrust5_detector_cfar")
+    assert ids[i + 1] == "thrust5_bridge_adc_bits_vs_detections"
+
+
+def test_thrust5_bridge_preset_is_ab_wired_to_the_two_bit_depths():
+    """A (as loaded) is the 12-bit corpus, matching thrust5_detector_cfar's CFAR
+    settings exactly; B swaps ONLY the corpus manifest to the 4-bit re-generation of
+    the same 5 test scenes -- no other param differs between the arms."""
+    from webapp.demo_presets import (
+        BRIDGE_CORPUS_12BIT, BRIDGE_CORPUS_4BIT, CFAR_THRESHOLD,
+    )
+
+    p = PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"]
+    assert p.thrust == 5
+    assert p.ab == ("corpus_environment", "manifest", BRIDGE_CORPUS_4BIT)
+    assert p.ab_label_a and p.ab_label_b
+    assert "12-bit" in p.ab_label_a and "4-bit" in p.ab_label_b
+
+    st_a = apply_preset(p)
+    assert st_a["corpus_environment"]["params"]["manifest"] == BRIDGE_CORPUS_12BIT
+    assert st_a["corpus_environment"]["params"]["split"] == "test"
+    assert st_a["detector"]["params"]["mode"] == "cfar"
+    assert st_a["detector"]["params"]["threshold"] == CFAR_THRESHOLD
+    assert st_a["detector"]["params"]["cfar_guard"] == 2
+    assert st_a["detector"]["params"]["cfar_train"] == 6
+    for bid in ("rffe", "interconnect", "afe", "subspace"):
+        assert st_a[bid]["enabled"] is False
+
+    st_b = apply_preset(p, arm="b")
+    assert st_b["corpus_environment"]["params"]["manifest"] == BRIDGE_CORPUS_4BIT
+    # Only the manifest differs between the two arms' resolved states.
+    st_a_no_manifest = dict(st_a["corpus_environment"]["params"])
+    st_b_no_manifest = dict(st_b["corpus_environment"]["params"])
+    del st_a_no_manifest["manifest"]
+    del st_b_no_manifest["manifest"]
+    assert st_a_no_manifest == st_b_no_manifest
+    assert st_a["detector"] == st_b["detector"]
+
+
+def test_thrust5_bridge_preset_replays_the_test_split_and_disables_the_frequency_chain():
+    """Same shape as the other Thrust 5 presets: corpus replay into radar_cube +
+    detector only, Thrusts 1-4 and every classic frequency-domain product off."""
+    st = apply_preset(PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"])
+    assert st["corpus_environment"]["enabled"]
+    assert st["radar_cube"]["enabled"] and st["detector"]["enabled"]
+    for bid in ("fft", "range_az", "range_el", "range_profile", "subspace_err", "comms"):
+        assert st[bid]["enabled"] is False
+
+
+def test_thrust5_bridge_card_reports_the_measured_hit_gap():
+    """The card must carry the measured numbers, not a promise to measure later
+    (MEASURE FIRST): cumulative hits 19 (12-bit) vs 17 (4-bit) over the 5 test frames,
+    reproduced bit-for-bit across two independent runs each arm (2026-09-23)."""
+    p = PRESETS_BY_ID["thrust5_bridge_adc_bits_vs_detections"]
+    assert "19" in p.blurb and "17" in p.blurb
+    assert "same scenes" in p.screen_note or "same 5 scenes" in p.screen_note
+    assert "quantizer" in p.screen_note.lower()
 
 
 # ------------------------------------------------------------------------------------

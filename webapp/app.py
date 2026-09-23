@@ -344,8 +344,11 @@ def _resolve_screen_note(preset: "DemoPreset", block_state: Dict[str, Any]) -> s
     note = preset.screen_note if preset is not None else ""
     if note and "{VMAX_CLAUSE}" in note:
         v_max = _read_corpus_v_max(block_state)
-        clause = (f"; unambiguous velocity ±{v_max:.2f} m/s from the manifest"
-                  if v_max is not None else "")
+        # Kept short (hostile-expert fourth read, 2026-09-23): the Thrust 5 notes grew
+        # a mandatory "frames: ..." prefix, and this clause has to leave room for it
+        # -- and, on thrust5_detector_ml, a further per-preset clause -- on one line
+        # at 16 px on the 1600 px results page.
+        clause = f"; v_max ±{v_max:.2f} m/s" if v_max is not None else ""
         note = note.replace("{VMAX_CLAUSE}", clause)
     return note
 

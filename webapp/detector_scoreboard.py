@@ -66,6 +66,11 @@ DEFAULT_RADDETNET_CI_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "raddetnet_ci.j
 #: (notes/ESTABLISHED_FACTS.md, measured 2026-09-22). Optional: an arm not scored here
 #: simply gets no OOD row (`_ood_rows_for_arm`). Overridable per call; never edited.
 DEFAULT_OOD_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "gen_s43_v2_test.json"
+#: A THIRD, separately-scored corpus (D4/b1_bench_v4) no checkpoint here trained on --
+#: F87 (notes/ESTABLISHED_FACTS.md, measured 2026-09-22). Optional, same convention as
+#: `DEFAULT_OOD_JSON`: an arm not scored here simply gets no 3rd-corpus row
+#: (`_third_corpus_rows_for_arm`). Overridable per call; never edited by this module.
+DEFAULT_THIRD_CORPUS_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "gen_v4_train.json"
 
 #: Hard precision ceiling for ANY detector that fires on every real object, because
 #: ground truth OMITS real objects: ~3.25 real strongly-scattering objects per frame
@@ -273,6 +278,20 @@ _TABLE_SUBLINE_LINE_PX = 32
 #: carries the budget instead. `scoreboard_figure` computes the real total from both
 #: annotations' actual wrapped line counts, never from assumed content.
 _TABLE_ANNOTATION_LINE_PX = 40
+#: Slack between the table's DECLARED height (this module's own row-count arithmetic)
+#: and what Plotly's table trace actually needs client-side, discovered empirically
+#: (4th hostile-expert read, 2026-09-23): a Playwright render of the exact raddetnet
+#: figure JSON clipped its last row even though `domain_height >= content_height`
+#: held EXACTLY (zero slack) -- Plotly's own row-position accumulation drifted ~12 px
+#: from this module's `n_rows * row_height` arithmetic somewhere in a numeric-heavy
+#: row's text metrics (root cause not fully isolated; a standalone same-content,
+#: same-column-width table reproduced the same per-row y-drift). +8 px was the
+#: measured minimum that stopped the clip on that figure; used at 2x for margin
+#: against a different arm's row content drifting differently. This buys back a
+#: little of the exact-fit budget this module otherwise computes -- it does not
+#: replace the geometric self-check below, which still catches a REAL row-count
+#: increase that isn't budgeted for at all.
+_TABLE_RENDER_SAFETY_PX = 16
 
 
 def _wrap_text(text: str, max_chars: int = 70) -> str:
@@ -354,6 +373,40 @@ def _load_json_arms(path) -> Optional[List[Dict[str, Any]]]:
         return None
 
 
+def _match_corpus_arm(bc_arm: Dict[str, Any], corpus_arms: List[Dict[str, Any]]
+                      ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """`(arm, sibling)` -- `bc_arm`'s (one beat_cfar.json arm's) counterpart in
+    `corpus_arms` (a separately-scored corpus' `"arms"` list), plus its two-seed
+    sibling if one exists in that SAME file. Shared by every "score this beat_cfar.json
+    arm on a separate corpus" row-builder (`_ood_rows_for_arm`, `_third_corpus_rows_for_arm`)
+    so the matching convention -- checkpoint PARENT DIRECTORY for an ML arm (same
+    convention `arm_name_for_detector` uses), NAME for CFAR (no checkpoint), and a
+    "_s<seed>" name suffix for sibling detection -- lives in exactly one place.
+
+    `(None, None)` if `bc_arm` has no counterpart in `corpus_arms` at all, or the
+    counterpart carries no AP (nothing to report). `sibling` is `None` whenever the
+    matched arm's name carries no "_s<seed>" suffix (CFAR, a joint checkpoint with no
+    per-seed family, ...) or no such sibling is present in `corpus_arms`.
+    """
+    ckpt = bc_arm.get("checkpoint")
+    if ckpt:
+        ckpt_dir = Path(ckpt).parent.name
+        arm = next((a for a in corpus_arms if a.get("checkpoint") and
+                   Path(a["checkpoint"]).parent.name == ckpt_dir), None)
+    else:
+        arm = next((a for a in corpus_arms if a.get("name") == bc_arm.get("name")), None)
+    if arm is None or arm.get("AP") is None:
+        return None, None
+
+    sibling = None
+    base, sep, _seed = arm.get("name", "").rpartition("_s")
+    if base and sep:
+        sibling = next((a for a in corpus_arms if a is not arm and
+                        a.get("name", "").startswith(base + "_s") and
+                        a.get("AP") is not None), None)
+    return arm, sibling
+
+
 def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
                       ) -> List[Tuple[str, str]]:
     """`[(label, value)]` -- one or two SHORT rows (never one long sentence, see the
@@ -368,24 +421,23 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
 
     For a two-seed RADDetNet arm specifically (its OOD name ends "_s<seed>" and a
     sibling "_s<other seed>" arm of the same base name is in the SAME file), also
-    finds the CFAR arm in that file and adds a second row stating whether CFAR's AP
-    falls between the two seeds' -- F86's finding that the out-of-distribution lead is
-    seed-dependent, computed from these three numbers at call time, never typed as a
-    conclusion here.
+    finds the CFAR arm in that file and adds an AP-vs-CFAR row (both seeds and CFAR's
+    own AP, one line -- see the row-budget comment inline below for why this is one
+    merged row rather than the AP triple plus a separate verdict sentence) and, when
+    every arm's operating point carries one, an "OOD unmatched/frame" row: on false
+    alarms specifically the BEST seed can lose to CFAR out of distribution even though
+    its AP wins (hostile-expert 4th read, 2026-09-23 -- AP alone hid that disagreement).
+    Both rows are computed from these files' own numbers at call time, never typed as
+    a conclusion here.
     """
     ood_arms = _load_json_arms(ood_json_path)
     if not ood_arms:
         return []
 
-    ckpt = bc_arm.get("checkpoint")
-    if ckpt:
-        ckpt_dir = Path(ckpt).parent.name
-        ood_arm = next((a for a in ood_arms if a.get("checkpoint") and
-                        Path(a["checkpoint"]).parent.name == ckpt_dir), None)
-    else:
-        ood_arm = next((a for a in ood_arms if a.get("name") == bc_arm.get("name")), None)
-    if ood_arm is None or ood_arm.get("AP") is None:
+    ood_arm, sibling = _match_corpus_arm(bc_arm, ood_arms)
+    if ood_arm is None:
         return []
+    seed_a = ood_arm.get("name", "").rpartition("_s")[2]
 
     try:
         ood_manifest = json.loads(Path(ood_json_path).read_text()).get("manifest", "")
@@ -398,48 +450,107 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
 
     ap = ood_arm["AP"]
     fa = (ood_arm.get("operating_point") or {}).get("fp_per_frame")
-
-    sibling = None
-    base, sep, seed_a = ood_arm.get("name", "").rpartition("_s")
-    if base and sep:
-        sibling = next((a for a in ood_arms if a is not ood_arm
-                        and a.get("name", "").startswith(base + "_s")
-                        and a.get("AP") is not None), None)
     cfar_arm = next((a for a in ood_arms if a.get("name") == "classical CFAR"), None)
 
-    # Two SHORT rows (one per column each), not one long sentence crammed into the
-    # label column -- a single 4-line row forced EVERY row in the table to that same
-    # height (Plotly's Table `cells.height` is one scalar for the whole table, not
-    # per-row), ballooning the whole scoreboard card past a screen (hostile-expert
-    # re-read, 2026-09-23). Each piece here is short enough to stay one line at the
-    # current column width (see `scoreboard_figure`'s wrap-budget comment).
+    # SHORT rows (one per column each), not one long sentence crammed into the label
+    # column -- a single 4-line row forced EVERY row in the table to that same height
+    # (Plotly's Table `cells.height` is one scalar for the whole table, not per-row),
+    # ballooning the whole scoreboard card past a screen (hostile-expert re-read,
+    # 2026-09-23). Each piece here is short enough to stay one line at the current
+    # column width (see `scoreboard_figure`'s wrap-budget comment). The AP triple and
+    # CFAR's own AP are one merged row (not AP-row + separate verdict sentence, as a
+    # first version had it) specifically to make room for the FA row below within the
+    # <=800 px card budget -- see `scoreboard_figure`'s row-count accounting comment;
+    # the qualitative "seeds straddle CFAR" reading is still recoverable from the three
+    # numbers here, just no longer spelled out in words.
     if sibling is not None and cfar_arm is not None and cfar_arm.get("AP") is not None:
         seed_b = sibling["name"].rpartition("_s")[2]
         cfar_ap, sib_ap = cfar_arm["AP"], sibling["AP"]
-        lo, hi = sorted((ap, sib_ap))
-        verdict = "seeds straddle it" if lo < cfar_ap < hi else "same side of CFAR"
-        return [
-            (f"OOD AP, {corpus} test", f"{ap:.3f} (s{seed_a}) / {sib_ap:.3f} (s{seed_b})"),
-            ("OOD CFAR", f"{cfar_ap:.3f} -- {verdict}"),
-        ]
+        rows = [(f"OOD AP, {corpus} test",
+                 f"{ap:.3f}/{sib_ap:.3f} (s{seed_a}/s{seed_b}) CFAR {cfar_ap:.3f}")]
+        # FA/frame specifically: AP alone can hide that the BEST-AP seed still loses
+        # to CFAR on false alarms out of distribution (F86 addendum, 2026-09-22
+        # gen_s43_v2_test.json) -- shown only when every arm's operating point has the
+        # number (never invented for one that doesn't).
+        cfar_fa = (cfar_arm.get("operating_point") or {}).get("fp_per_frame")
+        sib_fa = (sibling.get("operating_point") or {}).get("fp_per_frame")
+        if fa is not None and sib_fa is not None and cfar_fa is not None:
+            rows.append(("OOD unmatched/frame",
+                        f"{fa:.1f}/{sib_fa:.1f} (s{seed_a}/s{seed_b}) CFAR {cfar_fa:.1f}"))
+        return rows
     value = f"{ap:.3f}" + (f", FA {fa:.1f}" if fa is not None else "")
     return [(f"OOD AP, {corpus} test", value)]
 
 
+def _third_corpus_rows_for_arm(bc_arm: Dict[str, Any],
+                               third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON
+                               ) -> List[Tuple[str, str]]:
+    """`[(label, value)]` -- ONE row stating `bc_arm`'s (one beat_cfar.json arm's)
+    performance on a THIRD, separately-scored corpus no checkpoint here trained on --
+    F87 (notes/ESTABLISHED_FACTS.md, measured 2026-09-22) -- `[]` if
+    `third_corpus_json_path` is absent/malformed or carries no arm matching `bc_arm`
+    (never invented for an arm that file never scored). Matching is
+    `_match_corpus_arm`'s -- the same convention `_ood_rows_for_arm` uses: checkpoint
+    PARENT DIRECTORY for an ML arm (so e.g. the two-seed RADDetNet checkpoint and a
+    joint checkpoint trained on both prior corpora each match their own row here, by
+    directory, same as everywhere else in this module), NAME for CFAR (no checkpoint),
+    sibling via a "_s<seed>" name suffix.
+
+    For a two-seed arm, ONE row carries both seeds and CFAR's own AP (mirrors
+    `_ood_rows_for_arm`'s merged AP row -- same reason: a second row would not fit the
+    <=800 px card budget, see `scoreboard_figure`'s row-count accounting comment);
+    otherwise the row carries just the matched arm's own AP.
+    """
+    corpus_arms = _load_json_arms(third_corpus_json_path)
+    if not corpus_arms:
+        return []
+
+    arm, sibling = _match_corpus_arm(bc_arm, corpus_arms)
+    if arm is None:
+        return []
+    seed_a = arm.get("name", "").rpartition("_s")[2]
+
+    try:
+        manifest = json.loads(Path(third_corpus_json_path).read_text()).get("manifest", "")
+    except (OSError, ValueError):
+        manifest = ""
+    # e.g. "e2e/ml/datasets/b1_bench_v4/benchmark_v1_D4/manifest.json" -> "D4" (the
+    # SCENE TIER this corpus stresses -- what the label names, since "3rd corpus"
+    # already says this is a different corpus from the offline test split above).
+    tier = Path(manifest).parent.name.rsplit("_", 1)[-1] if manifest else "?"
+    n_frames = (arm.get("operating_point") or {}).get("n_frames")
+    frames_txt = f"{n_frames} fr" if n_frames is not None else "?"
+    label = f"3rd corpus AP, {tier} {frames_txt}"
+
+    ap = arm["AP"]
+    cfar_arm = next((a for a in corpus_arms if a.get("name") == "classical CFAR"), None)
+    if sibling is not None and cfar_arm is not None and cfar_arm.get("AP") is not None:
+        seed_b = sibling["name"].rpartition("_s")[2]
+        value = (f"{ap:.3f}/{sibling['AP']:.3f} (s{seed_a}/s{seed_b}) "
+                f"CFAR {cfar_arm['AP']:.3f}")
+    else:
+        value = f"{ap:.3f}"
+    return [(label, value)]
+
+
 def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON,
                       raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON,
-                      ood_json_path=DEFAULT_OOD_JSON
+                      ood_json_path=DEFAULT_OOD_JSON,
+                      third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON,
                       ) -> List[Tuple[str, str]]:
-    """`(label, value)` rows for the offline scoring of ONE beat_cfar.json arm: a
-    section-header row naming the split, then AP, FA/frame at that arm's recall
-    target, and -- only when the arm has one (CFAR does not) -- its rank-1 stripe
-    statistic against the stored ground-truth reference. Appends a bootstrap AP-delta-
+    """`(label, value)` rows for the offline scoring of ONE beat_cfar.json arm: an
+    "AP, offline test split" row naming AP and the split together (merged into one
+    row, 4th hostile-expert read, 2026-09-23, to make room for the connector/OOD-FA
+    rows added the same pass), then FA/frame at that arm's recall target, and -- only
+    when the arm has one (CFAR does not) -- its rank-1 stripe statistic against the
+    stored ground-truth reference. Appends a bootstrap AP-delta-
     vs-CFAR row too, but ONLY when `raddetnet_ci_json_path` exists AND carries a
     `comparisons` entry for this exact arm -- never invented for an arm the CI file
     hasn't scored yet -- plus, right after it, a caveat row stating the seed-to-seed
-    AP spread the CI's scene-bootstrap cannot see (F86). Finally appends an
-    out-of-distribution row (`_ood_rows_for_arm`) when a separate OOD-scored JSON
-    covers this arm.
+    AP spread the CI's scene-bootstrap cannot see (F86). Appends an out-of-distribution
+    row (`_ood_rows_for_arm`) when a separate OOD-scored JSON covers this arm, and,
+    finally, a third-corpus row (`_third_corpus_rows_for_arm`, F87) when a separate
+    third-corpus-scored JSON covers this arm.
 
     Returns `[]` if `beat_cfar_json_path` is missing/malformed or the arm is not one
     of its scored arms -- nothing invented for an arm this file never scored.
@@ -459,24 +570,56 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
     # single-column "offline, {n}-frame test split (beat_cfar.json)" (46+ chars)
     # wrapped to 2 lines and inflated the WHOLE table to that row height (see
     # `_TABLE_COL_CHARS`).
+    # Merged into ONE row with AP when there is one (Change, 4th hostile-expert read,
+    # 2026-09-23: freed a row to hold the <=800 px budget once the connector row and
+    # the OOD FA row -- both added this same pass -- needed the space; see
+    # `scoreboard_figure`'s render-safety-margin comment for why that budget matters
+    # beyond the naive row-count arithmetic). Kept as its own row, unmerged, only when
+    # this arm has no AP to attach it to (never observed in practice, but the header
+    # naming the split should not silently disappear if it ever happens).
     header_value = f"{n_frames}fr (beat_cfar.json)" if n_frames is not None else "(beat_cfar.json)"
-    rows: List[Tuple[str, str]] = [("offline test split", header_value)]
-
     ap = arm.get("AP")
-    if ap is not None:
-        rows.append(("AP", f"{ap:.3f}"))
-
-    fa_pf = op.get("fp_per_frame")
-    if fa_pf is not None:
-        label = (f"FA/frame at recall {target_recall:g}" if target_recall is not None
-                 else "FA/frame")
-        rows.append((label, f"{fa_pf:.2f}"))
-
     beat_cfar_block = data.get("beat_cfar") or {}
     stripe = (beat_cfar_block.get("stripe_rank1") or {}).get(beat_cfar_arm_name)
     stripe_gt = beat_cfar_block.get("stripe_ground_truth")
-    if stripe is not None and stripe_gt is not None:
-        rows.append(("rank-1 stripe vs ground truth", f"{stripe:.3f} vs {stripe_gt:.3f}"))
+    has_stripe = stripe is not None and stripe_gt is not None
+    if ap is not None:
+        # The rank-1 stripe stat rides on the SAME row as AP now (Change, this pass,
+        # F87): a 3rd-corpus row was added below and the raddetnet arm (the one arm
+        # with BOTH a stripe stat and the seed-sibling OOD/3rd-corpus rows) hit 15
+        # rows / 800 px exactly with nothing to spare -- merging the two least
+        # independently-actionable numbers here (both are "how good is this arm"
+        # single statistics, unlike the FA/CI/generalization rows, which are each a
+        # DIFFERENT claim) bought back the row without dropping either number. Loses
+        # the "(beat_cfar.json)" source citation in that case (implicit from context:
+        # every other row in this block is visibly from the same offline scoring).
+        if has_stripe:
+            ap_split_value = (f"{ap:.3f}, {n_frames}fr; stripe {stripe:.3f}/{stripe_gt:.3f}"
+                             if n_frames is not None
+                             else f"{ap:.3f}; stripe {stripe:.3f}/{stripe_gt:.3f}")
+            rows: List[Tuple[str, str]] = [("AP, split, stripe vs GT", ap_split_value)]
+        else:
+            ap_split_value = (f"{ap:.3f}, {n_frames}fr (beat_cfar.json)" if n_frames is not None
+                             else f"{ap:.3f} (beat_cfar.json)")
+            rows = [("AP, offline test split", ap_split_value)]
+    else:
+        rows = [("offline test split", header_value)]
+        if has_stripe:
+            rows.append(("rank-1 stripe vs ground truth", f"{stripe:.3f} vs {stripe_gt:.3f}"))
+
+    fa_pf = op.get("fp_per_frame")
+    if fa_pf is not None:
+        # States the OFFLINE frame count on this row too (Change, hostile-expert 4th
+        # read, 2026-09-23): this number sits directly above the live "unmatched /
+        # frame, these N frames" row below, and the two read as contradictory without
+        # both stating which sample size they're each over (see the connector row
+        # `scoreboard_figure` inserts between the two blocks for the same reason).
+        label = "FA/frame"
+        if target_recall is not None:
+            label += f" at recall {target_recall:g}"
+        if n_frames is not None:
+            label += f", {n_frames} frames"
+        rows.append((label, f"{fa_pf:.2f}"))
 
     ci_path = Path(raddetnet_ci_json_path)
     if ci_path.is_file():
@@ -492,16 +635,23 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
                         f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]"))
             # The CI band only speaks to SCENE-bootstrap variance of one already-
             # trained checkpoint; it hides the variance that has actually been
-            # measured to matter -- a second training seed moves AP by 0.040 (F86),
-            # comparable to the CI half-width itself. A SHORT two-column row (not one
-            # long sentence crammed into the label column, which forced every row in
-            # the table to that same height -- hostile-expert re-read, 2026-09-23)
-            # attached right after the CI row rather than left in the caption below
-            # the table, where a viewer skimming the CI number alone would miss it.
-            rows.append(("bootstrap: scenes, ONE seed",
-                        f"seed spread {SEED_TO_SEED_AP_SPREAD_F86:.3f} AP (F86)"))
+            # measured to matter -- a second training seed moves AP by 0.040 (F86).
+            # Stated as an explicit comparison against THIS arm's own CI half-width,
+            # computed at call time (never a hardcoded "comparable to" -- hostile-
+            # expert 4th read, 2026-09-23: the seed spread (0.040) actually EXCEEDS
+            # the half-width (0.032) here, a stronger and more checkable claim than
+            # "comparable"). A SHORT two-column row (not one long sentence crammed
+            # into the label column, which forced every row in the table to that same
+            # height -- hostile-expert re-read, 2026-09-23) attached right after the
+            # CI row rather than left in the caption below the table, where a viewer
+            # skimming the CI number alone would miss it.
+            half_width = (comp["ci_high"] - comp["ci_low"]) / 2.0
+            cmp_op = ">" if SEED_TO_SEED_AP_SPREAD_F86 > half_width else "<="
+            rows.append((f"bootstrap: seed spread {SEED_TO_SEED_AP_SPREAD_F86:.3f}",
+                        f"{cmp_op} CI half-width {half_width:.3f} (F86)"))
 
     rows.extend(_ood_rows_for_arm(arm, ood_json_path))
+    rows.extend(_third_corpus_rows_for_arm(arm, third_corpus_json_path))
     return rows
 
 
@@ -510,7 +660,8 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                       beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON,
                       beat_cfar_arm_name: Optional[str] = None,
                       raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON,
-                      ood_json_path=DEFAULT_OOD_JSON) -> go.Figure:
+                      ood_json_path=DEFAULT_OOD_JSON,
+                      third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON) -> go.Figure:
     """A compact table: this frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
     hit-rate, and the match rule stated in words -- the numbers the hostile-expert read
     (see the module docstring) said were missing from the objectness panel entirely.
@@ -519,7 +670,7 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
 
     `beat_cfar_arm_name` (typically `arm_name_for_detector(det_meta)`'s return) adds
     an offline-scored block for that beat_cfar.json arm -- see `_offline_arm_rows`.
-    `None` (the default) leaves the table at its base 7 rows: a caller with no mapped
+    `None` (the default) leaves the table at its base 6 rows: a caller with no mapped
     arm (e.g. a checkpoint outside the scored comparison) gets no offline block rather
     than a table of blanks.
 
@@ -572,8 +723,14 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # UNMATCHED detections against labels that themselves omit real objects -- ground
     # truth misses ~3.25 real strongly-scattering objects per frame inside 40 m
     # (F83), so a detector that correctly fires on every real object still racks up
-    # "false alarms" here. "FA" survives only in parentheses; the row can no longer be
-    # read as a true false-alarm count on its own.
+    # "false alarms" here. The row is no longer read as a true false-alarm count on
+    # its own; "(FA)" is dropped from the label (the annotation below the table still
+    # states the upper-bound caveat) to make room for stating THIS RUN'S OWN frame
+    # count instead -- a 4th hostile-expert read (2026-09-23) found this row sitting
+    # directly above the offline "FA/frame at recall ..." row with no indication the
+    # two are different sample sizes (a live run is capped at MAX_N_STEPS frames;
+    # beat_cfar.json's split is fixed and far larger), which reads as unexplained
+    # disagreement between two numbers that simply differ in N.
     #
     # "cumulative hits"/"hit rate" split their qualifier into the VALUE column
     # (Change, 2026-09-23 coordinator re-check) instead of a long label -- a single
@@ -589,16 +746,37 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                           f"{n_frames_split}fr split)")
     else:
         hit_rate_value = f"{hit_rate_str} ({n_scored}fr)"
+    # "cumulative unmatched detections" (the bare running total, dropped 2026-09-23
+    # 4th hostile-expert read) is the row this pass drops to hold the table's <=800 px
+    # budget while adding the connector row below and the OOD FA row (which required
+    # `_ood_rows_for_arm` to merge two of its own rows into one for the same reason):
+    # the bare total carried no denominator of its own -- the rate right
+    # below it, now also naming this run's own frame count in its label, already says
+    # more. "cumulative hits" stays: its "(N/N scored)" value is the denominator the
+    # false-alarm rate needs, not a number this pass could drop for free.
     base_labels = ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
-                  "cumulative hits", "cumulative unmatched detections",
-                  "unmatched / frame (FA)", "hit rate (design, not quality)"]
+                  "cumulative hits",
+                  f"unmatched / frame, these {n_scored} frames",
+                  "hit rate (design, not quality)"]
     base_values = this_frame + [
         f"{cum_hits_str} ({n_scored}/{n_total} scored)",
-        cum_unmatched_str, fa_per_frame_str, hit_rate_value,
+        fa_per_frame_str, hit_rate_value,
     ]
     offline_rows = (_offline_arm_rows(beat_cfar_arm_name, beat_cfar_json_path,
-                                      raddetnet_ci_json_path, ood_json_path)
+                                      raddetnet_ci_json_path, ood_json_path,
+                                      third_corpus_json_path)
                     if beat_cfar_arm_name else [])
+    # Bridges the live block above (this run's own, tiny, <=MAX_N_STEPS-frame counts,
+    # which swing frame to frame) and the offline block below (the large, fixed test
+    # split the demo's numeric CLAIMS are actually about) -- without this, a viewer
+    # reads the two blocks' visibly different counts (e.g. 4.00 vs 2.99) as
+    # disagreement rather than different sample sizes (hostile-expert 4th read,
+    # 2026-09-23, finding 1). Only shown when there IS an offline block to point at.
+    connector_rows = (
+        [(f"{n_scored}-frame live counts vary",
+          f"{n_frames_split}-frame numbers are the claim")]
+        if offline_rows and n_frames_split is not None else []
+    )
     # EVERY label AND value is pre-wrapped at the same budget (`_TABLE_COL_CHARS`),
     # not just the rows this module knows are long (Change, 2026-09-23 coordinator
     # re-check). The bug this originally fixed (rehearsal, 2026-09-23): Plotly's
@@ -610,8 +788,8 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # everything at a budget well under the column's real auto-wrap threshold means
     # Plotly never NEEDS to auto-wrap, so this module's own "<br>" count is always
     # the true rendered line count.
-    raw_labels = base_labels + [r[0] for r in offline_rows]
-    raw_values = base_values + [r[1] for r in offline_rows]
+    raw_labels = base_labels + [r[0] for r in connector_rows + offline_rows]
+    raw_values = base_values + [r[1] for r in connector_rows + offline_rows]
     labels = [_wrap_text(l, max_chars=_TABLE_COL_CHARS) for l in raw_labels]
     values = [_wrap_text(v, max_chars=_TABLE_COL_CHARS) for v in raw_values]
     n_rows = len(labels)
@@ -672,7 +850,8 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # row height above (base 7 rows, or 7 + a variable offline block) -- see the
     # geometry comment above `_TABLE_HEADER_HEIGHT` for why this must never go back to
     # a hardcoded row count or an assumed single-line row height.
-    table_height = margin_t + _TABLE_HEADER_HEIGHT + n_rows * row_height + margin_b
+    table_height = (margin_t + _TABLE_HEADER_HEIGHT + n_rows * row_height + margin_b
+                    + _TABLE_RENDER_SAFETY_PX)
     fig.update_layout(
         # Threshold moved here (out of the header -- see `_TABLE_HEADER_HEIGHT`'s
         # comment) as a "<br><sup>" subline, the same pattern pipeline_runner.py uses

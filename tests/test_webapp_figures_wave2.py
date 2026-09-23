@@ -58,7 +58,7 @@ def test_range_el_main_title_is_short_and_carries_its_qualifier():
     main_line = title.split("<br>")[0]
     assert len(main_line) <= _TITLE_MAIN_LINE_MAX_CHARS, main_line
     assert "non-coherent over azimuth" in title
-    assert "peak - median" not in title
+    assert "peak - median" in title.replace("<br>", " ")  # wave 5: range_el prints the statistic too
 
 
 # --------------------------------------------------------------------------------
