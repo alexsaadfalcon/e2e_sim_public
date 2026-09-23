@@ -596,8 +596,13 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                     data_a["_screen_note"] = screen_note
                 if prev_results:
                     data_a["_previous"] = {k: v for k, v in prev_results.items() if k != "_previous"}
+                # Keep the frame count in the status line: the Cancel journey (and the
+                # presenter) need "how far did it get", not only "B did not run".
+                meta_a = outputs_a.get("_axis_meta") or {}
+                ran_a = meta_a.get("n_steps_run", "?")
                 return data_a, html.Span(
-                    "Cancelled before run B started: showing run A only. See Results tab.",
+                    f"Cancelled after {ran_a} of {n_steps} frames of run A; run B did not "
+                    f"start: showing run A only. See Results tab.",
                     style={"color": "#f39c12"}), "tab-results", sink
             line_b = _ab_arm_line(ab_preset, "b")
             data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
