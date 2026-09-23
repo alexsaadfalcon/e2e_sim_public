@@ -83,6 +83,20 @@ DEFAULT_THIRD_CORPUS_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "gen_v4_train.j
 #: anything beyond the caption below (CLAUDE.md's provenance rule).
 PRECISION_CEILING_F83 = 0.640
 
+#: Number of elements along one axis of the receive array (CLAUDE.md: "the array is
+#: 32x32", N_RX=1024) -- used only by `hit_gate_scale_note` to translate the
+#: sin-azimuth match tolerance into a physical beamwidth; not read from any config
+#: file (this module has no other dependency on e2e.blocks/e2e.scenario).
+_ARRAY_ELEMENTS_PER_AXIS = 32
+
+#: The radar config preset every Thrust 5 live-chain preset's dechirp block replays
+#: with (`webapp.demo_presets._T5_LIVE_CHAIN`) -- read by `hit_gate_scale_note` only
+#: for its native range resolution, so that clause cannot drift from the actual
+#: corpus config. NOT the Ka-band munich frames' 3 GHz-sweep, ~5 cm native
+#: resolution Thrusts 1-4 show -- see that function's docstring for the mix-up this
+#: avoids.
+_T5_RADAR_PRESET_NAME = "benchmark_v1"
+
 #: In-distribution seed-42-vs-seed-43 AP spread for RADDetNet on benchmark_v1_D2/v3,
 #: one architecture, two training seeds, identical protocol (notes/ESTABLISHED_FACTS.md
 #: F86, measured 2026-09-22) -- the scale a single checkpoint's scene-bootstrap CI
@@ -124,6 +138,40 @@ def match_rule_text(criterion=None) -> str:
         f"range and ±{c.max_sin_az_err:g} in sin(azimuth) of a ground-truth target; "
         "one detection claims at most one target, nearest first "
         "(e2e.ml.metrics.match_detections)"
+    )
+
+
+def hit_gate_scale_note(criterion=None) -> str:
+    """Two clauses translating the match tolerance (see `match_rule_text`) into
+    physical units a viewer can sanity-check, computed at call time so neither
+    number is a hardcoded copy of something that can drift (CLAUDE.md's provenance
+    rule): the sin-azimuth tolerance against the array's own element count (one
+    32-element beamwidth, 2/32), and the range tolerance against the native range
+    resolution of the radar config every Thrust 5 preset's dechirp block replays
+    with (`benchmark_v1`, `e2e.radar_config.PRESETS` -- lazily imported, torch-free,
+    same convention as the `e2e.ml.metrics` import above).
+
+    RE-VERIFIED 2026-09-23 (wave 7, X7): the hostile-expert read's own arithmetic
+    for this clause ("40 native range bins at 5 cm") was the Ka-band MUNICH frames'
+    3 GHz-sweep resolution (Thrusts 1-4's screen, a different corpus from this
+    one) -- `benchmark_v1`'s own bandwidth (749.5 MHz) gives ~0.2 m/native bin, not
+    0.05 m/bin, so this function reads the real preset rather than repeating that
+    figure (CLAUDE.md's "claims carry provenance": a stored number from one screen
+    is not evidence for a different screen).
+    """
+    from e2e.ml.metrics import MatchCriterion
+    from e2e.radar_config import PRESETS as _radar_presets
+
+    c = criterion or MatchCriterion()
+    beamwidth = 2.0 / _ARRAY_ELEMENTS_PER_AXIS
+    native_res_m = _radar_presets[_T5_RADAR_PRESET_NAME].range_resolution_m
+    n_bins = c.max_range_err_m / native_res_m
+    return (
+        f"scale: the {c.max_sin_az_err:g} sin(azimuth) hit gate is about one "
+        f"{_ARRAY_ELEMENTS_PER_AXIS}-element array beamwidth "
+        f"(2/{_ARRAY_ELEMENTS_PER_AXIS} = {beamwidth:.4g}); the {c.max_range_err_m:g} m "
+        f"range hit gate is about {n_bins:.0f} native range bins at this corpus' "
+        f"own {native_res_m * 100:.0f} cm resolution ({_T5_RADAR_PRESET_NAME})"
     )
 
 
@@ -530,8 +578,8 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
                       third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON,
                       ) -> List[Tuple[str, str]]:
     """`(label, value)` rows for the offline scoring of ONE beat_cfar.json arm: an
-    "AP, offline test split" row naming AP and the split together, then FA/frame at
-    that arm's recall target. Appends a bootstrap AP-delta-vs-CFAR row too, but ONLY
+    "FA/frame at recall ..." row FIRST, then "AP, offline test split" naming AP and
+    the split together. Appends a bootstrap AP-delta-vs-CFAR row too, but ONLY
     when `raddetnet_ci_json_path` exists AND carries a `comparisons` entry for this
     exact arm -- never invented for an arm the CI file hasn't scored yet -- plus,
     right after it, a caveat row stating the seed-to-seed AP spread the CI's
@@ -539,6 +587,15 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
     (`_ood_rows_for_arm`) when a separate OOD-scored JSON covers this arm, and,
     finally, a third-corpus row (`_third_corpus_rows_for_arm`) when a separate
     third-corpus-scored JSON covers this arm.
+
+    FA/frame FIRST (Change, wave 7 X2, 2026-09-23): a hostile-expert read of the
+    KA-BAND screens found this arm's cross count on the live panel (fewer crosses
+    AND fewer hits than CFAR on 5 frames) read as a loss before a viewer ever
+    reached the one comparison this table can defend -- false alarms AT MATCHED
+    recall (e.g. 2.99 vs 6.24/frame for raddetnet vs CFAR). `scoreboard_figure` now
+    renders this whole offline block above the live block for the same reason; this
+    function additionally puts the FA row ahead of the AP row within the block, so
+    the very first row of the table is the matched-recall FA comparison.
 
     RETRACTED (hostile-expert read, 2026-09-23, item 8): this block used to also
     surface the rank-1 stripe statistic on the AP row ("AP, split, stripe vs GT",
@@ -574,26 +631,30 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
     # naming the split should not silently disappear if it ever happens).
     header_value = f"{n_frames}fr (beat_cfar.json)" if n_frames is not None else "(beat_cfar.json)"
     ap = arm.get("AP")
-    if ap is not None:
-        ap_split_value = (f"{ap:.3f}, {n_frames}fr (beat_cfar.json)" if n_frames is not None
-                         else f"{ap:.3f} (beat_cfar.json)")
-        rows: List[Tuple[str, str]] = [("AP, offline test split", ap_split_value)]
-    else:
-        rows = [("offline test split", header_value)]
+    rows: List[Tuple[str, str]] = []
 
+    # FA/frame FIRST, ahead of AP (Change, wave 7 X2, 2026-09-23 -- see this
+    # function's docstring): states the OFFLINE frame count on this row too
+    # (Change, hostile-expert 4th read, 2026-09-23): this number sits directly
+    # above the live "unmatched / frame, these N frames" row below, and the two
+    # read as contradictory without both stating which sample size they're each
+    # over (see the connector row `scoreboard_figure` inserts between the two
+    # blocks for the same reason).
     fa_pf = op.get("fp_per_frame")
     if fa_pf is not None:
-        # States the OFFLINE frame count on this row too (Change, hostile-expert 4th
-        # read, 2026-09-23): this number sits directly above the live "unmatched /
-        # frame, these N frames" row below, and the two read as contradictory without
-        # both stating which sample size they're each over (see the connector row
-        # `scoreboard_figure` inserts between the two blocks for the same reason).
         label = "FA/frame"
         if target_recall is not None:
             label += f" at recall {target_recall:g}"
         if n_frames is not None:
             label += f", {n_frames} frames"
         rows.append((label, f"{fa_pf:.2f}"))
+
+    if ap is not None:
+        ap_split_value = (f"{ap:.3f}, {n_frames}fr (beat_cfar.json)" if n_frames is not None
+                         else f"{ap:.3f} (beat_cfar.json)")
+        rows.append(("AP, offline test split", ap_split_value))
+    else:
+        rows.append(("offline test split", header_value))
 
     ci_path = Path(raddetnet_ci_json_path)
     if ci_path.is_file():
@@ -745,10 +806,10 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                                       raddetnet_ci_json_path, ood_json_path,
                                       third_corpus_json_path)
                     if beat_cfar_arm_name else [])
-    # Bridges the live block above (this run's own, tiny, <=MAX_N_STEPS-frame counts,
-    # which swing frame to frame) and the offline block below (the large, fixed test
-    # split the demo's numeric CLAIMS are actually about) -- without this, a viewer
-    # reads the two blocks' visibly different counts (e.g. 4.00 vs 2.99) as
+    # Bridges the offline block above (the large, fixed test split the demo's
+    # numeric CLAIMS are actually about) and the live block below (this run's own,
+    # tiny, <=MAX_N_STEPS-frame counts, which swing frame to frame) -- without this,
+    # a viewer reads the two blocks' visibly different counts (e.g. 2.99 vs 4.00) as
     # disagreement rather than different sample sizes (hostile-expert 4th read,
     # 2026-09-23, finding 1). Only shown when there IS an offline block to point at.
     connector_rows = (
@@ -767,8 +828,16 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # everything at a budget well under the column's real auto-wrap threshold means
     # Plotly never NEEDS to auto-wrap, so this module's own "<br>" count is always
     # the true rendered line count.
-    raw_labels = base_labels + [r[0] for r in connector_rows + offline_rows]
-    raw_values = base_values + [r[1] for r in connector_rows + offline_rows]
+    #
+    # OFFLINE BLOCK FIRST, then the connector, then the live block (Change, wave 7
+    # X2, 2026-09-23): a hostile-expert read of the KA-BAND screens found the live
+    # per-frame TP/FP/FN rows -- raw cross counts, not recall-matched -- were the
+    # first thing read on every Thrust 5 screen, ahead of the one comparison the
+    # table can actually defend (false alarms at MATCHED recall, from
+    # `_offline_arm_rows`, itself now FA-row-first for the same reason). No content
+    # or number changed here, only the row ORDER.
+    raw_labels = [r[0] for r in offline_rows + connector_rows] + base_labels
+    raw_values = [r[1] for r in offline_rows + connector_rows] + base_values
     labels = [_wrap_text(l, max_chars=_TABLE_COL_CHARS) for l in raw_labels]
     values = [_wrap_text(v, max_chars=_TABLE_COL_CHARS) for v in raw_values]
     n_rows = len(labels)
@@ -833,8 +902,13 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
         "detections are grouped to local peaks (3x3) before matching, the same "
         "rule for every detector; a wide target can draw extra unmatched hits"
     )
+    # Wave 7 X7: neither hit-gate tolerance had a physical-scale reading anywhere on
+    # screen (a viewer sees "0.06" and "2 m" with no sense of whether that is loose
+    # or tight against this array/corpus) -- one more wrapped sentence, computed by
+    # `hit_gate_scale_note` rather than typed here so it cannot drift.
+    scale_caveat = hit_gate_scale_note()
     annotation_text = (f"{_wrap_text(match_rule_text)}<br>{_wrap_text(ceiling_caveat)}"
-                       f"<br>{_wrap_text(grouping_caveat)}")
+                       f"<br>{_wrap_text(grouping_caveat)}<br>{_wrap_text(scale_caveat)}")
     n_annotation_lines = annotation_text.count("<br>") + 1
     margin_b = _TABLE_ANNOTATION_LINE_PX * n_annotation_lines
     # Height computed from the ACTUAL row count and the ACTUAL (possibly multi-line)

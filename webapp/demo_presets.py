@@ -96,12 +96,14 @@ _T5_SCREEN_NOTE = (
 #: height dropped to the low end of its presented envelope (arm B) -- NOT hand-typed:
 #: read off the same ParamSpec the GUI slider uses (webapp/pipeline_registry.py
 #: `_tessera_presented_range`), so a re-measured envelope moves both together. Height
-#: is the biggest single-knob mover of the range-profile skirt of the five continuous
-#: knobs, measured through this same InterconnectBlock(source='tessera') on the real
-#: munich Ka band (2026-09-23: baseline skirt -53.90 dB -> height-low -57.43 dB, a
-#: 3.53 dB native flat-frame metric move; notes/TESSERA_KNOB_MEASUREMENT_2026-09-23.md
-#: found the same direction/order-of-magnitude at scale=1). See `screen_note` below for
-#: whether that move is actually visible on the rendered figure.
+#: is OFFLINE the biggest single-knob mover of the range-profile skirt of the five
+#: continuous knobs, measured through this same InterconnectBlock(source='tessera') on
+#: the real munich Ka band (2026-09-23: baseline skirt -53.90 dB -> height-low
+#: -57.43 dB, a 3.53 dB native flat-frame metric move; that is NOT the statistic the
+#: rendered range-profile panel itself prints -- see the card's own `blurb`, corrected
+#: wave 7 X3, 2026-09-23, after the panel's own "median floor" statistic was quoted as
+#: if it were this number). notes/TESSERA_KNOB_MEASUREMENT_2026-09-23.md found the
+#: same direction/order-of-magnitude at scale=1.
 _TESSERA_HEIGHT_SPEC = next(p for p in BLOCKS_BY_ID["interconnect"].params
                            if p.key == "tessera_height_um")
 _TESSERA_ARM_B_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.min
@@ -109,6 +111,14 @@ _TESSERA_CANONICAL_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.default
 #: Display-rounded copy for card text -- the override itself (`ab=` below) uses the
 #: exact `.min`, so validation against the ParamSpec's own bound cannot drift.
 _TESSERA_ARM_B_HEIGHT_DISPLAY = round(_TESSERA_ARM_B_HEIGHT_UM, 2)
+#: Model-geometry (pre-scale) copy of the canonical height, PRESENTED value * the
+#: hardcoded x2 scale factor already stated in prose throughout this preset (wave 7
+#: X3, 2026-09-23): the card's Arm A header used to say "h 100 um" -- the MODEL
+#: geometry -- while every other reference on the same card (`live_knobs`,
+#: `screen_note`) used the PRESENTED 50 um, two numbers for one arm. Every label now
+#: uses the presented value; this constant exists so the "= 100 um model geometry"
+#: clause is stated from a computed number, once, in the blurb.
+_TESSERA_CANONICAL_HEIGHT_MODEL_UM = _TESSERA_CANONICAL_HEIGHT_UM * 2
 
 
 @dataclass(frozen=True)
@@ -410,16 +420,29 @@ PRESETS: List[DemoPreset] = [
             {"interconnect": {"enabled": True, "params": {"source": "tessera"}}},
             _only_products("range_profile", "range_az"),
         ),
+        # X3 fix (wave 7, 2026-09-23): the blurb used to quote "skirt -53.90 ->
+        # -57.43 dB" as if it were on the rendered panel -- it is an OFFLINE
+        # native-flat-frame measurement (TESSERA_KNOB_MEASUREMENT note); the range
+        # profile panel itself prints its own "median floor, dB rel. peak" statistic,
+        # and the offline skirt move sits below that displayed floor. Same fix,
+        # geometry convention: Arm A used to be "h 100 um" (model geometry) while
+        # every other reference on this card used 50 um presented -- one convention
+        # now (presented), with the model-geometry equivalence stated once below.
         blurb=("The LIVE public Tessera/UIC TSV surrogate, not a synthetic placeholder: "
                "InterconnectBlock(source='tessera'), scale model x2 geometry / half "
-               "frequency at our Ka band (banner describe() says so every run). Arm A "
-               "(top) is the canonical geometry (upstream's own demo point). Arm B "
-               "(bottom) drops TSV height to its presented low end -- the biggest "
-               "single-knob mover of the range-profile skirt of the five (measured "
-               "through this block on the real munich frames: skirt -53.90 -> "
-               "-57.43 dB). That move is bulk DELAY, not a shape change: |S21| itself "
-               "only moves hundredths of a dB. See the screen note for whether it is "
-               "even visible next to real returns."),
+               f"frequency at our Ka band (banner describe() says so every run). Arm A "
+               f"(top) is the canonical geometry, {_TESSERA_CANONICAL_HEIGHT_UM:g} um "
+               f"presented (= {_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry "
+               "at scale x2), upstream's own demo point. Arm B (bottom) drops TSV "
+               "height to its presented low end -- OFFLINE, the biggest single-knob "
+               "mover of the range-profile skirt of the five (notes/"
+               "TESSERA_KNOB_MEASUREMENT_2026-09-23.md: a 3.53 dB native flat-frame "
+               "move). Neither panel PRINTS that number: both print the range "
+               "profile's own median floor instead, and the offline skirt move sits "
+               "below it -- quote the on-screen median-floor statistic, not the "
+               "offline skirt figure, if asked what the panel shows. That move is "
+               "bulk DELAY, not a shape change: |S21| itself only moves hundredths of "
+               "a dB."),
         live_knobs=[("interconnect", "tessera_height_um",
                      f"{_TESSERA_CANONICAL_HEIGHT_UM:g} -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um "
                      "(the A/B above)"),
@@ -427,7 +450,7 @@ PRESETS: List[DemoPreset] = [
                      "manual third option, not part of the A/B: source='default' + "
                      "case='default' selects the old SYNTHETIC 11-tap boxcar placeholder")],
         ab=("interconnect", "tessera_height_um", _TESSERA_ARM_B_HEIGHT_UM),
-        ab_label_a="canonical Tessera geometry (h 100 um / scale x2)",
+        ab_label_a=f"canonical Tessera geometry ({_TESSERA_CANONICAL_HEIGHT_UM:g} um presented)",
         ab_label_b=f"TSV height -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um presented (largest skirt mover)",
         screen_note=("LIVE Tessera surrogate, scale model x2 (see banner); in-band |S21| "
                      "moves <0.03 dB across every knob -- invisible on a peak-normalized "
@@ -457,6 +480,10 @@ PRESETS: List[DemoPreset] = [
             "caption real-CSV results as shape-only.",
             "Range 0-2 m is not a target: Sionna's normalize_delays=True makes range 0 "
             "the earliest arrival. The 20-22 m stripe is real drifting multipath.",
+            "Skin depth goes as f^-1/2, not f^-1: under this x2 scale model, conductor "
+            "loss is under-estimated by about sqrt(2) -- about 0.2 dB on the 0.5 dB "
+            "in-band loss -- and substrate conductance coupling by up to 2x; trends "
+            "and shape are exact (F91).",
         ],
         do_not_say=[
             "That crosstalk is structurally absent -- RETRACTED: the surrogate models "
@@ -526,6 +553,10 @@ PRESETS: List[DemoPreset] = [
             "Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); the corpus "
             "targets are slower by construction, so a 20 m/s car would alias -- say so "
             "if asked.",
+            "Unmatched detections can DROP at deeper quantisation (a per-frame count on "
+            "this run's own scoreboard): quantisation noise raises the CA-CFAR estimate, "
+            "so fewer weak peaks clear the threshold -- a loss of sensitivity, not a "
+            "quality gain (5 frames still cannot resolve the knob, see do_not_say).",
         ],
         do_not_say=[
             "That 16 vs 13 hits measures what 3-bit quantisation costs: 5 frames at "
@@ -602,6 +633,10 @@ PRESETS: List[DemoPreset] = [
             "This checkpoint was trained on a different corpus from the frames on "
             "screen, and its rd input scaling comes from that corpus (the run note says "
             "so); moving a knob takes it further out of its training distribution.",
+            "On Arm B some displayed frames score TP = 0 (every cross a miss, a "
+            "horizontal band of them): that is the mechanism on display, not an "
+            "accident -- the 25 m corner attenuates the same near-range returns this "
+            "checkpoint was trained to fire on.",
         ],
         do_not_say=[
             "'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.",
@@ -629,15 +664,22 @@ PRESETS: List[DemoPreset] = [
         # reading backwards on screen); swept {2, 3, 4, 6} bits on both this preset
         # and CFAR -- 3-bit is the largest depth at which BOTH detectors lose hits
         # relative to 12-bit, so the direction on screen now agrees with the claim.
-        blurb=("The same live chain through RADDetNet (Doppler as channels, range x "
-               "azimuth as the spatial plane) on CFAR's own beamformed cube. Offline "
-               "test AP 0.476 vs CFAR's 0.301, 3.0 FA/frame at recall 0.5 vs CFAR's "
-               "6.2, controls pass. A/B re-digitises the same stored channel at "
-               "3 bits: 23 crosses become 16, 13 unmatched become 11, and hits go "
-               "10 -> 5 -- five frames, so read it as 'the knob reaches the detector', "
-               "not as a ranking. On an unseen earlier-generator corpus the result is "
-               "seed-dependent (F86). Lead with this: it leads Thrust 5, and volunteer "
-               "the out-of-distribution caveat before being asked."),
+        # X2 fix (wave 7, 2026-09-23): the screen shows fewer crosses AND fewer hits
+        # for RADDetNet than CFAR on 5 unmatched-recall frames, which reads as a
+        # loss; the real, defensible claim is fewer false alarms AT MATCHED recall
+        # (2.99 vs 6.24 FA/frame, 172 frames). Reworded to lead with that, not with
+        # the architecture description -- the scoreboard panel is reordered the same
+        # way (`webapp/detector_scoreboard.py`).
+        blurb=("THE REAL CLAIM, first: at matched recall (0.5) on the 172-frame split, "
+               "RADDetNet racks up fewer false alarms than CFAR -- 2.99 vs 6.24 "
+               "FA/frame (AP 0.476 vs 0.301, controls pass). On the 5 live frames "
+               "below, fewer crosses can mean fewer hits, since these frames are not "
+               "recall-matched -- read the scoreboard's FA rows, not the crosses. The "
+               "same live chain runs RADDetNet (Doppler as channels, range x azimuth "
+               "as the spatial plane) on CFAR's own beamformed cube. A/B re-digitises "
+               "the stored channel at 3 bits: hits go 10 -> 5, five frames, so read it "
+               "as 'the knob reaches the detector', not a ranking. Out of distribution "
+               "the result is seed-dependent (F86); volunteer it before being asked."),
         live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         ab=("quantizer", "bits", 3),

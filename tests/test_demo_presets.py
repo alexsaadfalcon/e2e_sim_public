@@ -301,6 +301,85 @@ def test_thrust4_runs_the_live_tessera_surrogate_ab_on_height():
     assert "next" in p.screen_note.lower() and "fext" in p.screen_note.lower()
 
 
+# ------------------------------------------------------------------------------------
+# Wave 7 review, KA-band screens (2026-09-23): X3, X11, X2, X9, X10.
+# ------------------------------------------------------------------------------------
+def test_thrust4_card_quotes_only_the_on_screen_median_floor_statistic():
+    """X3: the card used to quote 'skirt -53.90 -> -57.43 dB' as if it were on the
+    rendered panel; that number is an OFFLINE measurement and the panel itself
+    prints its own 'median floor' statistic. The offline number may still be named
+    (with its own provenance), but the card must say the panel prints something
+    else and that the offline move sits below it."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert "median floor" in p.blurb.lower()
+    assert "sits below" in p.blurb.lower() or "below it" in p.blurb.lower()
+    assert "offline" in p.blurb.lower()
+
+
+def test_thrust4_card_uses_one_height_convention_with_the_model_geometry_said_once():
+    """X3: Arm A's own label used to say 'h 100 um' (model geometry) while every
+    other reference on the card used the presented 50 um -- one convention now
+    (presented), with the model-geometry equivalence computed and stated once."""
+    from webapp.demo_presets import (
+        _TESSERA_CANONICAL_HEIGHT_MODEL_UM, _TESSERA_CANONICAL_HEIGHT_UM,
+    )
+
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert f"{_TESSERA_CANONICAL_HEIGHT_UM:g} um presented" in p.ab_label_a
+    assert "100 um" not in p.ab_label_a
+    assert _TESSERA_CANONICAL_HEIGHT_MODEL_UM == _TESSERA_CANONICAL_HEIGHT_UM * 2
+    assert (f"{_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry" in p.blurb)
+
+
+def test_thrust4_card_answers_the_skin_depth_question():
+    """X11: the prepared F91 answer to 'skin depth goes as f^-1/2, not f^-1'."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert any("skin depth" in s.lower() and "f^-1/2" in s for s in p.say)
+    assert any("sqrt(2)" in s and "f91" in s.lower() for s in p.say)
+
+
+def test_thrust5_ml_card_admits_the_shown_frame_scores_zero():
+    """X9: the displayed frame (TP = 0, all crosses miss on Arm B) is the mechanism
+    on display -- the near-range corner filter removing the returns this checkpoint
+    was trained on -- not an accident."""
+    p = PRESETS_BY_ID["thrust5_detector_ml"]
+    assert any("tp = 0" in s.lower() for s in p.say)
+    assert any("not an accident" in s.lower() for s in p.say)
+
+
+def test_thrust5_cfar_card_explains_unmatched_dropping_at_deeper_quantisation():
+    """X10: the prepared answer for 'unmatched dropped, not rose, at 3 bits' --
+    quantisation noise raises the CA-CFAR estimate, so fewer weak peaks clear the
+    threshold; a loss of sensitivity, not a quality gain."""
+    p = PRESETS_BY_ID["thrust5_detector_cfar"]
+    assert any("quantisation noise raises the ca-cfar estimate" in s.lower()
+              for s in p.say)
+    assert any("loss of sensitivity, not a quality gain" in s.lower() for s in p.say)
+    # The pre-existing "5 frames cannot resolve" line must still be present.
+    assert any("5 frames at one threshold is a demonstration" in s
+              for s in p.do_not_say)
+
+
+def test_thrust5_raddetnet_card_leads_with_the_matched_recall_fa_comparison():
+    """X2: the card's opening line must lead with the ONE comparison this table can
+    defend -- false alarms at matched recall -- not with the architecture
+    description or a hit-count framing that reads as a loss on 5 unmatched-recall
+    frames. Numbers themselves are unchanged (`beat_cfar.json`'s own 2.99/6.24)."""
+    p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    opening = p.blurb[:160]  # first sentence -- longer than any decimal-point split
+    assert "false alarm" in opening.lower()
+    assert "2.99" in opening and "6.24" in opening
+    # Exact numbers from beat_cfar.json -- never re-typed independently of the file.
+    import json
+    from webapp.detector_scoreboard import DEFAULT_BEAT_CFAR_JSON
+    data = json.loads(DEFAULT_BEAT_CFAR_JSON.read_text())
+    cfar_fa = next(a for a in data["arms"] if a["name"] == "classical CFAR")[
+        "operating_point"]["fp_per_frame"]
+    raddetnet_fa = next(a for a in data["arms"] if a["name"] == "raddetnet")[
+        "operating_point"]["fp_per_frame"]
+    assert f"{raddetnet_fa:.2f}" in p.blurb and f"{cfar_fa:.2f}" in p.blurb
+
+
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         st = apply_preset(PRESETS_BY_ID[pid])

@@ -632,6 +632,53 @@ def test_scoreboard_annotation_geometry_still_fits_with_two_sentences():
 
 
 # --------------------------------------------------------------------------------
+# Wave 7 X7 (2026-09-23): neither hit-gate tolerance had a physical-scale reading on
+# screen -- `hit_gate_scale_note` states both, computed from the real MatchCriterion
+# and the real benchmark_v1 radar config, never a hardcoded copy of either.
+# --------------------------------------------------------------------------------
+def test_hit_gate_scale_note_states_the_beamwidth_and_native_range_bins():
+    from e2e.radar_config import PRESETS as _radar_presets
+
+    text = ds.hit_gate_scale_note()
+    assert f"{_C.max_sin_az_err:g}" in text and "32-element array beamwidth" in text
+    assert f"2/{ds._ARRAY_ELEMENTS_PER_AXIS}" in text
+    native_res_m = _radar_presets[ds._T5_RADAR_PRESET_NAME].range_resolution_m
+    n_bins = round(_C.max_range_err_m / native_res_m)
+    assert f"{n_bins} native range bins" in text
+    assert f"{native_res_m * 100:.0f} cm" in text
+    # NOT the Ka-band munich frames' 3 GHz-sweep, ~5 cm resolution (a different
+    # corpus/screen, wave 7 X7's own arithmetic mix-up -- see the function's
+    # docstring): this corpus (benchmark_v1) is ~0.2 m/bin, not 0.05 m/bin.
+    assert "5 cm" not in text and "40 native range bins" not in text
+
+
+def test_scoreboard_annotation_states_the_hit_gate_scale_caveat():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
+                               match_rule_text="rule")
+    ann = fig.layout.annotations[0]
+    text = ann.text.replace("<br>", " ")
+    assert "32-element array beamwidth" in text
+    assert "native range bins" in text
+
+
+# --------------------------------------------------------------------------------
+# Wave 7 X2 (2026-09-23): the matched-recall FA comparison is the ONE thing this
+# table can defend across arms; it must be the first row read, not the live block's
+# raw (unmatched-recall) cross counts.
+# --------------------------------------------------------------------------------
+def test_offline_block_leads_with_fa_per_frame_not_ap():
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+    labels, _values = _table(fig).cells.values
+    fa_idx = labels.index(next(l for l in labels if l.startswith("FA/frame at recall")))
+    ap_idx = labels.index(next(l for l in labels if l.startswith("AP,")))
+    assert fa_idx == 0, "the matched-recall FA row must be the table's first row"
+    assert fa_idx < ap_idx
+
+
+# --------------------------------------------------------------------------------
 # Finding 2 (hostile-expert 3rd read, 2026-09-23): the CI row's scene-bootstrap band
 # hides the variance that has actually been measured to matter (a second training
 # seed), and an out-of-distribution row is added for any arm a SEPARATE OOD-scored
@@ -791,6 +838,11 @@ def test_scoreboard_offline_block_omits_third_corpus_row_when_file_missing(tmp_p
 # between the two blocks, only when there is an offline block to point at.
 # --------------------------------------------------------------------------------
 def test_scoreboard_connector_row_between_live_and_offline_blocks(beat_cfar_data):
+    """Order flipped (Change, wave 7 X2, 2026-09-23): the offline, matched-recall
+    block now renders FIRST (the comparison the table can defend), then the
+    connector, then the live per-frame block -- so a reader hits the fixed-split
+    numbers, then the "these vary" note, then this run's own tiny counts, in that
+    order (see `scoreboard_figure`'s inline comment)."""
     target = (10.0, 0.0, "vehicle")
     hit = (10.0, 0.0, 0.9, 10.0)
     scores = ds.score_frames([[hit]] * 5, [[target]] * 5)
@@ -804,13 +856,13 @@ def test_scoreboard_connector_row_between_live_and_offline_blocks(beat_cfar_data
     connector_label = next(l for l in labels if l.endswith("live counts vary"))
     assert "5" in live_label and "5" in connector_label
     assert row[connector_label] == f"{n_frames}-frame numbers are the claim"
-    # Must sit BETWEEN the two blocks, not before the live rows or after the offline
-    # ones -- so a reader hits the live counts, then the "these vary" note, then the
-    # fixed-split numbers, in that order.
+    # Must sit BETWEEN the two blocks, not before the offline rows or after the live
+    # ones -- so a reader hits the fixed-split numbers, then the "these vary" note,
+    # then this run's own tiny live counts, in that order.
     live_idx = labels.index(live_label)
     connector_idx = labels.index(connector_label)
     offline_idx = labels.index(next(l for l in labels if l.startswith("AP,")))
-    assert live_idx < connector_idx < offline_idx
+    assert offline_idx < connector_idx < live_idx
 
 
 def test_scoreboard_no_connector_row_without_an_offline_block():
@@ -860,10 +912,10 @@ def test_scoreboard_no_row_exceeds_the_max_line_cap():
 
 
 def test_scoreboard_figure_height_fits_a_screen_for_every_arm():
-    """~880 px (raised from the 800 px coordinator budget, 2026-09-23, item 3: the
-    mandatory peak-grouping footnote adds 2 wrapped annotation lines to every arm,
-    measured +80 px here -- there was no slack left in the 800 px budget to absorb a
-    line the content requires). The worst case (an arm with a CI row, a seed-spread
+    """~1000 px (raised from the 880 px budget, 2026-09-23, wave 7 X7: the mandatory
+    hit-gate scale footnote -- `hit_gate_scale_note`, one 32-element beamwidth / one
+    native-range-bins clause -- adds a 4th wrapped annotation sentence to every arm,
+    measured +94-98 px here). The worst case (an arm with a CI row, a seed-spread
     caveat, the connector row and a two-row OOD block -- 14 rows total) must still
     fit, with real slack in the browser, not just in this geometric formula (a real
     Playwright render of this exact arm's figure JSON clipped its last row at zero
@@ -874,7 +926,7 @@ def test_scoreboard_figure_height_fits_a_screen_for_every_arm():
         fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                    match_rule_text=ds.match_rule_text(),
                                    beat_cfar_arm_name=beat_cfar_arm_name)
-        assert fig.layout.height <= 880, (beat_cfar_arm_name, fig.layout.height)
+        assert fig.layout.height <= 1000, (beat_cfar_arm_name, fig.layout.height)
 
 
 # --------------------------------------------------------------------------------
