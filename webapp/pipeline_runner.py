@@ -795,8 +795,16 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         except Exception as e:
             raise PipelineError(f"Could not build the RT environment: {e}")
     else:
+        # `scenario_name` is the dropdown's own token (see webapp.corpus_catalog): for
+        # plain 'etoile' this token IS the SionnaEnvironmentBlock name, but munich's
+        # Ka-band and legacy-3.5-GHz files (F93) are surfaced as two distinct labels
+        # under the one name 'munich', so the label resolves to (name, link) rather
+        # than being passed straight through.
+        from webapp.corpus_catalog import resolve_sionna_scenario
+
+        resolved_name, resolved_link = resolve_sionna_scenario(scenario_name)
         try:
-            environment_block = SionnaEnvironmentBlock(scenario_name)
+            environment_block = SionnaEnvironmentBlock(resolved_name, link=resolved_link)
         except FileNotFoundError as e:
             raise PipelineError(
                 f"No precomputed frames found for scenario '{scenario_name}'. "
@@ -805,6 +813,13 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             )
         except ValueError as e:
             raise PipelineError(str(e))
+        # Surfaced in the Results banner: which carrier these frames actually are, for
+        # a v2 pkl (freq_plan present) -- the legacy pkl has no metadata to report.
+        if getattr(environment_block, "freq_plan", None):
+            carrier_ghz = float(environment_block.freq_plan["carrier_hz"]) / 1e9
+            run_notes.append(
+                f"Environment '{scenario_name}': frames carry a {carrier_ghz:g} GHz carrier."
+            )
 
     # Derive the receive-array size from the environment block's array_shape so the
     # Oja tracker dimension and Simulation's view() agree with the actual frames.

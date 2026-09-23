@@ -1603,20 +1603,157 @@ def test_core_modules_do_not_import_e2e_ml_at_module_scope():
         "update the documented rule):\n  " + "\n  ".join(offenders))
 
 
+def _write_fake_ka_pkl(path, carrier_hz=30e9):
+    """A tiny but structurally real v2 `{"meta", "links"}` pkl (see
+    e2e.environment.sionna_simple_channel / sionna_iterator), so `discover_sionna_scenarios`
+    exercises its real `freq_plan` read without needing the ~0.8 GB production file."""
+    import pickle
+
+    import numpy as np
+
+    meta = {
+        "version": 2,
+        "freq_plan": {"carrier_hz": carrier_hz, "start_hz": carrier_hz - 1.5e9,
+                     "stop_hz": carrier_hz + 1.5e9, "num_freqs": 4},
+        "links": {"munich": {"rx_array_shape": [2, 2], "physical_scale": False}},
+    }
+    arr = np.zeros((1, 1, 1, 1, 4), dtype=np.complex64)
+    with open(path, "wb") as f:
+        pickle.dump({"meta": meta, "links": {"munich": arr}}, f)
+
+
 def test_gui_offers_only_loadable_sionna_scenarios(tmp_path):
-    """The Scenario dropdown must list only scenarios whose .pkl exists (2026-09-23:
-    'etoile' was offered with no file and raised FileNotFoundError on selection)."""
+    """The Scenario dropdown must list only scenarios whose backing .pkl exists
+    (2026-09-23: 'etoile' was offered with no file and raised FileNotFoundError on
+    selection)."""
     from webapp import corpus_catalog as cc
     assert cc.discover_sionna_scenarios(tmp_path) == []
-    (tmp_path / "munich.pkl").write_bytes(b"x")
-    assert cc.discover_sionna_scenarios(tmp_path) == ["munich"]
+    # A bare (legacy-shaped) munich.pkl offers only the legacy label -- 'munich_ka.pkl'
+    # is what plain 'munich' now resolves to (F93).
+    (tmp_path / "munich.pkl").write_bytes(b"legacy-bare-array-stand-in")
+    assert cc.discover_sionna_scenarios(tmp_path) == [cc.MUNICH_LEGACY_LABEL]
     (tmp_path / "etoile.pkl").write_bytes(b"x")
-    assert cc.discover_sionna_scenarios(tmp_path) == ["munich", "etoile"]
+    assert cc.discover_sionna_scenarios(tmp_path) == [cc.MUNICH_LEGACY_LABEL, "etoile"]
+
     from webapp.pipeline_registry import BLOCKS
     env = next(b for b in BLOCKS if b.id == "environment")
     spec = next(p for p in env.params if p.key == "scenario_name")
-    for name in spec.choices:
-        assert (cc.SIONNA_SIMS_DIR / f"{name}.pkl").is_file() or not cc.SIONNA_SCENARIOS
+    for token in spec.choices:
+        name, link = cc.resolve_sionna_scenario(token)
+        expected_file = "munich_ka.pkl" if (name == "munich" and link is None) else f"{name}.pkl"
+        assert (cc.SIONNA_SIMS_DIR / expected_file).is_file() or not cc.SIONNA_SCENARIOS
+
+
+def test_discover_sionna_scenarios_ka_and_legacy_both_present(tmp_path):
+    """Both munich files present -> two distinct tokens, Ka-band first (it is the
+    default and what every preset uses), each carrying its own label."""
+    from webapp import corpus_catalog as cc
+
+    _write_fake_ka_pkl(tmp_path / "munich_ka.pkl", carrier_hz=30e9)
+    (tmp_path / "munich.pkl").write_bytes(b"legacy-bare-array-stand-in")
+
+    labels = cc.discover_sionna_scenarios(tmp_path)
+    assert labels == ["munich (Ka-band, 30 GHz)", cc.MUNICH_LEGACY_LABEL]
+
+    _labels, index = cc._discover_sionna_scenario_specs(tmp_path)
+    assert index["munich (Ka-band, 30 GHz)"] == ("munich", None)
+    from e2e.environment.sionna_iterator import MUNICH_LEGACY_LINK
+    assert index[cc.MUNICH_LEGACY_LABEL] == ("munich", MUNICH_LEGACY_LINK)
+
+
+def test_discover_sionna_scenarios_ka_only_when_legacy_absent(tmp_path):
+    """Only munich_ka.pkl on disk -> only the Ka token is offered."""
+    from webapp import corpus_catalog as cc
+
+    _write_fake_ka_pkl(tmp_path / "munich_ka.pkl", carrier_hz=30e9)
+    assert cc.discover_sionna_scenarios(tmp_path) == ["munich (Ka-band, 30 GHz)"]
+
+
+def test_munich_ka_label_falls_back_when_metadata_unreadable(tmp_path):
+    """A corrupt/unexpected munich_ka.pkl must not take discovery down with it."""
+    from webapp import corpus_catalog as cc
+
+    (tmp_path / "munich_ka.pkl").write_bytes(b"not a pickle")
+    assert cc.discover_sionna_scenarios(tmp_path) == ["munich (Ka-band)"]
+
+
+def test_resolve_sionna_scenario_passes_through_unknown_token():
+    """An unrecognized token (a saved UI state predating the split, or a name typed
+    directly) must still reach SionnaEnvironmentBlock, not be rejected here."""
+    from webapp import corpus_catalog as cc
+
+    assert cc.resolve_sionna_scenario("etoile") == ("etoile", None)
+    assert cc.resolve_sionna_scenario("some_future_scenario") == ("some_future_scenario", None)
+
+
+def test_environment_block_resolves_legacy_token_to_legacy_link(monkeypatch):
+    """run_pipeline must resolve the legacy label to (scenario_name='munich',
+    link=MUNICH_LEGACY_LINK) -- not pass the display label straight through as a
+    scenario name, which SionnaEnvironmentBlock would reject."""
+    pytest.importorskip("torch")
+    import e2e.blocks as blocks
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+    from webapp.corpus_catalog import MUNICH_LEGACY_LABEL
+    from e2e.environment.sionna_iterator import MUNICH_LEGACY_LINK
+
+    seen = {}
+
+    def spy(name, *args, **kwargs):
+        seen["name"] = name
+        seen["link"] = kwargs.get("link")
+        raise FileNotFoundError("stand-in: stop before the rest of the pipeline builds")
+
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", spy)
+    state = default_block_state()
+    state["environment"]["params"]["scenario_name"] = MUNICH_LEGACY_LABEL
+    with pytest.raises(pipeline_runner.PipelineError):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+    assert seen["name"] == "munich"
+    assert seen["link"] == MUNICH_LEGACY_LINK
+
+
+def test_environment_block_default_token_resolves_to_no_link(monkeypatch):
+    """The default (Ka) token must resolve to link=None, i.e. build exactly as
+    before the legacy/Ka split."""
+    pytest.importorskip("torch")
+    import e2e.blocks as blocks
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+
+    seen = {}
+
+    def spy(name, *args, **kwargs):
+        seen["name"] = name
+        seen["link"] = kwargs.get("link")
+        raise FileNotFoundError("stand-in: stop before the rest of the pipeline builds")
+
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", spy)
+    state = default_block_state()  # scenario_name defaults to DEFAULT_SIONNA_SCENARIO
+    with pytest.raises(pipeline_runner.PipelineError):
+        pipeline_runner.run_pipeline(state, n_steps=1)
+
+    assert seen["name"] == "munich"
+    assert seen["link"] is None
+
+
+def test_run_notes_state_carrier_when_freq_plan_present(monkeypatch, make_env_block):
+    """The run banner must say what carrier the frames actually are, when the
+    environment block carries a freq_plan (v2 pkl)."""
+    pytest.importorskip("torch")
+    import e2e.blocks as blocks
+    from webapp import pipeline_runner
+    from webapp.pipeline_registry import default_block_state
+
+    env = make_env_block(n_frames=1, n_freqs=4)
+    env.freq_plan = {"carrier_hz": 30e9, "start_hz": 28.5e9,
+                     "stop_hz": 31.5e9, "num_freqs": 4}
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock", lambda *a, **k: env)
+    state = default_block_state()
+    outputs = pipeline_runner.run_pipeline(state, n_steps=1)
+    notes = outputs["_axis_meta"]["notes"]
+    assert any("30 GHz" in n for n in notes), notes
 
 
 def test_corpus_replay_split_excludes_train():
