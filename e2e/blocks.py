@@ -162,11 +162,24 @@ class RFFEBlock:
         return s_pars_dist, PRX
 
 
-# Packaged interconnect transfer-function data (a Tessera TSV S21(f) sweep; the surrogate
-# architecture is public (BSD-3, github.com/HiPerCAS/tessera) but not vendored here, and
-# the specific finetuned checkpoint that produced this CSV was not released -- only this
-# derived CSV ships). See e2e/data/interconnect/README.md.
+# Packaged interconnect transfer-function data (Tessera TSV S21(f) sweeps; the surrogate
+# architecture is public, BSD-3, github.com/HiPerCAS/tessera). Two files, two purposes:
+#
+# `TESSERA_INTERCONNECT_CSV` (the default) is the DIRECT evaluation of the PUBLIC
+# checkpoint at its own canonical geometry -- reproducible from a clean clone via
+# `python -m e2e.interconnect_surrogate.fetch` then
+# `python -m e2e.data.interconnect.regenerate_tessera_tsv`.
+#
+# `LEGACY_TESSERA_INTERCONNECT_CSV` is the file supplied by the authors in August 2026,
+# ahead of the public release. It is NOT reproducible from the public checkpoint (measured
+# 2026-09-23, notes/ESTABLISHED_FACTS.md F89/F90: it is an exactly lossless closed-form
+# two-port that no checkpoint of this architecture could have produced). Kept only for
+# continuity with older figures/numbers that already cite it. See
+# e2e/data/interconnect/README.md for both files' provenance and measured numbers.
 TESSERA_INTERCONNECT_CSV = (
+    Path(__file__).resolve().parent / "data" / "interconnect" / "tessera_tsv_s21_public.csv"
+)
+LEGACY_TESSERA_INTERCONNECT_CSV = (
     Path(__file__).resolve().parent / "data" / "interconnect" / "tessera_tsv_s21.csv"
 )
 

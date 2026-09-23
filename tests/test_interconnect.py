@@ -1,8 +1,15 @@
-"""Tests for the data-driven InterconnectBlock transfer-function mode and the shipped
-Tessera TSV S21(f) CSV (e2e/data/interconnect/tessera_tsv_s21.csv).
+"""Tests for the data-driven InterconnectBlock transfer-function mode and the Tessera
+TSV S21(f) CSVs (e2e/data/interconnect/).
 
-These use only the committed CSV + numpy/torch -- no external interconnect model.
+`TESSERA_INTERCONNECT_CSV` is the DEFAULT/public file (`tessera_tsv_s21_public.csv`,
+reproducible from the public checkpoint -- F90, notes/ESTABLISHED_FACTS.md).
+`LEGACY_TESSERA_INTERCONNECT_CSV` is the older file supplied by the authors before the
+public release, not reproducible from it, kept only for continuity (see the data
+README). These use only the committed CSVs + numpy/torch -- no external interconnect
+model, except the one test explicitly gated on the surrogate being importable.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -10,6 +17,7 @@ torch = pytest.importorskip("torch")
 
 from e2e.blocks import (
     InterconnectBlock,
+    LEGACY_TESSERA_INTERCONNECT_CSV,
     load_interconnect_transfer,
     TESSERA_INTERCONNECT_CSV,
     device,
@@ -18,8 +26,12 @@ from e2e.blocks import (
 PIPELINE_BAND = (28.5e9, 31.5e9)
 
 
-def test_shipped_csv_loads_and_is_physical():
-    freq, s21 = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
+def test_legacy_csv_still_loadable_under_its_explicit_name():
+    """5AA (F89/F90): the legacy file -- not reproducible from the public release --
+    is kept beside the new public file, at its old name, so anyone loading it
+    explicitly still gets it. See e2e/data/interconnect/README.md."""
+    assert Path(LEGACY_TESSERA_INTERCONNECT_CSV).name == "tessera_tsv_s21.csv"
+    freq, s21 = load_interconnect_transfer(LEGACY_TESSERA_INTERCONNECT_CSV)
     # ascending 1..40 GHz sweep
     assert np.all(np.diff(freq) > 0)
     assert freq[0] == pytest.approx(1e9)
@@ -29,25 +41,13 @@ def test_shipped_csv_loads_and_is_physical():
     assert np.all(np.abs(s21) <= 1.0 + 1e-6)
 
 
-def test_legacy_csv_still_loadable_under_its_explicit_name():
-    """5AA (F89/F90): the legacy file -- not reproducible from the public release --
-    is kept beside the new public file, at its old name, so anyone loading it
-    explicitly still gets it. See e2e/data/interconnect/README.md."""
-    from pathlib import Path
-
-    assert Path(TESSERA_INTERCONNECT_CSV).name == "tessera_tsv_s21.csv"
-    freq, s21 = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
-    assert len(freq) > 0
-
-
 def test_public_csv_exists_and_is_passive():
-    """The regenerated public checkpoint's direct evaluation (F90): a real csv on
-    disk, ascending frequency, and passive (|S21| <= 0 dB) everywhere -- unlike the
-    legacy file, this one actually comes from a checkpoint, so passivity is a real
-    property of the model's output, not a closed-form guarantee."""
-    from e2e.main.main_interconnect import TESSERA_TSV_PUBLIC_CSV
-
-    freq, s21 = load_interconnect_transfer(TESSERA_TSV_PUBLIC_CSV)
+    """The DEFAULT `TESSERA_INTERCONNECT_CSV` (F90): a real csv on disk, ascending
+    frequency, and passive (|S21| <= 0 dB) everywhere -- unlike the legacy file, this
+    one actually comes from a checkpoint, so passivity is a real property of the
+    model's output, not a closed-form guarantee."""
+    freq, s21 = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
+    assert Path(TESSERA_INTERCONNECT_CSV).name == "tessera_tsv_s21_public.csv"
     assert len(freq) > 0
     assert np.all(np.diff(freq) > 0)
     s21_db = 20 * np.log10(np.abs(s21) + 1e-15)
@@ -63,9 +63,8 @@ def test_public_csv_matches_surrogate_at_three_frequencies():
 
     if not available():
         pytest.skip("Tessera surrogate/checkpoint not available on this machine")
-    from e2e.main.main_interconnect import TESSERA_TSV_PUBLIC_CSV
 
-    freq, s21 = load_interconnect_transfer(TESSERA_TSV_PUBLIC_CSV)
+    freq, s21 = load_interconnect_transfer(TESSERA_INTERCONNECT_CSV)
     tsv = TesseraTSV(passivity="ignore", warn_out_of_range=False)
     for idx in (0, len(freq) // 2, len(freq) - 1):
         got = tsv.s21(np.array([freq[idx]]), grid="ring3x3", **SHIPPED_TSV_DESIGN)[0]
@@ -80,8 +79,11 @@ def _ones_frame(n_freqs):
 
 
 def test_transfer_mode_applies_resampled_s21_over_band():
+    """Pins the LEGACY file's known datasheet values (not the public default's --
+    see `test_public_csv_exists_and_is_passive` for that one) purely to exercise the
+    generic CSV-resampling mechanism against fixed magic numbers."""
     n_freqs = 64
-    blk = InterconnectBlock(transfer_csv=TESSERA_INTERCONNECT_CSV, band_hz=PIPELINE_BAND)
+    blk = InterconnectBlock(transfer_csv=LEGACY_TESSERA_INTERCONNECT_CSV, band_hz=PIPELINE_BAND)
     out = blk.apply_interconnect(_ones_frame(n_freqs))
     assert out.shape == (2, 2, 1, n_freqs)
     H = out[0, 0, 0, :]
