@@ -1,7 +1,171 @@
 /* Dash serves this folder automatically (Dash(__name__) -> ./assets).
-   Disabled Run / Cancel buttons were drawn at full saturation, so a presenter clicking
-   Run twice got silence with no visible reason (operator-flow review, 2026-09-22). */
+ *
+ * The type scale, palette and page geometry of the layout spec (2026-09-24). The
+ * problem it fixes is NOT that type was small: figure text was 18-28 px while the page
+ * chrome was 14-16 px, so the hierarchy was inverted and the prose shouted louder than
+ * the titles. Titles go up, prose moves into the Details disclosure; the tick/axis
+ * sizes measured for podium legibility on 2026-09-22/23 are untouched.
+ *
+ * MINIMUM LEGIBLE SIZE: 15 px anywhere on a results screen. Nothing at 14 px survives.
+ */
+
+:root {
+  --ink:           #2d3a4a;
+  --muted:         #576574;
+  --muted-2:       #8395a7;
+  --border:        #dfe4ea;
+  --surface:       #ffffff;
+  --plot-surface:  #E5ECF6;
+  --arm-a:         #4b6584;
+  --arm-b:         #3867d6;
+  --ok:            #20bf6b;
+  --warn:          #f39c12;
+  --error:         #eb3b5a;
+
+  /* Spacing scale: 4 / 8 / 12 / 16 / 28 / 40 */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+  --sp-4: 16px; --sp-5: 28px; --sp-6: 40px;
+
+  --content-width: 1520px;
+  --ab-column: 746px;
+  --ab-gutter: 28px;
+}
+
+/* Disabled Run / Cancel buttons were drawn at full saturation, so a presenter
+   clicking Run twice got silence with no visible reason (operator-flow review,
+   2026-09-22). */
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.app-shell {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: var(--sp-3) 20px;
+  font-family: "Segoe UI", Arial, sans-serif;
+  color: var(--ink);
+}
+
+.page-title    { font-size: 26px; font-weight: 700; color: var(--ink); margin: 0; }
+.page-subtitle { font-size: 16px; color: var(--muted); margin: 2px 0 var(--sp-3) 0; }
+.page-heading  { font-size: 22px; font-weight: 600; color: var(--ink);
+                 margin: 0 0 var(--sp-2) 0; }
+
+/* Tab labels: 17/600, so the page chrome does not read smaller than the panels. */
+.tab-container .tab, .dash-tab, div.tab { font-size: 17px !important; font-weight: 600; }
+
+/* ---------------------------------------------------------------- results page -- */
+
+.results-page { width: 100%; max-width: var(--content-width); }
+
+/* Run-identity row: ONE line, the screen's only transport right-aligned in it. */
+.run-identity-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-5); min-height: 34px;
+}
+.run-identity-cell { display: flex; align-items: center; gap: var(--sp-3);
+                     min-width: 0; }
+.run-identity {
+  font-size: 18px; font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chip {
+  display: inline-block; padding: 2px 10px; border-radius: 10px;
+  font-size: 15px; font-weight: 600; white-space: nowrap;
+}
+.chip-warn { background: var(--warn); color: #ffffff; }
+
+.transport { display: flex; align-items: center; gap: var(--sp-2); flex: 0 0 auto; }
+.transport-btn {
+  font-size: 17px; line-height: 1; padding: 4px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--ink);
+}
+.transport-label { font-size: 16px; color: var(--muted); min-width: 110px; }
+.transport-slider { width: 300px; accent-color: var(--arm-b); }
+
+.section-rule {
+  height: 1px; background: var(--border);
+  margin: var(--sp-4) 0; width: 100%;
+}
+
+/* Arm header: chip, one-line caption, collapsed Details. At most 4 lines and 150 px
+   of this may sit above the first panel (acceptance check 2). */
+.arm-header { max-height: 150px; overflow: hidden; }
+.arm-chip { display: flex; align-items: center; gap: var(--sp-2); }
+.arm-chip-label { font-size: 20px; font-weight: 700; }
+.arm-chip-a .arm-chip-label { color: var(--arm-a); }
+.arm-chip-b .arm-chip-label { color: var(--arm-b); }
+.arm-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.arm-dot-a { background: var(--arm-a); }
+.arm-dot-b { background: var(--arm-b); }
+.arm-caption {
+  font-size: 16px; font-weight: 400; color: var(--muted);
+  margin-top: var(--sp-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* The Details disclosure. Closed by default; opening it pushes the panels down, which
+   is correct -- it is a deliberate act by the presenter, not the default state. */
+.details { margin-top: var(--sp-2); }
+.details-summary {
+  font-size: 16px; color: var(--arm-b); cursor: pointer;
+  list-style: none; user-select: none;
+}
+.details-summary::-webkit-details-marker { display: none; }
+.details-body {
+  margin-top: var(--sp-2); padding: var(--sp-3);
+  border: 1px solid var(--border); border-radius: 6px; background: #fbfcfd;
+  max-height: 520px; overflow-y: auto;
+}
+.details-line    { font-size: 15px; font-weight: 400; color: var(--muted);
+                   margin-bottom: var(--sp-1); }
+.details-banner  { font-weight: 600; color: var(--ink); }
+.details-heading { font-size: 15px; font-weight: 700; color: var(--ink);
+                   margin: var(--sp-2) 0 var(--sp-1) 0; }
+
+/* ------------------------------------------------------------- the product grid -- */
+
+.results-grid { width: 100%; }
+.ab-row {
+  display: flex; align-items: flex-start;
+  gap: var(--ab-gutter); margin-bottom: var(--sp-4);
+}
+.ab-cell { flex: 1 1 var(--ab-column); min-width: 0; max-width: var(--ab-column); }
+.ab-cell-single { flex: 0 0 auto; max-width: none; }
+
+.result-panel {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: var(--sp-3); background: var(--surface);
+  box-sizing: border-box; overflow: hidden;
+}
+.result-panel-empty { background: #fbfcfd; border-style: dashed; }
+
+.panel-header { height: 60px; overflow: hidden; }
+.panel-title {
+  font-size: 22px; font-weight: 600; color: var(--ink);
+  line-height: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.panel-caption {
+  font-size: 16px; font-weight: 400; color: var(--muted);
+  line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Page-foot screen note: a photograph of the screen still catches it; a viewer is no
+   longer made to read three lines of it before any data appears. */
+.page-foot-note {
+  font-size: 15px; font-weight: 400; color: var(--muted);
+  margin-top: var(--sp-5); padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+/* -------------------------------------------------------- Block Diagram tab ----- */
+
+.control-bar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-2) 0; min-height: 56px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.control-divider { width: 1px; height: 28px; background: var(--border); }

@@ -257,89 +257,59 @@ def score_frames(
     }
 
 
-#: Table geometry (px): header + data rows must fit inside the domain the figure's
-#: own `height`/`margin` leaves for the table trace, or the LAST rows get silently cut
-#: off by the renderer -- not resized, not scrolled (rehearsal, 2026-09-23: a long
-#: header ("CA-CFAR (guard 2, train 6) -- threshold 0.66") wrapped to two lines inside
-#: its declared single-line height, stealing room from the bottom of the table and
-#: clipping the "hit rate" row -- the CFAR and neural-detector arms otherwise run the
-#: same code and must show identical rows). Threshold moved out of the header (into
-#: the title, below) specifically so the header text stays short enough not to wrap;
-#: the extra header/margin slack below is a second, independent guard for arm names
-#: this module does not control the length of (e.g. an ML checkpoint's directory name).
-#: Row COUNT is no longer fixed (see `scoreboard_figure`'s `beat_cfar_arm_name`): the
-#: offline-scored block appends a variable number of rows for an arm found in
-#: beat_cfar.json (AP/FA/stripe/CI/OOD, some of them themselves wrapped to more than
-#: one line -- see `_TABLE_COL_CHARS`), so the table height below is computed
-#: from the actual PER-ROW rendered height at call time, never from a hardcoded row
-#: count or a uniform row height -- the same clipping bug this comment describes would
-#: otherwise recur the moment that block's row count or a row's line count changed.
+#: Table geometry (px), FIXED under the panel-meta contract (2026-09-24 layout
+#: redesign -- see `webapp.pipeline_runner`'s "PANEL GEOMETRY AND THE PANEL-META
+#: CONTRACT" section): every scoreboard figure now gets the SAME
+#: `FIGURE_HEIGHT[PANEL_ROW_TABLE]` (312 px), independent of row count, wrapped-line
+#: count or arm-name length. `scoreboard_figure` enforces this by capping the table
+#: at <=8 VISIBLE rows (the two highest-value offline rows plus the 6 live-run rows;
+#: everything else moves into the panel's Details disclosure) and asserting no row
+#: needs to wrap.
+#:
+#: RETIRED (2026-09-24): the old machinery that grew the table's own `height` from
+#: its actual row/line count and the figure title/subtitle/annotation's own wrapped
+#: line counts at call time (a variable `_TABLE_ROW_HEIGHT`, `_TABLE_MARGIN_T`,
+#: `_TABLE_SUBLINE_LINE_PX`, `_TABLE_ANNOTATION_LINE_PX`, `_TABLE_RENDER_SAFETY_PX`
+#: fudge factor) is gone with the figure title/subtitle/annotation it was sized
+#: around -- that text now lives in the panel's HTML title/caption/Details
+#: (`pipeline_runner.set_panel`), off the figure entirely, so the figure's own
+#: height has nothing left to grow with. This is a genuine simplification, not just
+#: a rename: the empirically-fudged render-safety margin the old comment here
+#: recorded (Plotly's row-position accumulation drifting ~12 px from this module's
+#: own arithmetic) is no longer load-bearing, because the table no longer tries to
+#: fit its height exactly to computed content -- it just asserts the content fits
+#: inside a height that was never derived from that content in the first place.
 _TABLE_HEADER_HEIGHT = 40
-#: Trimmed from 30 (2026-09-23 coordinator re-check) -- with up to 15 rows now
-#: sharing one uniform row height (Plotly's Table `cells.height` is one scalar for
-#: the whole table), this is the lever that actually has budget to give: unlike
-#: `_TABLE_MARGIN_T`/`_TABLE_ANNOTATION_LINE_PX` below (both tried and reverted --
-#: trimming either one clipped real content on the rendered raddetnet PNG), a few
-#: px off each of up to 15 rows adds up without touching anything that wraps.
-_TABLE_ROW_HEIGHT = 26
-#: Column widths (px): label:value roughly 50:50 (Change, 2026-09-23 coordinator
-#: re-check) -- was [280, 160] (label-heavy), which squeezed the OOD/CI-caveat
-#: VALUES (e.g. "0.208 (s42) / 0.153 (s43)") that this width split now needs room
-#: for on the value side too.
-_TABLE_COL_WIDTHS = [250, 250]
-#: Character budget BOTH columns are pre-wrapped at (not just the label column any
-#: more -- Change, 2026-09-23): calibrated so that EVERY row this module builds fits
-#: in exactly ONE line at `_TABLE_COL_WIDTHS`' width/font 18 (verified against this
-#: module's own longest label at each width, and empirically well under the point a
-#: standalone Playwright render showed Plotly's own auto-wrap kicking in at the
-#: OLD, wider 280 px column: fits at 48 chars, wraps at 68). A table where every row
-#: is forced to the SAME height (Plotly's Table `cells.height` is one scalar for the
-#: whole table, not per-row) can only stay short if every row stays to one line: a
-#: single 2-line row previously inflated the ENTIRE table (up to 15 rows) by one
-#: full row height each, pushing a Thrust 5 card past 1500 px (coordinator re-check,
-#: 2026-09-23) -- so this module now keeps content to 1 line by SPLITTING it across
-#: both columns (see `_offline_arm_rows`/`_ood_rows_for_arm`) rather than by
-#: shortening it, other than the "hit rate"/"cumulative hits" base rows, which do
-#: the same split. `_TABLE_CELL_MAX_LINES` is enforced (and tested) as a hard cap in
-#: case a future arm/corpus name is long enough to still need a second line.
+#: Row height cap (px, layout spec: "no row taller than 40 px"). The ACTUAL row
+#: height used per call is computed in `scoreboard_figure` from the real row count,
+#: floor-divided so `_TABLE_HEADER_HEIGHT + n_rows * row_height` never exceeds
+#: `FIGURE_HEIGHT[PANEL_ROW_TABLE]` -- at the table's max, 8 rows, this divides out
+#: to exactly 34 px/row with zero pixels left over (8*34 + 40 == 312).
+_TABLE_MAX_ROW_HEIGHT = 40
+#: Column widths (px, relative -- Plotly normalises `columnwidth`): 55/45,
+#: label-heavy (Change, 2026-09-24 layout redesign: was 50/50 -- the table now
+#: carries only its 8 highest-value rows, so the value side can give a little width
+#: back to the label side, which still carries full-sentence rows like "FA/frame at
+#: recall 0.5, 172 frames").
+_TABLE_COL_WIDTHS = [55, 45]
+#: Character budget both columns are checked against -- ONLY to feed the no-wrap
+#: assertion in `scoreboard_figure` now (Change, 2026-09-24): under the fixed-height
+#: contract above, no table row may wrap AT ALL (Plotly's Table `cells.height` is one
+#: scalar for the whole table, and every row is held to a fixed <=40 px), so
+#: `_wrap_text` below is no longer used to actually insert a "<br>" into a cell --
+#: only to detect that one would be needed, so the figure-building code can fail
+#: loudly (an `assert`) instead of silently inflating every row past its cap.
+#: Calibrated (2026-09-23, still valid at the new 55/45 split and 17 px font -- both
+#: give a row slightly MORE room per character than the value this was measured
+#: against, so 34 stays conservative) against this module's own longest rows at
+#: `_TABLE_COL_WIDTHS`' width.
 _TABLE_COL_CHARS = 34
-_TABLE_CELL_MAX_LINES = 2
-#: Base top margin: one title line ("Detector scoreboard") + a ONE-line subtitle
-#: ("threshold 0.44"). The real subline (see `scoreboard_figure`) is usually longer
-#: and wraps to several lines -- each one needs `_TABLE_SUBLINE_LINE_PX` more margin
-#: or Plotly overflows the title DOWN into the table's own header row instead of
-#: clipping it (measured, thrust5_detector_cfar rehearsal PNG, 2026-09-23 pixel
-#: re-check; RE-BROKEN and re-measured the same day when a first attempt to trim
-#: this for the <=800 px budget shaved this margin instead of the row/annotation
-#: budgets below -- the 3-line real subline overlapped the table header on the
-#: rendered raddetnet PNG. Left at its original, known-good value; the row-height
-#: and annotation trims below carry the whole budget instead).
-_TABLE_MARGIN_T = 90
-_TABLE_SUBLINE_LINE_PX = 32
-#: Per-wrapped-line px budget for the annotation block below the table (match rule +
-#: the F83 precision-ceiling caveat, the caption stating unmatched counts are an
-#: upper bound on false alarms) -- calibrated against the ORIGINAL fixed 120 px
-#: budget, which fit exactly the match-rule sentence alone at its default 3 wrapped
-#: lines. A first attempt at the <=800 px budget (2026-09-23 coordinator re-check)
-#: trimmed this to 30 and clipped the ceiling caveat's last line off the bottom of
-#: the rendered raddetnet PNG -- reverted to the known-good value; `_TABLE_ROW_HEIGHT`
-#: carries the budget instead. `scoreboard_figure` computes the real total from both
-#: annotations' actual wrapped line counts, never from assumed content.
-_TABLE_ANNOTATION_LINE_PX = 40
-#: Slack between the table's DECLARED height (this module's own row-count arithmetic)
-#: and what Plotly's table trace actually needs client-side, discovered empirically
-#: (4th hostile-expert read, 2026-09-23): a Playwright render of the exact raddetnet
-#: figure JSON clipped its last row even though `domain_height >= content_height`
-#: held EXACTLY (zero slack) -- Plotly's own row-position accumulation drifted ~12 px
-#: from this module's `n_rows * row_height` arithmetic somewhere in a numeric-heavy
-#: row's text metrics (root cause not fully isolated; a standalone same-content,
-#: same-column-width table reproduced the same per-row y-drift). +8 px was the
-#: measured minimum that stopped the clip on that figure; used at 2x for margin
-#: against a different arm's row content drifting differently. This buys back a
-#: little of the exact-fit budget this module otherwise computes -- it does not
-#: replace the geometric self-check below, which still catches a REAL row-count
-#: increase that isn't budgeted for at all.
-_TABLE_RENDER_SAFETY_PX = 16
+#: Every table row must now fit in exactly one line (asserted, not just hoped for --
+#: `scoreboard_figure`'s no-wrap assertion). Retained under its old name in case a
+#: caller still checks it; the old cap of 2 (a table where one row could still wrap
+#: to a second line, inflating every OTHER row's height to match) is gone with the
+#: variable-height table it protected.
+_TABLE_CELL_MAX_LINES = 1
 
 
 def _wrap_text(text: str, max_chars: int = 70) -> str:
@@ -1037,47 +1007,33 @@ def _raddetnet_ci_for_arm(arm_name: str, raddetnet_ci_json_path) -> Optional[Dic
     return None
 
 
-#: Top-margin sizing for `stored_pr_figure`'s title (main line + "<br><sup>" block) --
-#: same subtitle-line-count pattern as `pipeline_runner._heatmap_margin_t` (commit
-#: 6081e29). RE-CALIBRATED (wave 9, second hostile read, 2026-09-24): the previous
-#: 60/+24-per-line constants were a LINEAR extrapolation from one measured point
-#: (wave 8's 60 -> 84 for n_lines 2 -> 3) that was never re-verified against the
-#: browser; a real Playwright measurement of this exact figure (`gd.querySelector
-#: ('.g-gtitle')` vs `'.bg'` bounding rects, see notes/tools -- standalone script,
-#: not committed) found the title's rendered BOTTOM moves at only ~HALF the rate of
-#: `margin.t` (Plotly centers an auto-positioned title within its margin band
-#: rather than pinning it to the band's top), while the plot's own top edge moves
-#: 1:1 with `margin.t` -- so undershooting the per-line cost compounds: at n_lines=3
-#: the old 84 measured a bare 0 px gap (title bottom == plot top, exactly the
-#: "wave 8 fixed it with zero slack" pattern this file's table-margin comments
-#: already warn about elsewhere), and at n_lines=4 the extrapolated 108 measured an
-#: 11.6 px OVERLAP -- the exact "sco1ed" defect the second hostile read reported.
-#: These values are calibrated to a real ~18-22 px gap at both n_lines=3 (unused
-#: while `_PR_MIN_TITLE_LINES` floors every call to 4, kept for any future caller
-#: that passes a shorter title) and n_lines=4 (a doubled 24 px/line surrogate for
-#: the true "add half back" relationship, cheaper to reason about than re-deriving
-#: the half-rate formula per call).
-_PR_MARGIN_T_BASE = 65          # n_lines == 2 (main title + 1 sup line)
-_PR_MARGIN_T_PER_LINE = 55
-#: Both A/B arms of a Thrust-5 preset draw this SAME figure (`webapp.app._arm_result`
-#: appends one more "<br><sup>" line to arm B's copy, saying the curve is identical on
-#: both arms), and the two must render at the SAME margin or their plot axes do not
-#: line up (item 1, wave 9 hostile-expert read, 2026-09-23: a viewer switching between
-#: the two panels saw the axis heights shift; a viewer of B alone saw its 4th line's
-#: text overprinted by the plot's own y-axis tick, because that margin bump lived in
-#: `_arm_result` as a flat "+25" that undercounted the true per-line cost). Reserving
-#: room for at least this many total lines on EVERY call -- regardless of that call's
-#: own actual line count -- means arm A (3 lines) and arm B (4, after its append) get
-#: byte-identical margins without `_arm_result` needing to know or match this number.
-_PR_MIN_TITLE_LINES = 4
-#: Fixed bottom margin (legend) -- named so the height formula below can share it
-#: rather than repeating the literal.
-_PR_MARGIN_B = 110
-#: Plot area (px) preserved regardless of the top margin's own growth -- the figure's
-#: total `height` is computed as this plus both margins (mirrors
-#: `pipeline_runner._HEATMAP_PLOT_DOMAIN_HEIGHT`'s pattern) so the re-calibration
-#: above (item 1, wave 9 second hostile read) grows the CARD, not shrinks the PLOT.
-_PR_PLOT_DOMAIN_HEIGHT = 280
+#: PR-panel geometry (px), FIXED under the panel-meta contract (2026-09-24 layout
+#: redesign -- see `webapp.pipeline_runner`'s "PANEL GEOMETRY AND THE PANEL-META
+#: CONTRACT" section): the figure carries no title/subtitle any more, so nothing
+#: here derives from a title's own wrapped-line count.
+#:
+#: RETIRED (2026-09-24): `_PR_MARGIN_T_BASE`, `_PR_MARGIN_T_PER_LINE` and
+#: `_PR_MIN_TITLE_LINES` existed only to grow the top margin with the old
+#: multi-line title/subtitle (and to keep arm A/B margins equal while doing it --
+#: `_PR_MIN_TITLE_LINES` floored every call to the same line count so
+#: `webapp.app._arm_result`'s extra "<br><sup>" line for arm B never shifted its
+#: axes relative to arm A's). Every clause that title carried now lives in this
+#: function's Details instead (`stored_pr_figure`, off the figure entirely), so the
+#: margin is a small FIXED constant like every other panel's -- see that function's
+#: docstring for where each clause went, including the arm-B-only sentence, which
+#: is now a standing Details line rather than something only arm B's copy carries.
+_PR_MARGIN_L = 64
+_PR_MARGIN_R = 16
+_PR_MARGIN_T = 12
+#: Legend strip below the plot: 2 columns x 3 rows at 17 px (6 arms in beat_cfar.json
+#: today -> 3 rows at `entrywidth=0.5`), plus the x-axis title/tick allowance every
+#: other panel in this package budgets (`pipeline_runner._FIG_MARGIN_B`) -- kept as
+#: a literal here rather than importing that private constant, since this panel's
+#: margins are this module's own layout decision, not something that should
+#: silently move if that constant's value ever changes for a heatmap's needs.
+_PR_LEGEND_STRIP_PX = 64
+_PR_AXIS_MARGIN_B = 60
+_PR_MARGIN_B = _PR_LEGEND_STRIP_PX + _PR_AXIS_MARGIN_B
 
 
 def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
@@ -1087,19 +1043,35 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     single operating point sits next to the whole curve it was read off.
 
     Falls back, PER ARM, to plotting just its recall-0.5 (or whatever `target_recall`
-    the JSON recorded) operating point -- with AP in the legend, and a banner saying so
-    -- for any arm that has no stored `pr_curve`. The JSON this was built against
-    (2026-09-22 `e2e/ml/runs/beat_cfar.json`) has a full curve for every arm, so this is
-    a documented fallback, not the observed case; re-verify against a fresh
-    `beat_cfar.json` before assuming it never fires.
+    the JSON recorded) operating point -- with AP in the legend, and a Details line
+    saying so -- for any arm that has no stored `pr_curve`. The JSON this was built
+    against (2026-09-22 `e2e/ml/runs/beat_cfar.json`) has a full curve for every arm,
+    so this is a documented fallback, not the observed case; re-verify against a
+    fresh `beat_cfar.json` before assuming it never fires.
 
     `highlight_arm`'s legend entry also carries its bootstrap AP-delta-vs-CFAR 95% CI
     from `raddetnet_ci_json_path`, when that file has a row for it (see
-    `_raddetnet_ci_for_arm`) -- omitted, never invented, otherwise.
+    `_raddetnet_ci_for_arm`) -- omitted, never invented, otherwise. Its own curve
+    draws at `width=5`/full opacity; every OTHER arm draws dimmed (`width=2`,
+    `opacity=0.45`) EXCEPT the null/chance-floor arm, which this panel never lets
+    fade: it is the honesty anchor a viewer needs even while looking at a different
+    arm's curve, so it always stays at full opacity.
+
+    LAYOUT (2026-09-24 redesign, panel-meta contract -- see
+    `webapp.pipeline_runner`'s "PANEL GEOMETRY AND THE PANEL-META CONTRACT" section):
+    the figure carries no title/subtitle and no in-plot fallback banner; every
+    clause those used to carry (the offline-split/corpus statement, the
+    in-distribution/seed qualifier, the precision-ceiling-at-full-recall
+    clarification, the "identical on both arms" note that used to live only on arm
+    B's copy in `webapp.app._arm_result`, and the no-stored-curve fallback banner)
+    is attached instead via `pipeline_runner.set_panel` as Details -- nothing
+    dropped, only moved.
 
     Raises if the JSON is missing `arms`, or `arms` is empty -- there is nothing
     invented in place of a genuinely absent scoring artifact.
     """
+    from webapp import pipeline_runner as _pr  # lazy: circular import, see module docstring
+
     data = _load_beat_cfar(beat_cfar_json_path)
     arms = data["arms"]
     if not arms:
@@ -1108,13 +1080,13 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     manifest = data.get("manifest", "")
     # DATASET ROOT included (item 7, wave 9 second hostile read, 2026-09-24): the
     # scene-tier subdirectory name alone ("benchmark_v1_D2") is shared by more than
-    # one dataset root -- both the offline scoring corpus this figure is titled after
-    # (b1_bench_v3/benchmark_v1_D2) and the live Thrust 5 demo corpus
+    # one dataset root -- both the offline scoring corpus this figure is captioned
+    # after (b1_bench_v3/benchmark_v1_D2) and the live Thrust 5 demo corpus
     # (b1_demo_cfr/benchmark_v1_D2) -- so a bare "benchmark_v1_D2" reads as one
     # corpus when it names two. Read from the SAME `manifest` path every other field
-    # on this title already reads (never typed) -- same convention
-    # `run_pipeline`'s `trained_on` string and `_third_corpus_rows_for_arm`'s tier
-    # parsing use elsewhere (`Path(manifest).parent.parent.name`, the dataset root).
+    # here already reads (never typed) -- same convention `run_pipeline`'s
+    # `trained_on` string and `_third_corpus_rows_for_arm`'s tier parsing use
+    # elsewhere (`Path(manifest).parent.parent.name`, the dataset root).
     corpus_tier = Path(manifest).parent.name if manifest else "?"
     corpus_root = Path(manifest).parent.parent.name if manifest else ""
     corpus_name = f"{corpus_root}/{corpus_tier}" if corpus_root else corpus_tier
@@ -1132,6 +1104,8 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
 
     fig = go.Figure()
     fallback_arms: List[str] = []
+    highlight_disp_name: Optional[str] = None
+    highlight_ap: Optional[float] = None
     for a in arms:
         name = a.get("name", "?")
         # Display only -- e.g. the stored "null (random-in-GT-box)" reads as "random
@@ -1140,7 +1114,17 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # below (bold/CI matching) keys on.
         disp_name = _display_arm_name(name)
         bold = highlight_arm is not None and name == highlight_arm
+        # The null/chance-floor arm never dims (see this function's docstring): a
+        # viewer looking at some OTHER highlighted arm must still see where "chance"
+        # sits -- fading it like every other non-highlighted arm would let the one
+        # honesty anchor on this panel visually disappear. `_ARM_DISPLAY_NAMES`'s
+        # keys are exactly the arm names this module treats specially, so membership
+        # in it is also the null-arm test.
+        is_null = name in _ARM_DISPLAY_NAMES
+        opacity = 1.0 if (bold or is_null) else 0.45
         ap = a.get("AP", float("nan"))
+        if bold:
+            highlight_disp_name, highlight_ap = disp_name, ap
         pr = a.get("pr_curve")
         if pr and pr.get("recall") and pr.get("precision") is not None:
             x, y = _downsample(pr["recall"], pr["precision"])
@@ -1151,7 +1135,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
             else:
                 trace_name = f"{disp_name} (AP={ap:.3f})"
             fig.add_trace(go.Scatter(
-                x=x, y=y, mode="lines", name=trace_name,
+                x=x, y=y, mode="lines", name=trace_name, opacity=opacity,
                 line=dict(width=5 if bold else 2),
             ))
         else:
@@ -1161,7 +1145,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                 prec = (tp / (tp + fp)) if (tp is not None and fp is not None
                                             and (tp + fp) > 0) else None
                 fig.add_trace(go.Scatter(
-                    x=[op["recall_achieved"]], y=[prec], mode="markers",
+                    x=[op["recall_achieved"]], y=[prec], mode="markers", opacity=opacity,
                     marker=dict(size=18 if bold else 11, symbol="star"),
                     name=f"{disp_name} (AP={ap:.3f}, recall-{op['target_recall']:g} pt only)",
                 ))
@@ -1174,53 +1158,47 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1],
                      domain=[0.0, 1.0])
     fig.update_yaxes(title=dict(text="precision", font=dict(size=16)), range=[0, 1])
-    # Short enough to fit a two-card (~600 px) panel -- the old single-line "scored
-    # offline over the {n} test frames of {corpus} (beat_cfar.json)" ran off the card
-    # edge as "... (b..." (rehearsal, 2026-09-23); the source file name moves to a
-    # subline, like every other panel's qualifier text. The in-distribution/seed
-    # qualifier (owner-volunteered, 2026-09-23 re-read) says what this curve does and
-    # does NOT generalize to: held-out SCENES of the training corpus, not a held-out
-    # corpus, and one training seed per curve -- neither varies run to run the way the
-    # CI band on the highlighted arm might suggest.
-    title_text = (
-        f"scored offline: {n_frames} test frames, {corpus_name}"
-        "<br><sup>beat_cfar.json; in-distribution: held-out scenes of the "
-        "training corpus; one training seed per curve<br>the scoreboard's "
-        "precision ceiling binds at full recall, not near recall 0</sup>"
-    )
-    # Margin sized from the title's OWN line count, floored at `_PR_MIN_TITLE_LINES`
-    # so arm A and arm B (see that constant's comment) always reserve the same room.
-    n_title_lines = max(_PR_MIN_TITLE_LINES, title_text.count("<br>") + 1)
-    margin_t = _PR_MARGIN_T_BASE + _PR_MARGIN_T_PER_LINE * (n_title_lines - 2)
     fig.update_layout(
-        title=dict(text=title_text, font=dict(size=18)),
-        # Moved BELOW the plot, horizontal (Change, 2026-09-23 coordinator re-check):
-        # a vertical legend to the RIGHT of the plot (the previous default) sizes
-        # itself to its longest entry -- the highlighted arm's CI-augmented name is
-        # ~70 characters -- and Plotly reserves that width by shrinking the plot
-        # itself, down to a ~80 px sliver on the rehearsal PNGs. A legend below only
-        # ever costs BOTTOM margin, never plot WIDTH, regardless of entry length;
-        # Plotly wraps a horizontal legend onto more rows by itself when entries
-        # don't fit one row (visible as 2 rows on the highlighted-arm screens).
-        legend=dict(font=dict(size=13), orientation="h",
-                   x=0.5, xanchor="center", y=-0.28, yanchor="top"),
+        # Below the plot, 2 columns x ~3 rows (Change, 2026-09-24: was a single
+        # centred row; `entrywidth=0.5` packs 2 entries per row, and Plotly wraps to
+        # further rows by itself once 6 arms don't fit one -- still never costs plot
+        # WIDTH, only the fixed `_PR_MARGIN_B` strip below, regardless of entry
+        # length, same reasoning as the 2026-09-23 move below the plot in the first
+        # place).
+        legend=dict(orientation="h", entrywidthmode="fraction", entrywidth=0.5,
+                   y=-0.25, yanchor="top", x=0, xanchor="left", font=dict(size=17)),
         font=dict(size=16),
-        # Taller bottom margin than a single-row legend would need (Change, same
-        # re-check): the wrapped 2-row case must not overlap the x-axis title below
-        # it, which `automargin=True` below cannot solve for a LEGEND (that flag only
-        # covers axis titles/ticks).
-        margin=dict(l=50, r=20, t=margin_t, b=_PR_MARGIN_B),
-        # `height` grows WITH `margin_t` (item 1 re-calibration, wave 9 second
-        # hostile read) so the plot area itself (`_PR_PLOT_DOMAIN_HEIGHT`) stays
-        # fixed rather than shrinking every time the top margin does -- was a bare
-        # 480 (implicitly plot=480-84-110=286 at the old, insufficient margin).
-        height=_PR_PLOT_DOMAIN_HEIGHT + margin_t + _PR_MARGIN_B,
+        margin=dict(l=_PR_MARGIN_L, r=_PR_MARGIN_R, t=_PR_MARGIN_T, b=_PR_MARGIN_B),
+        height=_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_PR],
+        paper_bgcolor=_pr.PAPER_BGCOLOR, plot_bgcolor=_pr.PLOT_BGCOLOR,
     )
+
+    if highlight_arm is not None and highlight_disp_name is not None:
+        caption = [f"{highlight_disp_name} highlighted, AP {highlight_ap:.3f}"]
+    else:
+        caption = [f"{n_frames} test frames, {corpus_name}"]
+
+    # Every clause the old figure title/subtitle and in-plot fallback banner carried,
+    # verbatim (2026-09-24 redesign) -- see this function's docstring. The
+    # "identical on both arms" sentence used to be appended only to arm B's copy of
+    # the OLD title text by `webapp.app._arm_result`; it is a fact about this
+    # figure, true on every call, so it is a standing Details line here instead --
+    # app.py's title-mutating append is stale against a figure that no longer has a
+    # `layout.title` to append to and needs updating by that file's owner (not this
+    # module) to stop relying on it.
+    details = [
+        f"scored offline: {n_frames} test frames, {corpus_name} (beat_cfar.json).",
+        "In-distribution: held-out scenes of the training corpus; one training seed "
+        "per curve.",
+        "The precision ceiling binds at full recall, not near recall 0.",
+        "Scored offline; identical on both arms, the knob cannot move it.",
+    ]
     if fallback_arms:
-        fig.add_annotation(
-            text=("no stored PR curve for: " + ", ".join(fallback_arms) +
-                  " -- showing their recall-0.5 operating point only"),
-            xref="paper", yref="paper", x=0.5, y=1.10, showarrow=False,
-            font=dict(size=13, color="#eb3b5a"),
+        details.append(
+            "No stored PR curve for: " + ", ".join(fallback_arms) +
+            " -- showing their recall-0.5 operating point only."
         )
+
+    _pr.set_panel(fig, title="Precision-recall, offline test split",
+                 caption=caption, details=details, row=_pr.PANEL_ROW_PR)
     return fig

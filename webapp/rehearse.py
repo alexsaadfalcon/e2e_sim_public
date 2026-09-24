@@ -93,9 +93,33 @@ def _run_and_wait(page) -> float:
 
 
 def _figure_titles(page) -> List[str]:
+    """The panel titles as the AUDIENCE sees them.
+
+    Reads `.panel-title`, not Plotly's `.gtitle` (layout spec section 3, 2026-09-24):
+    figures carry no title any more -- the title and a one-line caption are HTML above
+    the plot -- so a `.gtitle` query would report zero figures on a page full of them.
+    """
     return page.evaluate(
         """() => Array.from(document.querySelectorAll(
-            '#results-tab-content .js-plotly-plot .gtitle')).map(e => e.textContent)""")
+            '#results-tab-content .panel-title')).map(e => e.textContent)""")
+
+
+def _expand_details(page) -> int:
+    """Open every `Details` disclosure on the Results tab and return how many were
+    opened -- so `--expand-details` can capture a SECOND screenshot proving that the
+    honesty text the default render hides is one click away and photographable
+    (acceptance check 15)."""
+    return page.evaluate(
+        """() => { const d = Array.from(document.querySelectorAll(
+            '#results-tab-content details')); d.forEach(e => e.open = true);
+            return d.length; }""")
+
+
+def _details_text(page) -> List[str]:
+    """The text of every expanded `Details` body, for the honesty diff."""
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+            '#results-tab-content .details-body')).map(e => e.innerText)""")
 
 
 def _status_after(page) -> str:
@@ -107,9 +131,15 @@ def _status_after(page) -> str:
 
 
 def rehearse(out: pathlib.Path, only: List[str] | None = None,
-             cancel_journey: bool = True, viewport=(1600, 1000)) -> Dict[str, Any]:
+             cancel_journey: bool = True, viewport=(1600, 1000),
+             expand_details: bool = False) -> Dict[str, Any]:
     """Load, run and screenshot every preset (or those in ``only``); optionally end
-    with a 20-frame run cancelled after a few seconds. Returns the summary dict."""
+    with a 20-frame run cancelled after a few seconds. Returns the summary dict.
+
+    ``expand_details`` additionally opens every ``Details`` disclosure and writes a
+    second ``<id>_results_details.png`` plus the disclosure text into the summary --
+    the capture the layout spec's acceptance check 15 ("opening all of them loses no
+    string that is present in today's screens") is run against."""
     from playwright.sync_api import sync_playwright
 
     from webapp.demo_presets import PRESETS
@@ -136,10 +166,20 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             page.wait_for_timeout(1500)  # let Plotly finish drawing every card
             titles = _figure_titles(page)
             page.screenshot(path=str(out / f"{p.id}_results.png"), full_page=True)
+            details_text: List[str] = []
+            if expand_details:
+                n_open = _expand_details(page)
+                page.wait_for_timeout(400)
+                details_text = _details_text(page)
+                page.screenshot(path=str(out / f"{p.id}_results_details.png"),
+                                full_page=True)
+                print(f"{p.id}: expanded {n_open} Details disclosure(s)", flush=True)
             status = _status_after(page)
             summary[p.id] = {"label": p.label, "n_steps": n_steps,
                              "wall_s": round(wall, 2), "figures": titles,
                              "status": status, "rendered_at": _now_iso()}
+            if expand_details:
+                summary[p.id]["details_text"] = details_text
             print(f"{p.id}: n={n_steps} {wall:.1f}s figs={len(titles)} "
                   f"status={status[:100]}", flush=True)
             ctx.close()
@@ -198,10 +238,14 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--only", nargs="*", default=None, help="preset ids to rehearse")
     ap.add_argument("--no-cancel", action="store_true",
                     help="skip the 20-frame run-then-Cancel journey at the end")
+    ap.add_argument("--expand-details", action="store_true",
+                    help="also open every Details disclosure and write "
+                         "<id>_results_details.png + its text into summary.json")
     args = ap.parse_args(argv)
     os.environ.setdefault("MPLBACKEND", "Agg")
     summary = rehearse(pathlib.Path(args.out), only=args.only,
-                       cancel_journey=not args.no_cancel)
+                       cancel_journey=not args.no_cancel,
+                       expand_details=args.expand_details)
     print(f"\n{len(summary)} entries -> {args.out}/summary.json. Now READ the PNGs.")
     return 0
 

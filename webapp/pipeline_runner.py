@@ -1670,50 +1670,255 @@ def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
 #: (webapp/detector_scoreboard.py's table, already at 18-20 px) on a Thrust 5 screen
 #: -- the two halves of one screen must not visibly differ in type scale.
 _LEGIBLE_FONT_SIZE = 18
-_LEGIBLE_TICK_SIZE = 20
-_LEGIBLE_COLORBAR_TICK_SIZE = 20
-_LEGIBLE_COLORBAR_TITLE_SIZE = 20
+_LEGIBLE_TICK_SIZE = 18
+_LEGIBLE_COLORBAR_TICK_SIZE = 18
+_LEGIBLE_COLORBAR_TITLE_SIZE = 18
 
-#: Font size for the LARGE, on-map statistic callout `_corner_annotation` draws
-#: (item 5, wave 9 hostile-expert read, 2026-09-23): the peak-median dB story used to
-#: live only inside the title's "<sup>" subline -- effectively ~13 px at this module's
-#: 18 px title font -- unreadable at podium distance.
-_STAT_CALLOUT_FONT_SIZE = 28
+# =====================================================================================
+# PANEL GEOMETRY AND THE PANEL-META CONTRACT (layout spec, 2026-09-24)
+# =====================================================================================
+#
+# The defect this section exists to remove (hostile round 10, section 2; layout spec
+# section 1, measured on the 2026-09-24 14:27 rehearsal PNGs): prose inside the figure
+# was given the same visual budget as data. `_heatmap_margin_t()` grew the top margin
+# 45 px per wrapped subtitle line while the plot domain stayed pinned, so every honesty
+# clause added since 2026-09-22 bought itself a strip of the screen and charged it to
+# the picture -- the thrust1 range-azimuth map rendered at 12.4 % of its panel.
+#
+# THE RULE NOW: a figure carries NO title and NO subtitle. The only text inside a
+# figure is axis titles, tick labels, colour-bar ticks, ONE statistic strip above the
+# plot, and ONE legend. The panel's title and a ONE-LINE caption are HTML above the
+# plot (webapp/app.py `_panel_block`); everything else -- every clause that used to be
+# on a subtitle, banner, run-notes line or screen note -- goes in the per-arm
+# "Details" disclosure, reachable in one click and never deleted. `panel_text()` below
+# is the single accessor that returns "every word this panel carries, wherever it now
+# lives", so a test pinning an honesty clause does not have to know which of the three
+# places it ended up in.
+#
+# Figures therefore have ONE height per row kind, not a height derived from their own
+# title's line count -- which is what made the same product a different size on every
+# screen (acceptance check 20).
 
-#: Range (m) around the direct-path/leakage gate (range 0, the delay-normalised
-#: munich frames' own 0 dB reference -- see `earliest_arrival_note` below) excluded
-#: before looking for the "brightest visible return" (item 7, coordinator addendum,
-#: 2026-09-23, measured on thrust1_circuit_knobs frame 5): the leakage smears into a
-#: couple of native bins around the true zero, not only the exact zero gate, so a
-#: narrower exclusion would still pick a leakage sidelobe rather than a genuine target.
-_DIRECT_PATH_EXCLUSION_M = 2.0
+#: Row kinds. Every product declares one; `webapp/app.py` sizes the row from it, so
+#: the two arms of an A/B pair are always the same height and their plot origins land
+#: on the same y (acceptance check 4).
+PANEL_ROW_MAP = "map"
+PANEL_ROW_TABLE = "table"
+PANEL_ROW_PR = "pr"
 
-#: Minimum y-axis upper bound for the subspace-error plot (Change 3, 2026-09-22
-#: review), so a near-floor curve reads as flat rather than filling the plot height.
-#: Picked from the presets' own measured range: Thrust 2's B arm (AFE mantissa 6->1)
-#: reaches ~0.63 and Thrust 3's cold start begins ~0.57 (webapp/demo_presets.py
-#: blurbs, measured 2026-09-22).
-_SUBSPACE_ERR_MIN_YMAX = 0.65
-#: The warm-started settled tracking floor the Thrust 2/3 cards quote.
-_SUBSPACE_ERR_SETTLED_LEVEL = 0.06
-#: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
-#: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
-#: max (A: 0-5, B: 0-10), so a real 2x difference in compute spent per frame rendered
-#: at the SAME pixel height on both screens -- pinning both to one common range is
-#: what makes that difference visible as a difference in bar/marker height rather than
-#: only in the printed numbers. 10 is AdaOjaBlock's own default n_refine ceiling
-#: (`subspace_n_refine`'s "none"-arm fallback default, see `run_pipeline`).
-_REFINE_AXIS_MIN_YMAX = 10.0
+#: Panel header band (HTML title + one-line caption) and the panel's own padding,
+#: px -- see the layout spec's section 2.2 table.
+PANEL_HEADER_HEIGHT = 60
+PANEL_PADDING = 16
+
+#: Total panel heights, px. No other heights exist: "if a product does not fit one of
+#: these, it is the product that changes."
+PANEL_HEIGHT = {
+    PANEL_ROW_MAP: 540,
+    PANEL_ROW_TABLE: 388,
+    PANEL_ROW_PR: 552,
+}
+
+#: The figure's own height inside each panel (total minus the HTML header and padding).
+FIGURE_HEIGHT = {k: v - PANEL_HEADER_HEIGHT - PANEL_PADDING
+                 for k, v in PANEL_HEIGHT.items()}
+
+#: Figure margins, px. `t` is the RESERVED STATISTIC STRIP (the on-map callout used to
+#: be drawn INSIDE the axes at y-domain 0.94 and covered the 105-125 m range band on
+#: every map -- hostile round 10, defect 6); `b` holds the axis title and ticks at the
+#: 18 px podium floor; `l` holds the rotated y-axis title; `r` is a small pad, with the
+#: colour bar living in the width Plotly reserves beyond it.
+_FIG_MARGIN_T = 52
+_FIG_MARGIN_B = 60
+_FIG_MARGIN_L = 64
+_FIG_MARGIN_R = 16
+
+#: Backwards-compatible aliases (several callers and tests still name these).
+_HEATMAP_MARGIN_L = _FIG_MARGIN_L
+_HEATMAP_MARGIN_R = _FIG_MARGIN_R
+_HEATMAP_MARGIN_B = _FIG_MARGIN_B
+_HEATMAP_MARGIN_T_BASE = _FIG_MARGIN_T
+_HEATMAP_PLOT_DOMAIN_HEIGHT = 540 - PANEL_HEADER_HEIGHT - PANEL_PADDING \
+    - _FIG_MARGIN_T - _FIG_MARGIN_B
+
+#: Statistic strip typography (layout spec section 3). The headline statistic is the
+#: A/B story on Thrusts 1, 2 and 4 and stays on the picture -- but above the axes, in
+#: a strip reserved for it, never over the data.
+_STAT_FONT_SIZE = 26
+#: The second, smaller line in the same strip: the per-frame readouts that must stay
+#: visible without expanding anything (the brightest visible return; which frame the
+#: clock is parked on) but must not compete with the headline number.
+_STAT_SUB_FONT_SIZE = 17
+#: Retained name (tests pin it): the headline statistic's size.
+_STAT_CALLOUT_FONT_SIZE = _STAT_FONT_SIZE
+
+#: Arm colours (layout spec section 5). Never `#0fb9b1`/`#8854d0`, which the block
+#: diagram owns.
+ARM_COLORS = {"a": "#4b6584", "b": "#3867d6"}
+
+#: One plot background for every panel on a screen, maps included (layout spec
+#: section 4, "Plot background"): today's white-behind-maps / `#E5ECF6`-behind-charts
+#: split made two panels in the same column read as two different products.
+PLOT_BGCOLOR = "#E5ECF6"
+PAPER_BGCOLOR = "#ffffff"
+
+
+def _heatmap_margin_t(title: str = "") -> int:
+    """Retained name, now a CONSTANT (layout spec section 3): the top margin no longer
+    depends on anything a wording change can grow -- that dependency is the mechanism
+    behind hostile round 10's defects 1, 3 and 5. Takes and ignores the old `title`
+    argument so no caller or test has to care."""
+    return _FIG_MARGIN_T
+
+
+def _base_layout(row: str = PANEL_ROW_MAP) -> Dict[str, Any]:
+    """The fixed geometry every figure in this module gets."""
+    return dict(
+        margin=dict(l=_FIG_MARGIN_L, r=_FIG_MARGIN_R, t=_FIG_MARGIN_T, b=_FIG_MARGIN_B),
+        height=FIGURE_HEIGHT[row],
+        paper_bgcolor=PAPER_BGCOLOR,
+        plot_bgcolor=PLOT_BGCOLOR,
+        title=None,
+    )
+
+
+CAPTION_SEP = " · "
+
+
+def set_panel(fig, *, title: str, caption: List[str], details: List[str],
+              row: str = PANEL_ROW_MAP):
+    """Attach this panel's WORDS to the figure, for `webapp/app.py` to render as HTML
+    above the plot.
+
+    `caption` is a list of clauses joined with CAPTION_SEP into ONE line (the sharing
+    pass below rewrites individual clauses, which is why it is a list and not a
+    string). `details` is every remaining clause, one per line, for the per-arm
+    Details disclosure -- nothing that was ever on screen may be dropped instead of
+    moved (acceptance check 15).
+    """
+    meta = dict(fig.layout.meta or {}) if (fig.layout.meta is not None) else {}
+    meta["panel"] = dict(title=title, caption=list(caption),
+                         details=[d for d in details if d], row=row)
+    fig.update_layout(meta=meta)
+    return fig
+
+
+def _sentence(clause: str) -> str:
+    """One subtitle clause as a Details sentence: leading "; " dropped, first letter
+    upper-cased, full stop added. `str.capitalize()` is NOT used -- it lower-cases the
+    REST of the string, which turned "0 dB = direct path" into "0 db = direct path"
+    (caught on the first smoke render, 2026-09-24)."""
+    t = (clause or "").strip().lstrip(";").strip()
+    if not t:
+        return ""
+    t = t[0].upper() + t[1:]
+    return t if t.endswith(".") else t + "."
+
+
+def panel_of(fig) -> Dict[str, Any]:
+    """This figure's panel meta (see `set_panel`), from either a `go.Figure` or the
+    plain dict form the Dash store round-trips. `{}` when absent."""
+    if hasattr(fig, "layout"):
+        meta = fig.layout.meta
+        meta = dict(meta) if meta else {}
+    else:
+        meta = ((fig.get("layout") or {}).get("meta") or {})
+        if not isinstance(meta, dict):
+            meta = {}
+    panel = meta.get("panel") or {}
+    return dict(panel) if isinstance(panel, dict) else {}
+
+
+def panel_caption(fig) -> str:
+    """The panel's one-line caption, clauses joined."""
+    return CAPTION_SEP.join(panel_of(fig).get("caption") or [])
+
+
+def panel_text(fig) -> str:
+    """EVERY word this panel carries -- title, caption and the whole Details body --
+    as one string.
+
+    The one accessor a test should use to assert an honesty clause is still reachable:
+    which of the three places a clause ended up in is a layout decision, and pinning
+    the place rather than the clause is what made every subtitle assertion in this
+    repo have to be rewritten when the layout changed (2026-09-24)."""
+    p = panel_of(fig)
+    parts = [p.get("title") or "", CAPTION_SEP.join(p.get("caption") or [])]
+    parts.extend(p.get("details") or [])
+    return "\n".join(x for x in parts if x)
+
+
+#: Marks the annotations that make up the reserved statistic strip, so `apply_arm_style`
+#: can recolour exactly those and nothing else (an in-plot tag like the detector map's
+#: "scoring <= 40 m" must keep its own colour).
+_STAT_ANNOTATION_FLAG = "stat_strip"
+
+
+def _stat_annotations(stat: str, sub: str = "", *, arm: str = "a") -> List[Dict[str, Any]]:
+    """The reserved statistic strip above the plot: the headline number left-aligned in
+    the arm's colour, and (optionally) the smaller per-frame readouts right-aligned on
+    the same line.
+
+    Anchored to the AXES' own domain (`x domain`/`y domain`) at y > 1, so the strip sits
+    entirely in the figure's top margin and can never cover a return (hostile round 10,
+    defect 6 / acceptance check 8). No background pill: there is nothing underneath it
+    to hide any more."""
+    out = [dict(text=stat, xref="x domain", yref="y domain", x=0.0, y=1.06,
+                showarrow=False, xanchor="left", yanchor="bottom", align="left",
+                name=_STAT_ANNOTATION_FLAG,
+                font=dict(size=_STAT_FONT_SIZE,
+                          color=ARM_COLORS.get(arm, ARM_COLORS["a"])))]
+    if sub:
+        out.append(dict(text=sub, xref="x domain", yref="y domain", x=1.0, y=1.06,
+                        showarrow=False, xanchor="right", yanchor="bottom", align="right",
+                        name=_STAT_ANNOTATION_FLAG + "_sub",
+                        font=dict(size=_STAT_SUB_FONT_SIZE, color="#576574")))
+    return out
+
+
+def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
+    """Retained name: the headline statistic annotation. It is no longer a "corner" --
+    see `_stat_annotations` for why the old INSIDE-the-axes placement was retired."""
+    return _stat_annotations(text)[0]
+
+
+def apply_arm_style(figs: Dict[str, Any], arm: str) -> None:
+    """Recolour every figure's statistic strip in `arm`'s colour, in place, on the
+    stored figure DICTS (and on each animation frame's layout override, which replaces
+    the whole annotations list when the clock steps).
+
+    `figures_from_outputs` builds one run's figures and has no idea which arm it will
+    be shown as; the A/B assignment is `webapp/app.py`'s (this run = A, the stored
+    previous run = B), so the colour is applied there."""
+    color = ARM_COLORS.get(arm, ARM_COLORS["a"])
+
+    def _recolor(layout):
+        for ann in (layout.get("annotations") or []):
+            if isinstance(ann, dict) and ann.get("name") == _STAT_ANNOTATION_FLAG:
+                font = ann.get("font")
+                if not isinstance(font, dict):
+                    font = {}
+                    ann["font"] = font
+                font["color"] = color
+
+    for fig in figs.values():
+        if not isinstance(fig, dict):
+            continue
+        _recolor(fig.get("layout") or {})
+        for frame in (fig.get("frames") or []):
+            _recolor(frame.get("layout") or {})
 
 
 def _make_legible(fig: go.Figure) -> go.Figure:
-    """Bump every text element on `fig` to the podium-distance floor above, IN PLACE,
-    and return it (so a call can wrap the figure's own construction). Safe on any
-    figure -- heatmap or scatter, with or without a slider/colorbar -- since each
-    update targets an element that may simply not be present."""
-    fig.update_layout(font=dict(size=_LEGIBLE_FONT_SIZE))
-    fig.update_xaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE))
-    fig.update_yaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE))
+    """Bump every text element on `fig` to the podium-distance floor (>= 17 px inside a
+    figure, layout spec section 3), IN PLACE, and return it. Safe on any figure --
+    heatmap or scatter, with or without a colorbar -- since each update targets an
+    element that may simply not be present."""
+    fig.update_layout(font=dict(size=_LEGIBLE_FONT_SIZE, color="#2d3a4a"))
+    fig.update_xaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE),
+                     title_font=dict(size=_LEGIBLE_FONT_SIZE))
+    fig.update_yaxes(tickfont=dict(size=_LEGIBLE_TICK_SIZE),
+                     title_font=dict(size=_LEGIBLE_FONT_SIZE))
     for trace in fig.data:
         cbar = getattr(trace, "colorbar", None)
         if cbar is not None:
@@ -1753,113 +1958,17 @@ def _radar_cube_clip_db(db: np.ndarray) -> float:
     return max(-40.0, float(np.median(db)) + 3.0)
 
 
-def _corner_annotation(text: str, *, y: float = 0.94) -> Dict[str, Any]:
-    """A LARGE statistic callout, anchored to the HEATMAP'S OWN plotting area rather
-    than the whole figure's paper coordinates (item 5, wave 9 hostile-expert read,
-    2026-09-23) -- "x domain"/"y domain" are fractions of the axis's own domain,
-    unaffected by the colorbar Plotly reserves to the RIGHT of that domain in "paper"
-    coordinates; a "paper"-anchored x=0.99 sat the text under the colorbar instead of
-    inside the map.
+#: The colour bar carries NO title any more (layout spec section 4): at 20 px,
+#: "dB rel. peak (clipped at -67.1)" was ~310 px wide and Plotly bought that width by
+#: shrinking the plot (hostile round 10, defect 5). Units, clip and sharing are ONE
+#: sentence in the HTML caption instead. The prefix is kept as the CAPTION clause that
+#: names the scale, and `db_colorbar` in `layout.meta` is now what tells the sharing
+#: pass which colour bars are dB-scaled.
+_DB_COLORBAR_PREFIX = "dB rel. peak"
 
-    TOP-LEFT, not top-right (correction, same read, after a re-check against the
-    rendered thrust1/thrust4 PNGs): a top-right placement at long range covered a
-    real return (thrust1's ~115 m streak sits at range ~93-108 m, sin(azimuth)
-    0.5-1.0 -- exactly the top-right corner). The top-LEFT corner (range > ~90 m,
-    sin(azimuth) in [-1, -0.5]) is empty on every munich preset's range-azimuth/
-    range-elevation panel checked (thrust1/thrust2/thrust4). A translucent
-    background is kept regardless, in case a future scene puts a target there too.
-    """
-    return dict(text=text, xref="x domain", yref="y domain", x=0.03, y=y,
-                showarrow=False, xanchor="left", align="left",
-                font=dict(size=_STAT_CALLOUT_FONT_SIZE, color="#2d3a4a"),
-                bgcolor="rgba(255,255,255,0.6)")
+#: Colour-bar geometry: thin, tall, tick-labels only.
+_COLORBAR = dict(thickness=14, len=0.90)
 
-
-#: `_heatmap`'s own margin/height -- named so `_add_frame_animation` (which
-#: overrides this same figure's margin/height to make room for its slider row) can
-#: reuse the top-margin sizing and plot-domain height instead of hardcoding a second
-#: copy that silently drifts from this one (see that function's own comment for the
-#: regression this caused, 2026-09-23: its old hardcoded t=40 undid this t=90).
-_HEATMAP_MARGIN_L = 40
-_HEATMAP_MARGIN_R = 20
-#: The top margin used to be ONE constant, bumped by hand every time a caller's
-#: title grew another line (40 -> 90 -> 120 -> 160, 2026-09-23) -- each bump was
-#: sized against whatever ONE subline was longest that day, and the range-azimuth/
-#: range-elevation subline (qualifier + peak-median stat + earliest-arrival note +
-#: gate-calibration clause + adaptive-clip clause) kept outgrowing it: at 160 its
-#: last wrapped word ("floor)") still overflowed DOWN into the plot's top-left
-#: corner on both the Thrust 1 (single wide panel) and Thrust 2 (two half-width
-#: panels) rehearsal PNGs. Sized from the title's OWN line count instead
-#: (`_heatmap_margin_t`), so a wording change that adds or removes a wrapped line
-#: cannot silently under-provision the margin again.
-_HEATMAP_MARGIN_T_BASE = 40       # one-line title, no subline (pre-2026-09-23 default)
-#: RETRACTED (wave 9, second hostile-expert read, 2026-09-24, item 3): this file's
-#: title used to be positioned by Plotly's DEFAULT auto-placement, which (measured
-#: via a standalone Playwright script against `.g-gtitle`/`.bg` bounding rects, not
-#: committed -- see `_heatmap`'s title `yref`/`y`/`yanchor` below) sits the title
-#: somewhere BETWEEN the card top and the plot, at a position that itself shifts
-#: with `margin.t` -- so the "60 px/line" this constant used to hold (raised from 45
-#: at wave 8 after a real clipping bug) was calibrated to stop the title's BOTTOM
-#: from colliding with the plot, without controlling where its TOP landed. At the
-#: n=6 line count item 7's own subline growth produced, that put ~145 px of blank
-#: space ABOVE the title (thrust1_circuit_knobs rehearsal PNG) -- correct at the
-#: bottom, wasteful at the top. `_heatmap` below now PINS the title to a small,
-#: fixed offset from the card's own top (`yref="container", y=1.0`), which
-#: decouples the title's position from `margin.t` entirely.
-#:
-#: RE-TUNED once already, same pass: a first pin attempt (`y=0.995`, pad 6) still
-#: measured a NEGATIVE gap to the card's own top edge (the title's own rendered
-#: glyph box starts above its nominal anchor point) and the rendered PNG confirmed
-#: it -- the top of "Range-azimuth power" was visibly clipped by the card border
-#: (thrust1_circuit_knobs). `y=1.0` (the true top, not "nearly 1.0" -- a fractional
-#: y off the true top scales with the figure's OWN height, which varies with
-#: `margin.t`, defeating the whole point of pinning) with a larger, re-measured
-#: `pad.t` (26, not 6) clears that with a small positive margin, confirmed
-#: independent of line count (same measured gap at n_lines=3 and 6, unlike the
-#: fractional-y attempt).
-_HEATMAP_MARGIN_T_BASE2 = 60      # n_lines == 2 (main title + 1 sup line), title PINNED
-_HEATMAP_MARGIN_T_PER_LINE = 45  # each further wrapped title/subline line, title PINNED
-_HEATMAP_MARGIN_B = 40
-_HEATMAP_PLOT_DOMAIN_HEIGHT = 280
-#: How far below the card's own top edge the pinned title sits (pixels, `title.pad.t`
-#: with `yref="container", y=1.0`) -- fixed regardless of the figure's own height,
-#: unlike the old floating position. See the constants above for the re-tuning this
-#: was measured against (a smaller pad here clipped the title's own top).
-_HEATMAP_TITLE_TOP_PAD = 26
-
-
-def _heatmap_margin_t(title: str) -> int:
-    """Top margin sized from how many lines `title` (a Plotly "<br>"-joined title,
-    possibly with a "<br><sup>...</sup>" subline that `_wrap_text` may itself have
-    wrapped further) actually renders as -- see `_HEATMAP_MARGIN_T_BASE2`. Assumes
-    the caller ALSO pins the title near the card's own top (`_heatmap`'s title
-    `yref`/`y`/`yanchor`/`pad`) -- the two-point calibration behind
-    `_HEATMAP_MARGIN_T_BASE2`/`_PER_LINE` was measured against that pinned
-    position, not Plotly's (unpinned) default. `n_lines <= 1` (no subline at all,
-    e.g. the azimuth-elevation FFT panel) keeps the original, separately-safe
-    single-line value -- the two-point fit above was never measured at n=1 and a
-    single MAIN-title-font line is taller than a `<sup>` line, so extrapolating the
-    per-line slope down to n=1 would UNDER-provision it."""
-    n_lines = (title or "").count("<br>") + 1
-    if n_lines <= 1:
-        return _HEATMAP_MARGIN_T_BASE
-    return _HEATMAP_MARGIN_T_BASE2 + _HEATMAP_MARGIN_T_PER_LINE * (n_lines - 2)
-
-
-#: How an A/B pair's two copies of the SAME heat-map product get ONE set of colour
-#: limits (`share_heatmap_z_limits`). Declared in each figure's own `layout.meta`
-#: where the figure is built, rather than re-derived from the product key in the
-#: sharing pass, so a new panel states its own policy in one place.
-#:
-#: `Z_SHARE_REACH_FLOOR` -- the limits must REACH both arms' noise floor, because the
-#: floor IS the story on those panels (owner, live test 2026-09-24, Thrust 1 "RF
-#: circuit knobs vs the image's noise floor": arm A peak-median 65.9 dB, arm B 54.3 dB,
-#: and "55 vs 65 dB peak to median is not discernible by human eye" -- both maps'
-#: medians sat BELOW the shared -40 dB clip, so both backgrounds rendered as the same
-#: single clip colour and an 11.6 dB floor difference was invisible).
-#: `Z_SHARE_KEEP_CLIP` -- the panel's own adaptive display clip is a deliberate
-#: decision about what to HIDE (see `_radar_cube_clip_db`), so sharing only unifies the
-#: two arms' clips instead of pushing the limit down to the floor.
 Z_SHARE_REACH_FLOOR = "reach_floor"
 Z_SHARE_KEEP_CLIP = "keep_clip"
 
@@ -1869,66 +1978,69 @@ Z_SHARE_KEEP_CLIP = "keep_clip"
 #: displayed range, this one guarantees it stays IN it on both arms.
 _SHARED_FLOOR_MARGIN_DB = 3.0
 
-#: Prefix of the colorbar title `_heatmap` writes for a dB-scale panel; the sharing
-#: pass rewrites the clip value inside it and uses the prefix to recognise which
-#: colorbars it may rewrite at all (the detector objectness panels are heat maps too,
-#: but their z is a 0-1 score, not dB).
-_DB_COLORBAR_PREFIX = "dB rel. peak"
+#: The caption clause that carries the display clip, and the ones the sharing pass
+#: adds. Recognised by prefix so `_apply_shared_z` REPLACES rather than appends (two
+#: clips printed on one panel read as a bug -- wave 11, 2026-09-24).
+CLIP_CLAUSE_PREFIX = "clipped at "
+SHARED_SCALE_CLAUSE = "same colour scale on both arms"
+INDEPENDENT_SCALE_CLAUSE = "independent colour scales"
+#: Marker the Details line that names the exact shared limits starts with. The clause
+#: itself is word-for-word the one that used to sit on the panel subtitle, so a reader
+#: (and a test) finds the same words -- in Details.
+_SHARED_LIMITS_MARKER = "colour limits shared with arm "
 
 
-def _heatmap(data_db, title: str, *, x=None, y=None,
+def _heatmap(data_db, *, x=None, y=None,
              xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0,
-             colorbar_title: str = None, z_share: str = None) -> go.Figure:
-    if colorbar_title is None:
-        # Peak-relative, and `zmin` is a display clip, not the data floor; the
-        # colorbar title says both so it is not read as absolute dB. Every caller
-        # but the range-Doppler panel uses this default (-40 dB, or whatever `zmin`
-        # is passed); that panel passes its own `colorbar_title` instead, because its
-        # clip is a computed float (e.g. -36.233...) that reads as false precision
-        # and says nothing about WHY it differs from the shared -40 dB (rehearsal,
-        # 2026-09-23) -- see the `radar_cube` branch of `figures_from_outputs`.
-        # ONE line (item 5, wave 9 second hostile-expert read, 2026-09-24): the old
-        # "<br>"-split two-line version had its own second line ("(clipped at
-        # -40.0)") collide with the colorbar's own "0" tick on every heat map --
-        # the colorbar sizes its own reserved title band differently from the main
-        # title (no `_heatmap_margin_t`-style line-count sizing exists for it), so a
-        # two-line colorbar title had nothing keeping it clear of the bar's ticks.
-        colorbar_title = f"dB rel. peak (clipped at {zmin:g})"
+             zmax: float = 0.0, z_share: str = None, colorscale=None,
+             db_colorbar: bool = True) -> go.Figure:
+    """One heat-map panel at the FIXED map-row geometry. No title, no subtitle, no
+    colour-bar title -- see this section's header comment."""
+    kwargs = {}
+    if colorscale is not None:
+        kwargs["colorscale"] = colorscale
     fig = go.Figure(
-        data=go.Heatmap(
-            z=data_db, x=x, y=y, zmin=zmin, zmax=0,
-            colorbar=dict(title=colorbar_title)
-        )
+        data=go.Heatmap(z=data_db, x=x, y=y, zmin=zmin, zmax=zmax,
+                        colorbar=dict(_COLORBAR), **kwargs)
     )
-    margin_t = _heatmap_margin_t(title)
-    fig.update_layout(
-        # PINNED near the card's own top edge, not Plotly's default (floating,
-        # off-center) position (item 3, wave 9 second hostile-expert read,
-        # 2026-09-24) -- `yref="container"` measures `y` against the WHOLE figure
-        # canvas (unaffected by `margin.t`), so the title's position no longer
-        # drifts down as the margin grows with line count, which is what left
-        # ~145 px of blank space above a 6-line title (thrust1_circuit_knobs
-        # rehearsal PNG) even though the margin itself was tall enough. See
-        # `_heatmap_margin_t`'s docstring: its own calibration assumes this pin.
-        title=dict(text=title, yref="container", y=1.0, yanchor="top",
-                   pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
-        xaxis_title=xlabel,
-        yaxis_title=ylabel,
-        margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
-                    t=margin_t, b=_HEATMAP_MARGIN_B),
-        height=_HEATMAP_PLOT_DOMAIN_HEIGHT + margin_t + _HEATMAP_MARGIN_B,
-    )
+    fig.update_layout(xaxis_title=xlabel, yaxis_title=ylabel, **_base_layout())
+    meta = {"db_colorbar": bool(db_colorbar)}
     if z_share is not None:
         # Carried on the figure itself, not looked up by product key later -- see the
         # `Z_SHARE_*` constants. `layout.meta` is Plotly's own free-form slot and
         # survives `to_dict()`/the Dash store round trip, which is where
         # `share_heatmap_z_limits` reads it back.
-        fig.update_layout(meta=dict(z_share=z_share))
+        meta["z_share"] = z_share
+    fig.update_layout(meta=meta)
     return fig
 
 
-#: Plan-view styling per object class. Kept here rather than derived from the mesh so a
-#: scenario with no assets (the dry-run path) still renders a readable diagram.
+#: Range (m) around the direct-path/leakage gate (range 0, the delay-normalised
+#: munich frames' own 0 dB reference -- see `earliest_arrival_note` below) excluded
+#: before looking for the "brightest visible return" (item 7, coordinator addendum,
+#: 2026-09-23, measured on thrust1_circuit_knobs frame 5): the leakage smears into a
+#: couple of native bins around the true zero, not only the exact zero gate, so a
+#: narrower exclusion would still pick a leakage sidelobe rather than a genuine target.
+_DIRECT_PATH_EXCLUSION_M = 2.0
+
+#: Minimum y-axis upper bound for the subspace-error plot (Change 3, 2026-09-22
+#: review), so a near-floor curve reads as flat rather than filling the plot height.
+#: Picked from the presets' own measured range: Thrust 2's B arm (AFE mantissa 6->1)
+#: reaches ~0.63 and Thrust 3's cold start begins ~0.57 (webapp/demo_presets.py
+#: blurbs, measured 2026-09-22).
+_SUBSPACE_ERR_MIN_YMAX = 0.65
+#: The warm-started settled tracking floor the Thrust 2/3 cards quote.
+_SUBSPACE_ERR_SETTLED_LEVEL = 0.06
+#: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
+#: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
+#: max (A: 0-5, B: 0-10), so a real 2x difference in compute spent per frame rendered
+#: at the SAME pixel height on both screens -- pinning both to one common range is
+#: what makes that difference visible as a difference in bar/marker height rather than
+#: only in the printed numbers. 10 is AdaOjaBlock's own default n_refine ceiling
+#: (`subspace_n_refine`'s "none"-arm fallback default, see `run_pipeline`).
+_REFINE_AXIS_MIN_YMAX = 10.0
+
+
 _TOPDOWN_STYLE = {
     "vehicle":    dict(color="#2E5A9C", symbol="square",        size=15),
     "pedestrian": dict(color="#B9701A", symbol="circle",        size=10),
@@ -1987,9 +2099,10 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
             ))
 
     fig.update_layout(
-        title="Scenario, plan view (x–y). Radar ▲, boresight dashed.",
         xaxis_title="x (m)", yaxis_title="y (m)",
-        margin=dict(l=40, r=20, t=40, b=40), height=420,
+        margin=dict(l=_FIG_MARGIN_L, r=_FIG_MARGIN_R, t=_FIG_MARGIN_T, b=_FIG_MARGIN_B),
+        height=FIGURE_HEIGHT[PANEL_ROW_MAP],
+        paper_bgcolor=PAPER_BGCOLOR, plot_bgcolor=PLOT_BGCOLOR,
     )
     # Equal aspect: a plan view with distorted axes misleads about angle, which is the
     # one thing this figure exists to make readable.
@@ -2019,56 +2132,45 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
 #: widths (600-700 px, Thrust 5's own two-column layout) and the wide single-card
 #: case (Thrust 1, ~1560 px): 0.34 (`_SLIDER_X`=0.42) clears the buttons by
 #: 11-52 px across that whole range.
+#: RETIRED (layout spec section 4, "Slider / play controls"; hostile round 10,
+#: defect 8): every animated figure used to carry its own `updatemenus` play/pause
+#: pair and its own frame slider, up to EIGHT copies of the same transport on one
+#: screen, each costing 130 px of bottom margin -- and the presenter never touched
+#: any of them, because `webapp/assets/results_clock.js` has driven every animated
+#: figure from ONE clock since wave 11. The figure now carries its `frames` and
+#: nothing else; the single transport lives in the run-identity row
+#: (`webapp/app.py::_transport_bar`, wired to the same clock).
+#:
+#: These constants are kept, unused by the figure layer, only so the reason they went
+#: away is recorded where the next person looks for them.
 _SLIDER_BUTTONS_X_EXTENT = 0.34
-_SLIDER_X = _SLIDER_BUTTONS_X_EXTENT + 0.08
-_SLIDER_LEN = 0.98 - _SLIDER_X
-#: The button/slider row's own y (paper fraction, below the plot) and the bottom
-#: margin/figure height that give it room. Moving `x` alone (above) cleared the
-#: buttons but only exposed a SECOND collision at the same font size: the row sat
-#: close enough below the plot to overlap the x-axis title text ("azimuth sin(theta)")
-#: rather than sitting under it -- confirmed by rendering both a browser screenshot
-#: (rehearsal, 2026-09-23) and a standalone reproduction. Pushing the whole row
-#: further down (and growing the margin/height that makes room for it) fixes both
-#: collisions at once; every caller of `_add_frame_animation` builds its figure via
-#: `_heatmap`, so overriding the top margin/height here is safe for all of them.
-#: The top margin reuses `_heatmap_margin_t` (rather than a second hardcoded number)
-#: because this `update_layout` call used to hardcode t=40, silently undoing
-#: `_heatmap`'s own sizing for the title it was actually given -- the title then
-#: overflowed DOWN into the plot instead of clipping (measured, thrust5_detector_cfar
-#: rehearsal PNG; every one of this function's callers is animated, so this was not a
-#: corner case). Read from `fig`'s OWN title (set by `_heatmap` before this function
-#: runs), not a shared constant, for the same reason `_heatmap_margin_t` exists: a
-#: module-wide constant sized for one caller's worst-case subline (last measured at
-#: t=160) still overflowed the range-azimuth/range-elevation panels once wave 7 grew
-#: their subline further (rehearsal, thrust1/thrust2 PNGs).
-_SLIDER_ROW_Y = -0.35
-_SLIDER_MARGIN_B = 130
+_SLIDER_MARGIN_B = 0
 
 
 def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="heatmap",
                          frame_layouts=None):
-    """Attach a frame slider + play control to `fig`, leaving its initial view alone.
+    """Attach the per-frame data to `fig` as Plotly `frames`, leaving its initial view
+    and its fixed geometry alone.
 
     `per_frame` is the already-converted data for each frame, in frame order, matching
     whatever `key` the target trace uses ("z" for a heatmap, "y" for a line). The
-    figure's existing trace 0 keeps the LAST frame's data, and the slider starts parked
-    on that same index, so the default rendering is byte-for-byte what it was before
-    animation existed.
+    figure's existing trace 0 keeps the LAST frame's data, so the default rendering is
+    byte-for-byte what it was before animation existed.
 
     `frame_layouts`, if given, is a per-frame list of layout dicts (same length and
-    order as `per_frame`) merged into each `go.Frame` -- used by the range-azimuth
-    panel to keep its peak-median dB annotation in step with the slider (Change 2).
+    order as `per_frame`) merged into each `go.Frame` -- used by the map panels to keep
+    their statistic strip in step with the clock.
 
-    Returns `fig` unchanged when there are fewer than two frames -- a slider over one
-    frame is noise.
+    NO slider and NO play/pause buttons are added: there is one transport per screen,
+    not one per panel (see `_SLIDER_BUTTONS_X_EXTENT` above). The clock steps frames by
+    NAME ("0".."n-1"), which is unchanged.
+
+    Returns `fig` unchanged when there are fewer than two frames -- an animation over
+    one frame is noise.
     """
     n = len(per_frame)
     if n < 2:
         return fig
-
-    # Sized from `fig`'s OWN title (set by `_heatmap` before this function runs) --
-    # see `_heatmap_margin_t` and this module's own comment above `_SLIDER_ROW_Y`.
-    _slider_margin_t = _heatmap_margin_t(fig.layout.title.text)
 
     # `type` is REQUIRED: without it Plotly infers Scatter for the frame's trace and
     # rejects "z" as an invalid property.
@@ -2077,41 +2179,6 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
                  **({"layout": frame_layouts[i]} if frame_layouts is not None else {}))
         for i, d in enumerate(per_frame)
     ]
-    steps = [dict(method="animate", label=str(i + 1),
-                  args=[[str(i)], dict(mode="immediate",
-                                       frame=dict(duration=0, redraw=True),
-                                       transition=dict(duration=0))])
-             for i in range(n)]
-    fig.update_layout(
-        # The slider starts clear of the play/pause buttons (x >= their extent,
-        # below), and its currentvalue label is explicitly LEFT-anchored so it
-        # extends right (away from the buttons) rather than growing left into them
-        # as the font size increases -- x=0.2 was "clear of the buttons" at the old
-        # 12 px currentvalue font, but the bump to the 16 px podium-distance floor
-        # widened "frame N" enough to draw it behind the buttons again (handoff
-        # regression, rehearsal 2026-09-23). The whole row also moves further below
-        # the plot (see `_SLIDER_ROW_Y`'s comment) to clear the x-axis title too.
-        sliders=[dict(active=n - 1, x=_SLIDER_X, len=_SLIDER_LEN, y=_SLIDER_ROW_Y,
-                      currentvalue=dict(prefix="frame ", font=dict(size=_LEGIBLE_FONT_SIZE),
-                                       xanchor="left"),
-                      pad=dict(t=30, b=4), steps=steps)],
-        updatemenus=[dict(type="buttons", showactive=False, direction="left",
-                          x=0.0, y=_SLIDER_ROW_Y, xanchor="left", yanchor="top",
-                          pad=dict(t=30, r=6),
-                          buttons=[dict(label="▶", method="animate",
-                                        args=[None, dict(mode="immediate",
-                                                         fromcurrent=True,
-                                                         frame=dict(duration=350,
-                                                                    redraw=True),
-                                                         transition=dict(duration=0))]),
-                                   dict(label="❚❚", method="animate",
-                                        args=[[None], dict(mode="immediate",
-                                                           frame=dict(duration=0,
-                                                                      redraw=True))])])],
-        margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
-                    t=_slider_margin_t, b=_SLIDER_MARGIN_B),
-        height=_HEATMAP_PLOT_DOMAIN_HEIGHT + _slider_margin_t + _SLIDER_MARGIN_B,
-    )
     return fig
 
 
@@ -2143,52 +2210,14 @@ def decode_plotly_array(v) -> list:
     return list(v)
 
 
-#: Marker the shared-limits subline starts with, so `share_heatmap_z_limits` can tell
-#: an already-annotated title from a fresh one and never append its clause twice.
-_SHARED_LIMITS_MARKER = "colour limits shared with arm "
-
-#: Matches the PER-ARM "; clip -40.0 dB (shared floor)"/"(median floor + 3 dB)" clause
-#: `figures_from_outputs` bakes into the range_az/range_el subline before sharing
-#: exists, so `_apply_shared_z` can remove it rather than print it beside the shared-
-#: limits clause that supersedes it (two clips on one panel -- rendered check,
-#: thrust1_circuit_knobs wave 11 PNG, 2026-09-24). Separators between words allow
-#: either a plain space or a `_wrap_text`-inserted "<br>" line break, since this runs
-#: on the already-wrapped title text. The superseded value is not lost: the shared
-#: clause's own "(was X)" names it once (see `_apply_shared_z` below).
-#: SCOPE: only the ";"-prefixed, mid-sentence shape (range_az/range_el) -- radar_cube's
-#: own clip clause has a DIFFERENT shape (see `_RADAR_CUBE_CLIP_CLAUSE_RE` below) and is
-#: handled separately.
-_CLIP_CLAUSE_RE = re.compile(
-    r";(?:\s+|<br>)*clip(?:\s+|<br>)+-?\d+(?:\.\d+)?(?:\s+|<br>)+dB(?:\s+|<br>)+\([^)]*\)")
-
-#: Matches radar_cube's (Range-Doppler power, Thrust 5) own clip clause, which is the
-#: WHOLE subline rather than one clause mid-sentence (see the `radar_cube` branch of
-#: `figures_from_outputs`, which drops the qualifier to keep the panel under the
-#: two-card width): `"<br><sup>clip -36.2 dB (median floor + 3 dB)</sup>"`. Matches
-#: the "<br><sup>...</sup>" segment WHOLE, tags included, so removing it under
-#: sharing leaves no orphan empty "<sup></sup>" line behind -- unlike
-#: `_CLIP_CLAUSE_RE`, which only strips the inner clause because there is other
-#: subline content on either side of it to keep.
-_RADAR_CUBE_CLIP_CLAUSE_RE = re.compile(
-    r"<br><sup>clip(?:\s+|<br>)+-?\d+(?:\.\d+)?(?:\s+|<br>)+dB(?:\s+|<br>)+\([^)]*\)</sup>")
-
-
-def _strip_superseded_clip_clause(text: str) -> str:
-    """Remove whichever shape of the per-arm clip clause `text` carries (see the two
-    regexes above), so `_apply_shared_z` prints the shared clause ONCE rather than
-    beside the clause it supersedes. A title with neither shape (most panels) is
-    returned unchanged."""
-    return _RADAR_CUBE_CLIP_CLAUSE_RE.sub("", _CLIP_CLAUSE_RE.sub("", text))
-
-
 def _heatmap_floors_db(fig: Dict[str, Any]) -> List[float]:
     """Median of this panel's own dB data for the INITIAL view and for EVERY animation
     frame -- i.e. the panel's own noise floor, per frame, over the whole run.
 
     Median (not min): these maps are peak-normalized, so the median IS the ambient
     floor -- the same quantity `_peak_minus_median_db` subtracts from the peak for the
-    on-screen "peak - median" callout, so a colour limit derived from it lines up with
-    the number the card quotes.
+    on-screen "peak - median" statistic, so a colour limit derived from it lines up
+    with the number the card quotes.
     """
     floors: List[float] = []
 
@@ -2208,14 +2237,39 @@ def _heatmap_floors_db(fig: Dict[str, Any]) -> List[float]:
     return floors
 
 
-def _apply_shared_z(fig: Dict[str, Any], zmin: float, zmax: float,
-                    other_arm: str) -> None:
-    """Pin one figure dict's heat-map traces to `zmin`/`zmax`, keep its colorbar label
-    honest, and SAY on the panel that the limits are shared (and with which arm).
+def _panel_dict(fig: Dict[str, Any]) -> Dict[str, Any]:
+    """The mutable `layout.meta.panel` dict of a stored figure dict, created if
+    missing. Mutating what this returns mutates the figure."""
+    layout = fig.setdefault("layout", {})
+    meta = layout.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        layout["meta"] = meta
+    panel = meta.get("panel")
+    if not isinstance(panel, dict):
+        panel = {"title": "", "caption": [], "details": [], "row": PANEL_ROW_MAP}
+        meta["panel"] = panel
+    panel.setdefault("caption", [])
+    panel.setdefault("details", [])
+    return panel
 
-    The clause is a fact about the picture that a photograph of the screen has no
-    other way to carry: two maps that share a colour scale look like two maps that
-    happen to be the same colour otherwise.
+
+def _apply_shared_z(fig: Dict[str, Any], zmin: float, zmax: float,
+                    other_arm: str, *, say_shared: bool) -> None:
+    """Pin one figure dict's heat-map traces to `zmin`/`zmax` and SAY so, in the two
+    places the layout now keeps words: the panel's one-line CAPTION (which clip is in
+    force, and -- on arm A only -- that the scale is shared) and its DETAILS (the exact
+    zmin/zmax pair, and the value sharing superseded).
+
+    The clause is a fact about the picture that a photograph of the screen has no other
+    way to carry: two maps that share a colour scale look like two maps that happen to
+    be the same colour otherwise.
+
+    `say_shared` is the layout spec's "stated once per row, not once per panel" rule:
+    the sharing sentence goes at the end of ARM A's caption only, and the exact limits
+    go in BOTH arms' Details. The absence of the clause must never be what carries the
+    meaning, so the caller states one of `SHARED_SCALE_CLAUSE` /
+    `INDEPENDENT_SCALE_CLAUSE` explicitly.
     """
     own_zmin = None
     for trace in (fig.get("data") or []):
@@ -2224,65 +2278,29 @@ def _apply_shared_z(fig: Dict[str, Any], zmin: float, zmax: float,
         if own_zmin is None and trace.get("zmin") is not None:
             own_zmin = float(trace["zmin"])
         trace["zmin"], trace["zmax"] = zmin, zmax
-        cbar = trace.get("colorbar")
-        if not isinstance(cbar, dict):
-            continue
-        cbar_title = cbar.get("title")
-        # `go.Figure.to_dict()` normalises `colorbar=dict(title="...")` to
-        # `{"title": {"text": "..."}}`; a hand-built dict may still hold the plain
-        # string form, so accept both.
-        text = cbar_title.get("text") if isinstance(cbar_title, dict) else cbar_title
-        if isinstance(text, str) and text.startswith(_DB_COLORBAR_PREFIX):
-            new_text = f"{_DB_COLORBAR_PREFIX} (clipped at {zmin:.1f})"
-            if isinstance(cbar_title, dict):
-                cbar_title["text"] = new_text
-            else:
-                cbar["title"] = {"text": new_text}
 
-    # Deliberately ONE line at `_wrap_text`'s 70-char width (measured: 56 chars):
-    # this subline is appended to titles that already run to six wrapped lines on the
-    # Thrust 1 screen, and every line it adds is 45 px of top margin
-    # (`_heatmap_margin_t`) taken off the plot. WHY the limits are where they are is
-    # already on the panel -- the clip clause and the "peak - median" callout -- so
-    # this clause only has to say that they are shared, with whom, and to what value.
-    # "(was X)" whenever sharing MOVED this arm's limit: the panel's existing clip
-    # clause ("clip -40.0 dB (shared floor)", "clip -29.6 dB (median floor + 3 dB)")
-    # is built per arm, before sharing exists, and is REMOVED here (`_CLIP_CLAUSE_RE`)
-    # rather than left standing beside the shared one -- two clips printed on one
-    # panel read as a bug (rendered check, thrust1 wave 11 PNG, 2026-09-24). The value
-    # it superseded is not lost: named once, in the shared clause's own "(was X)".
-    moved = f" (was {own_zmin:.1f})" if own_zmin is not None and         abs(own_zmin - zmin) > 0.05 else ""
-    clause = detector_scoreboard._wrap_text(
-        f"{_SHARED_LIMITS_MARKER}{other_arm}: zmin {zmin:.1f} dB{moved}, "
-        f"zmax {zmax:.0f} dB")
-    suffix = f"<br><sup>{clause}</sup>"
+    panel = _panel_dict(fig)
+    caption = [c for c in panel["caption"]
+               if not (isinstance(c, str)
+                       and (c.startswith(CLIP_CLAUSE_PREFIX)
+                            or c == SHARED_SCALE_CLAUSE
+                            or c == INDEPENDENT_SCALE_CLAUSE))]
+    caption.append(f"{CLIP_CLAUSE_PREFIX}{zmin:.1f} dB")
+    if say_shared:
+        caption.append(SHARED_SCALE_CLAUSE)
+    panel["caption"] = caption
 
-    layout = fig.setdefault("layout", {})
-    title = layout.get("title")
-    if isinstance(title, dict) and isinstance(title.get("text"), str):
-        if _SHARED_LIMITS_MARKER not in title["text"]:
-            title["text"] = _strip_superseded_clip_clause(title["text"]) + suffix
-        # The top margin is sized from the title's OWN line count
-        # (`_heatmap_margin_t`); a clause appended without re-sizing it overflows
-        # DOWN into the plot rather than clipping (the exact failure mode that
-        # constant exists for). Shift the figure's height by the same delta so the
-        # plot domain keeps the height it was built with.
-        margin = layout.setdefault("margin", {})
-        old_t = margin.get("t")
-        new_t = _heatmap_margin_t(title["text"])
-        if old_t is not None and new_t != old_t:
-            margin["t"] = new_t
-            if isinstance(layout.get("height"), (int, float)):
-                layout["height"] = layout["height"] + (new_t - old_t)
-
-    for frame in (fig.get("frames") or []):
-        f_title = ((frame.get("layout") or {}).get("title"))
-        if isinstance(f_title, dict) and isinstance(f_title.get("text"), str) \
-                and _SHARED_LIMITS_MARKER not in f_title["text"]:
-            # Per-frame title overrides REPLACE the whole title object when the
-            # slider/clock moves (see `figures_from_outputs`' `frame_layouts`), so the
-            # clause has to be on every frame's copy or it vanishes on frame 2.
-            f_title["text"] = _strip_superseded_clip_clause(f_title["text"]) + suffix
+    # "(was X)" whenever sharing MOVED this arm's limit. The superseded value is
+    # deliberate provenance (hostile round 10, section 5.3: keep the "(was X)") and is
+    # named exactly once, here.
+    moved = (f" (was {own_zmin:.1f})"
+             if own_zmin is not None and abs(own_zmin - zmin) > 0.05 else "")
+    line = (f"{_SHARED_LIMITS_MARKER}{other_arm}: zmin {zmin:.1f} dB{moved}, "
+            f"zmax {zmax:.0f} dB")
+    details = [d for d in panel["details"]
+               if not (isinstance(d, str) and d.startswith(_SHARED_LIMITS_MARKER))]
+    details.append(line)
+    panel["details"] = details
 
 
 def share_heatmap_z_limits(figs: Dict[str, Any], prev_figs: Dict[str, Any],
@@ -2328,8 +2346,11 @@ def share_heatmap_z_limits(figs: Dict[str, Any], prev_figs: Dict[str, Any],
             # and the higher clip keeps that promise for both arms.
             zmin = max(zmins)
         zmax = 0.0
-        for fig, other in zip(pair, labels):
-            _apply_shared_z(fig, zmin, zmax, other)
+        # Arm A (the first of the pair) carries the "shared" sentence; arm B does not
+        # repeat it. Saying it twice invites "why does it need saying twice?" --
+        # hostile round 10, section 5.8, on the PR panel's own once-only clause.
+        for i, (fig, other) in enumerate(zip(pair, labels)):
+            _apply_shared_z(fig, zmin, zmax, other, say_shared=(i == 0))
 
 
 def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
@@ -2348,14 +2369,24 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         u = _sin_angle_axis(bins)
         # Coherent 2D aperture FFT, non-coherent (power) integration over range --
         # a target shows up regardless of its range, not just one at range 0.
+        fft_frames = [_to_numpy_abs_db(f) for f in outputs["fft"]]
+        fft_stats = [f"{_peak_minus_median_db(d):.1f} dB peak−median"
+                     for d in fft_frames]
+        fft_subs = [f"frame {i + 1} of {len(fft_frames)}"
+                    for i in range(len(fft_frames))]
+        fig = _heatmap(fft_frames[-1], x=u, y=u,
+                       xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
+                       z_share=Z_SHARE_KEEP_CLIP)
+        fig.update_layout(annotations=_stat_annotations(fft_stats[-1], fft_subs[-1]))
+        set_panel(fig, title="Azimuth-elevation power",
+                  caption=[_DB_COLORBAR_PREFIX, f"{CLIP_CLAUSE_PREFIX}-40.0 dB"],
+                  details=["Non-coherent (power) integration over range, so a target "
+                           "shows up regardless of its range, not just one at range 0."],
+                  row=PANEL_ROW_MAP)
         figs["fft"] = _make_legible(_add_frame_animation(
-            _heatmap(
-                _to_numpy_abs_db(outputs["fft"][-1]),
-                "Azimuth-Elevation power (non-coherent over range)",
-                x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
-                z_share=Z_SHARE_KEEP_CLIP,
-            ),
-            [_to_numpy_abs_db(f) for f in outputs["fft"]]))
+            fig, fft_frames,
+            frame_layouts=[dict(annotations=_stat_annotations(s, sub))
+                           for s, sub in zip(fft_stats, fft_subs)]))
 
     # Shared range extent for the range-azimuth heatmap and the range-profile line
     # plot below (Change 4, 2026-09-23 hostile-expert re-read): both compress the
@@ -2519,60 +2550,58 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # floor" (unchanged from -40) -- measured, not assumed either way.
             clip_db = _radar_cube_clip_db(frames_db[-1])
             if clip_db > -40.0:
-                clip_note = f"; clip {clip_db:.1f} dB (median floor + 3 dB)"
+                clip_provenance = f"clip {clip_db:.1f} dB (median floor + 3 dB)"
             else:
-                clip_note = f"; clip {clip_db:.1f} dB (shared floor)"
-            # ONE line (item 5S, wave 9 second hostile-expert read, 2026-09-24):
-            # see `_heatmap`'s own colorbar_title comment -- a two-line version
-            # collided with the colorbar's own "0" tick.
-            colorbar_title = f"dB rel. peak (clipped at {clip_db:.1f})"
-            # The main title is short enough to fit the two-card layout's ~600 px
-            # ("Range-Azimuth power (non-coherent over elevation)" ran off the right
-            # edge there, rehearsal 2026-09-23); the qualifier moves into a
-            # "<br><sup>" subline, alongside the peak-median stat where there is one,
-            # rather than a floating annotation (which collided with the title at
-            # this font size).
-            # Wrapped (Change 4, 2026-09-23): with `earliest_arrival_note` appended,
-            # range_az's subline (qualifier + peak-median stat + note) is well past
-            # what a two-card (~700 px) panel fits on one line -- it clipped mid-word
-            # ("...range 0 = earliest arriv", rehearsal PNG,
-            # thrust4_interconnect_range_profile). Wave 8 (W2/W13) grew both the
-            # earliest-arrival clause (states the 0 dB = direct-path claim explicitly,
-            # not just "0 = earliest arrival") and the gate clause (native resolution +
-            # ratio, not just the display gate), which no longer fits the shared-floor
-            # case in 3 total lines at this qualifier length -- measured at 4 (see
-            # `test_range_az_subline_...` in test_webapp_figures_wave7.py). Left as 4
-            # rather than cut either clause for a line count: `_heatmap_margin_t` sizes
-            # the top margin from however many lines this actually wraps to, exactly so
-            # a wording change that adds a line does not silently under-provision it.
-            sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
-                       f"{earliest_arrival_note}{gate_note}{clip_note}{dp}"
-                       for d, dp in zip(dyn_range_db, direct_path_notes)]
-            titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
-                     for s in sublines]
-            fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
-                           ylabel=ylabel, zmin=clip_db, colorbar_title=colorbar_title,
-                           z_share=Z_SHARE_REACH_FLOOR)
+                clip_provenance = f"clip {clip_db:.1f} dB (shared floor)"
+            fig = _heatmap(frames_db[-1], x=x, y=y, xlabel=aperture_label,
+                           ylabel=ylabel, zmin=clip_db, z_share=Z_SHARE_REACH_FLOOR)
             if key == "range_az" and range_az_yaxis_extent is not None:
                 # See `range_az_yaxis_extent`'s definition above the loop.
                 fig.update_yaxes(range=[0.0, range_az_yaxis_extent])
-            # Item 5 (wave 9 hostile-expert read, 2026-09-23): the peak-median dB
-            # story lives only in the subtitle above, at "<sup>" (~13 px) size --
-            # unreadable at podium distance. Repeat the SAME number (never a second
-            # computation) large, inside the map's own top-right corner; per frame,
-            # in step with the slider, the same way the title already is.
-            corner_texts = [f"peak-median {d:.1f} dB" for d in dyn_range_db]
-            fig.add_annotation(**_corner_annotation(corner_texts[-1]))
-            # The per-frame title override must repeat the SAME pin `_heatmap` set
-            # on the base figure (item 3, wave 9 second hostile read, 2026-09-24):
-            # a `go.Frame(layout=dict(title=dict(text=t)))` REPLACES the whole
-            # title object, not just its text, so a frame update without
-            # `yref`/`y`/`yanchor`/`pad` would revert to Plotly's floating default
-            # position the moment the slider moved off its initial frame.
-            frame_layouts = [dict(title=dict(text=t, yref="container", y=1.0,
-                                            yanchor="top", pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
-                                  annotations=[_corner_annotation(c)])
-                            for t, c in zip(titles, corner_texts)]
+
+            # ---- The panel's words -------------------------------------------------
+            # TITLE: one line, HTML above the plot (layout spec section 2.2).
+            # CAPTION: one line, <= 110 characters, the units/clip sentence that
+            # replaced the colour-bar title, the "colour limits shared" subline and the
+            # screen note's clip clause -- three statements of one fact become one
+            # (layout spec section 4). `_apply_shared_z` rewrites the clip clause and
+            # appends the sharing sentence at render time.
+            # DETAILS: every other clause the old six-line subtitle carried, verbatim,
+            # so nothing on screen today is deleted -- only moved (acceptance check 15).
+            # The two PER-FRAME statistics (peak - median; the brightest visible
+            # return) stay visible without expanding anything: they are the reserved
+            # statistic strip above the plot, restepped by the clock exactly as the
+            # old title was.
+            n_frames_key = len(frames_db)
+            stat_texts = [f"{d:.1f} dB peak−median" for d in dyn_range_db]
+            sub_texts = []
+            for i, dp in enumerate(direct_path_notes):
+                bright = ""
+                if "brightest visible return: " in dp:
+                    bright = dp.split("brightest visible return: ", 1)[1].strip()
+                    bright = f"brightest visible return {bright} · "
+                sub_texts.append(f"{bright}frame {i + 1} of {n_frames_key}")
+            fig.update_layout(annotations=_stat_annotations(stat_texts[-1],
+                                                            sub_texts[-1]))
+            details = [f"Integration: ({qualifier}).",
+                       f"peak - median, dB: {dyn_range_db[-1]:.1f} (last frame).",
+                       clip_provenance + "; superseded by the shared limits below "
+                       "when both arms render this product."]
+            if earliest_arrival_note:
+                details.append(_sentence(earliest_arrival_note))
+            if gate_note:
+                details.append(_sentence(gate_note))
+            if direct_path_notes[-1]:
+                details.append(_sentence(direct_path_notes[-1]))
+            set_panel(fig, title=title,
+                      caption=[_DB_COLORBAR_PREFIX,
+                               f"{CLIP_CLAUSE_PREFIX}{clip_db:.1f} dB"],
+                      details=details, row=PANEL_ROW_MAP)
+
+            # The per-frame layout override REPLACES the whole annotations list when
+            # the clock steps, so every frame carries its own copy of the strip.
+            frame_layouts = [dict(annotations=_stat_annotations(s, sub))
+                             for s, sub in zip(stat_texts, sub_texts)]
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
 
@@ -2620,26 +2649,25 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # annotation collided with the title text at this font size (rehearsal,
         # 2026-09-23).
         floor_db = float(np.median(prof_db)) if prof_db.size else float("nan")
-        rp_title = (f"Range profile (non-coherent over channels)"
-                   f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}"
-                   f"{direct_path_note}</sup>")
-        # Margin sized from the title's OWN line count (item 2, wave 9 second
-        # hostile-expert read, 2026-09-24), the same `_heatmap_margin_t` this
-        # module's other panels already use: the fixed t=40 here fit only a
-        # one-line title and was never updated when the median-floor/direct-path
-        # subline turned this into two, so the subline rendered THROUGH the "0"
-        # tick and the plot's own top border on both Thrust 4 arms.
-        rp_margin_t = _heatmap_margin_t(rp_title)
-        fig.update_layout(
-            # PINNED the same way `_heatmap` pins its own title (item 3's fix
-            # applies here too: `_heatmap_margin_t`'s calibration now assumes it).
-            title=dict(text=rp_title, yref="container", y=1.0, yanchor="top",
-                      pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
-            xaxis_title=xlabel,
-            yaxis_title="power (dB rel. peak)",
-            margin=dict(l=40, r=20, t=rp_margin_t, b=40),
-            height=320 + rp_margin_t,
-        )
+        # The median-floor statistic is the one the Thrust 4 card quotes, so it goes in
+        # the reserved strip above the plot, not into a subtitle (layout spec section 4).
+        # This panel is built from the LAST frame and does not animate -- the strip says
+        # so, which is the disclosure hostile round 10 (defect 3.2) found missing.
+        fig.update_layout(annotations=_stat_annotations(
+            f"{floor_db:.1f} dB median floor",
+            f"last frame of {len(outputs['range_profile_agg'])} (static)"))
+        fig.update_layout(xaxis_title=xlabel,
+                          yaxis_title="power (dB rel. peak)",
+                          **_base_layout())
+        set_panel(fig, title="Range profile",
+                  caption=[_DB_COLORBAR_PREFIX, "non-coherent over channels"],
+                  details=[
+                      "Non-coherent (power) integration over channels.",
+                      f"median floor, dB rel. peak: {floor_db:.1f}.",
+                      _sentence(direct_path_note),
+                      "Built from the LAST frame and static: the range-azimuth map "
+                      "above it loops on the clock, this panel does not.",
+                  ], row=PANEL_ROW_MAP)
         figs["range_profile"] = _make_legible(fig)
 
     rx = meta.get("rx") or {}
@@ -2675,7 +2703,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # width (rehearsal 2026-09-23, all three Thrust 5 screens).
         # ONE line (item 5S, wave 9 second hostile-expert read, 2026-09-24): see
         # `_heatmap`'s own colorbar_title comment.
-        rd_clip_title = f"dB rel. peak (clipped at {rd_clip:.1f})"
+        rd_clip_caption = f"{CLIP_CLAUSE_PREFIX}{rd_clip:.1f} dB"
         # Shortened (Change 3, 2026-09-23 hostile-expert re-read): the previous
         # subline ("(non-coherent over channels); clip -36.2 dB = this frame's median
         # floor + 3 dB") ran past the two-card (~600 px) panel edge and was clipped
@@ -2685,16 +2713,32 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # length pin. The qualifier itself is not lost -- radar_cube's own block
         # comment above and the docstring still state it.
         if rd_clip > -40.0:
-            rd_panel_title = (f"Range-Doppler power<br><sup>clip {rd_clip:.1f} dB "
-                              "(median floor + 3 dB)</sup>")
+            rd_clip_provenance = f"clip {rd_clip:.1f} dB (median floor + 3 dB)"
         else:
-            rd_panel_title = (f"Range-Doppler power<br><sup>clip {rd_clip:.1f} dB "
-                              "(shared floor)</sup>")
+            rd_clip_provenance = f"clip {rd_clip:.1f} dB (shared floor)"
+        rd_frames = [_rd_db(c) for c in outputs["radar_cube"]]
+        rd_stats = [f"{_peak_minus_median_db(d):.1f} dB peak−median"
+                    for d in rd_frames]
+        rd_subs = [f"frame {i + 1} of {len(rd_frames)}" for i in range(len(rd_frames))]
+        fig = _heatmap(first, x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
+                       z_share=Z_SHARE_KEEP_CLIP)
+        fig.update_layout(annotations=_stat_annotations(rd_stats[-1], rd_subs[-1]))
+        set_panel(fig, title="Range-Doppler power",
+                  caption=[_DB_COLORBAR_PREFIX, rd_clip_caption],
+                  details=[
+                      "Non-coherent (power) integration over channels.",
+                      rd_clip_provenance + ": this panel's display clip is a "
+                      "deliberate decision about what to hide, so sharing it across "
+                      "arms only unifies the two clips instead of pushing the limit "
+                      "down to the floor.",
+                      "A sparse automotive scene at a ~25 dB clip is mostly flat dark "
+                      "blue on purpose; the scale is not stretched to make it look "
+                      "busy.",
+                  ], row=PANEL_ROW_MAP)
         figs["radar_cube"] = _make_legible(_add_frame_animation(
-            _heatmap(first, rd_panel_title,
-                     x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
-                     colorbar_title=rd_clip_title, z_share=Z_SHARE_KEEP_CLIP),
-            [_rd_db(c) for c in outputs["radar_cube"]]))
+            fig, rd_frames,
+            frame_layouts=[dict(annotations=_stat_annotations(s, sub))
+                           for s, sub in zip(rd_stats, rd_subs)]))
 
     det_meta = meta.get("detector") or {}
     for key, title in (("cfar_detection", "CFAR objectness"),
@@ -2702,14 +2746,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if not outputs.get(key):
             continue
         n_frames = len(outputs[key])
-        if det_meta:
-            # Name the detector and its operating point ON the figure: the three
-            # Thrust 5 presets are compared across screens, and their cross counts
-            # are set by the threshold as much as by the detector. This panel is the
-            # last frame while the cube beside it animates; say which frame it is.
-            title = (f"{title} -- {det_meta.get('label', '')}<br><sup>detections at "
-                     f"objectness >= {float(det_meta.get('threshold', 0.0)):.2f}"
-                     f" -- frame {n_frames} of {n_frames} (last)</sup>")
+        det_label = str(det_meta.get("label", "")) if det_meta else ""
+        det_threshold = float(det_meta.get("threshold", 0.0)) if det_meta else None
+        # Name the detector and its operating point ON the panel: the three Thrust 5
+        # presets are compared across screens, and their cross counts are set by the
+        # threshold as much as by the detector. This panel is the last frame while the
+        # cube beside it animates; the statistic strip says which frame it is.
+        panel_title = f"{title} — {det_label}" if det_label else title
         det = outputs[key][-1]
         if hasattr(det, "detach"):
             det = det.detach().cpu().numpy()
@@ -2730,19 +2773,22 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         x = -1.0 + (np.arange(n_a) + 0.5) * 2.0 / n_a  # sin(azimuth) bin centres
         fig = go.Figure(data=go.Heatmap(
             z=obj, x=x, y=y, zmin=0.0, zmax=1.0, colorscale="Viridis",
-            colorbar=dict(title="objectness"), name="objectness",
+            colorbar=dict(_COLORBAR), name="objectness",
         ))
         # Decoded detections (filled) and, for a replayed corpus frame, the stored
         # ground truth (hollow) -- drawn at the surface range the metric matches on.
         dets = (outputs.get(key + "s") or [[]])[-1]
+        n_dets = len(dets) if dets else 0
         if dets:
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
-                name=f"detections (n={len(dets)})",
+                name=f"✕ detections (n={len(dets)})",
                 marker=dict(symbol="x", size=14, color="#ff3b3b", line=dict(width=2)),
                 text=[f"score {d[2]:.2f}" for d in dets],
             ))
         gt = (outputs.get("gt_detections") or [[]])[-1]
+        n_gt = len(gt) if gt else 0
+        hit_rule = ""
         if gt:
             # Ground truth drawn as its own match-tolerance BOX, in DATA coordinates,
             # rather than a fixed-pixel circle: a fixed 18 px circle drew LARGER than
@@ -2763,27 +2809,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     x0=cx - az_tol, x1=cx + az_tol, y0=cy - r_tol, y1=cy + r_tol,
                     line=dict(color="#ffffff", width=2), fillcolor="rgba(0,0,0,0)",
                 )
+            # The hit RULE moves to the caption (layout spec section 4, "Detector
+            # map"): as a legend entry it was a 100-character sentence inside a dark
+            # block that took 72 px of the panel.
+            hit_rule = (f"hit = cross inside the box (±{r_tol:g} m, "
+                        f"±{az_tol:g} sin az)")
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in gt], y=[d[3] for d in gt], mode="markers",
-                name=(f"ground truth (n={len(gt)}): hit = cross inside the box "
-                      f"(±{r_tol:g} m, ±{az_tol:g} sin az)"),
+                name=f"● ground truth (n={len(gt)})",
                 marker=dict(symbol="circle", size=6, color="#ffffff",
                             line=dict(width=1, color="#2d3436")),
             ))
         fig.update_layout(
-            title=title, xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
-            # t=40/height=420 (pre-2026-09-23) fit a one-line title; `title` here is
-            # two lines (name -- label, then a "<br><sup>" operating-point subline)
-            # and the podium-font-size re-check raised the base font further -- an
-            # insufficient top margin overflows the title DOWN into the plot domain
-            # instead of clipping it (measured, thrust5_detector_cfar rehearsal PNG).
-            margin=dict(l=40, r=20, t=90, b=40), height=470,
-            # Dark legend: the ground-truth marker is a white open circle (visible
-            # on the Viridis map) and had no visible swatch on a white legend.
-            # y=-0.2 covered the x-axis title at the 20 px tick size (rehearsal
-            # 2026-09-23); sit the legend below it.
-            legend=dict(orientation="h", y=-0.32, bgcolor="#2d3436",
-                        font=dict(color="#ffffff")),
+            xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
+            # ONE inline legend line on the panel background, 17 px, 32 px tall (was a
+            # 72 px dark block): the marker glyphs are in the trace names above, so the
+            # entry reads as "x detections (n=7)" whatever the swatch does.
+            legend=dict(orientation="h", yanchor="top", y=-0.22, x=0.0,
+                        xanchor="left", bgcolor="rgba(0,0,0,0)",
+                        font=dict(size=17, color="#2d3a4a")),
+            **_base_layout(),
         )
         if scoring_max_r is not None:
             # 50 m is a fixed display margin above the scoring crop (not itself a
@@ -2792,14 +2837,33 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             fig.update_yaxes(range=[0.0, 50.0])
             fig.add_hline(
                 y=scoring_max_r, line_dash="dash", line_color="#ffffff",
-                annotation_text=f"labels & scoring stop at {scoring_max_r:g} m",
-                annotation_position="bottom right",
-                # Padding off the right border (item 4, wave 9 hostile-expert read,
-                # 2026-09-23): "bottom right" alone sits the text flush against the
-                # plot's right edge on all six Thrust-5 detector maps.
-                annotation_xshift=-10,
-                annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#ffffff"),
+                # A short TAG at the right end of the line, not a centred white
+                # sentence across the middle of the data (layout spec section 4).
+                annotation_text=f" scoring ≤ {scoring_max_r:g} m ",
+                annotation_position="top right",
+                annotation_xshift=-10, annotation_yshift=6,
+                annotation_bgcolor="rgba(45,58,74,0.7)",
+                annotation_font=dict(size=16, color="#ffffff"),
             )
+        thr_txt = "n/a" if det_threshold is None else f"{det_threshold:.2f}"
+        fig.update_layout(annotations=list(fig.layout.annotations or ())
+                          + _stat_annotations(
+                              f"{n_dets} detections, {n_gt} labelled",
+                              f"frame {n_frames} of {n_frames} (last)"))
+        set_panel(fig, title=panel_title,
+                  caption=[f"objectness ≥ {thr_txt}"]
+                          + ([hit_rule] if hit_rule else []),
+                  details=[
+                      f"detections at objectness >= {thr_txt} -- frame {n_frames} of "
+                      f"{n_frames} (last).",
+                      "This panel is pinned to the LAST frame while the range-Doppler "
+                      "cube above it loops on the clock, so the two can read as "
+                      "different frames.",
+                      (f"Ground truth boxes ARE the match tolerance: {hit_rule}."
+                       if hit_rule else ""),
+                      (f"labels & scoring stop at {scoring_max_r:g} m."
+                       if scoring_max_r is not None else ""),
+                  ], row=PANEL_ROW_MAP)
         figs[key] = _make_legible(fig)
 
         # Scoreboard: TP/FP/FN this frame + cumulative hits/false alarms/FA-per-frame/
@@ -2881,19 +2945,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                      annotation_xshift=(-15 if _annotation_collides else 0),
                      annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(
-            title=("Subspace error (Frobenius) per frame<br><sup>unnormalised distance; "
-                   "grows ~sqrt(k), not a fraction</sup>"),
             xaxis_title="frame",
-            # Unnormalised: said in the subline; the rotated axis title at 20 px
+            # Unnormalised: said in the caption; the rotated axis title at 20 px
             # clipped when it carried the word (rehearsal 2026-09-23).
             yaxis_title="subspace error (Frobenius)",
-            margin=dict(l=70, r=20, t=40, b=40),
-            # Taller than the other 360px panels: this y-axis title (40 characters,
-            # rotated) is LONGER than a 360px-tall plot at the 16px legibility floor,
-            # so it clipped top and bottom regardless of margin (rehearsal,
-            # 2026-09-23) -- the fix is vertical room, not horizontal margin.
-            height=460,
+            **_base_layout(),
         )
+        # The statistic the presenter reads off this panel: where the curve ended, and
+        # against what reference. Reserved strip above the plot, same as every map.
+        fig.update_layout(annotations=_stat_annotations(
+            f"{errs[-1]:.2f} at frame {len(errs)}",
+            f"warm-start reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
+        set_panel(fig, title="Subspace error per frame",
+                  caption=["Frobenius, unnormalised distance",
+                           "grows ~sqrt(k), not a fraction"],
+                  details=[
+                      "Unnormalised distance; grows ~sqrt(k), not a fraction.",
+                      f"The dashed line is the warm-start settled level "
+                      f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference) -- a separate "
+                      "warm-start case, not this run's own level.",
+                  ], row=PANEL_ROW_MAP)
         fig.update_yaxes(automargin=True)
         # Compute spent per frame (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23):
         # AdaOjaBlock's own effective_n_refine() decision (e2e/blocks.py), reported back
@@ -2936,11 +3007,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # Legend below the plot, not the default top-right: at top-right it sat
                 # on top of the new right-hand axis's own tick labels, clipping "10"
                 # into "1C" (found in the Thrust 3 rehearsal, 2026-09-23).
-                legend=dict(orientation="h", yanchor="top", y=-0.22,
-                           xanchor="center", x=0.5),
-                margin=dict(b=90),
+                legend=dict(orientation="h", yanchor="top", y=-0.30,
+                           xanchor="left", x=0.0, bgcolor="rgba(0,0,0,0)",
+                           font=dict(size=17, color="#2d3a4a")),
                 showlegend=True,
             )
+            # The compute-per-frame trace is the Thrust 3 A/B. Say where it ended,
+            # beside the error statistic, so the "2x compute" claim has a number on
+            # screen that does not require reading the right-hand axis.
+            panel = panel_of(fig)
+            fig.update_layout(annotations=_stat_annotations(
+                f"{errs[-1]:.2f} at frame {len(errs)}",
+                f"{int(n_refine_used[-1])} refinement passes/frame"))
+            set_panel(fig, title=panel["title"], caption=panel["caption"],
+                      details=list(panel["details"]) + [
+                          "The dotted red trace (right axis) is AdaOjaBlock's own "
+                          "effective_n_refine() decision per frame -- the compute "
+                          "actually spent, not a preset's prose. Both arms' right "
+                          "axes are pinned to one range, so a real 2x reads as a "
+                          "height difference.",
+                      ], row=panel["row"])
         figs["subspace_err"] = _make_legible(fig)
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
@@ -2962,13 +3048,18 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         plotted = [max(b, ber_floor) for b in bers]
         fig = go.Figure(data=go.Scatter(y=plotted, mode="lines+markers"))
         fig.update_layout(
-            title=title,
             xaxis_title="Frame",
             yaxis_title="BER",
             yaxis_type="log",
-            margin=dict(l=40, r=20, t=40, b=40),
-            height=360,
+            **_base_layout(),
         )
+        fig.update_layout(annotations=_stat_annotations(
+            f"BER {bers[-1]:.2e} (last frame)"))
+        set_panel(fig, title="Comms head BER", caption=[title.strip("()") or combining],
+                  details=[f"Combining: {combining}.",
+                           f"Frames with 0 bit errors are shown at the {ber_floor:g} "
+                           "display floor -- a log axis cannot plot an exact zero."],
+                  row=PANEL_ROW_MAP)
         if any(b < ber_floor for b in bers):
             fig.add_annotation(
                 text=f"frames with 0 bit errors shown at the {ber_floor:g} floor",
@@ -2980,13 +3071,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     if outputs.get("evm"):
         evms = [float(e) for e in outputs["evm"]]
         fig = go.Figure(data=go.Scatter(y=evms, mode="lines+markers"))
-        fig.update_layout(
-            title="Comms head EVM per frame",
-            xaxis_title="Frame",
-            yaxis_title="EVM",
-            margin=dict(l=40, r=20, t=40, b=40),
-            height=360,
-        )
+        fig.update_layout(xaxis_title="Frame", yaxis_title="EVM", **_base_layout())
+        fig.update_layout(annotations=_stat_annotations(
+            f"EVM {evms[-1]:.3f} (last frame)"))
+        set_panel(fig, title="Comms head EVM per frame",
+                  caption=["error vector magnitude, per frame"],
+                  details=["Error vector magnitude of the equalized data symbols, "
+                           "one point per frame."],
+                  row=PANEL_ROW_MAP)
         figs["evm"] = _make_legible(fig)
 
     if outputs.get("comm_data_eq"):
@@ -3017,14 +3109,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig = go.Figure(data=go.Scatter(
             x=data_np.real, y=data_np.imag, mode="markers", marker=marker,
         ))
-        fig.update_layout(
-            title="Comms head constellation (last frame, equalized) — "
-                  "coloured by transmitted symbol",
-            xaxis_title="I",
-            yaxis_title="Q",
-            margin=dict(l=40, r=20, t=40, b=40),
-            height=360,
-        )
+        fig.update_layout(xaxis_title="I", yaxis_title="Q", **_base_layout())
+        set_panel(fig, title="Comms head constellation",
+                  caption=["last frame, equalized",
+                           "coloured by transmitted symbol"],
+                  details=["Last frame, equalized; each received symbol is coloured "
+                           "by the ideal point it was actually TRANSMITTED as."],
+                  row=PANEL_ROW_MAP)
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
         figs["comm_const"] = _make_legible(fig)
 
@@ -3040,6 +3131,9 @@ def placeholder_figure(message: str) -> go.Figure:
     )
     fig.update_layout(
         xaxis=dict(visible=False), yaxis=dict(visible=False),
-        margin=dict(l=20, r=20, t=20, b=20), height=360,
+        margin=dict(l=20, r=20, t=20, b=20), height=FIGURE_HEIGHT[PANEL_ROW_MAP],
+        paper_bgcolor=PAPER_BGCOLOR, plot_bgcolor=PLOT_BGCOLOR,
     )
+    set_panel(fig, title="No data", caption=[message], details=[message],
+              row=PANEL_ROW_MAP)
     return fig
