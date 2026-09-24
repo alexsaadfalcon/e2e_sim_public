@@ -76,6 +76,30 @@ def figs():
     return figures_from_outputs(_outputs(1))
 
 
+def _detector_outputs():
+    """One corpus-replay frame: a range-Doppler cube plus a CFAR objectness map with
+    one detection and one ground-truth label."""
+    rng = np.random.default_rng(3)
+    cube = rng.normal(size=(2, 16, 8)) + 1j * rng.normal(size=(2, 16, 8))
+    obj = np.zeros((1, 8, 16), dtype=np.float32)
+    return {
+        "radar_cube": [cube],
+        "cfar_detection": [obj],
+        "cfar_detections": [[(0, 0.1, 0.9, 12.0)]],
+        "gt_detections": [[(0, -0.2, 1.0, 20.0)]],
+        "_axis_meta": {
+            "rx": {"grid": {"max_range_m": 40.0}},
+            "detector": {"mode": "cfar", "threshold": 0.66,
+                         "label": "CA-CFAR (guard 2, train 6)"},
+        },
+    }
+
+
+@pytest.fixture(scope="module")
+def detector_figs():
+    return figures_from_outputs(_detector_outputs())
+
+
 def _walk_fonts(obj, path="layout"):
     """Every ``font.size`` anywhere in a figure dict, with where it came from."""
     out = []
@@ -352,10 +376,25 @@ OLD_SUBTITLE_CLAUSES = {
         "non-coherent",
         "over range",
     ],
+    # The corpus-replay products. `_detector_outputs` below builds them, so these are
+    # checked against the same accessor as the munich panels rather than being left to
+    # tests/test_detector_scoreboard.py alone.
+    "radar_cube": [
+        "clip",
+        "median floor + 3 dB",
+    ],
+    "cfar_detection": [
+        "detections at objectness >=",
+        "frame 1 of 1 (last)",
+        "hit = cross inside the box",
+        "labels & scoring stop at",
+    ],
 }
 
 
-@pytest.mark.parametrize("product", sorted(OLD_SUBTITLE_CLAUSES))
+@pytest.mark.parametrize("product",
+                         sorted(set(OLD_SUBTITLE_CLAUSES)
+                                - {"radar_cube", "cfar_detection"}))
 def test_every_clause_the_old_subtitle_carried_is_still_reachable(figs, product):
     """CHECK 15. "Opening all of them loses no string that is present in today's
     screens -- the honesty content must be MOVED, never dropped. This check is the one
@@ -476,3 +515,23 @@ def test_the_arm_caption_cuts_at_a_clause_boundary_without_a_mark():
     assert _note_headline(long_one).endswith("…")
     # ... and never mid-word.
     assert not _note_headline(long_one).rstrip("…").endswith("wor")
+
+
+@pytest.mark.parametrize("product", ["radar_cube", "cfar_detection"])
+def test_the_corpus_replay_panels_keep_their_clauses_too(detector_figs, product):
+    """CHECK 15 for the Thrust 5 products. Same rule, same accessor: the objectness
+    panel's operating point, the frame it is pinned to, the hit rule and the scoring
+    crop are all still reachable, and so is the range-Doppler clip's provenance."""
+    text = panel_text(detector_figs[product])
+    missing = [c for c in OLD_SUBTITLE_CLAUSES[product] if c not in text]
+    assert not missing, f"{product} dropped: {missing} -- panel text: {text}"
+
+
+def test_the_detector_panel_says_it_is_pinned_while_the_cube_loops(detector_figs):
+    """Hostile round 10, section 3.2: the objectness panel is built from the LAST frame
+    and never animates while the range-Doppler cube above it loops on the clock, and
+    nothing on screen said so. Now the strip does."""
+    anns = " ".join(a.text for a in
+                    (detector_figs["cfar_detection"].layout.annotations or ()))
+    assert "(last)" in anns
+    assert not (detector_figs["cfar_detection"].frames or ())
