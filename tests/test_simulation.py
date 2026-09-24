@@ -8,7 +8,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from e2e.simulation import Simulation, get_U_true, perturb_basis, rank_diagnostic
+from e2e.simulation import (Simulation, get_U_true, perturb_basis, rank_diagnostic,
+                            to_beat_basis)
 from e2e.blocks import (
     RFFEBlock,
     InterconnectBlock,
@@ -73,7 +74,12 @@ def test_warm_start_true_frame0_is_perturbed_ground_truth(make_env_block, monkey
     assert sim.warm_start is True
 
     torch.manual_seed(42)
-    expected = perturb_basis(get_U_true(env.get_S_pars(), K))
+    # The tracker's input is the range-compressed cube, so the oracle is carried into
+    # the beat basis (`to_beat_basis`: conj + element-index reversal, exactly what the
+    # dechirp does). The warm start is otherwise the historical one, and the subspace
+    # numbers it produces are unchanged -- see
+    # tests/test_one_chain_spine.py::test_tracker_on_cube_snapshots_reproduces_todays_subspace.
+    expected = perturb_basis(to_beat_basis(get_U_true(env.get_S_pars(), K)))
 
     torch.manual_seed(42)
     sim.run(n_steps=1)
@@ -268,20 +274,29 @@ def test_pipeline_runs_without_subspace_block(make_env_block):
 
 
 class _ReservedKeyBlock:
-    """Dummy downstream block that emits a reserved pipeline key."""
+    """Dummy downstream block that emits a reserved pipeline key.
 
-    def __init__(self, key="s_pars"):
+    Declares DOMAIN_ANY so the domain check cannot refuse it first: on the one spine
+    the chain is in the cube domain by the time products run, and a DOMAIN_CFR block
+    would trip that contract before it ever got to clobber anything -- which would
+    make this test pass for the wrong reason (FrameContractError is a ValueError).
+    """
+
+    def __init__(self, key="cube"):
+        from e2e import frames as _frames
         self._key = key
+        self.frame_capabilities = _frames.FrameCapabilities(
+            domain=_frames.DOMAIN_ANY, dimension=_frames.DIMENSION_ANY)
 
     def apply(self, state_dict):
-        return {self._key: state_dict["s_pars"]}
+        return {self._key: state_dict["cube"]}
 
 
 def test_downstream_block_reserved_key_raises(make_env_block):
     """A downstream block clobbering a reserved key must raise ValueError."""
     env = make_env_block(n_frames=2, n_freqs=32)
     sim = Simulation(
-        env, [_ReservedKeyBlock("s_pars")], K,
+        env, [_ReservedKeyBlock("cube")], K,
         subspace_block=AdaOjaBlock(N_RX, K),
     )
     with pytest.raises(ValueError, match="reserved key"):
@@ -320,7 +335,14 @@ def test_multiple_chirps_assertion(make_env_block):
 
 
 def test_mimo_assertion(make_env_block):
-    """A frame with a TX dim (shape[1]) > 1 must trip the named no-MIMO guard."""
+    """A frame with a TX dim (shape[1]) > 1 must trip the named no-MIMO guard.
+
+    The guard MOVED (2026-09-24, contract section 1.2): `GridStage` is no longer on
+    the spine, so the refusal now comes from `Simulation._check_source_frame`, which
+    is where the frame and the dechirp's `cfg` are both in view. That matters for more
+    than the message: the spine's `DechirpBlock` ACCEPTS MIMO (combining the TX axis
+    is its job) and, told `mimo="single"`, would keep only TX 0 and say nothing.
+    """
     env = make_env_block(n_frames=1, n_freqs=32)
     sim = Simulation(
         env, _downstream(), K,
@@ -335,13 +357,13 @@ def test_mimo_assertion(make_env_block):
         return torch.cat([base, base], dim=1)  # shape (n_rx, 2, 1, F)
 
     env.get_S_pars = _two_tx_s_pars
-    with pytest.raises(ValueError, match="GridStage: MIMO not supported yet"):
+    with pytest.raises(ValueError, match="MIMO not supported yet"):
         sim.feed_forward()
 
 
 class _NoOpStage:
-    """Custom serial stage: tags 's_pars' so we can prove it ran and its edit flowed
-    through the rest of the pipeline (via the `serial_stages` composability hook)."""
+    """Custom serial stage: doubles 's_pars' so we can prove it ran and its edit
+    flowed through the rest of the pipeline (via the `serial_stages` hook)."""
 
     def __init__(self):
         self.ran = False
@@ -353,8 +375,20 @@ class _NoOpStage:
 
 def test_composability_custom_serial_stage_runs_and_flows_through(make_env_block):
     """A custom stage passed via serial_stages= replaces the auto-built list, runs in
-    feed_forward, and its s_pars edit is visible to later stages/downstream blocks."""
-    from e2e.blocks import GridStage, MeasurementStage
+    feed_forward, and its edit is visible to later stages/downstream blocks.
+
+    The composed list is now the SPINE's list (dechirp, range transform, measurement)
+    with the custom stage in front of it -- not a hand-assembled alternative pipeline.
+    That is the point of the one-chain consolidation: `serial_stages=` composes onto
+    one chain rather than replacing it with a second one.
+    """
+    from e2e.blocks import MeasurementStage
+    from e2e.chain.dechirp import DechirpBlock
+    from e2e.chain.receive import RangeTransformBlock
+
+    class _Cfg:
+        mimo = "single"
+        n_tx = 1
 
     env = make_env_block(n_frames=2, n_freqs=32)
     custom = _NoOpStage()
@@ -362,7 +396,9 @@ def test_composability_custom_serial_stage_runs_and_flows_through(make_env_block
     sim = Simulation(
         env, _downstream(), K,
         subspace_block=subspace_block,
-        serial_stages=[custom, GridStage((32, 32)), MeasurementStage(None, subspace_block)],
+        serial_stages=[custom, DechirpBlock(_Cfg()),
+                       RangeTransformBlock(window="none", dc_removal=False),
+                       MeasurementStage(None, subspace_block)],
     )
     out = sim.run(n_steps=1)
     assert custom.ran
@@ -371,17 +407,25 @@ def test_composability_custom_serial_stage_runs_and_flows_through(make_env_block
 
 
 def test_legacy_args_build_expected_stage_sequence(make_env_block):
-    """Legacy positional/kwarg construction auto-builds serial_stages in the right
-    order, skipping stages whose backing block is None."""
+    """Legacy positional/kwarg construction auto-builds THE spine in the contract's
+    order (notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2), skipping only the
+    OPTIONAL physical stages whose backing block is None.
+
+    The dechirp and the range transform are never skipped: they are what make the
+    chain one chain. `GridStage` is gone from the list entirely -- the aperture view
+    moved inside the products, which is what lets the compressor sit in series on a
+    flat element axis.
+    """
     from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
+    from e2e.chain.dechirp import DechirpBlock
+    from e2e.chain.receive import RangeTransformBlock
 
     env = make_env_block(n_frames=1, n_freqs=32)
 
-    # No circuit, no interconnect -> [GridStage, MeasurementStage]
     sim = Simulation(env, _downstream(), K, subspace_block=AdaOjaBlock(N_RX, K))
-    assert [type(s) for s in sim.serial_stages] == [GridStage, MeasurementStage]
+    assert [type(s) for s in sim.serial_stages] == [
+        DechirpBlock, RangeTransformBlock, MeasurementStage]
 
-    # Full stack -> [CircuitStage, GridStage, InterconnectStage, MeasurementStage]
     sim2 = Simulation(
         env, _downstream(), K,
         circuit_block=RFFEBlock(n=N_RX),
@@ -390,8 +434,10 @@ def test_legacy_args_build_expected_stage_sequence(make_env_block):
         subspace_block=AdaOjaBlock(N_RX, K),
     )
     assert [type(s) for s in sim2.serial_stages] == [
-        CircuitStage, GridStage, InterconnectStage, MeasurementStage,
+        CircuitStage, InterconnectStage, DechirpBlock, RangeTransformBlock,
+        MeasurementStage,
     ]
+    assert GridStage not in [type(s) for s in sim2.serial_stages]
 
 
 @pytest.mark.slow
@@ -441,8 +487,17 @@ def test_multichirp_frame_flows_through_the_elementwise_and_product_blocks(make_
 
 def test_single_chirp_product_shape_is_unchanged_by_the_capability_contract(make_env_block):
     """The historical single-chirp path must NOT grow a chirp axis -- broadcast_over_chirps
-    is the plain single-chirp call when n_chirp == 1."""
-    bins = 32
+    is the plain single-chirp call when n_chirp == 1.
+
+    The RANGE extent is a different matter and did change, by design: the spine's
+    `RangeTransformBlock` defaults to `crop_negative_delay=True` (the half the v1.0
+    SCREENS displayed), so a 32-point band yields 17 cube bins and `bins=32` gates
+    cannot be binned down to -- the product reports the 17 it measured rather than
+    padding up. That is the short-band rule in tests/test_blocks.py, reached here
+    through the crop. Ask for the full window with `crop_negative_delay=False`.
+    """
+    bins, n_freqs = 32, 32
+    n_range = n_freqs // 2 + 1        # the cropped (displayed) half
     sim = Simulation(
         _multichirp_env(make_env_block, 1),
         [FFTBlock(bins=bins), RangeAzBlock(bins=bins)], K,
@@ -452,7 +507,7 @@ def test_single_chirp_product_shape_is_unchanged_by_the_capability_contract(make
     sim.feed_forward()
     outputs = sim.get_outputs()
     assert outputs['fft'][0].shape == (bins, bins)
-    assert outputs['range_az'][0].shape == (bins, bins)
+    assert outputs['range_az'][0].shape == (bins, n_range)
 
 
 def test_multichirp_frame_stops_at_the_first_single_chirp_component(make_env_block):
@@ -495,30 +550,53 @@ class _AdcSource:
 
 
 class _AdcProduct:
-    """Downstream product block consuming the RX-time cube."""
+    """Downstream product block consuming the RX-time ADC record.
+
+    It runs as a serial stage now, NOT as a downstream product: on the one spine the
+    chain has crossed into the cube domain by the time products run, and a block that
+    wants `adc` has to sit where `adc` exists. The contract says so by name instead of
+    letting it read a stale tensor -- which is exactly the guarantee `_advance_domain`
+    was built for.
+    """
 
     def __init__(self):
         from e2e import frames as _frames
         self.frame_capabilities = _frames.FrameCapabilities(
             domain=_frames.DOMAIN_RX_TIME, chirps=_frames.CHIRP_NATIVE
         )
+        self.power = None
 
     def apply(self, state):
-        return {"cube_power": float(torch.sum(torch.abs(state["adc"]) ** 2))}
+        self.power = float(torch.sum(torch.abs(state["adc"]) ** 2))
+        return {}
 
 
 def test_chain_can_start_in_the_rx_time_domain_without_ray_tracing():
-    """Replay: a stored cube injected part-way down the chain must flow to the products
-    without the frequency-domain machinery (the SVD / subspace ground truth) running or
-    crashing on a 3-D payload."""
-    cube = torch.ones(4, 2, 8, dtype=torch.complex64)
-    sim = Simulation(_AdcSource(cube), [_AdcProduct()], K)
+    """Replay: a stored ADC record injected part-way down the ONE spine must flow to
+    the products without the frequency-domain machinery (the SVD / subspace ground
+    truth) running or crashing on a 3-D payload.
+
+    What changed (2026-09-24): the replay is a START INDEX into the same stage list,
+    not a second feed-forward loop over an empty one. The source declares
+    `rx_time`, so it enters at the range transform and the stages it skipped are
+    reported by name.
+    """
+    adc = torch.ones(4, 2, 8, dtype=torch.complex64)
+    probe = _AdcProduct()
+    sim = Simulation(_AdcSource(adc), [], K, serial_stages=None)
+    sim.serial_stages.insert(sim._start_index(_frames_domain_rx_time()), probe)
     sim.reset()
     sim.feed_forward()
+    assert probe.power == pytest.approx(4 * 2 * 8)
+    assert sim.skipped_stages == ["DechirpBlock"]
     out = sim.get_outputs()
-    assert out["cube_power"][0] == pytest.approx(4 * 2 * 8)
     # The subspace ground truth is deliberately absent rather than invented.
     assert "subspace_err" not in out
+
+
+def _frames_domain_rx_time():
+    from e2e import frames as _frames
+    return _frames.DOMAIN_RX_TIME
 
 
 def test_replay_carries_environment_state_into_the_chain():
@@ -530,15 +608,15 @@ def test_replay_carries_environment_state_into_the_chain():
         def __init__(self):
             from e2e import frames as _frames
             self.frame_capabilities = _frames.FrameCapabilities(
-                domain=_frames.DOMAIN_RX_TIME, chirps=_frames.CHIRP_NATIVE
+                domain=_frames.DOMAIN_ANY, dimension=_frames.DIMENSION_ANY
             )
 
         def apply(self, state):
             seen["labels"] = state.get("labels")
             return {}
 
-    cube = torch.zeros(2, 1, 4, dtype=torch.complex64)
-    sim = Simulation(_AdcSource(cube, labels=[{"range_m": 12.0}]), [_LabelReader()], K)
+    adc = torch.zeros(2, 1, 4, dtype=torch.complex64)
+    sim = Simulation(_AdcSource(adc, labels=[{"range_m": 12.0}]), [_LabelReader()], K)
     sim.reset()
     sim.feed_forward()
     assert seen["labels"] == [{"range_m": 12.0}]
@@ -710,8 +788,8 @@ def test_gap_response_reacts_only_to_spectrum_never_to_ground_truth(make_env_blo
     real_update = subspace.update
     subspace.update = lambda *a, **kw: (calls.__setitem__("n", calls["n"] + 1), real_update(*a, **kw))[-1]
 
-    s_pars = torch.randn(d, 1, 1, 8, dtype=torch.cfloat, device=torch_device)
-    state = {"s_pars": s_pars, "sv_gap_norm": 0.001}  # collapsed; no 'U_true' key present
+    cube = torch.randn(d, 1, 8, dtype=torch.cfloat, device=torch_device)
+    state = {"cube": cube, "sv_gap_norm": 0.001}  # collapsed; no 'U_true' key present
     assert "U_true" not in state
     stage.apply(state)
     assert calls["n"] == 6

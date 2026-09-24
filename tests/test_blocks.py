@@ -16,21 +16,45 @@ from e2e.blocks import (
     RangeElBlock,
     SubspaceErrorBlock,
 )
+from e2e.chain.dechirp import DechirpBlock
+from e2e.chain.receive import RangeTransformBlock
 from e2e.subspace.algorithms import rand_orth_complex
 from e2e.blocks import device
+
+
+class _SingleTxCfg:
+    """The minimal `cfg` `DechirpBlock` reads (only `.mimo`)."""
+    mimo = "single"
+    n_tx = 1
+
+
+def _spine_state(s_pars, array_shape):
+    """The state the ONE spine hands its products, from a raw CFR frame.
+
+    Since 2026-09-24 the range products consume the range-compressed `cube`, not an
+    aperture-viewed `s_pars` (owner directive; notes/ONE_CHAIN_CONTRACT_2026-09-24.md
+    section 1.2 row 11). These tests therefore run the two spine stages that produce
+    it -- dechirp, then range transform at the identity point (`window="none"`,
+    `dc_removal=False`, uncropped) -- instead of hand-building an aperture frame.
+
+    Consequence for every range assertion below: the cube's bin 0 IS zero delay (no
+    fftshift, no negation), so a zero-delay target peaks in range GATE 0, where the
+    v1.0 products put it at the centre gate.
+    """
+    adc = DechirpBlock(_SingleTxCfg()).apply({"s_pars": s_pars})["adc"]
+    cube = RangeTransformBlock(window="none", dc_removal=False,
+                               crop_negative_delay=False).apply({"adc": adc})["cube"]
+    return {"cube": cube, "aperture_shape": array_shape}
 
 
 @pytest.fixture
 def state_dict(n_freqs):
     """A minimal state_dict shaped like Simulation builds, on the library device."""
-    s_pars = torch.randn(32, 32, 1, n_freqs, dtype=torch.cfloat, device=device)
+    s_pars = torch.randn(1024, 1, 1, n_freqs, dtype=torch.cfloat, device=device)
     U_true = rand_orth_complex(1024, 16)
-    return {
-        "s_pars": s_pars,
-        "U_true": U_true,
-        "U": U_true.clone(),
-        "PRX": None,
-    }
+    state = _spine_state(s_pars, (32, 32))
+    state.update({"U_true": U_true, "U": U_true.clone(), "PRX": None})
+    return state
 
 
 @pytest.mark.parametrize("block_cls,key", [
@@ -59,11 +83,23 @@ _C = 2.99792458e8  # speed of light (m/s)
 
 
 def _steering_frame(n_az, n_el, n_freqs, az_deg, el_deg, tau, dev):
-    """A synthetic post-GridStage frame [n_az, n_el, 1, n_freqs] (matching
-    frames.to_aperture_grid's convention: dim0=az/columns, dim1=el/rows) holding a
-    single half-wavelength-spaced planar-array point target: element (m, n)'s
-    response is exp(i*pi*m*sin(az)) * exp(i*pi*n*sin(el)) * exp(-i*2*pi*f_k*tau)
-    over the stepped-frequency grid, where tau is the round-trip delay."""
+    """A synthetic point-target CFR frame `[n_az*n_el, 1, 1, n_freqs]`, pushed through
+    the spine's dechirp + range transform so the products get the `cube` they now
+    consume (see `_spine_state`).
+
+    Element (m, n) of the half-wavelength-spaced planar array responds
+    `exp(i*pi*m*sin(az)) * exp(i*pi*n*sin(el)) * exp(-i*2*pi*f_k*tau)` over the
+    frequency grid, where tau is the round-trip delay. The flat RX index is
+    `m*n_el + n`, matching `frames.cube_to_aperture_grid`'s row-major reshape
+    (dim0 = az/columns, dim1 = el/rows).
+
+    The dechirp's conjugate is what puts a POSITIVE delay on a POSITIVE cube bin: a
+    forward FFT of the raw CFR would put it at `(-N*df*tau) mod N`. Its accompanying
+    element-index reversal leaves the angle POWER map untouched (the conjugate exactly
+    cancels the mirror the flip alone would produce -- derived and pinned in
+    tests/test_one_chain_spine.py::v10_range_reorder), so every azimuth/elevation bin
+    assertion below is unchanged from the v1.0 versions of these tests.
+    """
     freqs = np.linspace(28.5e9, 31.5e9, n_freqs)
     m = np.arange(n_az).reshape(n_az, 1, 1)
     n = np.arange(n_el).reshape(1, n_el, 1)
@@ -72,8 +108,8 @@ def _steering_frame(n_az, n_el, n_freqs, az_deg, el_deg, tau, dev):
     steer = (np.exp(1j * np.pi * m * np.sin(az))
              * np.exp(1j * np.pi * n * np.sin(el))
              * np.exp(-1j * 2 * np.pi * f * tau)).astype(np.complex64)
-    s_pars = torch.from_numpy(steer).to(dev).view(n_az, n_el, 1, n_freqs)
-    return {"s_pars": s_pars}
+    s_pars = torch.from_numpy(steer).to(dev).reshape(n_az * n_el, 1, 1, n_freqs)
+    return _spine_state(s_pars, (n_az, n_el))
 
 
 def test_range_az_noncoherent_elevation_shows_offbroadside_target():
@@ -99,7 +135,9 @@ def test_range_az_noncoherent_elevation_shows_offbroadside_target():
     # exactly what makes the peak survive off-broadside elevation targets.
     expected_peak = n * (n * n) ** 2
     assert peak == pytest.approx(expected_peak, rel=1e-3)
-    assert (az_bin, range_bin) == (n // 2, n // 2)  # broadside az, zero-delay range
+    # broadside az; zero-delay range is now GATE 0, not the centre gate -- the cube's
+    # bin 0 IS zero delay (no fftshift, no negation). See `_spine_state`.
+    assert (az_bin, range_bin) == (n // 2, 0)
 
 
 def test_fft_block_noncoherent_range_shows_target_at_10m():
@@ -169,7 +207,7 @@ def test_range_az_full_band_compression_when_bins_lt_nfreqs():
     assert peak == pytest.approx(expected_full, rel=1e-3)
     assert peak > 10 * (n_ap * (n_ap * bins) ** 2)
     az_bin, range_bin = divmod(torch.argmax(power).item(), power.shape[1])
-    assert (az_bin, range_bin) == (bins // 2, bins // 2)  # broadside az, zero-delay range
+    assert (az_bin, range_bin) == (bins // 2, 0)   # broadside az, zero-delay gate 0
 
 
 def test_aperture_window_reduces_sidelobes():
@@ -204,10 +242,18 @@ def test_aperture_window_invalid_raises():
 
 def test_range_az_nondivisible_nfreqs_zero_gate_and_energy():
     """When n_freqs is NOT a multiple of bins (the production case, n_freqs~5000,
-    bins=256), power-binning groups per = ceil(n_freqs/bins) native bins per gate, so
-    a zero-delay target's peak lands in gate (n_freqs//2)//per -- NOT bins//2 -- while
-    still carrying the full coherent range energy. Guards the _power_bin / _range_axis
-    alignment that the exact-multiple tests miss."""
+    bins=256), power-binning groups per = ceil(n_freqs/bins) native cube bins per gate.
+
+    UPDATED for the one spine (2026-09-24, contract section 1.2 row 11). The v1.0
+    version of this test asserted the zero-delay peak landed in gate
+    `(n_freqs//2)//per` -- NOT `bins//2` -- because the products fftshifted the range
+    axis before binning, putting zero delay at native bin `n_freqs//2` and making the
+    zero GATE depend on the divisibility of `n_freqs` by `bins`. It no longer does:
+    the cube is unshifted, zero delay is native bin 0, and the zero gate is 0 for every
+    (n_freqs, bins) pair. That is a simplification the consolidation buys, so the test
+    now pins the property the old one was really guarding -- the peak gate and the
+    full coherent energy survive a non-divisible band -- rather than the old indexing.
+    """
     import math
     n_ap, n_freqs, bins = 4, 100, 8   # 100 % 8 != 0
     state = _steering_frame(n_ap, n_ap, n_freqs, az_deg=0.0, el_deg=0.0, tau=0.0, dev=device)
@@ -215,10 +261,9 @@ def test_range_az_nondivisible_nfreqs_zero_gate_and_energy():
     power = out["range_az"]
     assert power.shape == (bins, bins)
     per = math.ceil(n_freqs / bins)
-    zero_gate = (n_freqs // 2) // per
-    assert zero_gate != bins // 2         # the whole point: non-divisible shifts the zero gate
+    assert per * bins != n_freqs          # the non-divisible case is genuinely exercised
     az_bin, range_bin = divmod(torch.argmax(power).item(), power.shape[1])
-    assert (az_bin, range_bin) == (bins // 2, zero_gate)
+    assert (az_bin, range_bin) == (bins // 2, 0)
     peak = torch.max(power).item()
     assert peak == pytest.approx(n_ap * (n_ap * n_freqs) ** 2, rel=1e-3)
 
@@ -409,33 +454,37 @@ def test_range_maps_report_a_short_band_at_its_own_resolution_and_say_so(torch_d
     """
     import warnings
 
-    long_band = torch.randn(32, 32, 1, 512, dtype=torch.complex64, device=torch_device)
-    short_band = torch.randn(32, 32, 1, 128, dtype=torch.complex64, device=torch_device)
+    long_band = {"cube": torch.randn(1024, 1, 512, dtype=torch.complex64,
+                                     device=torch_device),
+                 "aperture_shape": (32, 32)}
+    short_band = {"cube": torch.randn(1024, 1, 128, dtype=torch.complex64,
+                                      device=torch_device),
+                  "aperture_shape": (32, 32)}
 
     # contract holds, and stays quiet
     with warnings.catch_warnings(record=True) as clean:
         warnings.simplefilter("always")
-        out = RangeAzBlock(bins=256).apply({"s_pars": long_band})["range_az"]
+        out = RangeAzBlock(bins=256).apply(long_band)["range_az"]
     assert tuple(out.shape) == (256, 256)
     assert not clean, "a band long enough to bin down must not warn"
 
     # contract cannot hold: reported at native resolution, loudly
     with warnings.catch_warnings(record=True) as warned:
         warnings.simplefilter("always")
-        out = RangeAzBlock(bins=256).apply({"s_pars": short_band})["range_az"]
+        out = RangeAzBlock(bins=256).apply(short_band)["range_az"]
     assert tuple(out.shape) == (256, 128), "must NOT be padded up to a square map"
     assert len(warned) == 1 and "128" in str(warned[0].message)
 
     # the documented way to make it explicit is silent again
     with warnings.catch_warnings(record=True) as explicit:
         warnings.simplefilter("always")
-        out = RangeAzBlock(bins=128).apply({"s_pars": short_band})["range_az"]
+        out = RangeAzBlock(bins=128).apply(short_band)["range_az"]
     assert tuple(out.shape) == (128, 128)
     assert not explicit, "asking for a band-sized map must not warn"
 
     # RangeElBlock shares the helper and therefore the behaviour
     with warnings.catch_warnings(record=True) as el:
         warnings.simplefilter("always")
-        out = RangeElBlock(bins=256).apply({"s_pars": short_band})["range_el"]
+        out = RangeElBlock(bins=256).apply(short_band)["range_el"]
     assert tuple(out.shape) == (256, 128)
     assert len(el) == 1

@@ -358,6 +358,37 @@ class Simulation:
                 f"environment block, which enters the spine at a start index."
             )
 
+    def _check_source_frame(self, payload, domain):
+        """Refuse a source frame the spine's dechirp would silently mangle.
+
+        `DechirpBlock` accepts MIMO -- combining the TX axis is its job -- but it reads
+        the scheme from its `cfg`, and the imaging spine's default cfg is single-TX.
+        Handing that a 2-TX frame is not an error inside `mimo_combine`: for
+        `mimo="single"` it selects TX `c % n_tx` and quietly KEEPS ONLY TX 0. So the
+        guard has to live here, where the cfg and the frame are both in view.
+
+        This replaces the old `GridStage: MIMO not supported yet` error, which came
+        from a stage that is no longer on the spine (the aperture view moved into the
+        products). Same refusal, named for the thing that can actually fix it.
+        """
+        if domain != frames.DOMAIN_CFR or not torch.is_tensor(payload) or payload.ndim != 4:
+            return
+        n_tx = payload.shape[1]
+        if n_tx == 1:
+            return
+        cfg = self.radar_cfg
+        cfg_tx = int(getattr(cfg, "n_tx", 1)) if cfg is not None else 1
+        scheme = str(getattr(cfg, "mimo", "single")).lower() if cfg is not None else "single"
+        if cfg_tx == n_tx and scheme in ("tdm", "ddma"):
+            return
+        raise frames.FrameContractError(
+            f"Simulation: MIMO not supported yet by this spine -- the frame has "
+            f"n_tx={n_tx} but the chain's radar_cfg declares n_tx={cfg_tx}, "
+            f"mimo={scheme!r}. The dechirp would keep only TX 0 and say nothing. "
+            f"Pass radar_cfg=RadarConfig(..., n_tx={n_tx}, mimo='tdm'|'ddma') so the "
+            f"TX axis is actually combined."
+        )
+
     def _start_index(self, domain):
         """Where a source in `domain` ENTERS the one spine.
 
@@ -406,6 +437,7 @@ class Simulation:
         # below (the SVD, the subspace ground truth) has nothing to say about it.
         # Blocks that advertise nothing get the historical frequency-domain start.
         domain = getattr(self.environment_block, 'signal_domain', frames.DOMAIN_CFR)
+        self._check_source_frame(payload, domain)
         start = self._start_index(domain)
         self.skipped_stages = [frames.component_name(s)
                                for s in self.serial_stages[:start]]
