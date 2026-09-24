@@ -109,11 +109,17 @@ def test_comms_blocks_compose_inside_simulation(make_env_block):
     freqs = _freqs(n_freqs)
     modem = ModemBlock(freqs, n_symbols=4, fft_size=64, cp_len=16, n_active=52,
                        pilot_spacing=8, bits_per_symbol=2, snr_db=30.0, seed=0)
+    # The comms head is a TAP off the frequency-domain side of the spine, so it
+    # travels in `comms_head=` rather than in `downstream_blocks` (2026-09-24): the
+    # downstream blocks run after the whole spine, by which point the chain is in the
+    # cube domain and `s_pars` has been dropped at the crossing. The radar products
+    # stay downstream, which is the point -- both heads, one chain, no exclusion rule.
     sim = Simulation(
         env,
-        [FFTBlock(), modem, BERBlock(), SubspaceErrorBlock()],
+        [FFTBlock(), SubspaceErrorBlock()],
         k=16,
         subspace_block=AdaOjaBlock(1024, 16),
+        comms_head=[modem, BERBlock()],
     )
     out = sim.run(n_steps=2)
     # comm products accumulated over both steps, alongside the radar products
@@ -212,3 +218,64 @@ def test_modem_block_reads_dict_shaped_freq_plan(state_dict, n_freqs, combining)
     assert "comm_rx_bits" in out
     if combining != "element0":
         assert "comm_array_gain_db" in out
+
+
+# --------------------------------------------------------------------------------
+# The comms head as a CONSUMER of the chain (one-chain contract section 1.4)
+# --------------------------------------------------------------------------------
+def test_modem_auto_disables_its_own_awgn_when_the_chain_injected_noise(state_dict,
+                                                                        n_freqs):
+    """ONE noise source per chain. `ModemBlock` used to inject its own AWGN
+    unconditionally -- a THIRD floor beside the front end's Friis cascade and the link
+    budget's kTBF (the contract's own count). On the one spine that makes every "turn
+    this knob and watch both products move" claim false, because half the comms floor
+    is a constructor argument that no knob touches.
+
+    `add_noise=None` (the default) reads `state['noise_injected_by']`, the seam the
+    front end stamps when it draws. The test is STRUCTURAL rather than a power
+    comparison: with the draw off, two applies of the same frame are bit-identical,
+    which a quieter-but-still-present noise source would not be.
+    """
+    modem = ModemBlock(_freqs(n_freqs), n_symbols=4, fft_size=64, snr_db=10.0, seed=0)
+
+    chain_noisy = dict(state_dict)
+    chain_noisy["noise_injected_by"] = "frontend"
+    assert modem.noise_enabled(chain_noisy) is False
+    assert modem.noise_enabled(dict(state_dict)) is True
+
+    modem.reset()
+    a = modem.apply(dict(chain_noisy))
+    modem.reset()
+    b = modem.apply(dict(chain_noisy))
+    assert torch.equal(a["comm_data_eq"], b["comm_data_eq"]), (
+        "two applies of the same frame differ, so something is still drawing noise")
+    assert a["comm_noise_source"] == "frontend"
+
+    # ...and with the chain silent, the block is its own link simulator as before:
+    # the per-frame counter makes consecutive frames draw independently.
+    modem.reset()
+    c = modem.apply(dict(state_dict))
+    d = modem.apply(dict(state_dict))
+    assert not torch.equal(c["comm_data_eq"], d["comm_data_eq"])
+    assert c["comm_noise_source"] == "modem"
+
+
+def test_modem_measures_the_equaliser_snr_when_the_chain_is_the_noise_source(
+        state_dict, n_freqs):
+    """The reported SNR must be a MEASUREMENT on that path, not the constructor value.
+
+    When this block draws its own noise it knows the SNR exactly and reports what it
+    used. When the CHAIN drew it, nothing in the pipeline knows the post-combining
+    SNR, so it is estimated from the pilot residual -- and a number typed into a preset
+    must not be able to reach a card as if it had been measured.
+    """
+    modem = ModemBlock(_freqs(n_freqs), n_symbols=8, fft_size=64, snr_db=7.0, seed=0)
+    own = modem.apply(dict(state_dict))
+    assert own["comm_snr_db"] == pytest.approx(7.0)
+
+    chain = dict(state_dict)
+    chain["noise_injected_by"] = "frontend"
+    measured = modem.apply(chain)["comm_snr_db"]
+    # A clean chain frame: the measured SNR must NOT come back as the configured 7 dB.
+    assert not (measured == pytest.approx(7.0, abs=1e-6)), (
+        "the reported SNR is the constructor's, so it was not measured")

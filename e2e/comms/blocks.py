@@ -16,6 +16,9 @@ Importing this module has no side effects beyond defining the classes.
 import numpy as np
 import torch
 
+from e2e import frames
+from e2e.frames import FrameCapabilities
+
 from .ofdm import OFDMModem, random_bits
 from . import channel as ch
 from . import beamforming as bf
@@ -57,6 +60,18 @@ def _cfr_from_state(state_dict, modem, freqs):
 class ModemBlock:
     """Transmit a random OFDM frame through the state-dict channel and equalize it.
 
+    ON THE ONE SPINE this is a SERIAL STAGE, tapped off the chain BEFORE the mixing
+    block (`Simulation(comms_head=[...])`), not a downstream block -- because it reads
+    a channel FREQUENCY RESPONSE, and by the time the downstream products run the
+    chain is in the cube domain and `s_pars` has been dropped at the crossing. It emits
+    only `comm_*` keys, so it changes nothing the sensing products read: a tap, not a
+    branch, which is why the old "comms head is mutually exclusive with the ADC chain"
+    rule is gone.
+
+    `add_noise=None` (the default) means AUTO -- this block draws no AWGN of its own
+    whenever the chain already injected some. See `add_noise` in `__init__`; it is the
+    difference between one noise source and three.
+
     Parameters mirror `OFDMModem`. On `apply` it returns the recovered bits,
     equalized data symbols, the (LS) channel estimate and the bits that were sent
     -- everything a downstream `BERBlock` needs.
@@ -81,12 +96,20 @@ class ModemBlock:
         (broadband) weight vector is the tracked subspace's dominant direction
         `state['U'][:, 0]` (`beamforming.subspace_weights`) instead of MRC.
         Requires a subspace tracker (`AdaOjaBlock`) in the pipeline so `state`
-        carries `'U'`.
+        carries `'U'`. NOTE THE TIMING on the one spine: the head is tapped BEFORE
+        the mixing block and the tracker runs at the tail, so the basis it reads is
+        the tracker's estimate as of the PREVIOUS frame. That is not a compromise --
+        it is the causally correct thing for a receiver to have, since this frame's
+        tracker output does not exist until this frame has been received.
     """
+
+    frame_capabilities = FrameCapabilities(
+        domain=frames.DOMAIN_CFR, accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
 
     def __init__(self, freqs, n_symbols=8, fft_size=64, cp_len=16, n_active=52,
                  pilot_spacing=8, bits_per_symbol=2, snr_db=20.0,
-                 equalizer="mmse", estimator="ls", seed=0, combining="element0"):
+                 equalizer="mmse", estimator="ls", seed=0, combining="element0",
+                 add_noise=None):
         self.freqs = np.asarray(freqs, dtype=np.float64)
         self.n_symbols = int(n_symbols)
         self.snr_db = float(snr_db)
@@ -99,6 +122,21 @@ class ModemBlock:
                 "'egc', 'mrc' or 'subspace')"
             )
         self.combining = combining
+        # WHETHER THIS BLOCK DRAWS ITS OWN AWGN. `None` (the default) is AUTO: off
+        # whenever the chain upstream already injected noise, which it announces in
+        # `state['noise_injected_by']`. That is contract section 1.4 -- exactly one
+        # thermal injection per chain -- and without it a chain with a front end counts
+        # noise twice and every "one knob moves both products" claim is false. `True`
+        # forces the historical standalone behaviour (this block as its own little link
+        # simulator, which is what the SNR-sweep examples want); `False` forces it off.
+        #
+        # When the chain is the noise source, `snr_db` also stops being the right
+        # number for the ESTIMATOR and the EQUALISER: nothing in the pipeline knows the
+        # post-combining SNR, so it is MEASURED from the pilot residual
+        # (`channel.estimate_snr_db`) and reported as `comm_snr_db`. A constructor
+        # argument reaching a card as if it were a measurement is the failure this
+        # avoids.
+        self.add_noise = add_noise
         self.modem = OFDMModem(fft_size=fft_size, cp_len=cp_len, n_active=n_active,
                                pilot_spacing=pilot_spacing, bits_per_symbol=bits_per_symbol)
 
@@ -122,8 +160,15 @@ class ModemBlock:
         repeated runs of the same Simulation reproduce identical realizations."""
         self._frame = 0
 
+    def noise_enabled(self, state_dict):
+        """Whether to draw AWGN for THIS frame -- see `add_noise` in `__init__`."""
+        if self.add_noise is not None:
+            return bool(self.add_noise)
+        return state_dict.get("noise_injected_by") is None
+
     def apply(self, state_dict):
         modem = self.modem
+        add_noise = self.noise_enabled(state_dict)
         # reuse the cached deterministic TX frame (see __init__)
         tx_bits = self._tx_bits
         tx_freq = self._tx_freq
@@ -138,29 +183,40 @@ class ModemBlock:
             # historical SISO tap (element (0, 0, 0)); bit-exact with the
             # pre-`combining` ModemBlock.
             H_sc = _cfr_from_state(state_dict, modem, self.freqs)
-            rx_freq, _ = ch.apply_channel(tx_freq, H_sc, self.snr_db, rng_seed=noise_seed)
+            if add_noise:
+                rx_freq, _ = ch.apply_channel(tx_freq, H_sc, self.snr_db,
+                                              rng_seed=noise_seed)
+            else:
+                rx_freq = tx_freq * H_sc[None, :]
             extra = {}
         else:
             # full-aperture spatial combining (egc / mrc / subspace): see
             # `_combine_spatial`. `H_sc` here is the EFFECTIVE (post-combining)
             # channel `w^H H`, reported the same way element0 reports its
             # single-tap channel.
-            rx_freq, H_sc, extra = self._combine_spatial(state_dict, tx_freq, noise_seed)
+            rx_freq, H_sc, extra = self._combine_spatial(state_dict, tx_freq,
+                                                         noise_seed, add_noise)
 
         # pilot-based channel estimation
         rx_pilots = modem.extract_pilots(rx_freq)
         tx_pilots = self._tx_pilots               # cached known pilot grid
-        if self.estimator == "mmse":
+        # The SNR the estimator and the equaliser use: this block's own when it drew
+        # the noise (it then knows the answer exactly), otherwise MEASURED from the
+        # pilot residual, because the chain's floor is not a number this block was
+        # told. `None` back means there was nothing to pool across -- fall through to
+        # zero-forcing, which needs no SNR at all and makes the same hard decision.
+        snr_db = self.snr_db if add_noise else ch.estimate_snr_db(rx_pilots, tx_pilots)
+        if self.estimator == "mmse" and snr_db is not None:
             H_est = ch.mmse_estimate(rx_pilots, tx_pilots, modem.pilot_idx,
-                                     modem.fft_size, self.snr_db)
+                                     modem.fft_size, snr_db)
         else:
             H_est = ch.ls_estimate(rx_pilots, tx_pilots, modem.pilot_idx, modem.fft_size)
 
         # equalize + demap
-        if self.equalizer == "zf":
+        if self.equalizer == "zf" or snr_db is None:
             eq = ch.zf_equalize(rx_freq, H_est)
         else:
-            eq = ch.mmse_equalize(rx_freq, H_est, self.snr_db)
+            eq = ch.mmse_equalize(rx_freq, H_est, snr_db)
         data_eq = modem.extract_data(eq)
         rx_bits = _demap(data_eq, modem)
 
@@ -176,11 +232,17 @@ class ModemBlock:
             "comm_bits_per_symbol": modem.bits_per_symbol,
             # share the prebuilt constellation so BERBlock need not rebuild it
             "comm_const": modem.const,
+            # WHICH SNR was actually used, and where the noise came from. On the one
+            # chain these two are the difference between a measured number and a
+            # configured one, and a card that quotes a BER has to know which it has.
+            "comm_snr_db": (float("nan") if snr_db is None else float(snr_db)),
+            "comm_noise_source": ("modem" if add_noise
+                                  else state_dict.get("noise_injected_by", "none")),
         }
         out.update(extra)   # mrc/subspace add 'comm_array_gain_db'; element0 adds nothing
         return out
 
-    def _combine_spatial(self, state_dict, tx_freq, noise_seed):
+    def _combine_spatial(self, state_dict, tx_freq, noise_seed, add_noise=True):
         """Full-aperture receive beamforming for
         `combining in ('egc', 'mrc', 'subspace')`.
 
@@ -236,12 +298,18 @@ class ModemBlock:
         sig_pow = torch.mean(torch.abs(rx_clean[:, :, active]) ** 2).item()
         noise_pow = sig_pow / (10 ** (self.snr_db / 10.0)) if sig_pow > 0 else 1e-12
 
-        gen = torch.Generator(device="cpu")
-        gen.manual_seed(int(noise_seed))
-        shape = rx_clean.shape
-        noise = (torch.randn(shape, generator=gen) + 1j * torch.randn(shape, generator=gen))
-        noise = noise.to(device) * float(np.sqrt(noise_pow / 2.0))
-        rx_full = rx_clean + noise                                # independent per element
+        if add_noise:
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(int(noise_seed))
+            shape = rx_clean.shape
+            noise = (torch.randn(shape, generator=gen)
+                     + 1j * torch.randn(shape, generator=gen))
+            noise = noise.to(device) * float(np.sqrt(noise_pow / 2.0))
+            rx_full = rx_clean + noise                            # independent per element
+        else:
+            # The chain upstream already carries the floor (contract section 1.4);
+            # drawing here would be a second, uncorrelated one.
+            rx_full = rx_clean
 
         rx_freq = bf.combine(rx_full, w)                          # [n_sym, fft]
         H_eff = bf.combine(H, w)                                  # [fft]

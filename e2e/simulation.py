@@ -264,6 +264,7 @@ class Simulation:
         composition="full",
         front_end=None,
         link_budget="auto",
+        comms_head=None,
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -299,6 +300,11 @@ class Simulation:
             )
         self.composition = composition
         self.radar_cfg = radar_cfg
+        #: `id()`s of serial stages whose returns are PRODUCTS and are recorded in
+        #: `outputs`, not just merged into state. Today: the comms head (see
+        #: `_build_spine`). Identity rather than type, so the same class can be a
+        #: product in one chain and a transform in another.
+        self._product_stages = set()
         self.link_budget = link_budget
         self.link_budget_active = False
         if serial_stages is not None:
@@ -306,7 +312,7 @@ class Simulation:
         else:
             self.serial_stages = self._build_spine(
                 circuit_block, interconnect_block, afe_block, subspace_block,
-                range_transform, front_end,
+                range_transform, front_end, comms_head,
             )
         self._check_single_source()
         self.outputs = defaultdict(list)
@@ -384,7 +390,7 @@ class Simulation:
         return bool(self.link_budget)
 
     def _build_spine(self, circuit_block, interconnect_block, afe_block,
-                     subspace_block, range_transform, front_end):
+                     subspace_block, range_transform, front_end, comms_head=None):
         """The contract's stage list (section 1.2), in order, for every source.
 
         `composition="full"` (the default) builds:
@@ -419,6 +425,10 @@ class Simulation:
         munich trace is generated with `normalize_delays=True`, putting the
         line-of-sight path AT bin 0, which the fast-time mean subtraction would zero.
         Pass `range_transform=` to override.
+
+        `comms_head=` is a list of blocks tapped off the chain BEFORE the mixing block,
+        in the frequency domain -- see the comment at the insertion point for why they
+        are serial stages rather than downstream blocks.
         """
         cfg = self._resolve_radar_cfg()
         self.radar_cfg = cfg
@@ -435,6 +445,26 @@ class Simulation:
             stages.append(CircuitStage(circuit_block))
         if interconnect_block is not None:
             stages.append(InterconnectStage(interconnect_block))
+        # THE COMMS HEAD taps the mixing block's INPUT -- the received grid at the
+        # interconnect / front-end output, still in the frequency domain (contract
+        # section 1.2, the `IC -> comms head` edge on the one diagram). It is a serial
+        # stage and not a downstream block for a structural reason, not a stylistic
+        # one: downstream blocks run after the WHOLE spine, by which point the chain is
+        # in the cube domain and `s_pars` has been dropped at the crossing. A head that
+        # reads a channel frequency response therefore has to run where one exists.
+        #
+        # These blocks emit only `comm_*` keys, so they change nothing the sensing
+        # products read; that is what makes the comms head a tap rather than a branch,
+        # and it is why the diagram no longer needs a rule forbidding it beside the
+        # radar products.
+        for block in (comms_head or []):
+            stages.append(block)
+            # A tap is a PRODUCT, so what it emits must reach `outputs` the way a
+            # downstream product's does -- otherwise `sim.get_outputs()['ber']` comes
+            # back empty and the head looks like it did not run. Serial stages
+            # ordinarily write state and nothing else, which is right for a stage that
+            # transforms the frame; these do not transform anything.
+            self._product_stages.add(id(block))
         stages.append(DechirpBlock(cfg or self._SingleTxCfg()))
         if not legacy:
             fe = front_end
@@ -587,6 +617,15 @@ class Simulation:
             # through the compressor (see e2e/blocks.py:_aperture_shape_for).
             'aperture_shape': (self.n_rx_x, self.n_rx_y),
         }
+        if self.subspace_block is not None:
+            # The tracker's basis AS OF THE PREVIOUS FRAME, seeded at the head of the
+            # chain rather than only written at its tail. A comms head tapped before
+            # the mixing block (`comms_head=`) beamforms with it, and the previous
+            # frame's estimate is the causally correct thing for it to have: this
+            # frame's tracker output does not exist until this frame has been received.
+            # It is overwritten with the current basis after the serial loop, so no
+            # downstream product's view changes.
+            state_dict['U'] = self.subspace_block.oja.U
         if self.skipped_stages:
             # Not a warning and not silence: a recorded fact, per frame, that a
             # stored-vs-live comparison can read back.
@@ -608,7 +647,11 @@ class Simulation:
             _check_frame_contract(stage, state_dict)
             before = state_dict.get('signal_domain', domain)
             before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
-            state_dict.update(stage.apply(state_dict))
+            emitted = stage.apply(state_dict)
+            state_dict.update(emitted)
+            if id(stage) in self._product_stages:
+                for name, value in emitted.items():
+                    self.outputs[name].append(value)
             _advance_domain(stage, state_dict, before)
             _advance_dimension(stage, state_dict, before_dim)
 
