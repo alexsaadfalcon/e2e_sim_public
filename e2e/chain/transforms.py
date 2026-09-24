@@ -32,6 +32,62 @@ import torch
 # --------------------------------------------------------------------------------
 # Range-Doppler processing
 # --------------------------------------------------------------------------------
+#: The range-transform protocol the ML corpora were SCORED on, and therefore the one
+#: `adc_to_rd` builds and the one `RadarCubeBlock` refuses a cube that departs from.
+#: Named once, here, because three places (this module, the spine's
+#: `RangeTransformBlock`, and the webapp's T5 chain) have to agree on it or F85/F95's
+#: bit-parity gates read a non-zero diff for a reason that has nothing to do with the
+#: detector under test. Measured 2026-09-24: with these three settings the block and
+#: this function's old inline range half are bit-identical (`torch.equal`) -- see
+#: `tests/test_transforms.py::test_adc_to_rd_is_the_range_transform_block_plus_doppler`.
+RD_RANGE_PROTOCOL = {"window": "hann", "dc_removal": True, "crop_negative_delay": False}
+
+
+def range_transform_for(cfg):
+    """THE `RangeTransformBlock` that produces an `adc_to_rd`-compatible cube.
+
+    One constructor, so a chain that wants `RadarCubeBlock`/`adc_to_rd` downstream
+    cannot accidentally build the imaging spine's identity-point transform
+    (`window="none"`, `dc_removal=False`) and get a cube the Doppler half would
+    silently accept. Imported lazily inside the function bodies below because
+    `e2e.chain.receive` imports THIS module -- the range transform lives there, next
+    to the rest of the receive chain, and this module is now a thin caller of it.
+    """
+    from e2e.chain.receive import RangeTransformBlock
+    return RangeTransformBlock(cfg, **RD_RANGE_PROTOCOL)
+
+
+def rd_from_cube(cfg, cube):
+    """The DOPPLER half: a range-compressed cube -> the Range-Doppler product.
+
+    `cube` complex64 `[n_rx, n_chirps, n_range]` as `RangeTransformBlock` emits it
+    (fast axis already range-compressed). Returns RD complex64
+    `[n_rx, range_bin, doppler_bin]`, zero-Doppler at the centre bin after `fftshift`.
+
+    Split out of `adc_to_rd` 2026-09-24 (one-chain contract section 1.2 row 11): the
+    range FFT is now the spine's one `RangeTransformBlock` and this is everything that
+    is left over. The arithmetic is unchanged and bit-identical.
+    """
+    cube = torch.as_tensor(cube, dtype=torch.complex64)
+    if cube.dim() != 3:
+        raise ValueError(
+            f"cube must be [n_rx, n_chirps, n_range], got shape {tuple(cube.shape)}")
+    n_chirps = cube.shape[1]
+    cfg_chirps = getattr(cfg, "n_chirps", None) if cfg is not None else None
+    if cfg_chirps is not None and cfg_chirps != n_chirps:
+        raise ValueError(f"cube has {n_chirps} chirps but cfg.n_chirps={cfg_chirps}")
+
+    doppler_win = torch.hann_window(n_chirps, periodic=False, dtype=torch.float32,
+                                    device=cube.device)
+    y = cube * doppler_win.to(cube.dtype)[None, :, None]
+    doppler_fft = torch.fft.fft(y, n=n_chirps, dim=1)
+    doppler_fft = torch.fft.fftshift(doppler_fft, dim=1)           # zero-Doppler -> centre bin
+
+    # swap (chirp, range) -> (range, doppler) so the returned axis order matches the docstring
+    rd = doppler_fft.transpose(1, 2).contiguous()                  # [n_rx, range_bin, doppler_bin]
+    return rd.to(torch.complex64)
+
+
 def adc_to_rd(cfg, adc):
     """Raw ADC -> Range-Doppler cube.
 
@@ -44,6 +100,15 @@ def adc_to_rd(cfg, adc):
       1. remove per-(rx,chirp) DC offset (mean over the sample axis);
       2. Hann window on the sample axis, FFT over samples (range);
       3. Hann window on the chirp axis, FFT over chirps + fftshift (Doppler).
+
+    Steps 1-2 are now `RangeTransformBlock` (the spine's ONE range FFT, contract
+    section 1.2 row 11) and step 3 is `rd_from_cube`; this function is the composition
+    of the two, kept because it is the scored ML protocol's entry point and a dozen
+    call sites and stored corpora are written against its name and its exact output.
+    The refactor is bit-identical by construction -- it is the same three operations
+    in the same order on the same tensors -- and pinned that way by
+    `tests/test_transforms.py::test_adc_to_rd_is_the_range_transform_block_plus_doppler`
+    and `tests/test_one_chain_spine.py::test_adc_to_rd_range_half_parity`.
     """
     adc = torch.as_tensor(adc, dtype=torch.complex64)
     if adc.dim() != 3:
@@ -57,23 +122,8 @@ def adc_to_rd(cfg, adc):
         if cfg_samples is not None and cfg_samples != n_samples:
             raise ValueError(f"adc has {n_samples} samples but cfg.n_samples={cfg_samples}")
 
-    # 1. per-chirp DC removal (mean over fast-time/sample axis)
-    x = adc - adc.mean(dim=-1, keepdim=True)
-
-    # 2. range FFT: Hann window over samples, FFT over the sample axis
-    range_win = torch.hann_window(n_samples, periodic=False, dtype=torch.float32, device=x.device)
-    x = x * range_win.to(x.dtype)
-    range_fft = torch.fft.fft(x, n=n_samples, dim=-1)              # [n_rx, n_chirps, range_bin]
-
-    # 3. doppler FFT: Hann window over chirps, FFT + fftshift over the chirp axis
-    doppler_win = torch.hann_window(n_chirps, periodic=False, dtype=torch.float32, device=x.device)
-    y = range_fft * doppler_win.to(x.dtype)[None, :, None]
-    doppler_fft = torch.fft.fft(y, n=n_chirps, dim=1)
-    doppler_fft = torch.fft.fftshift(doppler_fft, dim=1)           # zero-Doppler -> centre bin
-
-    # swap (chirp, range) -> (range, doppler) so the returned axis order matches the docstring
-    rd = doppler_fft.transpose(1, 2).contiguous()                  # [n_rx, range_bin, doppler_bin]
-    return rd.to(torch.complex64)
+    cube = range_transform_for(cfg).apply({"adc": adc})["cube"]
+    return rd_from_cube(cfg, cube)
 
 
 # --------------------------------------------------------------------------------

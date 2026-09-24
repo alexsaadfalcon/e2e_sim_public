@@ -22,8 +22,9 @@ Five blocks:
   `QuantizerBlock` (protecting the converter's dynamic range is its job).
 - `QuantizerBlock`   -- ADC digitization (full-scale clip + uniform quantization).
   Serial stage: rewrites `adc`.
-- `RadarCubeBlock`   -- range-Doppler product via `e2e.chain.transforms.adc_to_rd`.
-  Downstream product block: reads `adc`, emits `radar_cube`, never rewrites `adc`.
+- `RadarCubeBlock`   -- range-Doppler product: reads the spine's `cube` and applies
+  only the Doppler half (`e2e.chain.transforms.rd_from_cube`).
+  Downstream product block: reads `cube`, emits `radar_cube`, never rewrites `cube`.
 """
 
 import dataclasses
@@ -34,7 +35,7 @@ import torch
 from e2e import frames
 from e2e.frames import FrameCapabilities
 from e2e.chain.impairments import apply_all, ClutterParams, LeakageParams, PhaseNoiseParams
-from e2e.chain.transforms import adc_to_rd, tdm_deinterleave
+from e2e.chain.transforms import rd_from_cube, tdm_deinterleave
 from e2e.radar_config import C_MPS
 
 
@@ -673,15 +674,27 @@ class RangeTransformBlock:
             "range_n_fft": n_samples,
             "range_delta_f_hz": delta_f,
             "range_cropped": self.crop_negative_delay,
+            # The protocol the cube was built under, travelling in state. Added
+            # 2026-09-24 (shard 2) so a downstream product that is only valid under
+            # ONE protocol can refuse the others BY NAME instead of computing a
+            # plausible wrong answer: `RadarCubeBlock`/`transforms.adc_to_rd` are the
+            # scored ML protocol (hann / DC removal / uncropped, F85 and F95 read
+            # bit-parity against corpora made that way), and the imaging spine runs
+            # the identity point (`none` / no DC removal) instead.
+            "range_window": self.window,
+            "range_dc_removal": self.dc_removal,
         }
 
 
 class RadarCubeBlock:
     """Range-Doppler radar cube -- a downstream PRODUCT block (like `FFTBlock`/
-    `RangeAzBlock`): reads `adc` and emits `state['radar_cube']`, never rewriting
-    `adc` itself.
+    `RangeAzBlock`): reads `cube` and emits `state['radar_cube']`, never rewriting
+    `cube` itself.
 
-    Wraps `e2e.chain.transforms.adc_to_rd`; the returned cube is complex64
+    Consumes the spine's range-compressed `cube` (`RangeTransformBlock`, the ONE range
+    FFT -- contract section 1.2 row 11) and applies `transforms.rd_from_cube`, the
+    Doppler half of `adc_to_rd`. It no longer computes a range FFT of its own; the
+    returned cube is complex64
     `[n_rx (or n_virtual for TDM), range_bin, doppler_bin]` with `range_bin ==
     cfg.n_samples` and `doppler_bin == cfg.n_chirps` (or `cfg.n_chirps_per_tx` after
     TDM de-interleave -- see below), matching `cfg`'s configured bin counts.
@@ -694,23 +707,66 @@ class RadarCubeBlock:
     only (see module docstring).
     """
 
-    frame_capabilities = _RX_TIME
+    frame_capabilities = FrameCapabilities(
+        domain=frames.DOMAIN_CUBE, accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+    )
 
     def __init__(self, cfg):
         self.cfg = cfg
 
+    def _check_protocol(self, state):
+        """Refuse a cube that was not range-compressed on the SCORED protocol.
+
+        This block used to read `adc` and run `transforms.adc_to_rd` itself -- a
+        second range FFT, which is exactly what the one-chain contract deletes. Now
+        it reads the spine's `cube` and applies only the Doppler half, which makes
+        the range protocol somebody else's decision and therefore something this
+        block has to check: `RangeTransformBlock`'s own defaults match (hann, DC
+        removal), but the IMAGING spine deliberately builds the identity point
+        (`window="none"`, `dc_removal=False`) and crops to the non-negative half.
+        Handing that cube to the Doppler half produces a range-Doppler map on a
+        different, unlabelled protocol -- half the range bins and no window -- which
+        F85/F95's stored-vs-live gates would read as a detector difference.
+
+        Missing keys mean the cube did not come from a `RangeTransformBlock` (a test
+        parking one in state by hand); that is allowed and unchecked.
+        """
+        from e2e.chain.transforms import RD_RANGE_PROTOCOL
+        want = RD_RANGE_PROTOCOL
+        got = {"window": state.get("range_window"),
+               "dc_removal": state.get("range_dc_removal"),
+               "crop_negative_delay": state.get("range_cropped")}
+        if all(v is None for v in got.values()):
+            return
+        bad = {k: got[k] for k in want if got[k] is not None and got[k] != want[k]}
+        if bad:
+            raise frames.FrameContractError(
+                f"{frames.component_name(self)} consumes the SCORED range protocol "
+                f"{want} (it applies only the Doppler half of "
+                f"`transforms.adc_to_rd`), but the chain's cube was built with "
+                f"{bad}. Build the chain's RangeTransformBlock with "
+                f"`**transforms.RD_RANGE_PROTOCOL` -- or, for the imaging identity "
+                f"point, read a range-angle product instead of range-Doppler."
+            )
+
     def apply(self, state):
-        adc = state["adc"]
+        self._check_protocol(state)
+        frames.require_cube_axes(state, self, slow="chirp", fast="range_bin")
+        cube = state["cube"]
         cfg = self.cfg
         if getattr(cfg, "mimo", None) == "tdm":
-            adc = tdm_deinterleave(cfg, adc)
+            # The de-interleave is a pure reorganisation of the SLOW axis, so it
+            # commutes exactly with the fast-axis range FFT that has already run:
+            # applying it to the cube gives the same tensor as applying it to `adc`
+            # and range-compressing afterwards.
+            cube = tdm_deinterleave(cfg, cube)
             # De-interleaving consumes the transmit multiplexing: the cube now has one
             # virtual array and cfg.n_chirps_per_tx slow-time samples. Handing the
-            # ORIGINAL cfg to adc_to_rd then fails its own shape check, which blocked
+            # ORIGINAL cfg to rd_from_cube then fails its own shape check, which blocked
             # the ti_iwr1443 preset outright. Describe
             # the de-interleaved cube instead. Same pattern dataset.py already uses.
             cfg = dataclasses.replace(
                 cfg, n_tx=1, mimo="single", n_chirps=cfg.n_chirps_per_tx
             )
-        radar_cube = adc_to_rd(cfg, adc)
+        radar_cube = rd_from_cube(cfg, cube)
         return {"radar_cube": radar_cube}

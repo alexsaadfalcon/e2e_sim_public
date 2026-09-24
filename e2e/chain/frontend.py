@@ -206,6 +206,13 @@ class FrontEndBlock:
             if self.if_bw_mhz is not None:
                 table[:, self.RX_CONFIG_IF_BW] = float(self.if_bw_mhz) * 1e6
             self._rx_config = table
+        elif self._rx_config.device != torch.device(device):
+            # A table CLONED from an `RFFEBlock` (`from_rffe`) carries that block's
+            # device, which need not be the frame's -- `circuit_model_bb_approx`
+            # asserts they match, so a CPU frame through a CUDA-built front end used to
+            # die on `Device mismatch` with nothing naming the cause. Move and re-cache
+            # (found 2026-09-24 wiring the ML corpus chain onto this block).
+            self._rx_config = self._rx_config.to(device)
         return self._rx_config
 
     def fs_hz(self):
