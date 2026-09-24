@@ -564,8 +564,23 @@ class OFDMReceiveBlock:
     `state['U']` from the tracker, which sits DOWNSTREAM of the mixing block, so on this
     path the weights would come from the previous frame's basis or from nothing at all.
 
-    NOISE: none is injected here. The chain's own floor -- the front end's Friis
-    cascade -- is the single noise source, which is contract section 1.4.
+    NOISE: none is injected here, ever -- this block has no noise source and no
+    `add_noise` knob. The chain's floor is the only one, which is contract section 1.4.
+
+    THE SCOPE THAT MAKES THAT TRUE RATHER THAN EMPTY: for these waveform classes the
+    front end belongs in the FREQUENCY domain, as `CircuitStage(RFFEBlock)` on the
+    received grid -- and that is not a workaround, it is the physics. `ifft(s_pars)` of
+    a received OFDM grid IS the received time-domain symbol, the signal a real
+    amplifier sees, which is exactly what makes `RFFEBlock`'s round trip correct here
+    and wrong on an FMCW CFR (F96). Placed there the front end runs BEFORE this block,
+    stamps `noise_injected_by`, and its floor reaches both the comms products and the
+    sensing cube -- one knob moving both, on one frame.
+
+    A chain that instead puts a beat-placement `FrontEndBlock` after a mixing block
+    gives this head a NOISELESS grid: `comm_noise_source` then reads `"none"` and the
+    measured SNR is whatever float precision allows. That is reported, not hidden, and
+    it is the signal that the front end is on the wrong side of the tap for this
+    waveform.
 
     THE EQUALISER'S SNR is MEASURED, not assumed (`channel.estimate_snr_db`): once the
     front end is the only noise source, nothing in the pipeline knows the

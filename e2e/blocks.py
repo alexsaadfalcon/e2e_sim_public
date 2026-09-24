@@ -888,6 +888,21 @@ class CircuitStage:
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
+        # THE SEAM that makes "one noise source" true on the FREQUENCY-DOMAIN side of
+        # the chain, mirroring the one `FrontEndBlock` stamps on the beat record
+        # (contract section 1.4). Added 2026-09-24, and it matters for exactly one
+        # configuration: an OFDM/JSAC chain, where the front end belongs HERE rather
+        # than after a dechirp, because `ifft(s_pars)` of a received OFDM grid IS the
+        # received time-domain symbol -- the signal a real amplifier sees. A comms head
+        # tapped downstream of this stage reads the key and does not draw a second,
+        # uncorrelated floor of its own (`ModemBlock.noise_enabled`,
+        # `OFDMReceiveBlock`).
+        #
+        # It is NOT stamped when the block's own noise draw is off: `inject_noise=False`
+        # runs the cascade with no thermal term at all, so claiming an injection would
+        # make a downstream head suppress the only floor the chain has.
+        extra = ({"noise_injected_by": "frontend"}
+                 if getattr(self.rffe_block, "inject_noise", True) else {})
         # Advertise WHICH amplitude scale the frame is now on. `RFFEBlock` with
         # physical_scale=False divides the frame by its own mean magnitude, erasing the
         # absolute level; anything downstream that installs an ABSOLUTE reference (the
@@ -897,7 +912,8 @@ class CircuitStage:
         # above forfeits the scale.
         absolute = bool(getattr(self.rffe_block, "physical_scale", True))
         return {"s_pars": s_pars, "PRX": PRX,
-                "amplitude_scale": "absolute" if absolute else "normalised"}
+                "amplitude_scale": "absolute" if absolute else "normalised",
+                **extra}
 
 
 class GridStage:

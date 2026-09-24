@@ -72,6 +72,30 @@ class ModemBlock:
     whenever the chain already injected some. See `add_noise` in `__init__`; it is the
     difference between one noise source and three.
 
+    WHICH CHAINS ACTUALLY COUPLE, and this is a scope, not a caveat. A tap reads the
+    state as it stands AT THE TAP POINT, and the two front-end placements sit on
+    opposite sides of it:
+
+    * **OFDM / JSAC chains (`CircuitStage(RFFEBlock)`, frequency domain).** The front
+      end runs BEFORE this tap and stamps `noise_injected_by`, so the head suppresses
+      its own draw and the front end's floor is the only one. Turning the LNA bias or
+      the noise figure moves the image AND the BER. This is the "one knob, both
+      products" configuration, and it is the one a JSAC preset builds.
+    * **FMCW chains (`FrontEndBlock`, beat record).** The front end runs AFTER the
+      dechirp, i.e. strictly after this tap, and it acts on `adc` -- a tensor that does
+      not exist yet and a domain this head does not read. Its noise CANNOT reach a
+      channel-frequency-response tap, at any stage ordering, because the two live in
+      different domains. So on an FMCW chain this head is correctly its own noise
+      source, `comm_noise_source` reads `"modem"`, `comm_snr_db` is the configured
+      value, and **the front-end knobs do not move the BER**. That is a true statement
+      about a comms link tapped off a radar chain before the mixer, not a defect -- but
+      a card must not claim the coupling there.
+
+    `tests/test_comms_blocks.py::test_the_noise_coupling_is_real_on_a_frequency_domain_front_end`
+    and `::test_a_beat_placement_front_end_cannot_reach_a_cfr_tap` pin BOTH halves
+    through a real `Simulation`, because the isolated-state-dict tests below cannot see
+    which side of the tap a stage ends up on.
+
     Parameters mirror `OFDMModem`. On `apply` it returns the recovered bits,
     equalized data symbols, the (LS) channel estimate and the bits that were sent
     -- everything a downstream `BERBlock` needs.
