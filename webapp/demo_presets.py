@@ -335,15 +335,19 @@ PRESETS: List[DemoPreset] = [
         # result instead ("zmin -67.1 dB (was -40.0)"). Replaced with the actual
         # shared-scale rule; the two meanings of "shared" (a default clip vs the
         # A/B pass) no longer collide in one sentence.
+        # wave 13 (2026-09-24, round 10 §1.10): the cancel screen only ever renders
+        # ONE arm (B never started), so an unconditional "the 0.5 mA arm's background
+        # is visibly brighter" was false on that screen -- the two "share one colour
+        # scale" clauses (one generic, one naming arm B by value) are merged into a
+        # single clause gated on "when two arms run", true whether one or both render.
         screen_note=("dB rel. peak; clip follows the frame's median floor + 3 dB; "
-                     "both maps share one colour scale down to the deeper arm's "
-                     "floor (the printed zmin); range "
+                     "when two arms run, they share one colour scale down to the "
+                     "deeper arm's floor (the printed zmin), and the 0.5 mA arm's "
+                     "background reads visibly brighter than the 8 mA arm's, about "
+                     "twelve dB by the printed numbers, streaks matching; range "
                      "(m; 0 = earliest arrival; 1.00 m/gate; display 0-125 m of a 250 m "
-                     "unambiguous window, the negative-delay half cropped); the two maps "
-                     "share one colour scale down to the deeper floor, so the 0.5 mA "
-                     "arm's background is visibly brighter, about twelve dB by the "
-                     "printed numbers; the streaks are the same; all 1024 elements "
-                     "share one front-end config; " + _ARRAY_DISCLOSURE),
+                     "unambiguous window, the negative-delay half cropped); all 1024 "
+                     "elements share one front-end config; " + _ARRAY_DISCLOSURE),
         say=[
             # wave 11 (2026-09-24): runbook.py's "While it runs, say" line is
             # preset.say[0] -- it must carry the shared-colour-scale story, not
@@ -767,8 +771,15 @@ PRESETS: List[DemoPreset] = [
         # the run-notes line's own vocabulary: "ring3x3 (one signal via)", not
         # "single-via" (both true, e2e/interconnect_surrogate/tessera.py; two
         # vocabularies on one screen was the finding, not a factual error).
+        # wave 13 (2026-09-24, layout redesign): "under the banner" was the
+        # pre-redesign banner; the run-notes line is now only reachable inside each
+        # arm's Details disclosure (the caption slot under the banner is spent on the
+        # TSV height value, which overflows the arm chip on this preset -- see
+        # `_ab_arm_chip_overflow`/`_arm_caption` in webapp/app.py, confirmed on the
+        # rendered Results PNG: the scale/frequency clause does not appear until
+        # Details is opened).
         screen_note=("LIVE Tessera surrogate, scale model x2 (see the run-notes "
-                     "line under the banner); in-band "
+                     "line inside each arm's Details disclosure); in-band "
                      "|S21| moves <0.03 dB across every knob -- invisible on a "
                      "peak-normalized display. The 3.53 dB skirt figure on the card "
                      "is an offline flat-frame metric (bulk delay, not distortion), "
@@ -789,12 +800,18 @@ PRESETS: List[DemoPreset] = [
                      "not numbers from this run."),
         say=[
             # wave 12 (2026-09-24, item 1.7): folded in the one on-screen pointer
-            # for "did arm B actually run?" -- the run-notes line under each
-            # banner, which also carries the height that differs between arms.
+            # for "did arm B actually run?".
+            # wave 13 (2026-09-24, layout redesign): RETRACTED "the run-notes line
+            # under each banner names the scale factor and frequency, and is the one
+            # place arm B's height shows on screen" -- read on the rendered PNG, the
+            # scale/frequency clause is Details-only on this preset (the caption slot
+            # under the banner is spent on the TSV height VALUE instead, since the
+            # arm chip itself overflows); that value IS the one place the height
+            # shows without a click, so the two facts are now attributed correctly.
             "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a "
-            "CSV); the run-notes line under each banner names the scale factor "
-            "and frequency, and is the one place arm B's height shows on "
-            f"screen: {_TESSERA_CANONICAL_HEIGHT_UM:g} um (A) vs "
+            "CSV); scale factor and frequency are in each arm's Details. "
+            "Arm B's height shows without a click, in the caption under "
+            f"each banner: {_TESSERA_CANONICAL_HEIGHT_UM:g} um (A) vs "
             f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um (B).",
             "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
             "doi 10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are "

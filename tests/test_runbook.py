@@ -166,32 +166,40 @@ def test_render_gives_the_rdp_slider_rule_a_thrust_4_exception_too():
     assert "range-profile panel renders once from the last frame" in flat.lower()
 
 
-def test_render_warns_a_slider_drag_parks_only_one_arm():
-    """Item 3.3: `results_clock.js` pauses the shared clock on any drag, but the
-    drag itself only moves the ONE panel under the cursor -- the other arm's
-    panel stays wherever the clock stopped. The old wording ("so you can park a
-    panel on a chosen frame") did not say that, and following it silently
-    compares two different frames across arms."""
+def test_render_says_the_one_shared_slider_parks_both_arms():
+    """Item 3.3, RETRACTED by the beautification pass (2026-09-24): the old
+    per-panel sliders `results_clock.js` used to pause on drag could park ONE
+    arm and leave the other running (item 3.3's original finding). Those sliders
+    are gone -- there is now exactly one shared transport (pause/play + "frame N
+    of M" + one slider) for the whole screen, so scrubbing it pauses and parks
+    BOTH arms together. The runbook must state the current behaviour, not the
+    retired one-arm-parking warning."""
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render
 
     doc = render(PRESETS)
     flat = _flat(doc)
-    assert "parks only the one arm" in flat.lower() or "parks only the one" in flat.lower()
-    assert "press pause first, then compare" in flat.lower()
+    assert "parks only the one arm" not in flat.lower()
+    assert "parks both arms" in flat.lower()
+    assert "one slider for the whole screen" in flat.lower()
 
 
 def test_render_has_a_general_pause_before_reading_a_number_rule():
     """Item 3.4: three demo cards say "read it off the screen" for a printed
     statistic that is rebuilt every frame while the clock loops -- the runbook's
     general mechanics must carry one rule that applies to every preset, not
-    only the Thrust 5 exception paragraph."""
+    only the Thrust 5 exception paragraph.
+
+    Wave 13 (2026-09-24, beautification pass): the pinned phrase now names WHERE
+    to pause -- the one transport's button lives in the run-identity row, not on
+    a per-panel slider any more."""
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render
 
     doc = render(PRESETS)
     flat = _flat(doc)
-    assert "pause before reading one aloud" in flat.lower()
+    assert ("pause with the button in the run-identity row before reading a "
+           "per-frame number" in flat.lower())
     assert "not just thrust 5" in flat.lower()
 
 
@@ -260,21 +268,28 @@ def test_render_quotes_rendered_panel_titles_not_block_diagram_labels():
 
 def test_panel_titles_match_the_rendered_source():
     """Wave 10 (2026-09-24, item 3.5, hostile round 9): the panel-title constants
-    in webapp/runbook.py are hand-typed (the true strings are f-string title
-    expressions with computed numbers inline, inside torch-tolerant modules this
-    torch-free generator does not import) -- so this test, which MAY import
-    torch, greps those modules' own source text for the literal substrings, and
-    catches a rename there that generation time cannot see."""
+    in webapp/runbook.py are hand-typed (the true strings live inside
+    torch-tolerant modules this torch-free generator does not import) -- so this
+    test, which MAY import torch, greps those modules' own source text for the
+    literal substrings, and catches a rename there that generation time cannot
+    see.
+
+    Wave 13 (2026-09-24, beautification pass): RETRACTED the "not anchored to a
+    closing quote" extractor -- these titles used to be the first part of a
+    longer f-string title, so a bare substring check was the most it could pin.
+    They are now `set_panel(fig, title="...")` literals (five directly, or via a
+    `title` loop variable fed by a literal tuple two lines above its own
+    `set_panel(` call -- see `pipeline_runner.py`'s range_az/range_el loop), so
+    the extractor reads the actual set_panel( titles: it anchors to the quoted
+    literal (`"<title>"`), not a loose substring that could also match inside a
+    comment or an unrelated string in this heavily-commented file."""
     pytest.importorskip("torch")
     from webapp.runbook import _DETECTOR_PANEL_TITLES, _PANEL_TITLES
 
     pipeline_runner_src = (_REPO_ROOT / "webapp" / "pipeline_runner.py").read_text(encoding="utf-8")
     scoreboard_src = (_REPO_ROOT / "webapp" / "detector_scoreboard.py").read_text(encoding="utf-8")
     for bid, title in _PANEL_TITLES.items():
-        # Not anchored to a closing quote: several titles are the FIRST part of
-        # a longer f-string title (e.g. "...<br><sup>clip ...</sup>"), so only
-        # the literal substring, not "the whole quoted string", is stable.
-        assert title in pipeline_runner_src, (bid, title)
+        assert f'"{title}"' in pipeline_runner_src, (bid, title)
     for mode, title in _DETECTOR_PANEL_TITLES.items():
         assert f'"{title}"' in pipeline_runner_src, (mode, title)
     assert '"Detector scoreboard' in scoreboard_src

@@ -468,14 +468,19 @@ session's first run pays the torch cold start now (see check 4, Warm-up) --
 not while the room is watching.
 
 Presenting over RDP: the Results tab now PLAYS ITSELF. Every animated panel on
-it (both A/B arms) steps together on one 700 ms clock and loops forever, with no
+it (both A/B arms) steps together on ONE shared clock and loops forever, with no
 click. RETIRED (owner, live test 2026-09-24): the old "step the slider, never
 press Play" rule -- it existed because Play's ~350 ms/frame animation was assumed
 to stutter over the link, and the owner measured the frame rate over RDP as fine.
-To hold a frame while you talk about it, press the pause button (or drag the
-slider) on ANY panel -- it stops every panel; press play to resume. Thrust 5
-exception: only the Range-Doppler panel has frames; the objectness/scoreboard/PR
-panels hold the LAST frame, so the clock desyncs the cube from them by itself.
+SUPERSEDED (beautification pass, 2026-09-24): the per-panel sliders/Play buttons
+that rule was about are gone. There is exactly ONE transport for the whole
+screen now -- a pause/play button, a "frame N of M" readout, and one slider,
+together in the run-identity row at the top. Press pause with that ONE button to
+hold a frame while you talk about it -- it stops every panel together, both arms
+included -- then press it again to resume; dragging its slider does the same and
+now parks BOTH arms (there is only the one slider). Thrust 5 exception: only the
+Range-Doppler panel has frames; the objectness/scoreboard/PR panels hold the
+LAST frame, so the clock desyncs the cube from them by itself.
 
 Preset stage order:
 {order}

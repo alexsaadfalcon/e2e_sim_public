@@ -163,14 +163,22 @@ def _opening_block(preset: DemoPreset) -> Tuple[str, str]:
 
 
 def _ab_lines(preset: DemoPreset) -> Optional[Tuple[str, str]]:
-    """(A's banner line, B's banner line), matching `webapp.app._ab_arm_line` --
-    None if this preset has no built-in A/B."""
+    """(A's visible arm-chip text, B's), matching `webapp.app._ab_arm_chip` -- the
+    small chip next to each arm's colour dot, e.g. "A — LNA bias current (mA)
+    8 mA". None if this preset has no built-in A/B.
+
+    Wave 13 (2026-09-24, beautification pass): this used to match
+    `webapp.app._ab_arm_line`'s longer "A (as loaded): <label> <value> --
+    before" sentence, which WAS the visible banner pre-redesign. That sentence
+    still exists, but only as the first line inside each arm's own collapsed
+    ▸ Details (provenance, band, clip) disclosure now -- `_render_preset`'s own
+    "Arm chips on screen" bullet says where to find it."""
     if preset.ab is None:
         return None
     bid, key, _value_b = preset.ab
     label = _param_label(bid, key)
-    return (f"A (as loaded): {label} {preset.ab_label_a or '?'} -- before",
-            f"B: {label} {preset.ab_label_b or '?'} -- after")
+    return (f"A — {label} {preset.ab_label_a or '?'}",
+            f"B — {label} {preset.ab_label_b or '?'}")
 
 
 def _second_knobs(preset: DemoPreset) -> List[Tuple[str, str, str]]:
@@ -184,21 +192,30 @@ def _second_knobs(preset: DemoPreset) -> List[Tuple[str, str, str]]:
 # wave 10 (2026-09-24, item 3.5, hostile round 9): the RENDERED panel titles, not
 # the block-diagram node labels (`BLOCKS_BY_ID[bid].label`, e.g. "Radar Cube
 # (Range-Doppler)", "Detector (CFAR | ML)") the previous version of this module
-# quoted. Hand-typed, not imported: the true strings are f-string title
-# expressions with computed numbers inline (clip dB, corpus name, frame counts)
-# inside webapp/pipeline_runner.py and webapp/detector_scoreboard.py, which this
-# module deliberately does not import (both are torch-tolerant, not torch-free at
-# call time). tests/test_runbook.py::test_panel_titles_match_the_rendered_source
+# quoted. Hand-typed, not imported: the true strings live in
+# webapp/pipeline_runner.py and webapp/detector_scoreboard.py, which this module
+# deliberately does not import (both are torch-tolerant, not torch-free at call
+# time). tests/test_runbook.py::test_panel_titles_match_the_rendered_source
 # (which IS allowed to import torch) greps those two files' source for these exact
 # literal substrings, so a rename there is caught here rather than silently
 # quoting a string nobody sees on screen.
+#
+# Wave 13 (2026-09-24, beautification pass): RETRACTED "f-string title expressions
+# with computed numbers inline" -- these five are now plain `set_panel(fig,
+# title="...")` string literals (range_az/range_el via a `title` loop variable fed
+# by a literal tuple); the qualifier/computed number that used to sit inline in the
+# title moved to the panel's CAPTION or its statistic strip instead (e.g.
+# "non-coherent over channels" is now a caption clause on the Range profile panel,
+# not part of its title). Only the detector panel title still appends a computed
+# clause (` — {det_label}`), which is why `_DETECTOR_PANEL_TITLES` is checked
+# separately below.
 # =====================================================================================
 _PANEL_TITLES = {
     "range_az": "Range-azimuth power",
     "range_el": "Range-elevation power",
-    "range_profile": "Range profile (non-coherent over channels)",
+    "range_profile": "Range profile",
     "radar_cube": "Range-Doppler power",
-    "subspace_err": "Subspace error (Frobenius) per frame",
+    "subspace_err": "Subspace error per frame",
 }
 #: wave 12 (2026-09-24, item 3.1): the product ids that render as heat maps
 #: (`go.Heatmap`, subject to `webapp.app._share_y_ranges`'s colour-limit
@@ -288,17 +305,22 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         det_title = _panel_title("detector", preset)
         lines.append(_bullet(
             f'Four panels render: **"{_panel_title("radar_cube", preset)}"** '
-            f'(Range-Doppler, has its own frame slider), **"{det_title}"** '
-            '(no slider -- pinned to the last frame), **"Detector scoreboard"**, '
-            'and the offline PR-curve panel (**"scored offline: ... test '
-            'frames"**).'))
+            f'(Range-Doppler, follows the screen\'s one shared transport), '
+            f'**"{det_title}"** (pinned to the last frame regardless of the '
+            'transport), **"Detector scoreboard"**, and the offline PR-curve '
+            'panel (**"scored offline: ... test frames"**).'))
         # wave 11 (2026-09-24, owner live test): the Results-tab clock now animates
         # the cube WITHOUT a click, so the desync the wave-10 "leave the slider
         # alone" note warned about is the default state of these three screens.
+        # wave 13 (2026-09-24, beautification pass): there is one shared transport
+        # for the whole screen now, not a per-panel slider -- reworded so "press
+        # pause" points at that one control, not an implied per-panel one.
         lines.append(_bullet(
-            'The Range-Doppler panel loops by itself on the Results-tab clock; the '
-            'other three hold the LAST frame. Press pause on the cube before '
-            "talking about one frame's detections."))
+            'The Range-Doppler panel loops by itself on the shared clock; the '
+            'other three hold the LAST frame regardless of where the one '
+            'transport (pause/play + frame N of M + slider, in the run-identity '
+            'row) is parked. Pause it before talking about one frame\'s '
+            'detections.'))
     else:
         state = apply_preset(preset)
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
@@ -316,10 +338,17 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         # shared colour scale (there is no colour scale to share).
         colour_clause = (", on shared colour limits." if has_heatmap
                          else " (no heat map here, so no shared colour scale).")
+        # wave 13 (2026-09-24, beautification pass): these are the visible ARM
+        # CHIPS (`webapp.app._ab_arm_chip`) next to each arm's colour dot, not the
+        # longer "A (as loaded): ... -- before" banner -- that sentence, plus the
+        # provenance/band/clip clauses every panel used to carry as a subtitle,
+        # only reach the screen now behind that arm's own collapsed Details.
         lines.append(_bullet(
-            f'Arm banners on screen: "{ab[0]}" (LEFT column) / "{ab[1]}" '
-            f'(RIGHT column) -- each product renders once per column, on the same '
-            f'row{colour_clause}'))
+            f'Arm chips on screen: "{ab[0]}" (LEFT column, colour dot) / '
+            f'"{ab[1]}" (RIGHT column) -- each product renders once per column, '
+            f'on the same row{colour_clause} The full before/after sentence, '
+            "plus provenance, band and clip, is one click away behind that "
+            "arm's own **▸ Details (provenance, band, clip)**."))
     lines.append("")
 
     lines.append("### Second knob (optional)")
@@ -384,28 +413,38 @@ _BEFORE_AUDIENCE = """## Before the audience
    **Run pipeline**, let it finish. This pays the ~10s torch cold start now
    instead of in front of the room.
 5. The Results tab PLAYS ITSELF: every animated panel on it -- both A/B arms,
-   every product that has frames -- steps together on one 700 ms clock and loops
+   every product that has frames -- steps together on ONE shared clock and loops
    forever, starting by itself when the results render. Nothing to click.
    RETIRED (owner, live test 2026-09-24): the old rule to advance frames with a
    figure's own frame slider and never the ▶ (Play) control. It assumed Play's
    ~350 ms/frame animation stuttered over the RDP link; the owner measured the
    link and it does not.
-   To HOLD a frame while you talk about it, press the pause button on any panel --
-   one clock, so every panel stops together -- and ▶ to resume. Dragging a
-   slider ALSO pauses the clock, but it parks only the ONE arm under the
-   cursor -- the other arm keeps whatever index the clock stopped at. Press
-   pause first, then compare; do not drag to compare two arms.
-   A number a panel prints (peak-median, median floor, hit counts) is rebuilt
-   every frame while the clock loops -- pause before reading one aloud, on
-   every preset, not just Thrust 5.
+   SUPERSEDED (beautification pass, 2026-09-24): the per-figure sliders and
+   ▶ (Play) buttons that old rule was about are gone from the figures entirely.
+   There is exactly ONE transport for the whole screen now: a pause/play button,
+   a "frame N of M" readout, and one slider, together in the run-identity row at
+   the top. To HOLD a frame while you talk about it, press pause with that ONE
+   button -- it stops every animated panel together, both arms included -- then
+   press it again to resume. Dragging its slider also pauses the clock, and now
+   parks BOTH arms together (there is only the one slider for the whole screen);
+   the old per-panel sliders that could park one arm and leave the other running
+   are gone.
+   Each panel's headline number lives in its own statistic strip, the large
+   coloured figure directly above the plot (peak-median, median floor, hit
+   counts) -- that is what to read aloud, not the colour bar. It is rebuilt
+   every frame while the clock loops: pause with the button in the
+   run-identity row before reading a per-frame number aloud, on every preset,
+   not just Thrust 5.
    **Thrust 4 exception**: the range-profile panel renders once from the LAST
-   frame and never animates (no slider); the range-azimuth map above it keeps
-   looping on the shared clock, so the two panels show different frames by
-   design, with no drag needed to cause it.
+   frame and never animates (its own statistic strip says "static"); the
+   range-azimuth map above it keeps looping on the shared clock regardless of
+   where the one transport is parked, so the two panels can show different
+   frames by design, with no scrubbing needed to cause it.
    **Thrust 5 exception**: only the Range-Doppler panel has frames. The
    objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
-   clock now desyncs the cube from those frozen detections by itself, with no
-   drag at all. Pause the cube before talking about a specific frame's detections.
+   clock desyncs the cube from those frozen detections by itself, with no
+   scrubbing at all. Pause the cube (the one transport) before talking about a
+   specific frame's detections.
 """
 
 
@@ -432,25 +471,44 @@ def _click_mechanics(n_presets: int, n_ab: int) -> str:
                        "step in each section is a *manual, additional* change on top "
                        "of whatever the preset already does.")
     bullets = [
-        "The preset picker is the **Demo preset:** dropdown on the **Block Diagram** "
-        "tab; **Load preset** applies it.",
+        # wave 13 (2026-09-24, beautification pass): the preset picker, frame
+        # count, Run and Cancel all moved into ONE sticky control bar pinned to
+        # the top of the Block Diagram tab (block_diagram.py `layout()`'s
+        # docstring: "a sticky one-line control bar ... so the button the whole
+        # demo depends on never sits a thousand px below the fold") -- it is
+        # always visible, never scrolled past.
+        "The preset picker (**Demo preset:** dropdown), **Load preset**, "
+        "**Frames to run (n_steps)**, **Run pipeline** and **Cancel** all live "
+        "in ONE sticky control bar pinned to the top of the **Block Diagram** "
+        "tab -- it never scrolls out of view.",
         # wave 11 (2026-09-24, cold-read item 1): the exact affordance text under
         # the diagram (webapp/block_diagram.py) -- quoted once here rather than
         # per-preset, since it applies to every block click in every section
         # below (the auto-opened block on Load AND the "Second knob" clicks).
+        # wave 13 (2026-09-24, beautification pass): dropped "Then hit Run
+        # pipeline." -- Run pipeline is no longer reached by way of a block
+        # click; it lives in the sticky control bar above (previous bullet).
         'Every block in the diagram is clickable: "Click a block to edit its '
-        'parameters or toggle it on/off. Dashed edges feed a disabled block. '
-        'Then hit Run pipeline."',
+        'parameters or toggle it on/off. Dashed edges feed a disabled block."',
         "Loading a preset REPLACES the whole block state (edits made afterwards are "
         "the operator's own), fills **Frames to run (n_steps)** with the preset's "
-        'frame count, prints an operator card under the dropdown ("Loaded: '
-        "`<label>` (Thrust `<n>`, `<n_steps>` frames)\" followed by **Turn live** / "
-        "**Say** / **Do NOT say or show** lists -- copied verbatim from the "
-        "preset), and auto-opens the block-param editor on the block named by the "
-        "preset's first `live_knobs` entry.",
+        "frame count, and auto-opens the block-param editor on the block named by "
+        "the preset's first `live_knobs` entry. The operator's own card -- "
+        '"Loaded: `<label>` (Thrust `<n>`, `<n_steps>` frames)" followed by '
+        "**Turn live** / **Say** / **Do NOT say or show** lists, copied verbatim "
+        "from the preset -- is collapsed behind **▸ Presenter notes (Thrust "
+        "`<n>`)** at the bottom of the **Block Diagram** tab; click it to open.",
         "**Run pipeline** runs it; a run in progress enables **Cancel** (otherwise "
         "disabled) and shows the run-status text. A completed run switches the "
         "browser to the **Results** tab automatically.",
+        # wave 13 (2026-09-24, beautification pass): the honesty text -- every
+        # panel's provenance/band/clip clauses, plus the full "A (as loaded): ... "
+        # before/after sentence -- moved off the panel subtitles and the visible
+        # banner into each arm's own collapsed disclosure on the Results tab.
+        "Each arm's provenance, band and clip clauses, and its full before/after "
+        "sentence, are collapsed behind that arm's own **▸ Details "
+        "(provenance, band, clip)**, directly under its one-line caption on the "
+        "**Results** tab; click it to open.",
         ab_sentence,
     ]
     body = "\n".join(_bullet(b) for b in bullets)
@@ -564,7 +622,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         diff = difflib.unified_diff(
             existing.splitlines(keepends=True), content.splitlines(keepends=True),
             fromfile=str(out_path), tofile=f"{args.out} (generated)")
-        sys.stdout.writelines(diff)
+        diff_text = "".join(diff)
+        try:
+            sys.stdout.write(diff_text)
+        except UnicodeEncodeError:
+            # A Windows console's default cp1252 stdout can't encode the runbook's
+            # own unicode (▸, ▶, ±, …) -- write the diff as UTF-8 bytes instead of
+            # crashing `--check` before it reports the one fact that matters (stale
+            # or not).
+            sys.stdout.buffer.write(diff_text.encode("utf-8", errors="replace"))
         print(f"\n{out_path} is STALE -- regenerate with `{_CLI}`.")
         return 1
 

@@ -19,28 +19,38 @@ change to `webapp/demo_presets.py`.
    **Run pipeline**, let it finish. This pays the ~10s torch cold start now
    instead of in front of the room.
 5. The Results tab PLAYS ITSELF: every animated panel on it -- both A/B arms,
-   every product that has frames -- steps together on one 700 ms clock and loops
+   every product that has frames -- steps together on ONE shared clock and loops
    forever, starting by itself when the results render. Nothing to click.
    RETIRED (owner, live test 2026-09-24): the old rule to advance frames with a
    figure's own frame slider and never the ▶ (Play) control. It assumed Play's
    ~350 ms/frame animation stuttered over the RDP link; the owner measured the
    link and it does not.
-   To HOLD a frame while you talk about it, press the pause button on any panel --
-   one clock, so every panel stops together -- and ▶ to resume. Dragging a
-   slider ALSO pauses the clock, but it parks only the ONE arm under the
-   cursor -- the other arm keeps whatever index the clock stopped at. Press
-   pause first, then compare; do not drag to compare two arms.
-   A number a panel prints (peak-median, median floor, hit counts) is rebuilt
-   every frame while the clock loops -- pause before reading one aloud, on
-   every preset, not just Thrust 5.
+   SUPERSEDED (beautification pass, 2026-09-24): the per-figure sliders and
+   ▶ (Play) buttons that old rule was about are gone from the figures entirely.
+   There is exactly ONE transport for the whole screen now: a pause/play button,
+   a "frame N of M" readout, and one slider, together in the run-identity row at
+   the top. To HOLD a frame while you talk about it, press pause with that ONE
+   button -- it stops every animated panel together, both arms included -- then
+   press it again to resume. Dragging its slider also pauses the clock, and now
+   parks BOTH arms together (there is only the one slider for the whole screen);
+   the old per-panel sliders that could park one arm and leave the other running
+   are gone.
+   Each panel's headline number lives in its own statistic strip, the large
+   coloured figure directly above the plot (peak-median, median floor, hit
+   counts) -- that is what to read aloud, not the colour bar. It is rebuilt
+   every frame while the clock loops: pause with the button in the
+   run-identity row before reading a per-frame number aloud, on every preset,
+   not just Thrust 5.
    **Thrust 4 exception**: the range-profile panel renders once from the LAST
-   frame and never animates (no slider); the range-azimuth map above it keeps
-   looping on the shared clock, so the two panels show different frames by
-   design, with no drag needed to cause it.
+   frame and never animates (its own statistic strip says "static"); the
+   range-azimuth map above it keeps looping on the shared clock regardless of
+   where the one transport is parked, so the two panels can show different
+   frames by design, with no scrubbing needed to cause it.
    **Thrust 5 exception**: only the Range-Doppler panel has frames. The
    objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
-   clock now desyncs the cube from those frozen detections by itself, with no
-   drag at all. Pause the cube before talking about a specific frame's detections.
+   clock desyncs the cube from those frozen detections by itself, with no
+   scrubbing at all. Pause the cube (the one transport) before talking about a
+   specific frame's detections.
 
 Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
@@ -55,21 +65,27 @@ Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 General click mechanics that apply to every preset below (from `webapp/app.py`,
 `webapp/block_diagram.py`):
 
-- The preset picker is the **Demo preset:** dropdown on the **Block Diagram**
-  tab; **Load preset** applies it.
+- The preset picker (**Demo preset:** dropdown), **Load preset**, **Frames to
+  run (n_steps)**, **Run pipeline** and **Cancel** all live in ONE sticky
+  control bar pinned to the top of the **Block Diagram** tab -- it never
+  scrolls out of view.
 - Every block in the diagram is clickable: "Click a block to edit its
-  parameters or toggle it on/off. Dashed edges feed a disabled block. Then hit
-  Run pipeline."
+  parameters or toggle it on/off. Dashed edges feed a disabled block."
 - Loading a preset REPLACES the whole block state (edits made afterwards are
   the operator's own), fills **Frames to run (n_steps)** with the preset's
-  frame count, prints an operator card under the dropdown ("Loaded: `<label>`
-  (Thrust `<n>`, `<n_steps>` frames)" followed by **Turn live** / **Say** /
-  **Do NOT say or show** lists -- copied verbatim from the preset), and
-  auto-opens the block-param editor on the block named by the preset's first
-  `live_knobs` entry.
+  frame count, and auto-opens the block-param editor on the block named by the
+  preset's first `live_knobs` entry. The operator's own card -- "Loaded:
+  `<label>` (Thrust `<n>`, `<n_steps>` frames)" followed by **Turn live** /
+  **Say** / **Do NOT say or show** lists, copied verbatim from the preset -- is
+  collapsed behind **▸ Presenter notes (Thrust `<n>`)** at the bottom of the
+  **Block Diagram** tab; click it to open.
 - **Run pipeline** runs it; a run in progress enables **Cancel** (otherwise
   disabled) and shows the run-status text. A completed run switches the browser
   to the **Results** tab automatically.
+- Each arm's provenance, band and clip clauses, and its full before/after
+  sentence, are collapsed behind that arm's own **▸ Details (provenance, band,
+  clip)**, directly under its one-line caption on the **Results** tab; click it
+  to open.
 - Every one of the 7 presets below sets `ab`, so one click on **Run pipeline**
   runs BOTH arms A and B and renders both on the Results tab SIDE BY SIDE: one
   row per product, arm A in the left column, arm B in the right, each column
@@ -100,10 +116,11 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**.
-- Arm banners on screen: "A (as loaded): LNA bias current (mA) 8 mA -- before"
-  (LEFT column) / "B: LNA bias current (mA) 0.5 mA -- after" (RIGHT column) --
-  each product renders once per column, on the same row, on shared colour
-  limits.
+- Arm chips on screen: "A — LNA bias current (mA) 8 mA" (LEFT column, colour
+  dot) / "B — LNA bias current (mA) 0.5 mA" (RIGHT column) -- each product
+  renders once per column, on the same row, on shared colour limits. The full
+  before/after sentence, plus provenance, band and clip, is one click away
+  behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **RF Front-End (RFFE)** -> **IF bandwidth (MHz)** (min 1, max 50, default
@@ -183,10 +200,12 @@ gain). Manual second knob: IF bandwidth 15 -> 50 MHz.
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**,
-  **"Range-elevation power"**, **"Subspace error (Frobenius) per frame"**.
-- Arm banners on screen: "A (as loaded): FP mantissa bits 6 bit -- before"
-  (LEFT column) / "B: FP mantissa bits 1 bit -- after" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
+  **"Range-elevation power"**, **"Subspace error per frame"**.
+- Arm chips on screen: "A — FP mantissa bits 6 bit" (LEFT column, colour dot) /
+  "B — FP mantissa bits 1 bit" (RIGHT column) -- each product renders once per
+  column, on the same row, on shared colour limits. The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - None: the only `live_knobs` entry for this preset is the knob the built-in
@@ -263,13 +282,13 @@ Manual: AFE mantissa 6 -> 1 bit.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Product panel(s) this preset enables: **"Subspace error (Frobenius) per
-  frame"**.
-- Arm banners on screen: "A (as loaded): gap_response fixed effort (5
-  passes/frame) -- before" (LEFT column) / "B: gap_response adaptive gate
-  (shipped default, 10 passes/frame baseline) -- after" (RIGHT column) -- each
-  product renders once per column, on the same row (no heat map here, so no
-  shared colour scale).
+- Product panel(s) this preset enables: **"Subspace error per frame"**.
+- Arm chips on screen: "A — gap_response fixed effort (5 passes/frame)" (LEFT
+  column, colour dot) / "B — gap_response adaptive gate (shipped default, 10
+  passes/frame baseline)" (RIGHT column) -- each product renders once per
+  column, on the same row (no heat map here, so no shared colour scale). The
+  full before/after sentence, plus provenance, band and clip, is one click away
+  behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
@@ -336,9 +355,9 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** This is the LIVE public Tessera/UIC surrogate
-  (checkpoint, not a CSV); the run-notes line under each banner names the scale
-  factor and frequency, and is the one place arm B's height shows on screen: 50
-  um (A) vs 30.01 um (B).
+  (checkpoint, not a CSV); scale factor and frequency are in each arm's
+  Details. Arm B's height shows without a click, in the caption under each
+  banner: 50 um (A) vs 30.01 um (B).
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -346,12 +365,13 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
-  profile (non-coherent over channels)"**.
-- Arm banners on screen: "A (as loaded): Tessera: TSV height (um) canonical
-  Tessera geometry (50 um presented) -- before" (LEFT column) / "B: Tessera:
-  TSV height (um) TSV height -> 30.01 um presented (largest skirt mover) --
-  after" (RIGHT column) -- each product renders once per column, on the same
-  row, on shared colour limits.
+  profile"**.
+- Arm chips on screen: "A — Tessera: TSV height (um) canonical Tessera geometry
+  (50 um presented)" (LEFT column, colour dot) / "B — Tessera: TSV height (um)
+  TSV height -> 30.01 um presented (largest skirt mover)" (RIGHT column) --
+  each product renders once per column, on the same row, on shared colour
+  limits. The full before/after sentence, plus provenance, band and clip, is
+  one click away behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
@@ -368,9 +388,9 @@ presented low end -- OFFLINE the biggest single-knob mover of the skirt (3.53
 dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
 
 ### Say
-- This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); the
-  run-notes line under each banner names the scale factor and frequency, and is
-  the one place arm B's height shows on screen: 50 um (A) vs 30.01 um (B).
+- This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale
+  factor and frequency are in each arm's Details. Arm B's height shows without
+  a click, in the caption under each banner: 50 um (A) vs 30.01 um (B).
 - Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; doi
   10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are theirs.
 - In-band |S21| is invisible on this display (<0.03 dB span); A/B moves TSV
@@ -429,17 +449,19 @@ dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
-  frame slider), **"CFAR objectness"** (no slider -- pinned to the last frame),
-  **"Detector scoreboard"**, and the offline PR-curve panel (**"scored offline:
-  ... test frames"**).
-- The Range-Doppler panel loops by itself on the Results-tab clock; the other
-  three hold the LAST frame. Press pause on the cube before talking about one
-  frame's detections.
-- Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
-  before" (LEFT column) / "B: ADC bits 3-bit ADC (same frames) -- after" (RIGHT
-  column) -- each product renders once per column, on the same row, on shared
-  colour limits.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
+  screen's one shared transport), **"CFAR objectness"** (pinned to the last
+  frame regardless of the transport), **"Detector scoreboard"**, and the
+  offline PR-curve panel (**"scored offline: ... test frames"**).
+- The Range-Doppler panel loops by itself on the shared clock; the other three
+  hold the LAST frame regardless of where the one transport (pause/play + frame
+  N of M + slider, in the run-identity row) is parked. Pause it before talking
+  about one frame's detections.
+- Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
+  colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
+  The full before/after sentence, plus provenance, band and clip, is one click
+  away behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -518,17 +540,20 @@ crosses.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
-  frame slider), **"Neural detector objectness"** (no slider -- pinned to the
-  last frame), **"Detector scoreboard"**, and the offline PR-curve panel
-  (**"scored offline: ... test frames"**).
-- The Range-Doppler panel loops by itself on the Results-tab clock; the other
-  three hold the LAST frame. Press pause on the cube before talking about one
-  frame's detections.
-- Arm banners on screen: "A (as loaded): Corner range (m) IF high-pass corner 1
-  m (as built) -- before" (LEFT column) / "B: Corner range (m) IF high-pass
-  corner 25 m (attenuates ~4.3 dB at 22 m) -- after" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
+  screen's one shared transport), **"Neural detector objectness"** (pinned to
+  the last frame regardless of the transport), **"Detector scoreboard"**, and
+  the offline PR-curve panel (**"scored offline: ... test frames"**).
+- The Range-Doppler panel loops by itself on the shared clock; the other three
+  hold the LAST frame regardless of where the one transport (pause/play + frame
+  N of M + slider, in the run-identity row) is parked. Pause it before talking
+  about one frame's detections.
+- Arm chips on screen: "A — Corner range (m) IF high-pass corner 1 m (as
+  built)" (LEFT column, colour dot) / "B — Corner range (m) IF high-pass corner
+  25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) -- each product renders
+  once per column, on the same row, on shared colour limits. The full
+  before/after sentence, plus provenance, band and clip, is one click away
+  behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -608,17 +633,19 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
-  frame slider), **"Neural detector objectness"** (no slider -- pinned to the
-  last frame), **"Detector scoreboard"**, and the offline PR-curve panel
-  (**"scored offline: ... test frames"**).
-- The Range-Doppler panel loops by itself on the Results-tab clock; the other
-  three hold the LAST frame. Press pause on the cube before talking about one
-  frame's detections.
-- Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
-  before" (LEFT column) / "B: ADC bits 3-bit ADC (same frames) -- after" (RIGHT
-  column) -- each product renders once per column, on the same row, on shared
-  colour limits.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
+  screen's one shared transport), **"Neural detector objectness"** (pinned to
+  the last frame regardless of the transport), **"Detector scoreboard"**, and
+  the offline PR-curve panel (**"scored offline: ... test frames"**).
+- The Range-Doppler panel loops by itself on the shared clock; the other three
+  hold the LAST frame regardless of where the one transport (pause/play + frame
+  N of M + slider, in the run-identity row) is parked. Pause it before talking
+  about one frame's detections.
+- Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
+  colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
+  The full before/after sentence, plus provenance, band and clip, is one click
+  away behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
