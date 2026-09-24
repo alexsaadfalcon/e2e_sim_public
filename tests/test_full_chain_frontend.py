@@ -430,6 +430,48 @@ def test_the_full_spine_runs_front_end_after_the_dechirp(make_env_block):
     assert torch.all(torch.isfinite(out["range_profile"][0]))
 
 
+def test_the_two_placements_agree_on_the_noise_floor_LEVEL():
+    """The contract's own prediction (section 1.1 fact 2), checked: the noise-bandwidth
+    reference is `NBB*BW_IF` per frequency bin in the legacy placement and
+    `NBB*min(if_bw, fs)` per sample in the beat placement -- THE SAME NUMBER whenever
+    `if_bw <= fs`, which every shipped preset satisfies (15 MHz IF, 25 MHz fs).
+
+    The legacy path gets there by a two-seam route: it injects `NBB*BW/nt` per time
+    sample and the caller's UNNORMALISED forward FFT multiplies the variance by `nt`.
+    The beat path injects `NBB*B` per sample with no FFT at all. That they land on the
+    same floor is the whole reason the front end could move without re-measuring T1.
+
+    Measured 2026-09-24 on a zeroed frame (16 elements, 512 samples,
+    benchmark_v1_ka): the two floors agree to 8.1e-7 dB.
+    """
+    n, n_s = 16, 512
+    torch.manual_seed(0)
+    legacy = RFFEBlock(n=n, seed=5, physical_scale=True).apply_circuit(
+        torch.zeros(n, 1, 1, n_s, dtype=torch.complex64, device=device))[0]
+    torch.manual_seed(0)
+    beat = FrontEndBlock(CFG, n=n, seed=5, physical_scale=True).apply(
+        {"adc": _zero_adc(n, 1, n_s)})["adc"]
+    p_legacy = float((legacy.abs() ** 2).mean())
+    p_beat = float((beat.abs() ** 2).mean())
+    assert abs(_db(p_beat) - _db(p_legacy)) < 0.05, (
+        f"floors disagree: legacy {_db(p_legacy):.4f} dB, beat {_db(p_beat):.4f} dB")
+
+
+def test_inject_noise_false_is_a_true_bypass_on_both_blocks():
+    """Both front ends can run the nonlinearity with NO thermal draw. This is what the
+    placement-parity oracle needs: with the floor in, it would report a difference of
+    noise REALIZATIONS as a difference of placements."""
+    n, n_s = 4, 128
+    quiet_old = RFFEBlock(n=n, seed=1, physical_scale=True, inject_noise=False)
+    a = quiet_old.apply_circuit(torch.zeros(n, 1, 1, n_s, dtype=torch.complex64,
+                                            device=device))[0]
+    assert float(a.abs().max()) == 0.0
+    quiet_new = FrontEndBlock(CFG, n=n, seed=1, physical_scale=True, inject_noise=False)
+    out = quiet_new.apply({"adc": _zero_adc(n, 1, n_s)})
+    assert float(out["adc"].abs().max()) == 0.0
+    assert "noise_injected_by" not in out      # a downstream floor is still the injection
+
+
 def test_the_front_end_on_beat_samples_differs_from_the_impulse_placement(make_env_block):
     """The move is not cosmetic. Same knobs, same seed, same frame: the two placements
     produce different cubes, because the nonlinearity and the normalisation see
@@ -448,3 +490,82 @@ def test_the_front_end_on_beat_samples_differs_from_the_impulse_placement(make_e
 
     assert new.shape == old.shape
     assert not torch.allclose(new, old, rtol=1e-2, atol=1e-12)
+
+
+_KA_CORPUS = ("e2e/ml/datasets/b1_demo_cfr_ka/benchmark_v1_ka_D2/"
+              "benchmark_v1_ka_D2")
+
+
+@pytest.mark.skipif(not __import__("os").path.isdir(_KA_CORPUS),
+                    reason="needs the generated b1_demo_cfr_ka corpus")
+def test_placement_parity_on_the_ka_corpus_is_below_one_lsb():
+    """THE decision measurement the FULL contract turns on (section 5.4): does moving
+    the front end onto beat samples change a stored corpus's cube by more than one ADC
+    LSB at 12 bits?
+
+    Measured 2026-09-24 on 5 `b1_demo_cfr_ka` frames, thermal noise OFF on both arms
+    (see `test_inject_noise_false_is_a_true_bypass_on_both_blocks` for why -- with the
+    floor in, two independent draws of the SAME-variance noise differ by ~sqrt(2)x the
+    floor and the measurement would report that as a placement difference):
+
+        mean rel-RMSE   8.6e-05
+        one LSB / |cube| rms   1.76e-04
+        -> BELOW one LSB, by a factor of ~2.
+
+    So the SIGNAL path is corpus-safe: the nonlinearity and the normalisation reference
+    land within the converter's own resolution. Combined with
+    `test_the_two_placements_agree_on_the_noise_floor_LEVEL` (floors identical to
+    8.1e-7 dB), the placement move changes NO measurable quantity.
+
+    It still does not survive the live-vs-stored gates, and the distinction matters:
+    those read max |diff| = 0 CODES, and a differently-ordered RNG consumption changes
+    the noise realization, which fails a zero tolerance at any floor. The legacy flag
+    therefore stays for BIT parity while being unnecessary for NUMERICAL fidelity.
+    """
+    import glob
+    import json
+    import os
+
+    from e2e.chain.receive import QuantizerBlock
+    from e2e.radar_config import RadarConfig
+
+    with open(os.path.join(_KA_CORPUS, "manifest.json")) as fh:
+        man = json.load(fh)
+    cfg_d = man.get("config") or man.get("cfg") or man.get("radar_config")
+    cfg = RadarConfig.from_dict(cfg_d)
+    files = sorted(glob.glob(os.path.join(_KA_CORPUS, "*.cfr.npy")))[:5]
+    assert files, "corpus directory has no .cfr.npy sidecars"
+
+    rt = RangeTransformBlock(cfg, window="hann", dc_removal=True,
+                             crop_negative_delay=False)
+    rels, lsbs = [], []
+    for i, path in enumerate(files):
+        cfr = torch.from_numpy(np.load(path)).to(device)
+        if cfr.ndim == 3:
+            cfr = cfr.unsqueeze(1)
+        n_rx = cfr.shape[0]
+
+        torch.manual_seed(1000 + i)
+        a = CircuitStage(RFFEBlock(n=n_rx, seed=7 + i, physical_scale=True,
+                                   inject_noise=False)).apply({"s_pars": cfr})
+        a.update(DechirpBlock(cfg).apply(a))
+        qa = QuantizerBlock(bits=12)
+        a.update(qa.apply(a))
+        cube_a = rt.apply(a)["cube"]
+
+        torch.manual_seed(1000 + i)
+        b = DechirpBlock(cfg).apply({"s_pars": cfr})
+        b.update(FrontEndBlock(cfg, n=n_rx, seed=7 + i, physical_scale=True,
+                               inject_noise=False).apply(b))
+        b.update(QuantizerBlock(bits=12).apply(b))
+        cube_b = rt.apply(b)["cube"]
+
+        ref = float(torch.sqrt((cube_a.abs() ** 2).mean()))
+        rels.append(float(torch.sqrt(((cube_b - cube_a).abs() ** 2).mean())) / ref)
+        lsbs.append(float(qa.lsb) / ref)
+
+    rel = float(np.mean(rels))
+    lsb = float(np.mean(lsbs))
+    assert rel < lsb, (
+        f"placement parity {rel:.3e} rel-RMSE exceeds one LSB ({lsb:.3e}); the legacy "
+        f"placement flag is load-bearing for numerical fidelity, not just bit parity")

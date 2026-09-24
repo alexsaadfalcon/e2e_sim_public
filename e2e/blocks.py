@@ -118,7 +118,7 @@ class RFFEBlock:
 
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
                  physical_scale=False, chirp_dur=None, lna_bias_ma=None, if_bw_mhz=None,
-                 seed=None):
+                 seed=None, inject_noise=True):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
         # still pass it don't break.
         # fs (= freq_span_hz) is the complex-baseband buffer's true sample rate (the
@@ -155,6 +155,13 @@ class RFFEBlock:
         # same seed -> bit-identical noise across repeated runs; different seed/frame
         # -> a fresh draw.
         self.seed = seed
+        # False runs the cascade with NO thermal draw (band -> 0, so the variance is
+        # zero and the draw contributes nothing). It exists for ORACLES that need the
+        # nonlinearity alone -- notably the front-end placement parity measurement,
+        # where the two placements deliberately have different noise references and
+        # leaving the floor in would report the floor difference as a signal
+        # difference. Default True: every production caller is unchanged.
+        self.inject_noise = bool(inject_noise)
         self._frame_idx = 0
 
     def reset(self):
@@ -177,16 +184,19 @@ class RFFEBlock:
         # physical_scale=True: skip the normalization above -- the frame is already
         # in volts at the LNA input (the generation layer produces volts via
         # sqrt(N*P_tx*Z0) scaling; see e2e/environment/scenario_runner.py).
+        noise_kwargs = {} if self.inject_noise else {"noise_band_hz": 0.0}
         if self.seed is None:
             frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
-                                                  if_filter=self.if_filter)
+                                                  if_filter=self.if_filter,
+                                                  **noise_kwargs)
         else:
             generator = torch.Generator(device=frame.device)
             generator.manual_seed(int(self.seed) + self._frame_idx)
             self._frame_idx += 1
             frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
                                                   if_filter=self.if_filter,
-                                                  generator=generator)
+                                                  generator=generator,
+                                                  **noise_kwargs)
         s_pars_dist = torch.fft.fft(frame_dist, dim=-1)
         s_pars_dist = s_pars_dist.view(s_pars_shape)
         return s_pars_dist, PRX
