@@ -256,36 +256,37 @@ def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
     """INTEGRITY fix (hostile-expert third read, 2026-09-23): the FFT range-elevation
     panel used to be turned off because it contradicted the "image barely moves"
     story (former DO-NOT-SHOW #8). Hiding a contradicting panel is worse than showing
-    it -- range_el is back on, and the card tells the three-number version instead."""
+    it -- range_el is back on. Wave 9 update #3 (2026-09-24): the card no longer
+    quotes a specific dB move for either panel (see
+    test_thrust2_never_quotes_a_drifting_dB_pair) -- it tells the operator to read
+    both printed peak-median numbers off the screen instead."""
     st = apply_preset(PRESETS_BY_ID["thrust2_feature_reduction_error"])
     assert st["fft"]["enabled"] is False
     assert st["range_el"]["enabled"] and st["subspace_err"]["enabled"] and st["range_az"]["enabled"]
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert not any("deliberately off" in d.lower() and "range_el" in d.lower()
                   for d in p.do_not_say)
-    assert any("0.3 db" in s.lower() for s in p.say)
+    assert any("peak-median" in s.lower() for s in p.say)
 
 
 def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     """Hostile-expert fourth read (2026-09-23): the note used to claim the elevation
     cut moves ~2.7 dB, a number no panel on this screen shows (that figure was a
-    cross-arm mean |dB| difference on the off-screen FFT az-el product). Re-measured
-    on the final file (2026-09-23): the range-elevation panel actually shown moves
-    ~0.5 dB (peak-median 76.85 -> 76.57); wave 8 (2026-09-23, W4) found the rendered
-    panel actually prints 76.9 -> 76.6 (0.3 dB) -- the same move range-azimuth shows,
-    refuting the old "elevation is the one that moves" framing -- so the card now
-    quotes THAT on-screen number instead. Wave 9 (2026-09-24, item 1.1): a hostile
-    read of the rendered PNG found the elevation cut actually prints 76.9 -> 76.5
-    (0.4 dB), slightly MORE than the azimuth cut's 76.7 -> 76.4 (0.3 dB), not the
-    same move -- corrected again."""
+    cross-arm mean |dB| difference on the off-screen FFT az-el product). The card
+    then went through three more re-quotings of a specific dB pair (0.52 dB mean at
+    76.85->76.57; then 76.9->76.6, 0.3 dB; then 76.9->76.5, 0.4 dB, "slightly more
+    than" azimuth's 76.7->76.4) -- each one measured true on ITS OWN re-render and
+    false on the next, because the pipeline is nondeterministic at ~5e-3 and these
+    peak-median statistics drift ~0.1-0.2 dB run to run. Wave 9 update #3
+    (2026-09-24, orchestrator course-correction): retracted the whole pattern.
+    NO exact pair belongs on the card, ever -- see
+    test_thrust2_never_quotes_a_drifting_dB_pair."""
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert "2.7" not in p.screen_note
     assert "2.7" not in p.blurb
     assert not any("2.7" in s for s in p.say + p.do_not_say)
     assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
     assert "barely move" in p.screen_note
-    assert "76.9" in p.blurb and "76.5" in p.blurb and "on screen" in p.blurb
-    assert "76.85" not in p.blurb and "76.57" not in p.blurb
     # Wave 7 (2026-09-23, F94): the old cross-reference to Thrust 3's cold-start first
     # frame ("about 0.6") compared error values at k=8; this preset now runs at k=2
     # (k=8/k=4 are both degenerate on the Ka retrace -- see the `overrides` comment),
@@ -298,6 +299,22 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     # the stale "not comparable" claim is retracted, not just reworded.
     assert any("both run at k=2" in s.lower() for s in p.do_not_say)
     assert not any("not comparable" in s.lower() for s in p.say + p.do_not_say)
+
+
+def test_thrust2_never_quotes_a_drifting_dB_pair():
+    """Wave 9 update #3 (2026-09-24, orchestrator course-correction): a same-day
+    re-render printed range-azimuth 76.7->76.5 and range-elevation 76.8->76.6
+    (0.2 dB each) -- yet more numbers, none matching any pair this card had quoted
+    minutes earlier. The peak-median statistics drift ~0.1-0.2 dB run to run
+    (nondeterministic at ~5e-3), so NO exact pair, and no exact "0.3 dB" / "0.4 dB"
+    move, belongs on the card: it must instead tell the operator to read the two
+    printed numbers off THIS run's own screen."""
+    p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
+    for text in [p.blurb, p.screen_note, *p.say, *p.do_not_say]:
+        assert "76." not in text, text
+        assert "0.3 dB" not in text and "0.4 dB" not in text, text
+    assert any("run-to-run floor" in s.lower() or "run to run" in s.lower()
+              for s in [p.blurb] + p.say + p.do_not_say)
 
 
 def test_thrust3_is_a_cold_start_at_2_to_1():

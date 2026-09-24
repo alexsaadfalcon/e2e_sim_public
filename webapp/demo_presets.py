@@ -353,21 +353,24 @@ PRESETS: List[DemoPreset] = [
         # INTEGRITY (hostile-expert third read, 2026-09-23): the FFT range-elevation
         # panel used to be deliberately off because it contradicts the "image barely
         # moves" framing -- hiding a contradicting panel is worse than showing it. It
-        # is back on; the card now tells the three-number version below.
+        # is back on; the card now tells the no-exact-pair version below.
         # wave 9 (2026-09-24): the blurb used to say each panel PRINTS a subspace-error
         # statistic -- no panel does; the tracker panel plots a curve against a dashed
-        # "warm-start settled level (0.06, reference)" line, read by eye. Also fixed
-        # the range-elevation move: the screen prints 76.9 -> 76.5 (0.4 dB), slightly
-        # MORE than the azimuth cut's 76.7 -> 76.4 (0.3 dB), not the same move.
+        # "warm-start settled level (0.06, reference)" line, read by eye.
+        # wave 9 update #3 (2026-09-24, orchestrator course-correction): RETRACTED the
+        # specific dB pair. A same-day re-render (03:0x) printed range-azimuth
+        # 76.7 -> 76.5 and range-elevation 76.8 -> 76.6 (0.2 dB each) -- neither the
+        # 76.9->76.5/0.4 dB pair this card quoted minutes earlier, nor the 76.7->76.4/
+        # 0.3 dB azimuth pair. The pipeline is nondeterministic at ~5e-3, so these
+        # peak-median statistics drift ~0.1-0.2 dB run to run: NO exact pair belongs
+        # on the card, ever -- only the printed numbers on THIS run's own screen, and
+        # the fact that the move sits at the run-to-run noise floor.
         blurb=("Press Run once: both arms appear alike (A, top, mantissa 6 bit / B, "
                "bottom, 1 bit); the tracker panel plots a subspace-error curve "
                "against a dashed 0.06 reference line -- A settles on it, B sits "
-               "about 5x above, by eye. Three numbers: range-azimuth barely moves "
-               "(76.7 -> 76.4, ~0.3 dB), range-elevation moves slightly more "
-               "(76.9 -> 76.5, ~0.4 dB, on screen), tracker error moves ~5x "
-               "(0.06 -> 0.32). The tracker is far more sensitive to weight "
-               "precision than either picture. Manual: AFE mantissa 6 -> 1 bit, "
-               "run again."),
+               "about 5x above. Both images move a few tenths of a dB (read the "
+               "printed numbers) -- at the run-to-run floor, not the story; the "
+               "tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.32 at k=2)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
         # to 1 bit, the 0.32 arm the card's headline quotes.
@@ -376,9 +379,12 @@ PRESETS: List[DemoPreset] = [
         # Rewritten (hostile-expert fourth read, 2026-09-23): the old note claimed the
         # elevation cut moves ~2.7 dB, a number no panel on THIS screen shows (that
         # figure was a cross-arm mean |dB| difference on the off-screen FFT az-el
-        # product). Re-measured on the final file (2026-09-23): the range-elevation
-        # panel actually shown moves 0.52 dB mean (peak-median 76.85 -> 76.57) -- the
-        # note now claims only what the two displayed images and the tracker curve do.
+        # product). The note now claims only what the two displayed images and the
+        # tracker curve do -- RETRACTED (wave 9 update #3, 2026-09-24): every specific
+        # dB pair quoted here across three earlier waves (2.7, then 0.52 mean
+        # 76.85->76.57, then 0.3/0.4 at 76.x->76.x) is superseded by the blurb's own
+        # comment above: the statistic drifts run to run, so the note (and the card)
+        # names the drift, never a pair.
         # Numbers re-measured wave 7 at k=2 (see the `overrides` comment above); array
         # disclosure appended (wave 7, X4-X8: mandatory on any card naming the array).
         # wave 9 (2026-09-24, item 2.6): the tracker panel also draws a red dotted
@@ -395,32 +401,33 @@ PRESETS: List[DemoPreset] = [
         say=[
             # wave 9 (2026-09-24, item 1.5): frame 1 reads 0.00 on screen, frame 2
             # ~0.065 -- "by frame 1" was wrong by one frame.
-            "As loaded the curve starts near 0 and settles at about 0.06 by frame "
-            "2. The knob compares SETTLED levels, 0.06 vs 0.32.",
-            "Headline in ANGLES: 0.32 -> 0.06 is an unnormalized distance bounded by "
-            "sqrt(k); converted, average principal angle goes 13.1 -> 2.6 deg.",
-            "The three numbers: range-azimuth ~0.3 dB, range-elevation slightly "
-            "more (~0.4 dB), tracker error ~5x -- the AFE does something real; the "
-            "picture barely shows it.",
-            "No detection metric is wired to this view. Say so before being asked what it "
-            "means for P_d or false alarms.",
+            "As loaded the curve starts near 0, settles at about 0.06 by frame 2; "
+            "the knob compares SETTLED levels, 0.06 vs 0.32.",
+            "Headline in ANGLES: 0.32 -> 0.06 is unnormalized, bounded by sqrt(k); "
+            "converted, principal angle goes 13.1 -> 2.6 deg.",
+            "Both images move by only a few tenths of a dB -- read the two printed "
+            "peak-median numbers on the screen; that is at the ~0.1 dB run-to-run "
+            "floor, so the image is not the story; the tracker curve is (about 5x "
+            "above the 0.06 reference on arm B).",
+            "No detection metric is wired to this view; say so before asked what "
+            "it means for P_d or false alarms.",
             "Range 0-2 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); real multipath sits near 37 m and 68 m (F93/F94).",
-            "Tracker k was re-picked: k=8 (old default) and k=4 both spike mid-run "
-            "on the Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
+            "normalises to (0 dB); real multipath sits near 37 m and 68 m.",
+            "Tracker k was re-picked: k=8 (old default) and k=4 spike mid-run on "
+            "the Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
             "beyond |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m "
             "gates.",
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
-            "Prepared answer -- 'what is the 0.06 floor made of?': at k=2, rank "
-            "~3-4 (F94), part of A's residual is rank mismatch; the 5x gap to B is "
-            "the knob's contribution (interpretation).",
+            "Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank "
+            "~3-4, F94) part of A's residual is rank mismatch; the 5x gap to B is "
+            "the knob (interpretation).",
             # wave 9 (2026-09-24, item 3.12): the array-spread caveat lives on Thrust
             # 1's card; naming it here since the AFE/tracker story is what a
             # per-element spread would actually change.
             "All 1024 elements share one front-end config (Thrust 1); a spread would "
-            "show up in the AFE weights and tracker curve, not Thrust 1's picture.",
+            "show up in the AFE weights/tracker curve, not the picture.",
             # wave 9 (2026-09-24, orchestrator course-correction): same line as
             # Thrust 1/4 -- see that card's comment for the measurement it stands
             # in for.
@@ -429,16 +436,17 @@ PRESETS: List[DemoPreset] = [
             "every dB on the map is relative to the direct path.",
         ],
         do_not_say=[
-            "That the mantissa sweep models analog hardware error: AFEBlock uses "
-            "WEIGHT_FLOAT -- right for a compute datapath, wrong for an analog "
+            "That the mantissa sweep models analog hardware error: AFEBlock's "
+            "WEIGHT_FLOAT is right for a compute datapath, wrong for analog "
             "control (compress.py).",
-            "That the picture does not respond: range-elevation moves too (~0.4 dB), "
-            "slightly more than azimuth's ~0.3 dB.",
+            "That the picture does not respond: both images move a few tenths of "
+            "a dB, at the run-to-run floor -- not evidence either way; the "
+            "tracker curve is.",
             "That a higher compression ratio would look better: 512 of 1024 lets the "
-            "tracker see drift; observability drops 0.50 -> 0.055 at 16x.",
+            "tracker see drift; observability drops at 16x.",
             "Peak-to-median dynamic range as evidence compression is good: it improves as "
             "compression worsens.",
-            "That k=8 still applies: degenerate here (F94); Thrust 2 and 3 both run "
+            "That k=8 still applies: degenerate here (F94); Thrust 2/3 both run "
             "at k=2 now, so they compare.",
         ],
     ),

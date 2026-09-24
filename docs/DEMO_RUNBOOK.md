@@ -155,48 +155,46 @@ Manual path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz
 
 Press Run once: both arms appear alike (A, top, mantissa 6 bit / B, bottom, 1
 bit); the tracker panel plots a subspace-error curve against a dashed 0.06
-reference line -- A settles on it, B sits about 5x above, by eye. Three
-numbers: range-azimuth barely moves (76.7 -> 76.4, ~0.3 dB), range-elevation
-moves slightly more (76.9 -> 76.5, ~0.4 dB, on screen), tracker error moves ~5x
-(0.06 -> 0.32). The tracker is far more sensitive to weight precision than
-either picture. Manual: AFE mantissa 6 -> 1 bit, run again.
+reference line -- A settles on it, B sits about 5x above. Both images move a
+few tenths of a dB (read the printed numbers) -- at the run-to-run floor, not
+the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
 
 ### Say
-- As loaded the curve starts near 0 and settles at about 0.06 by frame 2. The
-  knob compares SETTLED levels, 0.06 vs 0.32.
-- Headline in ANGLES: 0.32 -> 0.06 is an unnormalized distance bounded by
-  sqrt(k); converted, average principal angle goes 13.1 -> 2.6 deg.
-- The three numbers: range-azimuth ~0.3 dB, range-elevation slightly more (~0.4
-  dB), tracker error ~5x -- the AFE does something real; the picture barely
-  shows it.
-- No detection metric is wired to this view. Say so before being asked what it
-  means for P_d or false alarms.
+- As loaded the curve starts near 0, settles at about 0.06 by frame 2; the knob
+  compares SETTLED levels, 0.06 vs 0.32.
+- Headline in ANGLES: 0.32 -> 0.06 is unnormalized, bounded by sqrt(k);
+  converted, principal angle goes 13.1 -> 2.6 deg.
+- Both images move by only a few tenths of a dB -- read the two printed
+  peak-median numbers on the screen; that is at the ~0.1 dB run-to-run floor,
+  so the image is not the story; the tracker curve is (about 5x above the 0.06
+  reference on arm B).
+- No detection metric is wired to this view; say so before asked what it means
+  for P_d or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); real multipath sits near 37 m and 68 m (F93/F94).
-- Tracker k was re-picked: k=8 (old default) and k=4 both spike mid-run on the
-  Ka retrace (rank 3-4, F94); k=2 is the largest stable k.
+  (0 dB); real multipath sits near 37 m and 68 m.
+- Tracker k was re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
+  retrace (rank 3-4, F94); k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
-- Prepared answer -- 'what is the 0.06 floor made of?': at k=2, rank ~3-4
-  (F94), part of A's residual is rank mismatch; the 5x gap to B is the knob's
-  contribution (interpretation).
+- Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank ~3-4, F94)
+  part of A's residual is rank mismatch; the 5x gap to B is the knob
+  (interpretation).
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
-  up in the AFE weights and tracker curve, not Thrust 1's picture.
+  up in the AFE weights/tracker curve, not the picture.
 - The 0 dB reference is a single range-0 gate too small to see; the panel
   prints the brightest visible return (read it off the screen); every dB on the
   map is relative to the direct path.
 
 ### Do NOT say
-- That the mantissa sweep models analog hardware error: AFEBlock uses
-  WEIGHT_FLOAT -- right for a compute datapath, wrong for an analog control
-  (compress.py).
-- That the picture does not respond: range-elevation moves too (~0.4 dB),
-  slightly more than azimuth's ~0.3 dB.
+- That the mantissa sweep models analog hardware error: AFEBlock's WEIGHT_FLOAT
+  is right for a compute datapath, wrong for analog control (compress.py).
+- That the picture does not respond: both images move a few tenths of a dB, at
+  the run-to-run floor -- not evidence either way; the tracker curve is.
 - That a higher compression ratio would look better: 512 of 1024 lets the
-  tracker see drift; observability drops 0.50 -> 0.055 at 16x.
+  tracker see drift; observability drops at 16x.
 - Peak-to-median dynamic range as evidence compression is good: it improves as
   compression worsens.
-- That k=8 still applies: degenerate here (F94); Thrust 2 and 3 both run at k=2
+- That k=8 still applies: degenerate here (F94); Thrust 2/3 both run at k=2
   now, so they compare.
 
 ---
