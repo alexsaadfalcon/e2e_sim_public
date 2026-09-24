@@ -496,9 +496,43 @@ DDMA_WIDE_V1 = RadarConfig(
     mimo="ddma",
 )
 
+# --------------------------------------------------------------------------------
+# MUNICH_KA_FMCW -- the stored munich Ka frames READ AS AN FMCW MEASUREMENT.
+# --------------------------------------------------------------------------------
+# The v1.0 imaging frames are a CFR on a uniform grid; sampling a CFR on an FMCW
+# ramp's frequency grid and conjugating it IS the dechirped beat record
+# (`e2e/environment/rt_signal_chain.py`, eq. 3), so they need no re-tracing -- but
+# only for a chirp whose `S/fs` equals the grid's OWN spacing.
+#
+# That spacing is `B/(N-1)`, NOT `B/N`: `sionna_simple_channel.build_frequencies` is
+# an endpoint-inclusive `np.linspace`, so for 28.5-31.5 GHz at 5000 points it is
+# 3e9/4999 = 600_120.02 Hz (verified against the shipped `munich_ka.pkl` header,
+# 2026-09-24). This preset therefore carries `bandwidth_hz = 3e9 * 5000/4999`, which
+# makes `ramp_slope_hzps / fs_hz` land on that number exactly rather than 0.02% away.
+#
+# The sweep time is otherwise FREE: any `(S, fs)` pair with `S/fs = df` yields the
+# same beat record, so `fs_hz` and `chirp_period_s` below change no image -- only the
+# sample rate the noise and IF filters are referenced to. Derived: T_sweep = 199.96 us,
+# S = 15.003 MHz/us, range/bin = 4.9955 cm (c/2), unambiguous delay 1/df = 1.66633 us
+# = 249.78 m (c/2) over the FULL FFT period (249.83 m if one wrongly uses B/N) -- see `e2e.chain.receive.RangeTransformBlock`
+# on why the whole period is physical and the "125 m" on the v1.0 cards was its
+# displayed half (F96).
+MUNICH_KA_FMCW = RadarConfig(
+    name="munich_ka_fmcw",
+    f0_hz=28.5e9,
+    bandwidth_hz=3e9 * 5000.0 / 4999.0,
+    n_tx=1,
+    n_rx=1024,
+    n_chirps=1,
+    n_samples=5000,
+    fs_hz=25.005e6,
+    chirp_period_s=250e-6,
+    mimo="single",
+)
+
 PRESETS = {"ti_iwr1443": TI_IWR1443, "radial_like": RADIAL_LIKE,
            "benchmark_v1": BENCHMARK_V1, "ddma_wide_v1": DDMA_WIDE_V1,
-           "benchmark_v1_ka": BENCHMARK_V1_KA}
+           "benchmark_v1_ka": BENCHMARK_V1_KA, "munich_ka_fmcw": MUNICH_KA_FMCW}
 
 
 if __name__ == "__main__":

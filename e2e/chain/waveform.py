@@ -144,6 +144,73 @@ _WAVEFORM_CLASSES = {
 }
 
 
+def fmcw_plan_from_freq_plan(freq_plan, *, n_rx, n_chirps=1, fs_hz=None,
+                             chirp_period_s=None, name="fmcw_from_freq_plan"):
+    """Build the FMCW `RadarConfig` that CONSUMES a stored CFR grid exactly.
+
+    The stored channel is a CFR on a uniform grid; sampling a CFR on an FMCW ramp's
+    frequency grid and conjugating it IS the dechirped beat record
+    (`e2e/environment/rt_signal_chain.py`, eq. 3). That identity holds only when the
+    ramp satisfies `S/fs == df` on the grid's OWN spacing, which for a v2 pkl is
+    `(stop - start) / (num_freqs - 1)` -- endpoint-inclusive, because
+    `sionna_simple_channel.build_frequencies` is an `np.linspace`. Getting this wrong
+    by the `N/(N-1)` factor is a silent 0.02% range-scale error, which is why the plan
+    is DERIVED here rather than typed into a preset per file (the one exception,
+    `radar_config.MUNICH_KA_FMCW`, carries the same arithmetic for the shipped file
+    and is checked against this function in tests/test_one_chain_spine.py).
+
+    The sweep time is free: any `(S, fs)` with `S/fs = df` gives the same beat record,
+    so `fs_hz`/`chirp_period_s` change no image -- only the sample rate the noise and
+    IF filters are referenced to. Defaults put `fs_hz` at `num_freqs * df / 200e-6`
+    (a 200 us sweep) unless the caller names one.
+
+    Raises ValueError, naming both numbers, if `freq_plan` cannot describe a grid.
+    """
+    from e2e.radar_config import RadarConfig
+
+    if not freq_plan:
+        raise ValueError(
+            "fmcw_plan_from_freq_plan needs a freq_plan dict "
+            "{start_hz, stop_hz, num_freqs}; got none. A legacy pkl carries no plan, "
+            "so its frames have no metre calibration -- pass a RadarConfig explicitly."
+        )
+    try:
+        start = float(freq_plan["start_hz"])
+        stop = float(freq_plan["stop_hz"])
+        num = int(freq_plan["num_freqs"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"freq_plan {freq_plan!r} is missing start_hz/stop_hz/num_freqs"
+        ) from exc
+    if num < 2 or not stop > start:
+        raise ValueError(
+            f"freq_plan must span a band with >= 2 points, got start={start} "
+            f"stop={stop} num_freqs={num}"
+        )
+    df = (stop - start) / (num - 1)
+    # bandwidth_hz is defined over the SAMPLED window (n_samples * df), which is one
+    # grid step wider than stop-start precisely because the grid is endpoint-inclusive.
+    bandwidth = df * num
+    if fs_hz is None:
+        # A 200 us sweep: n_samples / T_sweep. Arbitrary and stated as such -- it
+        # changes no image, only what `fs` the noise/IF blocks are referenced to.
+        fs_hz = num / 200e-6
+    slope = bandwidth / (num / float(fs_hz))
+    got = slope / float(fs_hz)
+    if abs(got - df) > 1e-6 * df:
+        raise ValueError(
+            f"chirp plan does not sample the stored grid: S/fs = {got:.6f} Hz but the "
+            f"stored grid spacing is {df:.6f} Hz"
+        )
+    return RadarConfig(
+        name=name, f0_hz=start, bandwidth_hz=bandwidth, n_tx=1, n_rx=int(n_rx),
+        n_chirps=int(n_chirps), n_samples=num, fs_hz=float(fs_hz),
+        chirp_period_s=float(chirp_period_s if chirp_period_s is not None
+                             else 1.25 * num / float(fs_hz)),
+        mimo="single",
+    )
+
+
 class WaveformBlock:
     """SOURCE: synthesizes the transmitted complex envelope `tx_wave`.
 

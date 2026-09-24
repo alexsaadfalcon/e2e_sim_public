@@ -1,3 +1,25 @@
+﻿"""`Simulation` -- ONE serial spine, one product fan-out.
+
+The owner's 2026-09-24 directive ("the block diagram shown is still very confusing
+from the fact that there are two pipelines ... Needs to be fixed immediately from the
+ground up") retires the structure this module used to have: two feed-forward loops
+(`feed_forward` for a CFR start, `_feed_forward_from` for any other domain) and a
+default stage builder that produced an EMPTY stage list for a non-CFR source, so a
+replayed ADC cube ran a different pipeline from a live frame.
+
+What replaces it, per notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2:
+
+* ONE stage list, in the contract's order --
+  `CircuitStage -> InterconnectStage -> DechirpBlock -> RangeTransformBlock ->
+  MeasurementStage` -- and ONE loop that walks it.
+* Replay is a START INDEX into that same list: a source advertising
+  `signal_domain == DOMAIN_RX_TIME` enters at the first stage that consumes RX time,
+  and the stages it skipped are recorded BY NAME in `self.skipped_stages` /
+  `outputs['skipped_stages']` rather than silently not existing.
+* Every product reads the one spine's state. The range products consume the cube the
+  `RangeTransformBlock` emits; nothing computes a second range transform of its own.
+"""
+
 import warnings
 
 import torch
@@ -5,12 +27,23 @@ from tqdm import tqdm
 from collections import defaultdict
 
 from e2e import frames
-from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
+from e2e.blocks import CircuitStage, InterconnectStage, MeasurementStage
+from e2e.chain.dechirp import ANTENNA_INDEX_REVERSED, DechirpBlock
+from e2e.chain.receive import RangeTransformBlock
 
 
 # Relative threshold (fraction of the top singular value) below which a singular value
 # is treated as noise floor when computing effective rank -- see rank_diagnostic.
 _RANK_RTOL = 1e-2
+
+#: Canonical pipeline state a downstream product must NOT clobber. One definition,
+#: because there used to be two copies (one per feed-forward loop) and they had
+#: already drifted apart by the time the loops were merged.
+_RESERVED_STATE_KEYS = frozenset({
+    'U', 'U_true', 's_pars', 'PRX', 'frame_layout', 'signal_domain',
+    'signal_dimension', 'sensing_matrix', 'aperture_shape', 'tx_wave', 'adc',
+    'cube', 'cube_axes',
+})
 
 
 def _check_frame_contract(component, state_dict):
@@ -176,6 +209,30 @@ def rank_diagnostic(S, k, rtol=_RANK_RTOL):
     }
 
 
+def to_beat_basis(U):
+    """Carry an element-axis basis from the CFR domain into the BEAT domain.
+
+    The dechirp is `conj` plus a reversal of the RX antenna index
+    (`e2e.chain.dechirp.beat_from_cfr`). On the one spine the subspace tracker's input
+    is the cube, so the tracker estimates the column space of `flip(conj(U))`, not of
+    `U`. The oracle has to be expressed in the same basis or `subspace_err` compares
+    two unrelated subspaces -- which is what a naive "keep the SVD where it was" move
+    would have done, silently, with plausible-looking numbers.
+
+    This is exact, not an approximation, and it is why NO published subspace number
+    changes: for a matrix `M`, `svd(conj(flip(M)))` has left factor `flip(conj(U))`;
+    the range DFT is scaled-unitary on the OTHER axis and so leaves the left column
+    space alone; and `subspace_dist_frob` is invariant under applying the same
+    permutation-and-conjugation to both arguments (`|<conj a, conj b>| = |<a, b>|`).
+    Measured 2026-09-24 against the v1.0 tracker output pinned in
+    tests/test_one_chain_spine.py.
+    """
+    out = U.conj()
+    if ANTENNA_INDEX_REVERSED:
+        out = torch.flip(out, dims=(0,))
+    return out
+
+
 def perturb_basis(U):
     U = U + 1e-3 * (torch.randn_like(U) + 1j * torch.randn_like(U))
     return torch.linalg.qr(U)[0]
@@ -192,6 +249,8 @@ class Simulation:
         array_shape=None,
         serial_stages=None,
         warm_start=True,
+        radar_cfg=None,
+        range_transform=None,
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -214,32 +273,21 @@ class Simulation:
         if array_shape is None:
             array_shape = getattr(environment_block, 'array_shape', (32, 32))
         self.n_rx_x, self.n_rx_y = array_shape
-        # The serial stages form the pipeline proper (each may rewrite 's_pars'), run
-        # in order inside feed_forward. By default they're built from the legacy
-        # block args above; pass `serial_stages` explicitly to replace the whole list
-        # (composability hook -- e.g. inserting a custom stage).
+        # THE serial spine. One list, the contract's order (section 1.2), built the
+        # SAME way whatever domain the source starts in -- a replayed ADC cube enters
+        # it at a start index (see `_start_index`) instead of getting a pipeline of
+        # its own. `serial_stages=` still replaces the whole list for callers that
+        # compose their own chain (the ML generator, the webapp), but there is no
+        # longer a branch that silently builds a DIFFERENT default.
+        self.radar_cfg = radar_cfg
         if serial_stages is not None:
-            self.serial_stages = serial_stages
-        elif getattr(environment_block, 'signal_domain', frames.DOMAIN_CFR) != frames.DOMAIN_CFR:
-            # The default stages below (circuit, aperture grid, measurement) are the
-            # frequency-domain imaging path. An environment that starts the chain in
-            # another domain -- a SourceBlock replaying a stored ADC cube -- has already
-            # passed the point where they apply, so building them would only produce a
-            # contract error naming a stage the caller never asked for. Such a chain
-            # supplies its own stages, or none.
-            self.serial_stages = []
+            self.serial_stages = list(serial_stages)
         else:
-            self.serial_stages = []
-            if circuit_block is not None:
-                self.serial_stages.append(CircuitStage(circuit_block))
-            self.serial_stages.append(GridStage((self.n_rx_x, self.n_rx_y)))
-            if interconnect_block is not None:
-                self.serial_stages.append(InterconnectStage(interconnect_block))
-            # No subspace block -> no measurement stage: the pipeline then ends at the
-            # aperture grid, which is all FFT/range-map products need. (AFE without a
-            # subspace block was already rejected above.)
-            if subspace_block is not None:
-                self.serial_stages.append(MeasurementStage(afe_block, subspace_block))
+            self.serial_stages = self._build_spine(
+                circuit_block, interconnect_block, afe_block, subspace_block,
+                range_transform,
+            )
+        self._check_single_source()
         self.outputs = defaultdict(list)
         # The online subspace tracker is initialized once (from the first frame's
         # subspace) and then tracks the evolving scene; this flag guards that
@@ -247,6 +295,87 @@ class Simulation:
         self._subspace_started = False
         # Throttles the rank-diagnostic warning to once per run (see feed_forward).
         self._rank_warned = False
+        # Names of the spine stages the LAST frame entered past (replay start index).
+        # Empty for a live CFR source; that is the same rule with nothing skipped.
+        self.skipped_stages = []
+
+    # --------------------------------------------------------------- the one spine
+    #: Minimal `cfg` for the imaging spine's dechirp: one TX, no multiplexing to undo.
+    #: `DechirpBlock` reads only `cfg.mimo` (see its docstring), so a full
+    #: `RadarConfig` is needed only when a caller wants TDM/DDMA combining or a
+    #: cfg-derived range calibration -- pass `radar_cfg=` for that.
+    class _SingleTxCfg:
+        mimo = "single"
+        n_tx = 1
+
+    def _build_spine(self, circuit_block, interconnect_block, afe_block,
+                     subspace_block, range_transform):
+        """The contract's stage list (section 1.2), in order, for every source.
+
+        `CircuitStage` and `InterconnectStage` are present only when configured (they
+        are physical options, not structure); the dechirp and the range transform are
+        ALWAYS present, because they are what make the chain one chain -- deleting
+        them is what used to leave the imaging products computing their own range
+        FFTs off a second path.
+
+        The range transform is built at the IMAGING identity point -- `window="none"`,
+        `dc_removal=False` -- not at `RangeTransformBlock`'s own (ML-protocol)
+        defaults. `window="none"` because it is the point at which the cube's column
+        space is exactly the v1.0 frame's (contract 5.4, and T2/T3's refine gate reads
+        a singular-value gap a window would move); `dc_removal=False` because the
+        munich trace is generated with `normalize_delays=True`, putting the
+        line-of-sight path AT bin 0, which the fast-time mean subtraction would zero.
+        Pass `range_transform=` to override.
+        """
+        stages = []
+        if circuit_block is not None:
+            stages.append(CircuitStage(circuit_block))
+        if interconnect_block is not None:
+            stages.append(InterconnectStage(interconnect_block))
+        stages.append(DechirpBlock(self.radar_cfg or self._SingleTxCfg()))
+        stages.append(range_transform or RangeTransformBlock(
+            self.radar_cfg, window="none", dc_removal=False))
+        # No subspace block -> no measurement stage: the spine then ends at the range
+        # transform, which is all the image/profile products need. (AFE without a
+        # subspace block was already rejected above.)
+        if subspace_block is not None:
+            stages.append(MeasurementStage(afe_block, subspace_block))
+        return stages
+
+    def _check_single_source(self):
+        """One chain, one source. A stage that is itself a frame source (it advertises
+        `get_S_pars`, the environment-block protocol) sitting in the serial list means
+        two things are trying to originate the chain, and whichever runs second
+        silently wins. Refuse, naming both."""
+        sources = [s for s in self.serial_stages if hasattr(s, "get_S_pars")]
+        if sources:
+            names = ", ".join(frames.component_name(s) for s in sources)
+            raise ValueError(
+                f"two sources on one chain: the environment block is "
+                f"{frames.component_name(self.environment_block)}, but the serial "
+                f"stage list also contains source block(s) {names}. The spine has one "
+                f"origin; a stored artifact is replayed by passing it as the "
+                f"environment block, which enters the spine at a start index."
+            )
+
+    def _start_index(self, domain):
+        """Where a source in `domain` ENTERS the one spine.
+
+        The replay capability, kept, without a second loop: the first stage that
+        consumes `domain` is where the chain begins, and everything before it is
+        skipped -- and NAMED, in `self.skipped_stages`, because "this run did not
+        apply the front end" is exactly the fact a stored-vs-live comparison turns on.
+        A CFR source starts at 0, so the live path is the no-skip case of one rule.
+        """
+        if domain == frames.DOMAIN_CFR:
+            return 0
+        for i, stage in enumerate(self.serial_stages):
+            if frames.capabilities_of(stage).domain == domain:
+                return i
+        # Nothing on this spine consumes the source's domain: the products may still
+        # be able to (a stored cube feeding an image). Start at the top and let the
+        # per-stage contract check name the first mismatch.
+        return len(self.serial_stages)
 
     def step(self):
         self.environment_block.step()
@@ -271,18 +400,95 @@ class Simulation:
         payload = self.environment_block.get_S_pars()
 
         # Which signal domain does the chain START in? Normally the frequency domain --
-        # an environment block hands over an S-parameter frame. But a SourceBlock
-        # replaying a stored artifact may start the chain mid-way, already past the
-        # dechirp, in which case the payload is an ADC cube and the frequency-domain
-        # machinery below (the SVD, the subspace ground truth) has nothing to say about
-        # it. Blocks that advertise nothing get the historical frequency-domain start.
+        # an environment block hands over an S-parameter frame. A SourceBlock replaying
+        # a stored artifact starts further down the SAME spine (see `_start_index`),
+        # in which case the payload is an ADC cube and the frequency-domain machinery
+        # below (the SVD, the subspace ground truth) has nothing to say about it.
+        # Blocks that advertise nothing get the historical frequency-domain start.
         domain = getattr(self.environment_block, 'signal_domain', frames.DOMAIN_CFR)
-        if domain != frames.DOMAIN_CFR:
-            return self._feed_forward_from(domain, payload)
+        start = self._start_index(domain)
+        self.skipped_stages = [frames.component_name(s)
+                               for s in self.serial_stages[:start]]
 
-        s_pars = payload
+        state_dict = {
+            frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'): payload,
+            'PRX': None,
+            'signal_domain': domain,
+            # Seeded explicitly, like signal_domain above: a replayed payload is stored
+            # post-digitization and therefore full-dimension, and leaving it to a
+            # .get() default elsewhere would mean the two entry points disagreed about
+            # what the contract's starting state even is.
+            'signal_dimension': frames.DIMENSION_FULL,
+            # The receive-array geometry the aperture products factor the cube's
+            # element axis with. It travels in state because the cube stays flat
+            # through the compressor (see e2e/blocks.py:_aperture_shape_for).
+            'aperture_shape': (self.n_rx_x, self.n_rx_y),
+        }
+        if self.skipped_stages:
+            # Not a warning and not silence: a recorded fact, per frame, that a
+            # stored-vs-live comparison can read back.
+            state_dict['skipped_stages'] = list(self.skipped_stages)
+        # The stored frame's own frequency plan, seeded at the source so the range
+        # transform calibrates the ONE range axis from the grid the frames were
+        # actually traced on -- `(stop - start) / (num_freqs - 1)`, endpoint-inclusive
+        # -- instead of a display helper re-deriving `B / num_freqs` downstream and
+        # landing 0.02% (half a metre at 125 m on munich Ka) away from it.
+        plan = getattr(self.environment_block, 'freq_plan', None)
+        if plan:
+            state_dict['freq_plan'] = plan
+
+        if domain == frames.DOMAIN_CFR:
+            self._seed_subspace_oracle(payload, state_dict)
+        state_dict.update(self._environment_state_updates())
+
+        for stage in self.serial_stages[start:]:
+            _check_frame_contract(stage, state_dict)
+            before = state_dict.get('signal_domain', domain)
+            before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
+            state_dict.update(stage.apply(state_dict))
+            _advance_domain(stage, state_dict, before)
+            _advance_dimension(stage, state_dict, before_dim)
+
+        # Serial stages that touch the subspace tracker (MeasurementStage) refresh
+        # 'U' via their return dict; re-read it from the tracker here too so 'U' is
+        # always current. Guarded: a serial_stages override may legitimately run
+        # without a subspace block, in which case 'U' is whatever the stages set.
+        if self.subspace_block is not None:
+            state_dict['U'] = self.subspace_block.oja.U
+
+        # Per-frame refine-pass count MeasurementStage actually ran (constant unless a
+        # gap_response is enabled). Logged next to 'sv_gap_at_k' so the adaptive
+        # compute cost of a gap response is visible in the same outputs record that
+        # holds the diagnostic that triggered it.
+        if 'n_refine_used' in state_dict:
+            self.outputs['n_refine_used'].append(state_dict['n_refine_used'])
+        if self.skipped_stages:
+            self.outputs['skipped_stages'].append(list(self.skipped_stages))
+
+        for downstream_block in self.downstream_blocks:
+            _check_frame_contract(downstream_block, state_dict)
+            outputs = downstream_block.apply(state_dict)
+            for output_name, output in outputs.items():
+                self.outputs[output_name].append(output)
+            # Make a block's outputs visible to subsequent downstream blocks, so they
+            # can compose (e.g. a comms BERBlock consumes a ModemBlock's tx/rx bits).
+            # Existing product blocks emit disjoint keys, so this is a no-op for them.
+            # Guard the reserved pipeline keys: a block must not clobber the canonical
+            # state the orchestrator feeds every block, so the contract is explicit.
+            for key in outputs:
+                if key in _RESERVED_STATE_KEYS:
+                    raise ValueError(
+                        f"downstream block {downstream_block} emitted reserved key {key!r}"
+                    )
+            state_dict.update(outputs)
+
+    def _seed_subspace_oracle(self, s_pars, state_dict):
+        """The subspace ground truth + rank diagnostic, for a chain that starts at the
+        CFR. Unchanged arithmetic; lifted out of `feed_forward` so the one loop reads
+        as one loop. See `to_beat_basis` for why `U_true` is expressed in the beat
+        basis and why that moves no published number."""
         U, S = _svd_frame(s_pars)
-        U_true = U[:, :self.k]
+        U_true = to_beat_basis(U[:, :self.k])
 
         # Rank / singular-value-gap diagnostic on the frame get_U_true saw: flags when
         # the requested subspace rank self.k exceeds the frame's effective rank, in
@@ -320,63 +526,14 @@ class Simulation:
                 self.subspace_block.oja.U = perturb_basis(U_true)
             self._subspace_started = True
 
-        state_dict = {
-            's_pars': s_pars,
-            'U_true': U_true,
-            'PRX': None,
-            'signal_domain': frames.DOMAIN_CFR,
-            'signal_dimension': frames.DIMENSION_FULL,
-            # Spectrum-only diagnostic ((S[k-1]-S[k])/S[0], from rank_diagnostic
-            # above) -- NOT derived from U_true. Threaded through so a stage/block
-            # downstream (e.g. MeasurementStage/AdaOjaBlock's opt-in gap_response) can
-            # react to an ill-conditioned subspace identity at the k cutoff -- a
-            # degenerate cluster there OR an insignificant tail -- without peeking at
-            # the ground-truth basis itself.
-            'sv_gap_norm': rank_diag['sv_gap_norm'],
-        }
-        state_dict.update(self._environment_state_updates())
-        for stage in self.serial_stages:
-            _check_frame_contract(stage, state_dict)
-            before = state_dict.get('signal_domain', frames.DOMAIN_CFR)
-            before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
-            state_dict.update(stage.apply(state_dict))
-            _advance_domain(stage, state_dict, before)
-            _advance_dimension(stage, state_dict, before_dim)
-        # Serial stages that touch the subspace tracker (MeasurementStage) refresh
-        # 'U' via their return dict; re-read it from the tracker here too so 'U' is
-        # always current. Guarded: a serial_stages override may legitimately run
-        # without a subspace block, in which case 'U' is whatever the stages set.
-        if self.subspace_block is not None:
-            state_dict['U'] = self.subspace_block.oja.U
+        state_dict['U_true'] = U_true
+        # Spectrum-only diagnostic ((S[k-1]-S[k])/S[0], from rank_diagnostic above) --
+        # NOT derived from U_true. Threaded through so a stage/block downstream (e.g.
+        # MeasurementStage/AdaOjaBlock's opt-in gap_response) can react to an
+        # ill-conditioned subspace identity at the k cutoff -- a degenerate cluster
+        # there OR an insignificant tail -- without peeking at the ground-truth basis.
+        state_dict['sv_gap_norm'] = rank_diag['sv_gap_norm']
 
-        # Per-frame refine-pass count MeasurementStage actually ran (constant unless a
-        # gap_response is enabled). Logged next to 'sv_gap_at_k' so the adaptive
-        # compute cost of a gap response is visible in the same outputs record that
-        # holds the diagnostic that triggered it.
-        if 'n_refine_used' in state_dict:
-            self.outputs['n_refine_used'].append(state_dict['n_refine_used'])
-
-        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
-                         'signal_domain', 'signal_dimension', 'sensing_matrix',
-                         'aperture_shape', 'tx_wave', 'adc'}
-
-        for downstream_block in self.downstream_blocks:
-            _check_frame_contract(downstream_block, state_dict)
-            outputs = downstream_block.apply(state_dict)
-            for output_name, output in outputs.items():
-                self.outputs[output_name].append(output)
-            # Make a block's outputs visible to subsequent downstream blocks, so they
-            # can compose (e.g. a comms BERBlock consumes a ModemBlock's tx/rx bits).
-            # Existing product blocks emit disjoint keys, so this is a no-op for them.
-            # Guard the reserved pipeline keys: a block must not clobber the canonical
-            # state the orchestrator feeds every block, so the contract is explicit.
-            for k in outputs:
-                if k in reserved_keys:
-                    raise ValueError(
-                        f"downstream block {downstream_block} emitted reserved key {k!r}"
-                    )
-            state_dict.update(outputs)
-        
     def _environment_state_updates(self):
         """Extra state an environment block wants to seed the chain with.
 
@@ -389,57 +546,6 @@ class Simulation:
         getter = getattr(self.environment_block, 'get_state_updates', None)
         return dict(getter() or {}) if callable(getter) else {}
 
-    def _feed_forward_from(self, domain, payload):
-        """Run a chain that starts in a domain other than the frequency domain.
-
-        This is the replay path: a stored ADC cube injected part-way down the chain, so
-        impairments or products can be re-derived without paying for ray tracing again.
-        The subspace ground truth is deliberately absent -- it is a property of an
-        S-parameter frame, and inventing one here would be a fiction downstream blocks
-        could not distinguish from the real thing.
-        """
-        state_dict = {
-            frames.DOMAIN_PAYLOAD_KEY.get(domain, 's_pars'): payload,
-            'PRX': None,
-            'signal_domain': domain,
-            # Seeded explicitly, like signal_domain above. A replayed payload is stored
-            # post-digitization and therefore full-dimension; leaving it to the .get()
-            # default elsewhere would mean the replay path silently disagreed with the
-            # main path about what the contract's starting state even is.
-            'signal_dimension': frames.DIMENSION_FULL,
-        }
-        state_dict.update(self._environment_state_updates())
-
-        for stage in self.serial_stages:
-            _check_frame_contract(stage, state_dict)
-            before = state_dict.get('signal_domain', domain)
-            before_dim = state_dict.get('signal_dimension', frames.DIMENSION_FULL)
-            state_dict.update(stage.apply(state_dict))
-            _advance_domain(stage, state_dict, before)
-            # The main loop enforces this; the replay loop must too, or a stage that
-            # declares emits_dimension gets its promise checked on one path and not the
-            # other -- the asymmetry is the bug, not whether it is reachable today.
-            _advance_dimension(stage, state_dict, before_dim)
-
-        # Same cost log as the main path -- the replay loop mirrors it so runs that
-        # start mid-chain record identical bookkeeping.
-        if 'n_refine_used' in state_dict:
-            self.outputs['n_refine_used'].append(state_dict['n_refine_used'])
-
-        reserved_keys = {'U', 'U_true', 's_pars', 'PRX', 'frame_layout',
-                         'signal_domain', 'signal_dimension', 'sensing_matrix',
-                         'aperture_shape', 'tx_wave', 'adc'}
-        for downstream_block in self.downstream_blocks:
-            _check_frame_contract(downstream_block, state_dict)
-            outputs = downstream_block.apply(state_dict)
-            for output_name, output in outputs.items():
-                self.outputs[output_name].append(output)
-            for key in outputs:
-                if key in reserved_keys:
-                    raise ValueError(
-                        f"downstream block {downstream_block} emitted reserved key {key!r}"
-                    )
-            state_dict.update(outputs)
 
     def get_outputs(self):
         return self.outputs

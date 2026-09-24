@@ -110,8 +110,9 @@ LAYOUT_APERTURE = "aperture"  # [rx_x, rx_y, n_chirp, n_freqs] -- after to_apert
 DOMAIN_TX_TIME = "tx_time"   # tx_wave [n_tx, n_chirp, n_t]           -- transmitted envelope
 DOMAIN_CFR     = "cfr"       # s_pars  [n_rx, n_tx, n_chirp, n_freqs] -- transfer functions
 DOMAIN_RX_TIME = "rx_time"   # adc     [n_rx, n_chirp, n_samples]     -- dechirped beat samples
+DOMAIN_CUBE    = "cube"      # cube    [n_rx, n_chirp, n_range]       -- range-compressed
 
-_DOMAINS = (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME)
+_DOMAINS = (DOMAIN_TX_TIME, DOMAIN_CFR, DOMAIN_RX_TIME, DOMAIN_CUBE)
 
 #: Declared by blocks that do NOT consume the chain's current payload at all: they work
 #: on a side channel of their own. The transmit waveform is the motivating case -- it is
@@ -129,13 +130,44 @@ DOMAIN_PAYLOAD_KEY = {
     DOMAIN_TX_TIME: "tx_wave",
     DOMAIN_CFR: "s_pars",
     DOMAIN_RX_TIME: "adc",
+    DOMAIN_CUBE: "cube",
 }
 
 #: Human-readable hint naming the block that crosses INTO each domain, used in errors.
 _DOMAIN_BRIDGE = {
     DOMAIN_CFR: "ModulateBlock",
     DOMAIN_RX_TIME: "DechirpBlock",
+    DOMAIN_CUBE: "RangeTransformBlock",
 }
+
+
+# ------------------------------------------------------------------------ cube axes
+# What the cube's two non-element axes MEAN. The range transform is one block on one
+# spine, but the waveform that fed it decides whether the fast axis counts range bins
+# (FMCW: an FFT of beat samples) or subcarriers (OFDM-ISAC, v1.2), and whether the slow
+# axis counts chirps or symbols. A product that assumes the wrong one produces a
+# plausible picture of nothing, so the pair travels in state under `cube_axes` and
+# `require_cube_axes` refuses the mismatch BY NAME -- the same discipline
+# `require_domain` applies one level up. See notes/ONE_CHAIN_CONTRACT_2026-09-24.md
+# section 1.2 (state keys).
+CUBE_AXES_FMCW = {"slow": "chirp", "fast": "range_bin"}
+CUBE_AXES_OFDM = {"slow": "symbol", "fast": "subcarrier"}
+
+
+def require_cube_axes(state, component, slow="chirp", fast="range_bin"):
+    """Raise FrameContractError unless the chain's `cube_axes` match what `component`
+    consumes. A chain carrying no `cube_axes` at all is treated as FMCW
+    (`CUBE_AXES_FMCW`) -- the only waveform the v1.1 spine builds.
+    """
+    axes = state.get("cube_axes") or CUBE_AXES_FMCW
+    want = {"slow": slow, "fast": fast}
+    if dict(axes) != want:
+        raise FrameContractError(
+            f"{component_name(component)} consumes a cube whose axes are "
+            f"{want}, but the chain's cube is {dict(axes)} -- the waveform that "
+            f"produced it is not the one this product reads."
+        )
+    return axes
 
 
 # ------------------------------------------------------------------ signal dimension
@@ -377,3 +409,33 @@ def to_aperture_grid(s_pars, array_shape):
             f"n_rx={d.n_rx}"
         )
     return s_pars.view(rx_x, rx_y, d.n_chirp, d.n_freqs)
+
+
+def cube_to_aperture_grid(cube, array_shape):
+    """The `to_aperture_grid` of the RANGE-COMPRESSED cube: `[n_rx, n_chirp, n_range]`
+    -> `[rx_x, rx_y, n_chirp, n_range]`.
+
+    Same row-major reshape, same ordering caveat (see `to_aperture_grid`: for
+    Sionna-generated frames `array_shape` is `(num_cols, num_rows)`), applied to the
+    3-D cube the spine's `RangeTransformBlock` emits rather than the 4-D CFR frame.
+    It exists because the cube has no TX axis to collapse -- the dechirp already did
+    that -- so the two reshapes genuinely differ in rank, and one function pretending
+    to do both would have to guess which axis it was handed.
+
+    The OUTPUT keeps the 4-D `[dim0, dim1, chirp, fast]` layout the aperture products
+    (`RangeAzBlock`, `RangeElBlock`, `FFTBlock`) index, so `chirp0` works on it
+    unchanged.
+    """
+    if cube.ndim != 3:
+        raise FrameContractError(
+            f"expected a range-compressed cube with 3 dims [n_rx, n_chirp, n_range], "
+            f"got shape {tuple(cube.shape)} ({cube.ndim} dims)"
+        )
+    n_rx, n_chirp, n_range = cube.shape
+    rx_x, rx_y = array_shape
+    if n_rx != rx_x * rx_y:
+        raise FrameContractError(
+            f"array_shape {(rx_x, rx_y)} (= {rx_x * rx_y} elements) does not factor "
+            f"the cube's n_rx={n_rx}"
+        )
+    return cube.reshape(rx_x, rx_y, n_chirp, n_range)

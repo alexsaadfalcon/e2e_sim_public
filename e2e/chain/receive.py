@@ -8,8 +8,12 @@ Each block below follows the same `apply(state) -> dict of state updates` protoc
 `Simulation._check_frame_contract` raises a named `FrameContractError` if one of these
 runs before the chain has actually crossed into RX time (e.g. no DechirpBlock inserted).
 
-Four blocks:
+Five blocks:
 
+- `RangeTransformBlock` -- THE range FFT of the one chain: `adc` (RX time) ->
+  `cube` (DOMAIN_CUBE), the single object every range product reads. Bridge block:
+  it is what makes the spine serial instead of branched. See its docstring and
+  notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2 row 11.
 - `ImpairmentBlock`  -- wraps `e2e.chain.impairments.apply_all` (phase noise, TX/RX
   leakage, clutter). Serial stage: rewrites `adc`.
 - `IFHighPassBlock`  -- the IF-chain high-pass every FMCW receiver puts between the
@@ -440,6 +444,228 @@ class QuantizerBlock:
 
         return {"adc": out, "clipped_fraction": clipped_fraction,
                 "quant_snr_db": quant_snr_db, "adc_full_scale": fs}
+
+
+# ================================================================================
+# The range transform -- THE bridge from RX time to the one range-compressed cube.
+# ================================================================================
+# Every product downstream of it (range-azimuth / range-elevation / az-el / range
+# profile / the subspace tracker's snapshots) reads THIS cube. Before the one-chain
+# consolidation each of those products ran its own range FFT over the frequency axis
+# of `s_pars` (`e2e/blocks.py` at HEAD c33bb64, lines 1090/1164/1204) while the ML
+# chain ran a second, differently-conventioned one inside `transforms.adc_to_rd` --
+# the two pipelines the owner's 2026-09-24 directive retires. See
+# notes/ONE_CHAIN_CONTRACT_2026-09-24.md sections 1.2 (row 11) and 5.1.
+
+#: The two metre conventions the stored bistatic munich frames admit. They are not a
+#: labelling choice: the frames are a TX->RX-array link with `normalize_delays=True`,
+#: so a bin's delay tau is an EXCESS delay over the line of sight, and the metre it is
+#: quoted in changes every number on every card (contract section 3.6, ballot Q2).
+#:   "monostatic_c2"  -- c*tau/2, the range a monostatic radar would report for the
+#:                       same delay. Today's cards' convention. THE DEFAULT, so
+#:                       nothing on screen moves until the owner says so.
+#:   "bistatic_path"  -- c*tau, the excess PATH LENGTH, physically exact for what the
+#:                       frames actually are.
+RANGE_CONVENTIONS = ("monostatic_c2", "bistatic_path")
+
+#: Metres per second of delay, per convention.
+_CONVENTION_SCALE = {"monostatic_c2": C_MPS / 2.0, "bistatic_path": C_MPS}
+
+
+def delta_f_from_freq_plan(freq_plan):
+    """Frequency-grid spacing (Hz) of a stored v2 CFR, from its `freq_plan` meta.
+
+    `e2e/environment/sionna_simple_channel.py:build_frequencies` is
+    `np.linspace(start, stop, num_freqs)` -- ENDPOINT-INCLUSIVE -- so the spacing is
+    `(stop - start) / (num_freqs - 1)`, NOT `B / num_freqs`. For the shipped munich Ka
+    file (28.5-31.5 GHz, 5000 points) that is 600_120.02 Hz against 600_000.0 Hz: a
+    0.02% error, worth ~0.5 m at the far end of a 2500-bin window. Measured
+    2026-09-24 against the pickle header; holds for any v2 file written by that script.
+
+    Returns None when `freq_plan` is absent or unusable (legacy pkls), which is the
+    caller's cue that the cube has no metre axis -- bins only.
+    """
+    if not freq_plan:
+        return None
+    try:
+        start = float(freq_plan["start_hz"])
+        stop = float(freq_plan["stop_hz"])
+        num = int(freq_plan["num_freqs"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if num < 2 or not stop > start:
+        return None
+    return (stop - start) / (num - 1)
+
+
+def delta_f_from_cfg(cfg):
+    """Frequency-grid spacing (Hz) of an FMCW beat record described by `cfg`.
+
+    `e2e/environment/rt_signal_chain.py:beat_frequencies` samples at `f0 + S*n/fs` for
+    `n < n_samples` -- NOT endpoint-inclusive -- so the spacing is `S/fs`, i.e.
+    `bandwidth_hz / n_samples`. This is deliberately a DIFFERENT formula from
+    `delta_f_from_freq_plan`'s, because the two grids really are built differently;
+    the known-delay oracle in tests/test_one_chain_spine.py checks both.
+    """
+    if cfg is None:
+        return None
+    try:
+        return float(cfg.bandwidth_hz) / float(cfg.n_samples)
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def range_axis_m(n_bins, delta_f_hz, n_fft, convention="monostatic_c2"):
+    """Physical range (m) of cube bins `0 .. n_bins-1` as a float64 tensor, or None
+    when the chain carries no frequency plan to calibrate against.
+
+    Bin `k` of a forward FFT of `n_fft` beat samples spaced `delta_f_hz` apart is delay
+    `tau_k = k / (n_fft * delta_f_hz)`; the metre is `tau_k` times
+    `_CONVENTION_SCALE[convention]`. NOTE it is written against `n_fft * delta_f_hz`
+    and never against a nominal bandwidth `B`: for an endpoint-inclusive grid those two
+    differ by `N/(N-1)`, and baking `B` in is exactly the off-by-one the contract
+    (section 3.6) says the oracle must not be able to hide.
+
+    `n_bins` may be smaller than `n_fft` (a cropped cube); the calibration of bin `k`
+    does not depend on how many bins were kept.
+    """
+    if convention not in RANGE_CONVENTIONS:
+        raise ValueError(
+            f"unknown range convention {convention!r}; expected one of {RANGE_CONVENTIONS}"
+        )
+    if delta_f_hz is None or not float(delta_f_hz) > 0:
+        return None
+    step = _CONVENTION_SCALE[convention] / (float(n_fft) * float(delta_f_hz))
+    return torch.arange(int(n_bins), dtype=torch.float64) * step
+
+
+class RangeTransformBlock:
+    """RX-time beat samples -> THE range-compressed cube. The one range FFT in the
+    simulator.
+
+    `adc [n_rx, n_chirp, n_samples]` (DOMAIN_RX_TIME) in; `cube [n_rx, n_chirp,
+    n_range]` (DOMAIN_CUBE) out, plus `range_axis` (metres, or None when the chain
+    carries no frequency plan), `range_axis_m_per_bin`, `cube_axes` and
+    `range_convention`.
+
+    Chain, in order -- the range half of `transforms.adc_to_rd`, which keeps its own
+    copy while `e2e/chain/transforms.py` is under the F84 training freeze; the parity
+    is asserted by `tests/test_one_chain_spine.py::test_adc_to_rd_range_half_parity`,
+    and the refactor that makes THIS the single implementation is the follow-on:
+
+      1. optional per-(rx, chirp) DC removal (mean over fast time);
+      2. optional window on the fast axis;
+      3. forward FFT along fast time. NO fftshift, NO negation.
+
+    Conventions, each of which used to live in a display helper and now lives here:
+
+    * **Bin k is delay `k / (n_samples * delta_f)`, k in [0, n_samples).** With IQ
+      sampling the whole FFT period is physical delay (F96); there is no negative-delay
+      half to fold away. What the v1.0 SCREENS showed as "negative range" was an
+      artifact of fftshifting and then negating an axis with no negative half -- the
+      upper bins are real delay, cropped (contract section 3.6).
+    * **`crop_negative_delay`** (default True) keeps bins `0 .. n_samples//2`, which is
+      EXACTLY the half the v1.0 display kept (`webapp/pipeline_runner.py:_range_axis` /
+      `_nonnegative_range` at HEAD c33bb64: gates with `axis >= 0` are the gates at or
+      below `zero_gate`, which map back to native bins `0 .. n_freqs//2`). Default True
+      so nothing on screen moves without a decision; set False for the full unambiguous
+      window (250 m on munich Ka under c/2).
+    * **`dc_removal`** defaults to True, matching `adc_to_rd`'s scored ML protocol.
+      The imaging spine passes False: the munich trace is generated with
+      `normalize_delays=True`, so the line-of-sight path sits AT bin 0 and removing the
+      mean would delete the brightest feature on the screen. (Subtracting the fast-time
+      mean zeroes FFT bin 0 exactly and leaves every other bin untouched -- so this flag
+      is a one-bin decision, not a filter.)
+    * **`window`** defaults to 'hann' (the scored protocol); the imaging/tracker presets
+      pass 'none', which is the point at which this block is the identity with the v1.0
+      products (contract section 5.4).
+
+    `delta_f_hz` resolution order: the explicit kwarg, else `state['freq_plan']`
+    (endpoint-inclusive: `delta_f_from_freq_plan`), else `cfg` (`delta_f_from_cfg`).
+    If none of them answer, `range_axis` is None and the cube is calibrated in bins --
+    said out loud rather than guessed.
+    """
+
+    frame_capabilities = FrameCapabilities(
+        domain=frames.DOMAIN_RX_TIME, emits_domain=frames.DOMAIN_CUBE,
+        accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+    )
+
+    #: Windows this block accepts on the FAST (range) axis. 'none' is the v1.0 identity
+    #: point; 'hann' is what `adc_to_rd` applies and what the ML corpora were scored on.
+    WINDOWS = ("none", "hann", "hamming")
+
+    def __init__(self, cfg=None, *, window="hann", dc_removal=True,
+                 convention="monostatic_c2", crop_negative_delay=True,
+                 delta_f_hz=None):
+        window = "none" if window is None else str(window)
+        if window not in self.WINDOWS:
+            raise ValueError(
+                f"unknown range window {window!r}; expected one of {self.WINDOWS}"
+            )
+        if convention not in RANGE_CONVENTIONS:
+            raise ValueError(
+                f"unknown range convention {convention!r}; expected one of "
+                f"{RANGE_CONVENTIONS}"
+            )
+        self.cfg = cfg
+        self.window = window
+        self.dc_removal = bool(dc_removal)
+        self.convention = convention
+        self.crop_negative_delay = bool(crop_negative_delay)
+        self.delta_f_hz = None if delta_f_hz is None else float(delta_f_hz)
+
+    def _fast_window(self, n, device):
+        if self.window == "none":
+            return None
+        if self.window == "hann":
+            return torch.hann_window(n, periodic=False, dtype=torch.float32, device=device)
+        return torch.hamming_window(n, periodic=False, dtype=torch.float32, device=device)
+
+    def resolve_delta_f(self, state=None):
+        """The grid spacing this block calibrates with, or None. Public so a caller
+        (a webapp panel, a card test) can read the SAME number the cube was built with
+        instead of re-deriving it from a literal."""
+        if self.delta_f_hz is not None:
+            return self.delta_f_hz
+        plan = (state or {}).get("freq_plan")
+        df = delta_f_from_freq_plan(plan)
+        if df is not None:
+            return df
+        return delta_f_from_cfg(self.cfg)
+
+    def apply(self, state):
+        adc = state["adc"]
+        if adc.dim() != 3:
+            raise frames.FrameContractError(
+                f"RangeTransformBlock expects adc [n_rx, n_chirp, n_samples], got "
+                f"shape {tuple(adc.shape)}"
+            )
+        n_samples = adc.shape[-1]
+        x = adc
+        if self.dc_removal:
+            x = x - x.mean(dim=-1, keepdim=True)
+        w = self._fast_window(n_samples, x.device)
+        if w is not None:
+            x = x * w.to(x.dtype)
+        cube = torch.fft.fft(x, n=n_samples, dim=-1)
+        n_keep = n_samples // 2 + 1 if self.crop_negative_delay else n_samples
+        cube = cube[..., :n_keep].contiguous().to(torch.complex64)
+
+        delta_f = self.resolve_delta_f(state)
+        axis = range_axis_m(n_keep, delta_f, n_samples, self.convention)
+        per_bin = float(axis[1] - axis[0]) if axis is not None and n_keep > 1 else None
+        return {
+            "cube": cube,
+            "signal_domain": frames.DOMAIN_CUBE,
+            "cube_axes": dict(frames.CUBE_AXES_FMCW),
+            "range_axis": axis,
+            "range_axis_m_per_bin": per_bin,
+            "range_convention": self.convention,
+            "range_n_fft": n_samples,
+            "range_delta_f_hz": delta_f,
+            "range_cropped": self.crop_negative_delay,
+        }
 
 
 class RadarCubeBlock:

@@ -38,9 +38,15 @@ FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 
 
 def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=False):
-    """Run the full radar pipeline (environment -> RFFE -> interconnect -> AFE ->
-    AdaOja subspace tracking -> FFT/RangeAz/RangeEl/SubspaceError) and, if `show`,
-    save the subspace-error and az/el-map figures to FIG_DIR.
+    """Run the ONE spine and, if `show`, save the subspace-error and az/el-map figures
+    to FIG_DIR.
+
+    The spine `Simulation` builds from the blocks passed below is, in order:
+    environment -> RFFE (CircuitStage) -> interconnect -> dechirp -> range transform
+    -> AFE + AdaOja (MeasurementStage) -> the product fan-out
+    (FFT / RangeAz / RangeEl / SubspaceError). There is no second path: the products
+    read the one range-compressed cube rather than each running a range FFT of its own
+    (owner directive 2026-09-24; notes/ONE_CHAIN_CONTRACT_2026-09-24.md).
 
     `environment_block`, if given, is used as-is (e.g. a synthetic drop-in for
     tests); otherwise a `SionnaEnvironmentBlock(scenario_name)` is constructed,
