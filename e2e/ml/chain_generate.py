@@ -124,6 +124,40 @@ def _interconnect_band_hz(cfg) -> Tuple[float, float]:
     `benchmark_v1_ka` (owner decision 2026-09-23, Ka-band re-founding) -- derives the
     band from its own carrier: `f0_hz +- _INTERCONNECT_EVAL_SPAN_HZ / 2`, so a config
     generated for a different band is not silently mapped over 75-81 GHz.
+
+    KNOWN DEFECT AT KA, MEASURED 2026-09-24 -- read this before "fixing" it.
+    ------------------------------------------------------------------------
+    `DEFAULT_INTERCONNECT_CSV` covers **70-90 GHz** (402 points). Case (3) hands
+    `benchmark_v1_ka` the band **27-33 GHz**, which lies entirely BELOW that range, and
+    `InterconnectBlock` clamps out-of-range grid points to the CSV's endpoints. So at Ka
+    the "interconnect" is a CONSTANT complex gain, not a filter. Measured on a
+    `benchmark_v1_ka` frame (512 samples):
+
+    | config | band | \|S21\| ripple | phase span |
+    |---|---|---|---|
+    | `benchmark_v1` (77 GHz) | 75-81 GHz | **0.0336 dB** | 0.089 deg |
+    | `benchmark_v1_ka` (30 GHz) | 27-33 GHz | **0.000000 dB** | **0.000000 deg** |
+
+    Every grid point of the Ka response is bit-identical: -0.4861 dB / +1.2946 deg, the
+    CSV's 70 GHz endpoint. The 0.034 dB figure quoted in `build_chain_simulation`'s
+    interconnect comment was measured at 77 GHz and holds only there.
+
+    CONSEQUENCE, and it is small but it is not nothing: every Ka corpus
+    (`b1_bench_v3_ka`, `b1_bench_v4_ka`, `b1_demo_cfr_ka`) was generated with
+    `use_interconnect=True` and an interconnect that contributed a scalar. A constant
+    complex gain changes no measurable quantity downstream -- `QuantizerBlock` AGCs off
+    the frame peak -- so the corpora are not wrong, but any claim that they carry a
+    MODELLED interconnect at Ka is. A Ka card must not say the interconnect shapes the
+    band on this path.
+
+    NOT FIXED HERE, deliberately. Changing the band, the CSV or the clamp changes what
+    `use_interconnect=True` computes, which regenerates every Ka corpus and breaks the
+    bit-parity gates that read max |diff| = 0 codes. The real fix is a Ka-band S21 --
+    either a CSV for this band or `InterconnectBlock(source="tessera")`, whose geometric
+    scale model (F91) exists precisely to evaluate the surrogate at a non-77 GHz carrier
+    -- and it is a corpus-regeneration decision, not a quiet edit.
+    `tests/test_ml_chain_generate.py::test_the_ka_interconnect_is_a_clamped_constant`
+    pins the current behaviour so it cannot be "fixed" into a parity break by accident.
     """
     start = getattr(cfg, "f_start_hz", None)
     stop = getattr(cfg, "f_stop_hz", None)
@@ -402,6 +436,12 @@ def build_chain_simulation(
         # replaced here with a real simulated interconnect (0.51-0.55 dB passive loss,
         # 0.034 dB ripple in band) that leaves the range response intact -- width 1 bin,
         # sidelobes -75 dB. The classic pipeline's default is deliberately untouched.
+        #
+        # SCOPE OF THAT 0.034 dB (added 2026-09-24): it was measured at 77 GHz, where the
+        # CSV lives. At Ka the derived band falls outside the CSV's 70-90 GHz range and
+        # the response clamps to a CONSTANT -- ripple 0.000000 dB, measured. See
+        # `_interconnect_band_hz`'s "KNOWN DEFECT AT KA" section before quoting this
+        # number for a Ka corpus or a Ka card.
         ic_kwargs = dict(interconnect_kwargs) if interconnect_kwargs else {}
         ic_kwargs.setdefault("transfer_csv", str(DEFAULT_INTERCONNECT_CSV))
         ic_kwargs.setdefault("band_hz", _interconnect_band_hz(cfg))

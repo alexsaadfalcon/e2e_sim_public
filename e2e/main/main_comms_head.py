@@ -47,6 +47,7 @@ from e2e.blocks import (
     RangeAzBlock,
     device,
 )
+from e2e.chain.waveform import fmcw_plan_from_freq_plan
 from e2e.comms.blocks import ModemBlock, BERBlock
 from e2e.viz import fig_dir, to_db, imshow_ra
 
@@ -120,8 +121,9 @@ def _make_environment(n_frames, n_freqs, force_synthetic, seed):
 
 def _build_simulation(environment_block, combining, freqs, k, snr_db, n_symbols, seed):
     """A fresh Simulation (fresh RFFE/interconnect/AFE/subspace state) around the SAME
-    environment_block (same frames), terminating in a radar head (RangeAzBlock) PLUS
-    the requested comms head (ModemBlock(combining=...) -> BERBlock)."""
+    environment_block (same frames), terminating in a radar head (RangeAzBlock,
+    downstream) PLUS the requested comms head (ModemBlock(combining=...) -> BERBlock,
+    tapped off the chain before the mixing block -- see `comms_head=` below)."""
     circuit_block = RFFEBlock(
         n=N_RX * N_TX,
         # Mirror the webapp's auto scale-resolution (main_sionna_blocks does the same):
@@ -133,8 +135,28 @@ def _build_simulation(environment_block, combining, freqs, k, snr_db, n_symbols,
     afe_block = AFEBlock()
     subspace_block = AdaOjaBlock(N_RX, k, gap_response="refine")
     modem = ModemBlock(freqs, n_symbols=n_symbols, snr_db=snr_db, seed=seed,
-                       combining=combining)
-    downstream_blocks = [RangeAzBlock(), modem, BERBlock()]
+                       combining=combining,
+                       # This example's whole POINT is comparing combining modes at a
+                       # STATED snr_db (the number in its own printed table and in
+                       # comms_head_ber.png's title), so it must keep drawing its own
+                       # AWGN rather than deferring to ModemBlock's AUTO default (which
+                       # would go silent here: a chain with a front end configured
+                       # counts as "noise already injected" and the comparison's snr_db
+                       # would stop being the number actually applied). `add_noise=True`
+                       # states that choice rather than leaving it to the default.
+                       add_noise=True)
+    # RangeAzBlock stays a downstream product (it reads the cube, after the whole
+    # spine); the comms head taps the chain BEFORE the mixing block, in the frequency
+    # domain, so it moves to `comms_head=` -- see Simulation._build_spine's docstring.
+    downstream_blocks = [RangeAzBlock()]
+    # A front end (circuit_block=RFFEBlock) needs a beat SAMPLE RATE (contract section
+    # 1.2): derive the RadarConfig from THIS example's own frequency grid (the same
+    # START_HZ/STOP_HZ/freqs this function is already handed) rather than inventing a
+    # separate one, so the dechirp/front end/range axis all calibrate off the one grid
+    # the comms head's channel is built from too.
+    freq_plan = {"start_hz": float(freqs[0]), "stop_hz": float(freqs[-1]),
+                "num_freqs": len(freqs)}
+    radar_cfg = fmcw_plan_from_freq_plan(freq_plan, n_rx=N_RX * N_TX)
     return Simulation(
         environment_block,
         downstream_blocks,
@@ -143,6 +165,8 @@ def _build_simulation(environment_block, combining, freqs, k, snr_db, n_symbols,
         interconnect_block,
         afe_block,
         subspace_block,
+        radar_cfg=radar_cfg,
+        comms_head=[modem, BERBlock()],
     )
 
 

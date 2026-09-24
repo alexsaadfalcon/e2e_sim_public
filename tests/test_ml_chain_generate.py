@@ -676,3 +676,54 @@ def test_chain_flags_reflect_a_non_default_composition(tmp_path, fake_env):
     assert meta["use_interconnect"] is True
     assert meta["use_link_budget"] is False
     assert meta["quant_bits"] == 6
+
+
+def test_the_ka_interconnect_is_a_clamped_constant():
+    """A KNOWN DEFECT, pinned so nobody fixes it into a corpus-parity break.
+
+    `DEFAULT_INTERCONNECT_CSV` covers 70-90 GHz. `_interconnect_band_hz` hands a Ka
+    config 27-33 GHz, entirely below that range, and `InterconnectBlock` clamps
+    out-of-range grid points to the CSV's endpoints -- so at Ka the interconnect is a
+    CONSTANT complex gain rather than a filter, and `use_interconnect=True` on a Ka
+    corpus bought a scalar.
+
+    MEASURED 2026-09-24 on a `benchmark_v1_ka` frame (512 samples): |S21| ripple
+    0.000000 dB and phase span 0.000000 deg (every grid point bit-identical at
+    -0.4861 dB / +1.2946 deg), against 0.0336 dB / 0.089 deg for `benchmark_v1` at
+    77 GHz where the CSV actually lives.
+
+    A constant complex gain changes no measurable quantity downstream, so the stored Ka
+    corpora are not wrong -- but any claim that they carry a MODELLED interconnect at Ka
+    is, and a Ka card must not say the interconnect shapes the band on this path.
+
+    THE FIX IS A CORPUS DECISION, NOT A QUIET EDIT: a Ka-band S21, or
+    `InterconnectBlock(source="tessera")` whose geometric scale model (F91) exists to
+    evaluate the surrogate at a non-77 GHz carrier. Either changes what
+    `use_interconnect=True` computes and regenerates every Ka corpus, breaking the
+    bit-parity gates that read max |diff| = 0 codes. This test failing means someone
+    made that change -- which may well be right, but it must be a decision.
+    """
+    from e2e.blocks import InterconnectBlock
+    from e2e.ml.chain_generate import DEFAULT_INTERCONNECT_CSV, _interconnect_band_hz
+    from e2e.radar_config import PRESETS
+
+    def response(cfg_name):
+        cfg = PRESETS[cfg_name]
+        block = InterconnectBlock(transfer_csv=str(DEFAULT_INTERCONNECT_CSV),
+                                  band_hz=_interconnect_band_hz(cfg))
+        ones = torch.ones(1, 1, 1, cfg.n_samples, dtype=torch.complex64)
+        return block.apply_interconnect(ones).reshape(-1)
+
+    ka = response("benchmark_v1_ka")
+    assert torch.equal(ka, ka[0].expand_as(ka)), (
+        "the Ka interconnect response is no longer a clamped constant -- someone gave "
+        "this path a real Ka-band S21. That is probably the right thing to do, but it "
+        "regenerates every Ka corpus: check the bit-parity gates before landing it.")
+
+    # ...and the 77 GHz path, where the CSV lives, is NOT constant -- so the test is
+    # pinning a band-specific defect and not an inert code path.
+    mm = response("benchmark_v1").abs()
+    ripple_db = float(20 * torch.log10(mm.max() / mm.min()))
+    assert ripple_db == pytest.approx(0.0336, abs=0.002), (
+        f"the 77 GHz in-band ripple is {ripple_db:.4f} dB, not the 0.034 dB "
+        f"`build_chain_simulation` quotes")
