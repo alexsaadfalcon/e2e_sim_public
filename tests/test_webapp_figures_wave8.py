@@ -148,7 +148,8 @@ def test_refine_axis_shares_a_common_range_regardless_of_this_arms_own_max():
         [0.5, 0.4, 0.3], [5, 5, 5]))["subspace_err"]
     fig_b = figures_from_outputs(_subspace_outputs(
         [0.5, 0.2, 0.06], [10, 10, 1]))["subspace_err"]
-    assert fig_a.layout.yaxis2.range[1] == fig_b.layout.yaxis2.range[1] == _REFINE_AXIS_MIN_YMAX
+    assert (fig_a.layout.yaxis2.range[1] == fig_b.layout.yaxis2.range[1]
+            == pytest.approx(1.2 * _REFINE_AXIS_MIN_YMAX))
     assert fig_a.layout.yaxis2.range[0] == 0
 
 
@@ -158,7 +159,7 @@ def test_refine_axis_grows_past_the_floor_for_a_high_pass_count():
     floor, since this function only ever sees one run's own data."""
     fig = figures_from_outputs(_subspace_outputs(
         [0.5, 0.4], [12, 15]))["subspace_err"]
-    assert fig.layout.yaxis2.range[1] == 16
+    assert fig.layout.yaxis2.range[1] == pytest.approx(1.2 * 16)
     assert fig.layout.yaxis2.range[1] > _REFINE_AXIS_MIN_YMAX
 
 

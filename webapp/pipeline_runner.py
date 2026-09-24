@@ -2467,9 +2467,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             _max_refine_used = max(int(n) for n in n_refine_used)
             refine_top = (_max_refine_used + 1 if _max_refine_used > _REFINE_AXIS_MIN_YMAX
                          else _REFINE_AXIS_MIN_YMAX)
+            # 20% headroom above the shared top (still common to both arms, since
+            # `refine_top` itself is): without it, a trace that reaches the top value
+            # exactly sits on the plot's top edge and runs through the subtitle text
+            # (rehearsal PNGs, 2026-09-23).
             fig.update_layout(
                 yaxis2=dict(title="refinement passes/frame", overlaying="y",
-                           side="right", range=[0, refine_top], showgrid=False),
+                           side="right", range=[0, 1.2 * refine_top], showgrid=False),
                 # Legend below the plot, not the default top-right: at top-right it sat
                 # on top of the new right-hand axis's own tick labels, clipping "10"
                 # into "1C" (found in the Thrust 3 rehearsal, 2026-09-23).
