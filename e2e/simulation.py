@@ -1,4 +1,4 @@
-﻿"""`Simulation` -- ONE serial spine, one product fan-out.
+"""`Simulation` -- ONE serial spine, one product fan-out.
 
 The owner's 2026-09-24 directive ("the block diagram shown is still very confusing
 from the fact that there are two pipelines ... Needs to be fixed immediately from the
