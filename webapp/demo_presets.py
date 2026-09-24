@@ -111,12 +111,20 @@ DEMO_CFR_CORPUS = "e2e/ml/datasets/b1_demo_cfr/benchmark_v1_D2/manifest.json"
 #: webapp/app.py `_resolve_screen_note` -- reads cleanly whether or not it fills
 #: in), under the 400-char budget on all three T5 cards (checked, ML has the
 #: least headroom because of its own appended sentence).
+#: wave 12 (2026-09-24, item 1.3): "clip follows arm's floor, not the knob" is now
+#: false -- the shared-scale pass takes the TIGHTER of the two arms' own clips on
+#: Range-Doppler (printed as "zmin -25.9 (was -29.6)", the opposite direction from
+#: the munich maps' "reach the deeper floor" rule). Replaced with the rule that is
+#: actually in force -- trimmed elsewhere in the same edit (dropped the "12-bit"
+#: aside and two connector words) to stay under the 400-char budget on all three
+#: T5 cards; ML has the least headroom because of its own appended sentence.
 _T5_SCREEN_NOTE = (
     "corpus traced at 77 GHz (legacy; Ka-band regen scheduled); frames: stored "
     "ray-traced channel (b1_demo_cfr); ADC chain LIVE; offline numbers "
-    "(beat_cfar.json, b1_bench_v3, 12-bit) are shown for reference, not "
-    "re-measured live; ML leaves training distribution on any knob move; clip "
-    "follows arm's floor, not the knob; scoring crop 40 m{VMAX_CLAUSE}."
+    "(beat_cfar.json, b1_bench_v3) shown for reference, not "
+    "re-measured live; any knob moves ML off training distribution; "
+    "Range-Doppler shares the tighter arm's clip (printed); scoring crop "
+    "40 m{VMAX_CLAUSE}."
 )
 
 
@@ -290,14 +298,18 @@ PRESETS: List[DemoPreset] = [
         # "both arms appear alike ... the difference is in the statistic, not
         # the picture" line is now false: the shared scale puts the floor
         # difference IN the picture (arm B's background reads visibly brighter).
-        blurb=("Press Run once: the two arms (A, top, 8 mA / B, bottom, 0.5 mA) "
+        # wave 12 (2026-09-24): "A, top / B, bottom" -> "A, left / B, right" --
+        # the A/B arms render side by side (left/right columns), not stacked;
+        # and dropped the drifting (66 vs 54 dB) pair -- the printed peak-median
+        # numbers move run to run, so no exact pair belongs on the card (see
+        # thrust2's own no-exact-pair rule, same standard applied here).
+        blurb=("Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) "
                "share one colour scale down to the deeper floor, so arm B's "
                "background reads visibly brighter, about twelve dB by the "
-               "printed numbers (66 vs 54 dB); streaks match. Signal sits "
+               "printed numbers; streaks match. Signal sits "
                "just below input-referred noise (1e-7 vs 1.36e-7 V; "
-               "per-element SNR, recovered by coherent gain). Manual: LNA "
-               "bias is the A/B; second knob: IF bandwidth 15 -> 50 MHz (see "
-               "live_knobs)."),
+               "SNR recovered by coherent gain). Manual second knob: IF "
+               "bandwidth 15 -> 50 MHz."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
                                           "(about -5 dB; 1 -> 50 MHz is -13.5 dB here, "
@@ -317,8 +329,15 @@ PRESETS: List[DemoPreset] = [
         # scale (owner's live test) makes the floor difference visible, so "same
         # streaks at the same visible brightness" is retracted; and F96 (munich's
         # "unambiguous 125 m" is only the positive-delay half of a 250 m window).
-        screen_note=("dB rel. peak; clip follows the frame's median floor + 3 dB, falls "
-                     "back to the shared -40 dB below -43 dB (as here, both arms); range "
+        # wave 12 (2026-09-24, item 1.2): "falls back to the shared -40 dB below
+        # -43 dB (as here, both arms)" described the PRE-wave-11 single-arm clip
+        # rule and is now false -- the panel subtitle prints the shared-scale
+        # result instead ("zmin -67.1 dB (was -40.0)"). Replaced with the actual
+        # shared-scale rule; the two meanings of "shared" (a default clip vs the
+        # A/B pass) no longer collide in one sentence.
+        screen_note=("dB rel. peak; clip follows the frame's median floor + 3 dB; "
+                     "both maps share one colour scale down to the deeper arm's "
+                     "floor (the printed zmin); range "
                      "(m; 0 = earliest arrival; 1.00 m/gate; display 0-125 m of a 250 m "
                      "unambiguous window, the negative-delay half cropped); the two maps "
                      "share one colour scale down to the deeper floor, so the 0.5 mA "
@@ -336,7 +355,7 @@ PRESETS: List[DemoPreset] = [
             "At default signal level (1e-5) these knobs do nothing (0.5 dB, under "
             "the 40 dB floor).",
             "Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB "
-            "leaves the attenuator regime (4->8 mA: +1.6 dB).",
+            "leaves the attenuator (4->8 mA: +1.6 dB).",
             "No trade-off today: nothing clips; the IF filter only sets noise "
             "variance (1 MHz = 1 ms sweep vs 20 us at 50 MHz).",
             # wave 9 (2026-09-24): "brightest band" was wrong -- the hottest visible
@@ -346,16 +365,19 @@ PRESETS: List[DemoPreset] = [
             # subtitle prints "36 m" (1 m display gates round the true 37.1 m delay,
             # F94) -- the card told the presenter to read a number off the screen
             # that was not the one printed there.
+            # wave 12 (2026-09-24, item 1.4): "~36 m on the panel" read as "the
+            # panel prints 36" when it prints 37 -- reworded to name what the
+            # panel actually shows without asserting a specific digit.
             "Range 0-2 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); multipath: ~36 m on the panel (37.1 m true "
-            "delay) and 68 m (F93/F94).",
+            "normalises to (0 dB); multipath: the ~37 m return the panel names "
+            "(37.1 m true delay, F94) and 68 m.",
             # wave 10 (2026-09-24): merged the old "noise figure" and "what
             # end-to-end buys over Friis" bullets -- both turned on the same 0.17 dB
             # agreement figure.
-            "Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB (0.17 dB "
-            "agreement) validates the mechanism and gives what Friis alone can't -- "
-            "this knob's AFE/tracker/detector effect. Absolute dBm is NOT "
-            "quotable: input level is free.",
+            # wave 12 (2026-09-24): trimmed for the 450-word card ceiling.
+            "Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB "
+            "validates the mechanism and this knob's AFE/tracker/detector "
+            "effect. Absolute dBm is NOT quotable: input level is free.",
             "Channel mismatch: all 1024 elements share one config; mismatch is "
             "structurally zero; a per-element spread is a small change.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
@@ -372,15 +394,29 @@ PRESETS: List[DemoPreset] = [
             # colour bar's 0 dB is never actually visible on the map. Numbers not
             # typed here on purpose: the other coder prints them on the panel
             # subtitle.
-            "The 0 dB reference is a single range-0 gate too small to see; the "
-            "panel prints the brightest visible return (read it off the screen); "
+            # wave 12 (2026-09-24): dropped "(read it off the screen)" -- now
+            # redundant with the dedicated pause-before-reading bullet below.
+            "The 0 dB reference is a single range-0 gate too small to see; "
             "every dB on the map is relative to the direct path.",
             # wave 10 (2026-09-24, item 4.1, hostile round 9): the noise floor
             # moves 11 dB between this slide and the next; name the cause before
             # the room asks.
             "Thrust 1 runs at signal_scaling 1e-7 (legacy mode): peak-median ~66 "
-            "dB is ~11 dB below Thrust 2's ~77 dB, same frames -- a different "
-            "operating point, not scene.",
+            "dB is ~11 dB below Thrust 2's ~77 dB -- a different operating "
+            "point.",
+            # wave 12 (2026-09-24, item 1.5): the panel subtitle and its
+            # peak-median callout rebuild every 700 ms while the Results clock
+            # loops -- a presenter reading a number off a moving screen without
+            # warning reads as reciting a fixed figure that then contradicts
+            # itself on the next loop.
+            "The printed statistics update per frame while the panels loop; "
+            "pause before reading one.",
+            # wave 12 (2026-09-24, items 4.1/4.2): the shared-scale rule runs in
+            # opposite directions here vs Thrust 5's Range-Doppler; trimmed for
+            # the 450-word card ceiling.
+            "Shared-scale direction flips by screen (munich: deeper floor; "
+            "Thrust 5 Range-Doppler: tighter clip); a fainter streak is the "
+            "floor rising, contrast not level.",
         ],
         do_not_say=[
             "Any DC power readout: PRX is U-shaped, MINIMUM at best quality.",
@@ -439,12 +475,14 @@ PRESETS: List[DemoPreset] = [
         # still holds (T2's images genuinely don't move much), but the framing
         # now names the shared scale so the presenter reads it as a deliberate
         # display fact, not silence.
-        blurb=("Press Run once (A, top, mantissa 6 bit / B, bottom, 1 bit); the "
+        # wave 12 (2026-09-24, item 1.1): "A, top / B, bottom" -> "A, left / B,
+        # right" -- the A/B arms render side by side, not stacked.
+        blurb=("Press Run once (A, left, mantissa 6 bit / B, right, 1 bit); the "
                "tracker panel plots a subspace-error curve against a dashed "
                "0.06 reference line -- A settles on it, B sits about 5x above. "
                "With the shared colour scale, compare the backgrounds; any "
                "difference at the ~0.1 dB run-to-run floor is not the knob. "
-               "Manual: AFE mantissa 6 -> 1 bit, run again."),
+               "Manual: AFE mantissa 6 -> 1 bit."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.32 at k=2)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
         # to 1 bit, the 0.32 arm the card's headline quotes.
@@ -465,8 +503,10 @@ PRESETS: List[DemoPreset] = [
         # "refinement passes/frame" trace on a right-hand axis, flat at 10 for this
         # preset -- the card never named it; it is the AFE mantissa knob on screen, not
         # a tracker setting.
-        screen_note=("range-azimuth and range-elevation images barely move on the "
-                     "adaptive display clip (statistics printed on each; range m/gate "
+        # wave 12 (2026-09-24, item 1.6): the note still named the pre-wave-11
+        # per-arm adaptive clip; the panels now share one colour scale instead.
+        screen_note=("range-azimuth and range-elevation images barely move under the "
+                     "shared colour scale (statistics printed on each; range m/gate "
                      "and unambiguous range on the panel); the tracker error moves "
                      "about 5x; subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
                      "for k = 2; the tracker panel's red dotted trace (right axis) is "
@@ -487,13 +527,14 @@ PRESETS: List[DemoPreset] = [
             "for P_d or false alarms.",
             # wave 10 (2026-09-24, item 1.7, hostile round 9): see Thrust 1's card
             # for the same fix -- the panel prints "36 m" (37.1 m true delay, F94).
+            # wave 12 (2026-09-24, item 1.4): same reword as Thrust 1's card.
             "Range 0-2 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); multipath: ~36 m on the panel (37.1 m true "
-            "delay) and 68 m.",
+            "normalises to (0 dB); multipath: the ~37 m return the panel names "
+            "(37.1 m true delay, F94) and 68 m.",
             "Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the "
             "Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m "
+            "beyond |sin theta| ~0.90; range resolution 5 cm, binned to 1 m "
             "gates.",
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
@@ -508,9 +549,14 @@ PRESETS: List[DemoPreset] = [
             # wave 9 (2026-09-24, orchestrator course-correction): same line as
             # Thrust 1/4 -- see that card's comment for the measurement it stands
             # in for.
-            "The 0 dB reference is a single range-0 gate too small to see; the "
-            "panel prints the brightest visible return (read it off the screen); "
+            # wave 12 (2026-09-24): dropped "(read it off the screen)" -- now
+            # redundant with the dedicated pause-before-reading bullet below.
+            "The 0 dB reference is a single range-0 gate too small to see; "
             "every dB on the map is relative to the direct path.",
+            # wave 12 (2026-09-24, item 1.5): same warning as Thrust 1/4 -- the
+            # printed peak-median numbers rebuild per frame while the clock loops.
+            "The printed statistics update per frame while the panels loop; "
+            "pause before reading one.",
         ],
         do_not_say=[
             "That the mantissa sweep models analog hardware error: AFEBlock's "
@@ -571,14 +617,18 @@ PRESETS: List[DemoPreset] = [
         # Reworded "up to 60 when unhealthy": the right axis here runs 0-12 and this
         # file's gate never escalates past 10 -- 60 is what the gate would do on a
         # file with a small spectral gap, not this one.
+        # wave 12 (2026-09-24, item 1.9): "settling near 0.16" and the trajectory's
+        # closing "about 0.2" named two different values for arm A's settled
+        # level on the same card; the screen settles at 0.16-0.17 from frame 5 --
+        # one number now, stated once.
         blurb=("Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: "
-               "FIXED 5 passes/frame, settling near 0.16, never reaching B's ~0.06 "
+               "FIXED 5 passes/frame, never reaching B's ~0.06 "
                "floor in 8 frames -- about 2.5x higher. Arm B: the shipped "
                "adaptive gate, 10 passes/frame baseline (right axis 0-12; a "
                "small-gap file would climb to 60, not this one). Over 8 frames: A "
-               "about 0.6 -> 0.31 -> about 0.2; B about 0.30 -> 0.09 by frame 2, "
-               "settled from frame 3. It never escalates here: k=2's gap stays "
-               "well clear of 0.01."),
+               "about 0.6 -> 0.31 -> settles about 0.16-0.17 from frame 5; B about "
+               "0.30 -> 0.09 by frame 2, settled from frame 3. It never escalates "
+               "here: k=2's gap stays well clear of 0.01."),
         # gap_response has no registry ParamSpec (no UI slider -- see
         # demo_presets._INTERNAL_PARAMS); it is the `ab` knob below, not listed here as
         # a manually-turned live_knob. warm_start does have a slider and stays
@@ -679,19 +729,20 @@ PRESETS: List[DemoPreset] = [
         # wave 11 (2026-09-24): named the shared colour scale (owner's live
         # test) as what to compare -- same physics as before (T4's images still
         # move at the run-to-run floor), just stated against the new screen.
+        # wave 12 (2026-09-24): trimmed for the 450-word card ceiling.
         blurb=("THE HONEST STORY: the interconnect is NOT the limiting element "
-               "here; with the shared colour scale, compare the backgrounds -- "
+               "here; compare the backgrounds under the shared colour scale -- "
                "any ~0.1 dB difference between the arms' printed statistics "
                "(either panel) is the run-to-run floor, not the knob. This is "
                "the LIVE public Tessera/UIC TSV surrogate "
                "(InterconnectBlock(source='tessera'), scale x2 / half frequency "
                "at Ka band). "
-               f"Arm A: canonical geometry, {_TESSERA_CANONICAL_HEIGHT_UM:g} um "
-               f"presented (= {_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model "
-               "geometry). Arm B drops TSV height to its presented low end -- "
-               "OFFLINE the biggest single-knob mover of the skirt (3.53 dB "
-               "native flat-frame move) -- bulk DELAY, sits below the printed "
-               "median floor; a group-delay/|S21| overlay would show it."),
+               f"Arm A: {_TESSERA_CANONICAL_HEIGHT_UM:g} um presented "
+               f"(= {_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry). "
+               "Arm B drops TSV height to its presented low end -- OFFLINE the "
+               "biggest single-knob mover of the skirt (3.53 dB native "
+               "flat-frame move) -- bulk DELAY, sits below the printed median "
+               "floor."),
         live_knobs=[("interconnect", "tessera_height_um",
                      f"{_TESSERA_CANONICAL_HEIGHT_UM:g} -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um "
                      "(the A/B above)"),
@@ -737,9 +788,14 @@ PRESETS: List[DemoPreset] = [
                      "(F89), so these are fixed reference values for checker3x3, "
                      "not numbers from this run."),
         say=[
-            "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- "
-            "the run-notes line under the banner names the scale factor and "
-            "frequency.",
+            # wave 12 (2026-09-24, item 1.7): folded in the one on-screen pointer
+            # for "did arm B actually run?" -- the run-notes line under each
+            # banner, which also carries the height that differs between arms.
+            "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a "
+            "CSV); the run-notes line under each banner names the scale factor "
+            "and frequency, and is the one place arm B's height shows on "
+            f"screen: {_TESSERA_CANONICAL_HEIGHT_UM:g} um (A) vs "
+            f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um (B).",
             "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
             "doi 10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are "
             "theirs.",
@@ -762,21 +818,27 @@ PRESETS: List[DemoPreset] = [
             "by sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; "
             "trends/shape exact (F91).",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m "
+            "beyond |sin theta| ~0.90; range resolution 5 cm, binned to 1 m "
             "gates.",
             # wave 9 (2026-09-24, orchestrator course-correction): same line as
             # Thrust 1/2 -- see Thrust 1's comment for the measurement it stands
             # in for.
-            "The 0 dB reference is a single range-0 gate too small to see; the "
-            "panel prints the brightest visible return; every dB on the map "
-            "is relative to the direct path.",
+            # wave 12 (2026-09-24): trimmed, redundant with the pause bullet below.
+            "The 0 dB reference is a single range-0 gate too small to see; "
+            "every dB on the map is relative to the direct path.",
             # wave 10 (2026-09-24, item 4.2, hostile round 9): the prepared answer
             # for "then why is this a thrust?" -- a negative result stated as such,
             # not hidden behind "THE HONEST STORY" alone.
-            "What Thrust 4 DID establish: the live surrogate's six knobs run end "
-            "to end through the real chain, and in-band |S21| moves <0.03 dB "
-            "across all of them -- the interconnect is not the limiting "
-            "element. A negative result, stated as one.",
+            # wave 12 (2026-09-24): trimmed -- the blurb already states "the
+            # interconnect is NOT the limiting element", so this bullet no
+            # longer repeats it.
+            "What Thrust 4 DID establish: six knobs run live end to end, and "
+            "in-band |S21| moves <0.03 dB across all -- a negative result, "
+            "stated as one.",
+            # wave 12 (2026-09-24, item 1.5): same warning as Thrust 1/2 -- the
+            # printed panel statistics rebuild per frame while the clock loops.
+            "The printed statistics update per frame while the panels loop; "
+            "pause before reading one.",
         ],
         do_not_say=[
             "That crosstalk is structurally absent -- RETRACTED: the surrogate models "
@@ -826,16 +888,16 @@ PRESETS: List[DemoPreset] = [
         ab_label_b="3-bit ADC (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
-            "SAY FIRST: the frames change here. Thrusts 1-4 ran munich frames "
-            "(125 m, range-azimuth); this is the benchmark corpus (100 m, "
-            "range-Doppler). STORED is the ray-traced channel -- everything after "
+            "SAY FIRST: the frames change -- Thrusts 1-4 ran munich (125 m, "
+            "range-azimuth); this is the benchmark corpus (100 m, "
+            "range-Doppler). STORED is the ray-traced channel; everything after "
             "runs live, so the ADC knob reaches the detector.",
             "The gate that makes this honest: at generation settings the live "
-            "cube is BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes). "
-            "Move a knob and that leaves zero -- the whole demonstration.",
+            "cube is BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); "
+            "moving a knob breaks that -- the whole demonstration.",
             "Classical CFAR scores AP 0.301 offline; chance floor 0.081 "
-            "(b1_bench_v3, 12-bit). The counts on screen are 5 live frames of a "
-            "different corpus -- a demonstration, not a re-measurement.",
+            "(b1_bench_v3, 12-bit). These 5 frames are a different corpus -- a "
+            "demonstration, not a re-measurement.",
             # wave 9 (2026-09-24, item 1.7): the old line was wrong on both counts --
             # the detector map spans 0-50 m (a 10 m unscored strip above the 40 m
             # dashed line), and the 0-100 m panel is Range-Doppler power, unlabelled.
@@ -843,14 +905,13 @@ PRESETS: List[DemoPreset] = [
             # animated panel on one shared clock -- the Range-Doppler cube
             # loops while the detector/scoreboard/PR panels hold the last
             # frame; pause the cube before pointing at one frame's crosses.
-            "The CFAR map spans 0-50 m; the 10 m strip above the dashed line is "
-            "unscored (labels/scoring stop at 40 m). The detector, scoreboard "
-            "and PR panels hold the LAST frame while the Range-Doppler cube "
-            "loops beside them; pause the cube (its pause button) before "
-            "discussing one frame's detections.",
-            "Ground truth omits ~3 real strongly-scattering objects per frame "
-            "inside 40 m, so a detector firing on every real object has a "
-            "precision ceiling of 0.64 -- some 'false alarms' are real objects.",
+            "The CFAR map spans 0-50 m; the top 10 m is unscored (scoring "
+            "stops at 40 m). Detector, scoreboard and PR panels hold the LAST "
+            "frame; the Range-Doppler cube loops beside them -- pause it "
+            "before discussing one frame's detections.",
+            "Ground truth omits ~3 real objects per frame inside 40 m, so a "
+            "detector catching every real object caps precision at 0.64 -- "
+            "some 'false alarms' are real.",
             "Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); corpus "
             "targets are slower by construction, so a 20 m/s car would alias.",
             "Unmatched detections can DROP at deeper quantisation: quantisation "
@@ -858,9 +919,18 @@ PRESETS: List[DemoPreset] = [
             "threshold -- a loss of sensitivity, not a quality gain.",
             # wave 9 (2026-09-24, T5 item 5): prepared answer, shared across the three
             # T5 cards.
-            "This detector sits at its 172-frame recall-0.5 threshold, yet gives "
-            "0.53 recall on these 5 frames; the matched-recall FA comparison is "
-            "made on that 172-frame split -- 5 frames cannot reproduce a recall.",
+            "This detector sits at its 172-frame recall-0.5 point, yet gives "
+            "0.53 recall here; matched-recall FA comparisons use that "
+            "172-frame split -- 5 frames cannot reproduce a recall.",
+            # wave 12 (2026-09-24, item 4.3): how the cube becomes a map, read
+            # from classical_detection_map/cfar_objectness (e2e/ml/baseline.py):
+            # the Doppler axis is summed away first (non-coherent integration,
+            # the shipped default), leaving one 2-D range-azimuth power map;
+            # CA-CFAR's guard/train cells then form ONE square annulus over
+            # range AND azimuth together, not two separate 1-D passes.
+            "How the cube becomes the map: Doppler sums away first (angle FFT) "
+            "into a range-azimuth map; CA-CFAR's guard 2 / train 6 cells form "
+            "one square annulus over range and azimuth, not two 1-D passes.",
         ],
         do_not_say=[
             "That 16 vs 13 hits measures 3-bit quantisation's cost: 5 frames at one "
@@ -1039,11 +1109,11 @@ PRESETS: List[DemoPreset] = [
             # wave 11 (2026-09-24): replaced "no slider here" -- the
             # Range-Doppler panel now auto-plays/loops on the shared clock;
             # kept under the 45-word RADDetNet bullet cap.
-            "The counts on screen are 5 live frames of a different corpus, "
-            "LAST shown -- a demonstration, not a re-measurement of AP; "
-            "recall here (0.33) cannot reproduce recall-0.5. Detector, "
-            "scoreboard and PR panels hold that frame while Range-Doppler "
-            "loops; pause it to discuss one frame.",
+            "The counts on screen are 5 live frames, LAST shown -- a "
+            "demonstration, not a re-measurement of AP; recall here (0.33) "
+            "cannot reproduce recall-0.5. Detector, scoreboard and PR panels "
+            "hold that frame while Range-Doppler loops; pause it to discuss "
+            "one frame.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
             "were scored too, best 0.328 -- above shipped CFAR (0.301), but the best "
@@ -1054,10 +1124,13 @@ PRESETS: List[DemoPreset] = [
             # wave 10 (2026-09-24, item 4.4, hostile round 9): folded in the
             # seed-spread-vs-CI caveat -- the say list is at its 6-bullet cap, and
             # this is the OOD bullet the caveat actually belongs on.
+            # wave 12 (2026-09-24, item 1.8): "3 seeds + the joint arm" read as a
+            # bigger sample than the scoreboard shows -- it prints two seed rows
+            # (0.208/0.153) plus the joint checkpoint, not three seeds.
             "THE CAVEAT: on b1_bench_v2 (unseen), seed 42 scores 0.208 vs CFAR "
-            "0.179; seed 43 0.153 -- NOT a reliable OOD win (F86). Seed spread "
-            "0.040 exceeds the CI half-width 0.032: the lead rests on 3 seeds + "
-            "the joint arm, not the CI alone.",
+            "0.179; seed 43 0.153 -- NOT reliable OOD (F86). Seed spread 0.040 "
+            "exceeds CI half-width 0.032: the lead rests on the 2-seed rows "
+            "shown plus the joint checkpoint (F86), not the CI alone.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution, on "

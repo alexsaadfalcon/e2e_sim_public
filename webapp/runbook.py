@@ -200,6 +200,13 @@ _PANEL_TITLES = {
     "radar_cube": "Range-Doppler power",
     "subspace_err": "Subspace error (Frobenius) per frame",
 }
+#: wave 12 (2026-09-24, item 3.1): the product ids that render as heat maps
+#: (`go.Heatmap`, subject to `webapp.app._share_y_ranges`'s colour-limit
+#: sharing) -- `range_profile`/`subspace_err` are line plots and never get a
+#: shared colour scale. Thrust 5's `detector` panel is a heat map too but that
+#: section is hand-written (see the `thrust == 5` branch below), not driven by
+#: this set.
+_HEATMAP_PRODUCT_IDS = {"range_az", "range_el", "radar_cube", "detector"}
 #: The two rendered titles for the "detector" product block -- which one shows
 #: depends on the preset's own `detector.mode` override, not the block itself.
 _DETECTOR_PANEL_TITLES = {"cfar": "CFAR objectness", "ml": "Neural detector objectness"}
@@ -267,6 +274,11 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
     lines.append("")
 
     lines.append("### What you are looking at")
+    # wave 12 (2026-09-24, item 3.1): Thrust 5 always renders heat-map panels
+    # (radar_cube, detector); every other preset is checked against its own
+    # enabled products -- Thrust 3 enables only subspace_err (a line plot), so
+    # its A/B has no shared colour scale to promise.
+    has_heatmap = preset.thrust == 5
     if preset.thrust == 5:
         # wave 10 (2026-09-24, item 3.4, hostile round 9): two product blocks
         # (radar_cube, detector) render FOUR panels on every Thrust 5 screen --
@@ -290,6 +302,7 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
     else:
         state = apply_preset(preset)
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
+        has_heatmap = any(bid in _HEATMAP_PRODUCT_IDS for bid in enabled_bids)
         if enabled_bids:
             titles = [_panel_title(bid, preset) for bid in enabled_bids]
             lines.append(_bullet("Product panel(s) this preset enables: "
@@ -297,10 +310,16 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         else:
             lines.append(_bullet("This preset enables no product panel (check the block state)."))
     if ab is not None:
+        # wave 12 (2026-09-24, item 3.1): "on shared colour limits" only when a
+        # heat-map panel is actually on screen -- Thrust 3's only product is a
+        # line plot (subspace_err), which `_share_y_ranges` never gives a
+        # shared colour scale (there is no colour scale to share).
+        colour_clause = (", on shared colour limits." if has_heatmap
+                         else " (no heat map here, so no shared colour scale).")
         lines.append(_bullet(
             f'Arm banners on screen: "{ab[0]}" (LEFT column) / "{ab[1]}" '
             f'(RIGHT column) -- each product renders once per column, on the same '
-            f'row, on shared colour limits.'))
+            f'row{colour_clause}'))
     lines.append("")
 
     lines.append("### Second knob (optional)")
@@ -373,7 +392,16 @@ _BEFORE_AUDIENCE = """## Before the audience
    link and it does not.
    To HOLD a frame while you talk about it, press the pause button on any panel --
    one clock, so every panel stops together -- and ▶ to resume. Dragging a
-   slider also pauses the clock, so you can park a panel on a chosen frame.
+   slider ALSO pauses the clock, but it parks only the ONE arm under the
+   cursor -- the other arm keeps whatever index the clock stopped at. Press
+   pause first, then compare; do not drag to compare two arms.
+   A number a panel prints (peak-median, median floor, hit counts) is rebuilt
+   every frame while the clock loops -- pause before reading one aloud, on
+   every preset, not just Thrust 5.
+   **Thrust 4 exception**: the range-profile panel renders once from the LAST
+   frame and never animates (no slider); the range-azimuth map above it keeps
+   looping on the shared clock, so the two panels show different frames by
+   design, with no drag needed to cause it.
    **Thrust 5 exception**: only the Range-Doppler panel has frames. The
    objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
    clock now desyncs the cube from those frozen detections by itself, with no

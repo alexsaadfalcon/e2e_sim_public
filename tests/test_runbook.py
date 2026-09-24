@@ -150,6 +150,73 @@ def test_render_gives_the_rdp_slider_rule_a_thrust_5_exception():
     assert "desyncs the cube" in flat.lower()
 
 
+# wave 12 (2026-09-24), hostile round 10 items 3.1-3.4.
+def test_render_gives_the_rdp_slider_rule_a_thrust_4_exception_too():
+    """Item 3.2: the loop-vs-static desync isn't Thrust-5-only -- Thrust 4's
+    range-profile panel is built from the LAST frame and never animates while
+    the range-azimuth map above it keeps looping (pipeline_runner's
+    `range_profile_agg[-1]`); the runbook used to disclose only the Thrust 5
+    case."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert "thrust 4 exception" in flat.lower()
+    assert "range-profile panel renders once from the last frame" in flat.lower()
+
+
+def test_render_warns_a_slider_drag_parks_only_one_arm():
+    """Item 3.3: `results_clock.js` pauses the shared clock on any drag, but the
+    drag itself only moves the ONE panel under the cursor -- the other arm's
+    panel stays wherever the clock stopped. The old wording ("so you can park a
+    panel on a chosen frame") did not say that, and following it silently
+    compares two different frames across arms."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert "parks only the one arm" in flat.lower() or "parks only the one" in flat.lower()
+    assert "press pause first, then compare" in flat.lower()
+
+
+def test_render_has_a_general_pause_before_reading_a_number_rule():
+    """Item 3.4: three demo cards say "read it off the screen" for a printed
+    statistic that is rebuilt every frame while the clock loops -- the runbook's
+    general mechanics must carry one rule that applies to every preset, not
+    only the Thrust 5 exception paragraph."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert "pause before reading one aloud" in flat.lower()
+    assert "not just thrust 5" in flat.lower()
+
+
+def test_render_states_shared_colour_limits_only_when_a_heatmap_is_on_screen():
+    """Item 3.1: "on shared colour limits" used to be claimed for every A/B
+    preset, including Thrust 3, whose only product (subspace_err) is a line
+    plot -- there is no colour scale on that screen to share."""
+    from webapp.demo_presets import PRESETS, PRESETS_BY_ID
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    t3 = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    i3 = PRESETS.index(t3) + 1
+    start = doc.index(f"## {i3}. {t3.label}")
+    section = doc[start:doc.index("### Second knob", start)]
+    assert "shared colour limits" not in _flat(section).lower()
+    assert "no shared colour scale" in _flat(section).lower()
+    # A heat-map preset (Thrust 1) still gets the claim.
+    t1 = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    i1 = PRESETS.index(t1) + 1
+    start1 = doc.index(f"## {i1}. {t1.label}")
+    section1 = doc[start1:doc.index("### Second knob", start1)]
+    assert "shared colour limits" in _flat(section1).lower()
+
+
 def test_render_lists_all_four_thrust5_panels():
     """Wave 10 (2026-09-24, item 3.4, hostile round 9): two product blocks
     (radar_cube, detector) render FOUR panels on every Thrust 5 screen -- the

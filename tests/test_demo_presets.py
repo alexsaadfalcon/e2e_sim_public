@@ -229,11 +229,18 @@ def test_thrust1_and_2_multipath_number_matches_the_panel():
     """Wave 10 (2026-09-24, item 1.7, hostile round 9): the panel subtitles print
     "36 m" (1 m display gates rounding the true 37.1 m delay, F94); the cards used
     to tell the presenter to read "37 m" off the screen, a number not printed
-    there."""
+    there.
+
+    RETRACTED wave 12 (2026-09-24, item 1.4, hostile round 10): the round-10 read
+    found the T1 and T4 panels actually print "37 m"/"38 m", not "36 m" -- the
+    wave-10 fix pinned the wrong digit. The card no longer asserts a specific
+    digit at all, only that it names the panel's own return alongside the true
+    37.1 m delay (F94)."""
     for pid in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error"):
         p = PRESETS_BY_ID[pid]
-        assert any("~36 m" in s and "37.1 m" in s for s in p.say), pid
-        assert not any("near 37 m" in s for s in p.say), pid
+        assert any("the ~37 m return the panel names" in s and "37.1 m" in s
+                  for s in p.say), pid
+        assert not any("~36 m" in s for s in p.say), pid
 
 
 def test_thrust1_names_the_operating_point_difference_from_thrust2():
@@ -483,9 +490,16 @@ def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
     current file at k=2 (see the preset's `overrides` comment): arm A about
     0.6 -> 0.31 -> ~0.2 (wave 10, 2026-09-24, item 1.10: "0.19" read ~0.20 on the
     03:0x re-render, off by 2x the card's own ~5e-3 nondeterminism floor -- rounded
-    to "about 0.2"), arm B about 0.30 -> 0.09."""
+    to "about 0.2"), arm B about 0.30 -> 0.09.
+
+    RETRACTED wave 12 (2026-09-24, item 1.9, hostile round 10): "settling near
+    0.16" (the blurb's second sentence) and "about 0.2" (the trajectory's closing
+    value) named two different values for arm A's own settled level on the same
+    card -- unified to the screen's actual settled range, stated once."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb and "about 0.2" in p.blurb
+    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb
+    assert "settles about 0.16-0.17 from frame 5" in p.blurb
+    assert "settling near 0.16" not in p.blurb and "about 0.2" not in p.blurb
     assert "0.57" not in p.blurb and "0.595" not in p.blurb and "0.19" not in p.blurb
     assert any("nondeterministic" in s.lower() and "third decimal" in s.lower()
               for s in p.say)

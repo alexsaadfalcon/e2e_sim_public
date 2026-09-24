@@ -27,7 +27,16 @@ change to `webapp/demo_presets.py`.
    link and it does not.
    To HOLD a frame while you talk about it, press the pause button on any panel --
    one clock, so every panel stops together -- and ▶ to resume. Dragging a
-   slider also pauses the clock, so you can park a panel on a chosen frame.
+   slider ALSO pauses the clock, but it parks only the ONE arm under the
+   cursor -- the other arm keeps whatever index the clock stopped at. Press
+   pause first, then compare; do not drag to compare two arms.
+   A number a panel prints (peak-median, median floor, hit counts) is rebuilt
+   every frame while the clock loops -- pause before reading one aloud, on
+   every preset, not just Thrust 5.
+   **Thrust 4 exception**: the range-profile panel renders once from the LAST
+   frame and never animates (no slider); the range-azimuth map above it keeps
+   looping on the shared clock, so the two panels show different frames by
+   design, with no drag needed to cause it.
    **Thrust 5 exception**: only the Range-Doppler panel has frames. The
    objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
    clock now desyncs the cube from those frozen detections by itself, with no
@@ -102,12 +111,11 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   MHz is -13.5 dB here, re-measured 2026-09-23 -- the block panel's 17 dB is
   the front end's own noise-power scaling, a different quantity)
 
-Press Run once: the two arms (A, top, 8 mA / B, bottom, 0.5 mA) share one
+Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) share one
 colour scale down to the deeper floor, so arm B's background reads visibly
-brighter, about twelve dB by the printed numbers (66 vs 54 dB); streaks match.
-Signal sits just below input-referred noise (1e-7 vs 1.36e-7 V; per-element
-SNR, recovered by coherent gain). Manual: LNA bias is the A/B; second knob: IF
-bandwidth 15 -> 50 MHz (see live_knobs).
+brighter, about twelve dB by the printed numbers; streaks match. Signal sits
+just below input-referred noise (1e-7 vs 1.36e-7 V; SNR recovered by coherent
+gain). Manual second knob: IF bandwidth 15 -> 50 MHz.
 
 ### Say
 - With the shared colour scale, arm B's background reads about twelve dB
@@ -115,15 +123,15 @@ bandwidth 15 -> 50 MHz (see live_knobs).
 - At default signal level (1e-5) these knobs do nothing (0.5 dB, under the 40
   dB floor).
 - Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB leaves
-  the attenuator regime (4->8 mA: +1.6 dB).
+  the attenuator (4->8 mA: +1.6 dB).
 - No trade-off today: nothing clips; the IF filter only sets noise variance (1
   MHz = 1 ms sweep vs 20 us at 50 MHz).
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); multipath: ~36 m on the panel (37.1 m true delay) and 68 m (F93/F94).
-- Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB (0.17 dB
-  agreement) validates the mechanism and gives what Friis alone can't -- this
-  knob's AFE/tracker/detector effect. Absolute dBm is NOT quotable: input level
-  is free.
+  (0 dB); multipath: the ~37 m return the panel names (37.1 m true delay, F94)
+  and 68 m.
+- Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB validates the
+  mechanism and this knob's AFE/tracker/detector effect. Absolute dBm is NOT
+  quotable: input level is free.
 - Channel mismatch: all 1024 elements share one config; mismatch is
   structurally zero; a per-element spread is a small change.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
@@ -131,12 +139,15 @@ bandwidth 15 -> 50 MHz (see live_knobs).
 - Peak-to-median dynamic range measures how empty the map is (median set by
   empty gates), not target SNR; it moves with the noise floor this knob
   changes.
-- The 0 dB reference is a single range-0 gate too small to see; the panel
-  prints the brightest visible return (read it off the screen); every dB on the
+- The 0 dB reference is a single range-0 gate too small to see; every dB on the
   map is relative to the direct path.
 - Thrust 1 runs at signal_scaling 1e-7 (legacy mode): peak-median ~66 dB is ~11
-  dB below Thrust 2's ~77 dB, same frames -- a different operating point, not
-  scene.
+  dB below Thrust 2's ~77 dB -- a different operating point.
+- The printed statistics update per frame while the panels loop; pause before
+  reading one.
+- Shared-scale direction flips by screen (munich: deeper floor; Thrust 5
+  Range-Doppler: tighter clip); a fainter streak is the floor rising, contrast
+  not level.
 
 ### Do NOT say
 - Any DC power readout: PRX is U-shaped, MINIMUM at best quality.
@@ -181,11 +192,11 @@ bandwidth 15 -> 50 MHz (see live_knobs).
 - None: the only `live_knobs` entry for this preset is the knob the built-in
   A/B already turns; nothing further to change manually before re-running.
 
-Press Run once (A, top, mantissa 6 bit / B, bottom, 1 bit); the tracker panel
+Press Run once (A, left, mantissa 6 bit / B, right, 1 bit); the tracker panel
 plots a subspace-error curve against a dashed 0.06 reference line -- A settles
 on it, B sits about 5x above. With the shared colour scale, compare the
 backgrounds; any difference at the ~0.1 dB run-to-run floor is not the knob.
-Manual: AFE mantissa 6 -> 1 bit, run again.
+Manual: AFE mantissa 6 -> 1 bit.
 
 ### Say
 - As loaded the curve starts near 0, settles at about 0.06 by frame 2; the knob
@@ -199,19 +210,21 @@ Manual: AFE mantissa 6 -> 1 bit, run again.
 - No detection metric is wired here; say so before asked what it means for P_d
   or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); multipath: ~36 m on the panel (37.1 m true delay) and 68 m.
+  (0 dB); multipath: the ~37 m return the panel names (37.1 m true delay, F94)
+  and 68 m.
 - Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
   retrace (rank 3-4, F94); k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
+  |sin theta| ~0.90; range resolution 5 cm, binned to 1 m gates.
 - Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank ~3-4, F94)
   part of A's residual is rank mismatch; the 5x gap to B is the knob
   (interpretation).
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the AFE weights/tracker curve, not the picture.
-- The 0 dB reference is a single range-0 gate too small to see; the panel
-  prints the brightest visible return (read it off the screen); every dB on the
+- The 0 dB reference is a single range-0 gate too small to see; every dB on the
   map is relative to the direct path.
+- The printed statistics update per frame while the panels loop; pause before
+  reading one.
 
 ### Do NOT say
 - That the mantissa sweep models analog hardware error: AFEBlock's WEIGHT_FLOAT
@@ -255,17 +268,18 @@ Manual: AFE mantissa 6 -> 1 bit, run again.
 - Arm banners on screen: "A (as loaded): gap_response fixed effort (5
   passes/frame) -- before" (LEFT column) / "B: gap_response adaptive gate
   (shipped default, 10 passes/frame baseline) -- after" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
+  product renders once per column, on the same row (no heat map here, so no
+  shared colour scale).
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
   default 'warm'): manual: cold -> warm (perturbed truth; not part of this A/B)
 
 Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: FIXED 5
-passes/frame, settling near 0.16, never reaching B's ~0.06 floor in 8 frames --
-about 2.5x higher. Arm B: the shipped adaptive gate, 10 passes/frame baseline
-(right axis 0-12; a small-gap file would climb to 60, not this one). Over 8
-frames: A about 0.6 -> 0.31 -> about 0.2; B about 0.30 -> 0.09 by frame 2,
+passes/frame, never reaching B's ~0.06 floor in 8 frames -- about 2.5x higher.
+Arm B: the shipped adaptive gate, 10 passes/frame baseline (right axis 0-12; a
+small-gap file would climb to 60, not this one). Over 8 frames: A about 0.6 ->
+0.31 -> settles about 0.16-0.17 from frame 5; B about 0.30 -> 0.09 by frame 2,
 settled from frame 3. It never escalates here: k=2's gap stays well clear of
 0.01.
 
@@ -322,8 +336,9 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** This is the LIVE public Tessera/UIC surrogate
-  (checkpoint, not a CSV) -- the run-notes line under the banner names the
-  scale factor and frequency.
+  (checkpoint, not a CSV); the run-notes line under each banner names the scale
+  factor and frequency, and is the one place arm B's height shows on screen: 50
+  um (A) vs 30.01 um (B).
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -343,19 +358,19 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
   'default'): manual third option, not part of the A/B: source='default' +
   case='default' selects the old SYNTHETIC 11-tap boxcar placeholder
 
-THE HONEST STORY: the interconnect is NOT the limiting element here; with the
-shared colour scale, compare the backgrounds -- any ~0.1 dB difference between
+THE HONEST STORY: the interconnect is NOT the limiting element here; compare
+the backgrounds under the shared colour scale -- any ~0.1 dB difference between
 the arms' printed statistics (either panel) is the run-to-run floor, not the
 knob. This is the LIVE public Tessera/UIC TSV surrogate
 (InterconnectBlock(source='tessera'), scale x2 / half frequency at Ka band).
-Arm A: canonical geometry, 50 um presented (= 100 um model geometry). Arm B
-drops TSV height to its presented low end -- OFFLINE the biggest single-knob
-mover of the skirt (3.53 dB native flat-frame move) -- bulk DELAY, sits below
-the printed median floor; a group-delay/|S21| overlay would show it.
+Arm A: 50 um presented (= 100 um model geometry). Arm B drops TSV height to its
+presented low end -- OFFLINE the biggest single-knob mover of the skirt (3.53
+dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
 
 ### Say
-- This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- the
-  run-notes line under the banner names the scale factor and frequency.
+- This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); the
+  run-notes line under each banner names the scale factor and frequency, and is
+  the one place arm B's height shows on screen: 50 um (A) vs 30.01 um (B).
 - Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; doi
   10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are theirs.
 - In-band |S21| is invisible on this display (<0.03 dB span); A/B moves TSV
@@ -371,14 +386,13 @@ the printed median floor; a group-delay/|S21| overlay would show it.
   sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; trends/shape
   exact (F91).
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
-- The 0 dB reference is a single range-0 gate too small to see; the panel
-  prints the brightest visible return; every dB on the map is relative to the
-  direct path.
-- What Thrust 4 DID establish: the live surrogate's six knobs run end to end
-  through the real chain, and in-band |S21| moves <0.03 dB across all of them
-  -- the interconnect is not the limiting element. A negative result, stated as
-  one.
+  |sin theta| ~0.90; range resolution 5 cm, binned to 1 m gates.
+- The 0 dB reference is a single range-0 gate too small to see; every dB on the
+  map is relative to the direct path.
+- What Thrust 4 DID establish: six knobs run live end to end, and in-band |S21|
+  moves <0.03 dB across all -- a negative result, stated as one.
+- The printed statistics update per frame while the panels loop; pause before
+  reading one.
 
 ### Do NOT say
 - That crosstalk is structurally absent -- RETRACTED: the surrogate models
@@ -405,10 +419,10 @@ the printed median floor; a group-delay/|S21| overlay would show it.
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-- **While it runs, say:** SAY FIRST: the frames change here. Thrusts 1-4 ran
-  munich frames (125 m, range-azimuth); this is the benchmark corpus (100 m,
-  range-Doppler). STORED is the ray-traced channel -- everything after runs
-  live, so the ADC knob reaches the detector.
+- **While it runs, say:** SAY FIRST: the frames change -- Thrusts 1-4 ran
+  munich (125 m, range-azimuth); this is the benchmark corpus (100 m,
+  range-Doppler). STORED is the ray-traced channel; everything after runs live,
+  so the ADC knob reaches the detector.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -443,31 +457,33 @@ on 5 frames recall varies, so compare the 172-frame FA/frame rows, not the
 crosses.
 
 ### Say
-- SAY FIRST: the frames change here. Thrusts 1-4 ran munich frames (125 m,
+- SAY FIRST: the frames change -- Thrusts 1-4 ran munich (125 m,
   range-azimuth); this is the benchmark corpus (100 m, range-Doppler). STORED
-  is the ray-traced channel -- everything after runs live, so the ADC knob
+  is the ray-traced channel; everything after runs live, so the ADC knob
   reaches the detector.
 - The gate that makes this honest: at generation settings the live cube is
-  BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes). Move a knob and
-  that leaves zero -- the whole demonstration.
+  BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); moving a knob
+  breaks that -- the whole demonstration.
 - Classical CFAR scores AP 0.301 offline; chance floor 0.081 (b1_bench_v3,
-  12-bit). The counts on screen are 5 live frames of a different corpus -- a
-  demonstration, not a re-measurement.
-- The CFAR map spans 0-50 m; the 10 m strip above the dashed line is unscored
-  (labels/scoring stop at 40 m). The detector, scoreboard and PR panels hold
-  the LAST frame while the Range-Doppler cube loops beside them; pause the cube
-  (its pause button) before discussing one frame's detections.
-- Ground truth omits ~3 real strongly-scattering objects per frame inside 40 m,
-  so a detector firing on every real object has a precision ceiling of 0.64 --
-  some 'false alarms' are real objects.
+  12-bit). These 5 frames are a different corpus -- a demonstration, not a
+  re-measurement.
+- The CFAR map spans 0-50 m; the top 10 m is unscored (scoring stops at 40 m).
+  Detector, scoreboard and PR panels hold the LAST frame; the Range-Doppler
+  cube loops beside them -- pause it before discussing one frame's detections.
+- Ground truth omits ~3 real objects per frame inside 40 m, so a detector
+  catching every real object caps precision at 0.64 -- some 'false alarms' are
+  real.
 - Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); corpus targets
   are slower by construction, so a 20 m/s car would alias.
 - Unmatched detections can DROP at deeper quantisation: quantisation noise
   raises the CA-CFAR estimate, so fewer weak peaks clear threshold -- a loss of
   sensitivity, not a quality gain.
-- This detector sits at its 172-frame recall-0.5 threshold, yet gives 0.53
-  recall on these 5 frames; the matched-recall FA comparison is made on that
-  172-frame split -- 5 frames cannot reproduce a recall.
+- This detector sits at its 172-frame recall-0.5 point, yet gives 0.53 recall
+  here; matched-recall FA comparisons use that 172-frame split -- 5 frames
+  cannot reproduce a recall.
+- How the cube becomes the map: Doppler sums away first (angle FFT) into a
+  range-azimuth map; CA-CFAR's guard 2 / train 6 cells form one square annulus
+  over range and azimuth, not two 1-D passes.
 
 ### Do NOT say
 - That 16 vs 13 hits measures 3-bit quantisation's cost: 5 frames at one
@@ -628,10 +644,10 @@ the result is seed-dependent (F86); say so unprompted.
   b1_bench_v3, 12-bit default impairments); re-scored bit-identically. Paired
   scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI [+0.145, +0.208];
   +0.148 vs the best of nine classical baselines (0.328).
-- The counts on screen are 5 live frames of a different corpus, LAST shown -- a
-  demonstration, not a re-measurement of AP; recall here (0.33) cannot
-  reproduce recall-0.5. Detector, scoreboard and PR panels hold that frame
-  while Range-Doppler loops; pause it to discuss one frame.
+- The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
+  re-measurement of AP; recall here (0.33) cannot reproduce recall-0.5.
+  Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
+  pause it to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.328 -- above shipped CFAR (0.301), but the best classical
@@ -639,9 +655,9 @@ the result is seed-dependent (F86); say so unprompted.
 - Four learned arms were screened: three ported architectures and this one
   designed to the F83 diagnosis; all four are in beat_cfar.json, none dropped.
 - THE CAVEAT: on b1_bench_v2 (unseen), seed 42 scores 0.208 vs CFAR 0.179; seed
-  43 0.153 -- NOT a reliable OOD win (F86). Seed spread 0.040 exceeds the CI
-  half-width 0.032: the lead rests on 3 seeds + the joint arm, not the CI
-  alone.
+  43 0.153 -- NOT reliable OOD (F86). Seed spread 0.040 exceeds CI half-width
+  0.032: the lead rests on the 2-seed rows shown plus the joint checkpoint
+  (F86), not the CI alone.
 
 ### Do NOT say
 - 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's
