@@ -666,3 +666,5 @@ Then: `python -m webapp.app`, open `http://127.0.0.1:8050`, and load/Run one
 throwaway preset before the audience arrives. The PDF deck under
 `e2e/main/figures/rehearsal/` (via `python -m webapp.rehearse`) is a last resort —
 preflight exists so it is never needed.
+
+The per-Thrust click sequence the presenter follows is `docs/DEMO_RUNBOOK.md`.
