@@ -1673,6 +1673,20 @@ _LEGIBLE_TICK_SIZE = 20
 _LEGIBLE_COLORBAR_TICK_SIZE = 20
 _LEGIBLE_COLORBAR_TITLE_SIZE = 20
 
+#: Font size for the LARGE, on-map statistic callout `_corner_annotation` draws
+#: (item 5, wave 9 hostile-expert read, 2026-09-23): the peak-median dB story used to
+#: live only inside the title's "<sup>" subline -- effectively ~13 px at this module's
+#: 18 px title font -- unreadable at podium distance.
+_STAT_CALLOUT_FONT_SIZE = 28
+
+#: Range (m) around the direct-path/leakage gate (range 0, the delay-normalised
+#: munich frames' own 0 dB reference -- see `earliest_arrival_note` below) excluded
+#: before looking for the "brightest visible return" (item 7, coordinator addendum,
+#: 2026-09-23, measured on thrust1_circuit_knobs frame 5): the leakage smears into a
+#: couple of native bins around the true zero, not only the exact zero gate, so a
+#: narrower exclusion would still pick a leakage sidelobe rather than a genuine target.
+_DIRECT_PATH_EXCLUSION_M = 2.0
+
 #: Minimum y-axis upper bound for the subspace-error plot (Change 3, 2026-09-22
 #: review), so a near-floor curve reads as flat rather than filling the plot height.
 #: Picked from the presets' own measured range: Thrust 2's B arm (AFE mantissa 6->1)
@@ -1738,13 +1752,26 @@ def _radar_cube_clip_db(db: np.ndarray) -> float:
     return max(-40.0, float(np.median(db)) + 3.0)
 
 
-def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
-    """A small top-right, paper-anchored annotation -- the headline dynamic-range/floor
-    statistic the demo cards quote, printed on the panel itself instead of living only
-    in the operator's memory."""
-    return dict(text=text, xref="paper", yref="paper", x=0.99, y=y,
-                showarrow=False, xanchor="right", align="right",
-                font=dict(size=_LEGIBLE_TICK_SIZE, color="#2d3a4a"))
+def _corner_annotation(text: str, *, y: float = 0.94) -> Dict[str, Any]:
+    """A LARGE statistic callout, anchored to the HEATMAP'S OWN plotting area rather
+    than the whole figure's paper coordinates (item 5, wave 9 hostile-expert read,
+    2026-09-23) -- "x domain"/"y domain" are fractions of the axis's own domain,
+    unaffected by the colorbar Plotly reserves to the RIGHT of that domain in "paper"
+    coordinates; a "paper"-anchored x=0.99 sat the text under the colorbar instead of
+    inside the map.
+
+    TOP-LEFT, not top-right (correction, same read, after a re-check against the
+    rendered thrust1/thrust4 PNGs): a top-right placement at long range covered a
+    real return (thrust1's ~115 m streak sits at range ~93-108 m, sin(azimuth)
+    0.5-1.0 -- exactly the top-right corner). The top-LEFT corner (range > ~90 m,
+    sin(azimuth) in [-1, -0.5]) is empty on every munich preset's range-azimuth/
+    range-elevation panel checked (thrust1/thrust2/thrust4). A translucent
+    background is kept regardless, in case a future scene puts a target there too.
+    """
+    return dict(text=text, xref="x domain", yref="y domain", x=0.03, y=y,
+                showarrow=False, xanchor="left", align="left",
+                font=dict(size=_STAT_CALLOUT_FONT_SIZE, color="#2d3a4a"),
+                bgcolor="rgba(255,255,255,0.6)")
 
 
 #: `_heatmap`'s own margin/height -- named so `_add_frame_animation` (which
@@ -2098,6 +2125,42 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if frames_db[-1].shape[0] == keep.size:
                 frames_db = [f[keep] for f in frames_db]
                 y = y[keep]
+            # Item 7 (coordinator addendum, wave 9, 2026-09-23, measured on
+            # thrust1_circuit_knobs frame 5): the 0 dB reference cell (range 0, the
+            # direct-path/leakage gate the caption above already names) renders as
+            # roughly ONE native display gate against this panel's own fixed
+            # plot-domain height -- sub-pixel at the geometry these presets ship
+            # with, so no viewer can actually see the "0 dB" a caption references.
+            # Computed per frame from the CROPPED (physical, nonneg-range) map, so
+            # "visible" matches what is actually on screen -- never typed. Scoped
+            # exactly like `earliest_arrival_note` above (a physical range axis
+            # only): this never fires on the corpus-replay radar_cube/detector
+            # panels, which use a different, absolute range axis.
+            if n_freqs and freq_span_hz and y.size:
+                _beyond_direct_path = y >= _DIRECT_PATH_EXCLUSION_M
+                # RETRACTED (coordinator re-check, same wave, 2026-09-24): this used
+                # to also quote a "~N px" figure from `_HEATMAP_PLOT_DOMAIN_HEIGHT /
+                # y.size` -- that divides the module's own DECLARED plot-domain
+                # constant by the bin count, not the browser's actual rendered pixel
+                # height (measured on the PNG: ~206 px for 126 gates = 1.6 px here,
+                # not the 2.2 the old formula printed) -- a wrong, un-reproducible
+                # number this module has no way to verify from inside Python. Says
+                # "sub-pixel" (true at any plausible render size for a 1 m gate
+                # against a 100+ m axis) instead of a specific, wrong pixel count.
+                def _direct_path_note(frame_db_2d: np.ndarray) -> str:
+                    if not _beyond_direct_path.any():
+                        return ""
+                    sub = frame_db_2d[_beyond_direct_path]
+                    i_flat = int(np.argmax(sub))
+                    r_idx = np.unravel_index(i_flat, sub.shape)[0]
+                    bright_db = float(sub.flat[i_flat])
+                    bright_range_m = float(y[_beyond_direct_path][r_idx])
+                    return (f"; 0 dB cell at range 0 is one {_gate_m:.2g} m gate "
+                            f"(sub-pixel here, not visible); brightest visible "
+                            f"return: {bright_db:.1f} dB at {bright_range_m:.0f} m")
+                direct_path_notes = [_direct_path_note(f) for f in frames_db]
+            else:
+                direct_path_notes = [""] * len(frames_db)
             # Adaptive display clip (wave 7, X4/X5): on the pre-diffuse-scattering
             # munich Ka trace the shared -40 dB clip left these screens near-black --
             # 99%+ of pixels sat below it (F94) -- because nothing followed the
@@ -2132,7 +2195,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # the top margin from however many lines this actually wraps to, exactly so
             # a wording change that adds a line does not silently under-provision it.
             sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
-                       f"{earliest_arrival_note}{gate_note}{clip_note}" for d in dyn_range_db]
+                       f"{earliest_arrival_note}{gate_note}{clip_note}{dp}"
+                       for d, dp in zip(dyn_range_db, direct_path_notes)]
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
                      for s in sublines]
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
@@ -2140,7 +2204,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if key == "range_az" and range_az_yaxis_extent is not None:
                 # See `range_az_yaxis_extent`'s definition above the loop.
                 fig.update_yaxes(range=[0.0, range_az_yaxis_extent])
-            frame_layouts = [dict(title=dict(text=t)) for t in titles]
+            # Item 5 (wave 9 hostile-expert read, 2026-09-23): the peak-median dB
+            # story lives only in the subtitle above, at "<sup>" (~13 px) size --
+            # unreadable at podium distance. Repeat the SAME number (never a second
+            # computation) large, inside the map's own top-right corner; per frame,
+            # in step with the slider, the same way the title already is.
+            corner_texts = [f"peak-median {d:.1f} dB" for d in dyn_range_db]
+            fig.add_annotation(**_corner_annotation(corner_texts[-1]))
+            frame_layouts = [dict(title=dict(text=t), annotations=[_corner_annotation(c)])
+                            for t, c in zip(titles, corner_texts)]
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
 
@@ -2349,6 +2421,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 y=scoring_max_r, line_dash="dash", line_color="#ffffff",
                 annotation_text=f"labels & scoring stop at {scoring_max_r:g} m",
                 annotation_position="bottom right",
+                # Padding off the right border (item 4, wave 9 hostile-expert read,
+                # 2026-09-23): "bottom right" alone sits the text flush against the
+                # plot's right edge on all six Thrust-5 detector maps.
+                annotation_xshift=-10,
                 annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#ffffff"),
             )
         figs[key] = _make_legible(fig)
@@ -2415,11 +2491,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         _early = errs[:min(4, len(errs))]
         _annotation_collides = any(
             abs(e - _SUBSPACE_ERR_SETTLED_LEVEL) <= 0.03 for e in _early)
+        # Padding off the right plot edge (item 3, wave 9 hostile-expert read,
+        # 2026-09-23): "top right" sat the label flush against x=1 (paper), which then
+        # ran into the right-hand axis's own tick label (the primary y-axis when there
+        # is no refinement-passes trace, or that trace's y2 axis when there is one) --
+        # a SECOND collision this branch introduced while fixing the first (the early-
+        # frame marker). `annotation_xshift` nudges it left, off that edge, without
+        # touching which side ("top right" vs "top left") is chosen -- keeping that
+        # choice intact matters: it is what a cold-start/refine-gate run (an early
+        # frame near the settled level) versus a clear run actually differ on.
         fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash", line_color="#576574",
                      annotation_text=(f"warm-start settled level "
                                       f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference)"),
                      annotation_position=("top right" if _annotation_collides
                                           else "top left"),
+                     annotation_xshift=(-15 if _annotation_collides else 0),
                      annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(
             title=("Subspace error (Frobenius) per frame<br><sup>unnormalised distance; "

@@ -109,6 +109,19 @@ def test_run_status_carries_the_notes():
     assert 'axis_meta.get("notes")' in src
 
 
+def test_render_results_carries_the_notes_too():
+    """Item 6 (wave 9 hostile-expert read, 2026-09-23): run notes reached only the
+    status line above -- the Results tab, what a visitor actually photographs, carried
+    no on-screen record of them (e.g. the interconnect Tessera surrogate's evaluated
+    frequency, Thrust 4). See tests/test_webapp_figures_wave9.py for the full
+    behavioural pin (per-arm notes, rendered under each arm's own banner); this just
+    anchors the fix in the file a reader of this module would look in first."""
+    import inspect
+    import webapp.app as appmod
+    assert 'axis_meta.get("notes")' in inspect.getsource(appmod._notes_line)
+    assert '"_notes"' in inspect.getsource(appmod._render_results)
+
+
 # ------------------------------------------------------------------------------------
 # 3. one ceiling each
 # ------------------------------------------------------------------------------------

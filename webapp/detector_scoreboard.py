@@ -633,6 +633,18 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
     ap = arm.get("AP")
     rows: List[Tuple[str, str]] = []
 
+    # The CFAR reference these two rows print inline, for a LEARNED detector's arm
+    # only (never CFAR's own row, which would be "CFAR vs itself") -- read from this
+    # SAME beat_cfar.json, never typed (wave 9, hostile-expert read, 2026-09-23,
+    # item 2): before this, only the OOD/3rd-corpus rows below stated CFAR's number
+    # beside a learned detector's; the two rows that actually carry the demo's
+    # headline claim ("FA/frame at recall ...", "AP, offline test split") stated
+    # none, so a viewer had to scroll to a different arm's table to compare.
+    is_learned = beat_cfar_arm_name != "classical CFAR"
+    cfar_arm = (next((a for a in data.get("arms", []) if a.get("name") == "classical CFAR"),
+                     None)
+               if is_learned else None)
+
     # FA/frame FIRST, ahead of AP (Change, wave 7 X2, 2026-09-23 -- see this
     # function's docstring): states the OFFLINE frame count on this row too
     # (Change, hostile-expert 4th read, 2026-09-23): this number sits directly
@@ -647,11 +659,26 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
             label += f" at recall {target_recall:g}"
         if n_frames is not None:
             label += f", {n_frames} frames"
-        rows.append((label, f"{fa_pf:.2f}"))
+        fa_value = f"{fa_pf:.2f}"
+        cfar_fa = ((cfar_arm.get("operating_point") or {}).get("fp_per_frame")
+                  if cfar_arm is not None else None)
+        if cfar_fa is not None:
+            fa_value += f" (CFAR {cfar_fa:.2f})"
+        rows.append((label, fa_value))
 
     if ap is not None:
-        ap_split_value = (f"{ap:.3f}, {n_frames}fr (beat_cfar.json)" if n_frames is not None
-                         else f"{ap:.3f} (beat_cfar.json)")
+        cfar_ap = cfar_arm.get("AP") if cfar_arm is not None else None
+        if cfar_ap is not None:
+            # Shorter form (drops the "{n}fr (beat_cfar.json)" suffix): the subline
+            # above this table already states both the split size and the file
+            # (`scoreboard_figure`'s "... test split (beat_cfar.json)" sentence), so
+            # this row spends its char budget on the CFAR number instead of a second
+            # copy of them.
+            ap_split_value = f"{ap:.3f} (CFAR {cfar_ap:.3f})"
+        elif n_frames is not None:
+            ap_split_value = f"{ap:.3f}, {n_frames}fr (beat_cfar.json)"
+        else:
+            ap_split_value = f"{ap:.3f} (beat_cfar.json)"
         rows.append(("AP, offline test split", ap_split_value))
     else:
         rows.append(("offline test split", header_value))
@@ -1010,6 +1037,27 @@ def _raddetnet_ci_for_arm(arm_name: str, raddetnet_ci_json_path) -> Optional[Dic
     return None
 
 
+#: Top-margin sizing for `stored_pr_figure`'s title (main line + "<br><sup>" block) --
+#: same subtitle-line-count pattern as `pipeline_runner._heatmap_margin_t` (commit
+#: 6081e29). Calibrated against this figure's own measurements: 60 px fit the
+#: original single-sup-line title (n_lines=2); wave 8 (W5) raised it to 84 for the
+#: 2-sup-line title (n_lines=3) this module ships today -- i.e. +24 px per further
+#: wrapped line.
+_PR_MARGIN_T_BASE = 60          # n_lines == 2 (main title + 1 sup line)
+_PR_MARGIN_T_PER_LINE = 24
+#: Both A/B arms of a Thrust-5 preset draw this SAME figure (`webapp.app._arm_result`
+#: appends one more "<br><sup>" line to arm B's copy, saying the curve is identical on
+#: both arms), and the two must render at the SAME margin or their plot axes do not
+#: line up (item 1, wave 9 hostile-expert read, 2026-09-23: a viewer switching between
+#: the two panels saw the axis heights shift; a viewer of B alone saw its 4th line's
+#: text overprinted by the plot's own y-axis tick, because that margin bump lived in
+#: `_arm_result` as a flat "+25" that undercounted the true per-line cost). Reserving
+#: room for at least this many total lines on EVERY call -- regardless of that call's
+#: own actual line count -- means arm A (3 lines) and arm B (4, after its append) get
+#: byte-identical margins without `_arm_result` needing to know or match this number.
+_PR_MIN_TITLE_LINES = 4
+
+
 def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                      highlight_arm: Optional[str] = None,
                      raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON) -> go.Figure:
@@ -1093,23 +1141,26 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1],
                      domain=[0.0, 1.0])
     fig.update_yaxes(title=dict(text="precision", font=dict(size=16)), range=[0, 1])
+    # Short enough to fit a two-card (~600 px) panel -- the old single-line "scored
+    # offline over the {n} test frames of {corpus} (beat_cfar.json)" ran off the card
+    # edge as "... (b..." (rehearsal, 2026-09-23); the source file name moves to a
+    # subline, like every other panel's qualifier text. The in-distribution/seed
+    # qualifier (owner-volunteered, 2026-09-23 re-read) says what this curve does and
+    # does NOT generalize to: held-out SCENES of the training corpus, not a held-out
+    # corpus, and one training seed per curve -- neither varies run to run the way the
+    # CI band on the highlighted arm might suggest.
+    title_text = (
+        f"scored offline: {n_frames} test frames, {corpus_name}"
+        "<br><sup>beat_cfar.json; in-distribution: held-out scenes of the "
+        "training corpus; one training seed per curve<br>the scoreboard's "
+        "precision ceiling binds at full recall, not near recall 0</sup>"
+    )
+    # Margin sized from the title's OWN line count, floored at `_PR_MIN_TITLE_LINES`
+    # so arm A and arm B (see that constant's comment) always reserve the same room.
+    n_title_lines = max(_PR_MIN_TITLE_LINES, title_text.count("<br>") + 1)
+    margin_t = _PR_MARGIN_T_BASE + _PR_MARGIN_T_PER_LINE * (n_title_lines - 2)
     fig.update_layout(
-        # Short enough to fit a two-card (~600 px) panel -- the old single-line
-        # "scored offline over the {n} test frames of {corpus} (beat_cfar.json)" ran
-        # off the card edge as "... (b..." (rehearsal, 2026-09-23); the source file
-        # name moves to a subline, like every other panel's qualifier text. The
-        # in-distribution/seed qualifier (owner-volunteered, 2026-09-23 re-read) says
-        # what this curve does and does NOT generalize to: held-out SCENES of the
-        # training corpus, not a held-out corpus, and one training seed per curve --
-        # neither varies run to run the way the CI band on the highlighted arm might
-        # suggest.
-        title=dict(
-            text=f"scored offline: {n_frames} test frames, {corpus_name}"
-                 "<br><sup>beat_cfar.json; in-distribution: held-out scenes of the "
-                 "training corpus; one training seed per curve<br>the scoreboard's "
-                 "precision ceiling binds at full recall, not near recall 0</sup>",
-            font=dict(size=18),
-        ),
+        title=dict(text=title_text, font=dict(size=18)),
         # Moved BELOW the plot, horizontal (Change, 2026-09-23 coordinator re-check):
         # a vertical legend to the RIGHT of the plot (the previous default) sizes
         # itself to its longest entry -- the highlighted arm's CI-augmented name is
@@ -1125,10 +1176,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # re-check): the wrapped 2-row case must not overlap the x-axis title below
         # it, which `automargin=True` below cannot solve for a LEGEND (that flag only
         # covers axis titles/ticks).
-        # t raised 60 -> 84 (wave 8, W5): the ceiling-vs-recall clarification added a
-        # 2nd wrapped `<sup>` line above; unraised, that line rendered UNDER the
-        # plot's own top axis, clipped mid-word on the rehearsal PNG.
-        margin=dict(l=50, r=20, t=84, b=110),
+        margin=dict(l=50, r=20, t=margin_t, b=110),
         height=480,
     )
     if fallback_arms:

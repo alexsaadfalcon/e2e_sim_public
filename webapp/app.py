@@ -367,6 +367,19 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
+def _notes_line(axis_meta: Dict[str, Any]) -> str:
+    """`axis_meta['notes']` (`pipeline_runner.run_pipeline`'s `run_notes` -- e.g. the
+    interconnect Tessera surrogate's scale-model/frequency disclosure,
+    `InterconnectBlock.describe()`) joined into one line for the Results tab (item 6,
+    wave 9 hostile-expert read, 2026-09-23): these reached only the Block Diagram
+    tab's status line (via `_note_for` below), so a Thrust 4 Results screen carried
+    no on-screen record of the frequency it was actually evaluated at -- a visitor
+    reading only that tab, or a photograph of it, never saw the disclosure at all.
+    `''` when there are none, same convention as `_note_for`."""
+    notes = axis_meta.get("notes")
+    return "  |  ".join(notes) if notes else ""
+
+
 def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str,
                 arm: str = "a"):
     """Figures + banner + status message for ONE run's outputs -- shared by the
@@ -414,17 +427,19 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
         if arm_name is not None:
             pr_fig = detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)
             if arm == "b":
+                # `stored_pr_figure` already reserves top margin for
+                # `detector_scoreboard._PR_MIN_TITLE_LINES` (4) lines on EVERY call, so
+                # appending this 4th line to arm B's title needs no further margin bump
+                # here (item 1, wave 9 hostile-expert read, 2026-09-23: a flat "+25"
+                # bump here undercounted the true per-line cost and this line's own
+                # closing tick overprinted the plot's y-axis; worse, arm A never got
+                # the bump at all, so the two arms' plots did not share an axis
+                # height). Margin now comes from `stored_pr_figure` alone, identical on
+                # both arms regardless of which one appends this sentence.
                 pr_fig.update_layout(title=dict(
                     text=pr_fig.layout.title.text
                         + "<br><sup>scored offline; identical on both arms, the "
                           "knob cannot move it</sup>"))
-                # The appended line makes this a THREE-line title (main + the base
-                # figure's own subline + this one); the base top margin only budgets
-                # for two, so the new line sat a few pixels into the plot's top tick
-                # (rehearsal 2026-09-23, wave 6 cosmetic carry-over). Give it room
-                # without touching anything else about the figure.
-                m = pr_fig.layout.margin
-                pr_fig.update_layout(margin=dict(l=m.l, r=m.r, b=m.b, t=(m.t or 0) + 25))
             figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
@@ -617,6 +632,9 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
                 data_a["_banner"] = f"{line_a} -- B did not run (cancelled)  ||  {result_a['banner']}"
                 data_a["_ab"] = True
+                notes_a = _notes_line(outputs_a.get("_axis_meta") or {})
+                if notes_a:
+                    data_a["_notes"] = notes_a
                 if screen_note:
                     data_a["_screen_note"] = screen_note
                 if prev_results:
@@ -636,6 +654,15 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             data_a["_ab"] = True
             data_b["_banner"] = f"{line_b}  ||  {result_b['banner']}"
             data_b["_ab"] = True
+            # Item 6 (wave 9 hostile-expert read, 2026-09-23): run notes belong on the
+            # Results tab, per arm (they can differ, e.g. arm B turning the interconnect
+            # to a different scale/frequency) -- see `_notes_line` and `_render_results`.
+            notes_a = _notes_line(outputs_a.get("_axis_meta") or {})
+            if notes_a:
+                data_a["_notes"] = notes_a
+            notes_b = _notes_line(outputs_b.get("_axis_meta") or {})
+            if notes_b:
+                data_b["_notes"] = notes_b
             if screen_note:
                 # Shown ONCE, above both A and B -- on `data_a` (the top-level payload),
                 # never duplicated onto `data_b`/`_previous`.
@@ -664,6 +691,9 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
         # Ordinary single-run path: unchanged behaviour.
         data = {k: f.to_dict() for k, f in result_a["figs"].items()}
         data["_banner"] = result_a["banner"]
+        notes = _notes_line(outputs_a.get("_axis_meta") or {})
+        if notes:
+            data["_notes"] = notes
         if screen_note:
             data["_screen_note"] = screen_note
         if prev_results:
@@ -956,6 +986,17 @@ def _render_results(results_data, active_tab):
         children.append(html.Div(f"{prefix}{banner}",
                                  style={"color": "#2d3a4a", "fontWeight": "bold",
                                         "marginBottom": "4px"}))
+    notes_line = results_data.get("_notes")
+    if notes_line:
+        # Item 6 (wave 9 hostile-expert read, 2026-09-23): run notes (e.g. the
+        # interconnect Tessera surrogate's scale-model/frequency disclosure) used to
+        # reach only the Block Diagram tab's status line -- the Results tab, what a
+        # visitor actually photographs, carried no frequency disclosure for Thrust 4.
+        # Same muted subline style as `screen_note` below; THIS arm's own notes only
+        # (an A/B pair's arms can differ, e.g. arm B turning the interconnect band).
+        children.append(html.Div(notes_line,
+                                 style={"color": "#576574", "fontSize": "14px",
+                                        "marginBottom": "6px"}))
     screen_note = results_data.get("_screen_note")
     if screen_note:
         # The preset's own caveat, for whoever photographs this tab rather than hears
@@ -975,6 +1016,11 @@ def _render_results(results_data, active_tab):
             f"{prev_prefix}{prev.get('_banner') or 'unlabelled'}",
             style={"color": "#576574", "fontWeight": "bold", "marginTop": "6px",
                    "marginBottom": "4px"}))
+        prev_notes_line = prev.get("_notes")
+        if prev_notes_line:
+            children.append(html.Div(prev_notes_line,
+                                     style={"color": "#576574", "fontSize": "14px",
+                                            "marginBottom": "6px"}))
         children.append(_grid(prev_figs))
     return html.Div(children)
 

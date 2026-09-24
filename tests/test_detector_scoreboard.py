@@ -420,6 +420,7 @@ def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
     labels, values = table.cells.values
     row = dict(zip(labels, values))
     arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
+    cfar = next(a for a in beat_cfar_data["arms"] if a["name"] == "classical CFAR")
     # "offline test split" was merged into the AP row (Change, 4th hostile-expert
     # read, 2026-09-23: freed a row for the connector/OOD-FA rows added this same
     # pass, within the <=800 px budget) -- both the AP number and the split's own
@@ -428,10 +429,15 @@ def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
     # ("AP, split, stripe vs GT" / "stripe 0.617/0.312") -- a bare number pair no
     # visitor could interpret without the presenter's own narration; the row is now
     # AP + split only, and the presenter's card keeps the stripe number.
-    assert row["AP, offline test split"] == (
-        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr (beat_cfar.json)")
+    # Item 2 (wave 9 hostile-expert read, 2026-09-23): "raddetnet" is a LEARNED
+    # detector's arm, so both the AP and FA/frame rows now also carry CFAR's own
+    # number inline (read from this same file, never typed) -- the AP row drops the
+    # "{n}fr (beat_cfar.json)" suffix to make room, since the subline above the
+    # table already states both.
+    assert row["AP, offline test split"] == f"{arm['AP']:.3f} (CFAR {cfar['AP']:.3f})"
     fa_label = next(k for k in row if k.startswith("FA/frame at recall"))
-    assert row[fa_label] == f"{arm['operating_point']['fp_per_frame']:.2f}"
+    assert row[fa_label] == (f"{arm['operating_point']['fp_per_frame']:.2f} "
+                             f"(CFAR {cfar['operating_point']['fp_per_frame']:.2f})")
     # The offline block's own frame count is now stated on this row too (4th
     # hostile-expert read, 2026-09-23) -- it sits directly below the live
     # "unmatched / frame, these N frames" row, and the two numbers must not read as
@@ -441,6 +447,22 @@ def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
     # More than the base 6 rows now -- the table's height must have grown to match
     # (see the geometric check below), not silently clipped the new rows.
     assert len(labels) > 6
+
+
+def test_scoreboard_offline_block_cfar_arm_has_no_self_reference(beat_cfar_data):
+    """CFAR's own row must never print "CFAR" against itself (item 2 is for a
+    LEARNED detector's arm only) -- unchanged format for the classical CFAR row."""
+    scores = ds.score_frames([[]], None)
+    fig = ds.scoreboard_figure(scores, arm_name="CFAR", threshold=0.66,
+                               match_rule_text="rule",
+                               beat_cfar_arm_name="classical CFAR")
+    labels, values = _table(fig).cells.values
+    row = dict(zip(labels, values))
+    arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "classical CFAR")
+    assert row["AP, offline test split"] == (
+        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr (beat_cfar.json)")
+    fa_label = next(k for k in row if k.startswith("FA/frame at recall"))
+    assert row[fa_label] == f"{arm['operating_point']['fp_per_frame']:.2f}"
 
 
 def test_scoreboard_offline_block_omits_stripe_row_for_classical_cfar(beat_cfar_data):
