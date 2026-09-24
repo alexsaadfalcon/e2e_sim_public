@@ -112,6 +112,13 @@ from e2e.frames import FrameCapabilities
 #                            the dechirp commutes with the front end's envelope
 #                            nonlinearity (`e2e/chain/frontend.py`), and the reason the
 #                            TX PA is inert on FMCW and bites on OFDM (PAPR ~10 dB).
+#   .mixing               -- WHICH mixing block turns the received frame into the
+#                            sampled record: "dechirp" (FMCW), "symbol_division"
+#                            (JSAC), or None (OFDM -- a comms receiver equalises the
+#                            grid, it does not form a cube). This is the third leg of
+#                            the triple (source waveform, mixing mode, product set)
+#                            that makes these three CLASSES rather than labels, and it
+#                            is what `e2e.comms.ofdm_isac.waveform_chain_spec` reads.
 #
 # See notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 2 for the option table this
 # implements, and `notes/JSAC_WAVEFORM_2026-09-24.md` (a research note that did not yet
@@ -128,6 +135,8 @@ class _WaveformClass:
 
     kind = None
     constant_envelope = False
+    #: See the contract above. "dechirp" | "symbol_division" | None.
+    mixing = None
 
     def __init__(self, metadata: dict):
         self.metadata = dict(metadata or {})
@@ -150,6 +159,7 @@ class _WaveformClass:
             "n_slow": md.get("n_slow", 1),
             "delta_f_hz": delta_f,
             "constant_envelope": self.constant_envelope,
+            "mixing": self.mixing,
         }
 
 
@@ -200,6 +210,7 @@ class FMCWSignal(_WaveformClass):
 
     kind = "fmcw"
     constant_envelope = True
+    mixing = "dechirp"
 
     def generate(self, t):
         bw = self.metadata['bw']
@@ -219,150 +230,150 @@ class FMCWSignal(_WaveformClass):
         return signal
 
 
-class OFDMISACSignal(_WaveformClass):
-    """OFDM waveform, sensed by SYMBOL DIVISION -- the JSAC-capable option.
+class _OFDMGridSignal(_WaveformClass):
+    """Shared implementation of the two OFDM-grid classes. Not registered itself.
 
-    Sensing works differently from FMCW and the difference is the whole point: there is
-    no dechirp. The receiver estimates `H_est = Y_q / X_q` per subcarrier (LS on an
-    all-pilot symbol, `e2e/comms/channel.py`), and THAT estimate is the frequency-domain
-    record the range transform then compresses. So the cube's fast axis counts
-    SUBCARRIERS, not range bins, until the transform runs -- which is exactly why
-    `cube_axes` travels in state and why a product built for `(chirp, range_bin)`
-    refuses this waveform by name instead of drawing a plausible picture of nothing.
+    Both `ofdm` and `jsac` transmit the SAME thing -- one CP-OFDM frame whose
+    subcarriers sit on the stored channel's own frequency grid, an all-pilot preamble
+    followed by data symbols on a comb. They differ in exactly one attribute,
+    `mixing`, and therefore in which products the chain can read out. That is the
+    whole distinction, it is one line of code, and it is the reason the dropdown has
+    three entries rather than two-plus-a-relabel: run `ofdm` and you get a
+    constellation and a BER; add the mixing block and a radar image appears from the
+    same frame, the same front end and the same knobs.
 
-    The envelope is NOT constant (PAPR ~10 dB), with two consequences the chain must
-    respect: the TX PA's Rapp nonlinearity is live here where it is inert on FMCW, and
-    the front end's clamp (`rffe_model.py`'s clamp-at-cubic-peak) engages where an FMCW
-    chirp never reaches it. Nothing about `FrontEndBlock`'s placement argument survives
-    on this path either: the dechirp/nonlinearity commutation is a unit-modulus
-    identity, so on OFDM the front end must act on the actual sampled record.
+    The frame itself lives in `e2e.comms.ofdm_isac.OFDMFrame`, which is where the
+    numerology, the resource-split knob and the data-rate arithmetic are -- imported
+    lazily so importing this module does not drag in the comms package.
 
-    IMPLEMENTED AS FAR AS `e2e/comms/ofdm.py` ALLOWS: this class builds the transmitted
-    time-domain symbol (pilot-loaded, CP-prefixed) via `OFDMModem`, and reports the
-    record layout. The RECEIVE bridge -- `Y/X` per subcarrier into the spine's frequency
-    record -- lives in the comms package (`e2e/comms/isac.py` does the CFR version
-    today) and is wired by the shard that owns it.
-
-    CP CAVEAT, stated because it is a real constraint and not a default: the cyclic
-    prefix must exceed the channel's delay SPREAD, not its fourth-strongest path. F94
-    records the munich Ka diffuse families reaching 454 ns, so a CP below ~1/4 symbol
-    on that trace produces inter-symbol interference that the range transform will
-    faithfully render as clutter. Read it off the PDP; do not assume the default.
+    Metadata keys read here: `freq_plan` (preferred -- the frame is then built from the
+    SOURCE's own grid, which is the premise of the whole design), else `n_subcarriers`
+    + `subcarrier_spacing_hz`, else `bw` + `n_fast`; plus `n_symbols`, `cp_len`,
+    `bits_per_symbol`, `pilot_spacing`, `sensing_source`, `seed`.
     """
 
-    kind = "ofdm"
     constant_envelope = False
+
+    #: Keys forwarded to `OFDMFrame`. Named so a typo in a preset is a TypeError at
+    #: construction rather than a silently ignored knob.
+    _FRAME_KEYS = ("n_symbols", "cp_len", "bits_per_symbol", "pilot_spacing",
+                   "sensing_source", "seed")
 
     def __init__(self, metadata: dict):
         super().__init__(metadata)
-        self.fft_size = int(self.metadata.get("fft_size", 64))
-        self.cp_len = int(self.metadata.get("cp_len", self.fft_size // 4))
-        self.n_symbols = int(self.metadata.get("n_symbols", 1))
-        self.bits_per_symbol = int(self.metadata.get("bits_per_symbol", 2))
-        self._modem = None
+        self._frame = None
 
-    def modem(self):
-        """The `OFDMModem` this waveform transmits through, built lazily so importing
-        the waveform module does not drag in the comms package."""
-        if self._modem is None:
-            from e2e.comms.ofdm import OFDMModem
-            self._modem = OFDMModem(
-                fft_size=self.fft_size, cp_len=self.cp_len,
-                bits_per_symbol=self.bits_per_symbol,
-                **{k: v for k, v in self.metadata.items()
-                   if k in ("n_active", "pilot_spacing")})
-        return self._modem
+    def frame(self):
+        """The `OFDMFrame` this waveform transmits, built once."""
+        if self._frame is None:
+            from e2e.comms.ofdm_isac import OFDMFrame, frame_from_freq_plan
+
+            kwargs = {k: self.metadata[k] for k in self._FRAME_KEYS
+                      if k in self.metadata}
+            plan = self.metadata.get("freq_plan")
+            if plan:
+                self._frame = frame_from_freq_plan(plan, **kwargs)
+            else:
+                n = self.metadata.get("n_subcarriers") or self.metadata.get("n_fast")
+                df = self.metadata.get("subcarrier_spacing_hz")
+                if n is None or df is None:
+                    bw = self.metadata.get("bw")
+                    if not (n and bw):
+                        raise ValueError(
+                            f"{type(self).__name__} needs the subcarrier grid: pass "
+                            f"freq_plan= (preferred -- the frame is then built from "
+                            f"the source's own grid), or n_subcarriers + "
+                            f"subcarrier_spacing_hz, or n_subcarriers + bw. Got "
+                            f"metadata keys {sorted(self.metadata)}.")
+                    df = float(bw) / float(n)
+                self._frame = OFDMFrame(n_subcarriers=int(n),
+                                        subcarrier_spacing_hz=float(df), **kwargs)
+        return self._frame
 
     def generate(self, t):
-        """The transmitted time-domain OFDM record (CP included), truncated or
-        zero-padded to `t`'s length so it drops into `WaveformBlock` unchanged.
+        """The transmitted time-domain record, CP included, on `t`'s grid.
 
-        Pilot-loaded random data: the sensing path only needs a KNOWN `X`, and using
-        the modem's own pilot/data machinery keeps the transmitted grid identical to
-        what the comms head will divide by.
+        Truncated or zero-padded to `len(t)` so it drops into `WaveformBlock`
+        unchanged. The TX GRID -- what the mixer divides by and the demapper demaps
+        against -- is `frame().tx_grid`; a receiver that re-guesses `X` is not the same
+        receiver, which is why the frame object and not just the samples travels
+        downstream.
         """
-        from e2e.comms.ofdm import random_bits
-        modem = self.modem()
-        n_bits = modem.data_bits_per_symbol_block * self.n_symbols
-        bits = random_bits(n_bits, seed=self.metadata.get("seed", 0))
-        # `modulate` returns (tx_time, tx_freq); the transmitted GRID is kept because
-        # the sensing path divides by it (`H_est = Y/X`) and the comms head demaps
-        # against it -- a receiver that re-guesses `X` is not the same receiver.
-        tx_time, tx_freq = modem.modulate(bits, self.n_symbols)
-        self.tx_freq = tx_freq
-        self.tx_bits = bits
-        tx = tx_time.reshape(-1)
+        wave = self.frame().tx_wave.reshape(-1)
         n_t = int(t.shape[0])
-        if tx.shape[0] < n_t:
-            tx = torch.cat([tx, tx.new_zeros(n_t - tx.shape[0])])
-        return tx[:n_t].to(torch.complex64)
+        if wave.shape[0] < n_t:
+            wave = torch.cat([wave, wave.new_zeros(n_t - wave.shape[0])])
+        return wave[:n_t].to(torch.complex64)
 
     def record_metadata(self):
         md = super().record_metadata()
-        md.update({
-            "cube_axes": dict(frames.CUBE_AXES_OFDM),
-            "n_fast": self.fft_size,
-            "n_slow": self.n_symbols,
-            "cp_len": self.cp_len,
-            "delta_f_hz": (float(self.metadata["bw"]) / self.fft_size
-                           if self.metadata.get("bw") else None),
-        })
+        md.update(self.frame().record_metadata())
+        md["kind"] = self.kind
+        md["mixing"] = self.mixing
         return md
 
 
-class JSACSignal(_WaveformClass):
-    """The hybrid sensing-and-communication waveform. REGISTERED, NOT IMPLEMENTED.
+class OFDMSignal(_OFDMGridSignal):
+    """`ofdm` -- the COMMS class. One OFDM frame, no mixing block, comms products only.
 
-    It is a registered class rather than an absent one on purpose: the branch point on
-    the diagram is real, the contract it must satisfy is written down, and a caller
-    asking for it gets a refusal that says what is missing instead of a KeyError that
-    says the option does not exist.
+    `mixing = None` is the substantive statement: a communications receiver equalises
+    the received grid and demaps it; it never forms a range cube, so this chain has no
+    sensing half and the card says so. That is what the owner's second named class
+    ("comms (OFDM)") means, and having it on the dropdown is what makes `jsac` a
+    different thing rather than the same thing with an extra tab -- the comparison is
+    a screenshot, not a claim.
 
-    WHICH hybrid is an open research question at the time of writing. The two candidates
-    the contract (section 2) costs out:
+    The envelope is NOT constant (mean PAPR 9.55 dB at Nyquist / 10.03 dB at 4x
+    oversampling, measured 2026-09-24 on a 5000-point QPSK grid), so the TX PA's Rapp
+    nonlinearity is live here where it is inert on FMCW. See
+    `e2e.comms.ofdm_isac.measure_lna_input_papr` before making any claim about the
+    RECEIVE front end's clamp -- that measurement runs the other way from the
+    intuition, and on the shipped preset it runs backwards.
+    """
 
-      * **OFDM-ISAC** -- one OFDM waveform doing both jobs; sensing by symbol division.
-        Already half-built as `OFDMISACSignal` above; a JSAC preset on top of it is the
-        cheaper path.
-      * **FMCW with embedded data** -- chirp-to-chirp PSK on the SLOW axis. Sensing is
-        unchanged after code removal (the data is a known unit-modulus factor per
-        chirp, so the radar divides it out exactly and the cube is bit-for-bit what it
-        would have been); comms decodes the phase at the sync/line-of-sight range bin.
-        Multi-chirp frames only -- munich frames are single-chirp, so they carry zero
-        bits and this option is corpus-only.
+    kind = "ofdm"
+    mixing = None
 
-    `notes/JSAC_WAVEFORM_2026-09-24.md` is to decide between them. Implementing it is
-    the other shard's task; what THIS class owes it is the contract above
-    (`record_metadata` must name the cube axes and whether the envelope is constant),
-    plus a `generate` that produces the transmitted record.
+
+class JSACSignal(_OFDMGridSignal):
+    """`jsac` -- the HYBRID class: OFDM-ISAC by symbol division.
+
+    Chosen from five waveform families in `notes/JSAC_WAVEFORM_2026-09-24.md` (Sturm &
+    Wiesbeck 2011 is the founding reference; Xiong et al. 2023 names the
+    deterministic-random tradeoff the QAM-order knob makes visible; 802.11bf is the
+    architectural precedent -- the standard did not invent a hybrid waveform, it made
+    the comms waveform's channel estimate the sensing product). It is the only
+    candidate that yields a range/angle IMAGE and a BIT-ERROR RATE from one frame of
+    one waveform through one front end, which is what "hybrid" has to mean on a screen.
+
+    `mixing = "symbol_division"`: the receiver forms `Z = Y / X` per subcarrier, which
+    cancels the data EXACTLY -- no matched filter, no code sidelobes, and the sensing
+    estimate is independent of the transmitted bits -- then runs the same conjugate,
+    antenna flip and MIMO combine the dechirp runs, and the same one range transform.
+    See `e2e.comms.ofdm_isac` for the block, the oracles and the resource-split knob.
+
+    THE COST, which belongs on the card beside the data rate: dividing instead of
+    dechirping throws away stretch processing. The FMCW arm samples the same 3 GHz at
+    25.0 MS/s over a 199.96 us sweep; this arm needs 3.0 GS/s over a 9.865 us frame --
+    120x the ADC rate, for 2.66 Gb/s (QPSK) and a 20x shorter frame. Both halves are
+    true and quoting one without the other is a half-truth. `record_metadata()`
+    reports `sample_rate_hz` so a card reads it rather than repeating it.
     """
 
     kind = "jsac"
-    constant_envelope = False
-
-    def generate(self, t):
-        raise NotImplementedError(
-            "the JSAC hybrid waveform is registered but not implemented: which hybrid "
-            "it is (OFDM-ISAC, or FMCW with chirp-to-chirp PSK on the slow axis) is "
-            "still open -- see notes/JSAC_WAVEFORM_2026-09-24.md and this class's "
-            "docstring for the contract an implementation must satisfy. Use "
-            "kind='fmcw' (or 'ofdm') until it lands."
-        )
-
-    def record_metadata(self):
-        raise NotImplementedError(
-            "JSACSignal.record_metadata: see generate() -- the hybrid is not chosen yet."
-        )
+    mixing = "symbol_division"
 
 
-#: The waveform registry -- the `kind` switch on `WaveformBlock`. "fmcw" is the
-#: default and the only one a v1.1 preset selects; "ofdm" and "jsac" are the v1.2
-#: options the contract's section 2 costs out. "wideband" is not one of
+#: The waveform registry -- the `kind` switch on `WaveformBlock`. THREE registered
+#: classes, as the owner's directive names them: sensing ("fmcw"), comms ("ofdm") and
+#: the hybrid ("jsac"). They are distinguished by the triple (source waveform, mixing
+#: mode, product set), not by a label -- see each class's docstring and
+#: `e2e.comms.ofdm_isac.waveform_chain_spec`. "wideband" is not one of
 #: `WAVEFORM_KINDS`: it is a probe waveform with no consumer (see its docstring).
 _WAVEFORM_CLASSES = {
     "wideband": RandomWidebandSignal,
     "fmcw": FMCWSignal,
-    "ofdm": OFDMISACSignal,
+    "ofdm": OFDMSignal,
     "jsac": JSACSignal,
 }
 
@@ -439,6 +450,9 @@ class WaveformBlock:
 
     `kind` selects one of the waveform classes above -- 'fmcw' (the default),
     'ofdm', 'jsac' (see WAVEFORM_KINDS), or the unregistered probe 'wideband'.
+    `freq_plan=` and any extra keyword go into the class's `metadata` dict: the OFDM
+    classes build their subcarrier grid from the plan, so passing the SOURCE's plan is
+    what makes the transmitted grid and the stored channel's grid the same grid.
     'narrowband' was an all-ones placeholder, deleted in the C2 fold-in; asking for
     it raises with this history. `fc`/`bw`/`sample_rate`/`chirp_duration` feed the
     class's `metadata` dict verbatim (see the module docstring's note on `fc`
@@ -462,7 +476,8 @@ class WaveformBlock:
     )
 
     def __init__(self, kind="fmcw", fc=0.0, bw=1e9, sample_rate=3e9,
-                 chirp_duration=1e-6, n_t=None, n_tx=1, n_chirp=1):
+                 chirp_duration=1e-6, n_t=None, n_tx=1, n_chirp=1,
+                 freq_plan=None, **waveform_kwargs):
         if kind == "narrowband":
             raise ValueError(
                 "waveform kind 'narrowband' was removed (release-plan C2): it was an "
@@ -479,6 +494,12 @@ class WaveformBlock:
             "fc": fc, "bw": bw, "sample_rate": sample_rate,
             "chirp_duration": chirp_duration,
         }
+        # `freq_plan` and the class-specific knobs ride in the same metadata dict the
+        # class already reads. The plan is what lets an OFDM/JSAC frame put its
+        # subcarriers ON the stored channel's grid instead of interpolating onto it.
+        if freq_plan:
+            self.metadata["freq_plan"] = dict(freq_plan)
+        self.metadata.update(waveform_kwargs)
         self._signal = _WAVEFORM_CLASSES[kind](self.metadata)
         self.sample_rate = float(sample_rate)
         self.n_tx = int(n_tx)
@@ -505,8 +526,16 @@ class WaveformBlock:
         # assuming FMCW. `cube_axes` is the pair `frames.require_cube_axes` checks --
         # it is what makes a product refuse an OFDM cube by name.
         record = self._signal.record_metadata()
-        return {"tx_wave": tx_wave, "waveform": record,
-                "waveform_kind": record["kind"]}
+        out = {"tx_wave": tx_wave, "waveform": record,
+               "waveform_kind": record["kind"]}
+        # The transmitted GRID, for the classes that have one. It travels in state
+        # because the mixing block divides by it and the comms head demaps against it,
+        # and both must use the object this block actually transmitted.
+        frame = getattr(self._signal, "frame", None)
+        if callable(frame):
+            out["tx_grid"] = frame().tx_grid
+            out["cube_axes"] = dict(record["cube_axes"])
+        return out
 
 
 class TxPABlock:
