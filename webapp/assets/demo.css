@@ -127,7 +127,11 @@ button:disabled {
 .details-body {
   margin-top: var(--sp-2); padding: var(--sp-3);
   border: 1px solid var(--border); border-radius: 6px; background: #fbfcfd;
-  max-height: 520px; overflow-y: auto;
+  /* NO max-height, no inner scroll (2026-09-24): a 520 px scrollable box put the tail
+     of the Thrust 5 disclosure below its own fold, so a PHOTOGRAPH of the opened
+     screen -- the thing the honesty text exists for -- still missed clauses. Opening
+     Details is meant to push the panels down; that is a deliberate act by the
+     presenter, not the default state. */
 }
 .details-line    { font-size: 15px; font-weight: 400; color: var(--muted);
                    margin-bottom: var(--sp-1); }
