@@ -80,6 +80,11 @@ WHAT THIS MODULE DELIBERATELY DOES NOT CLAIM
   `ifft(s_pars)`, and on this trace the LoS tap carries ~93% of the energy, so the
   SHIPPED FMCW preset is the peakier one at the LNA. `measure_lna_input_papr` is
   provided so a card quotes a measured number for the configuration it actually runs.
+  Worse for the intuition, and measured on `munich_ka.pkl` frame 0 through THIS module
+  2026-09-24: the ALL-PILOT PREAMBLE is 36.67 dB at the LNA -- bit-identically the bare
+  CFR's own 36.67 dB, because `X == 1` makes `Y` the bare CFR -- while the data symbols
+  are 19.34 dB. So the peakiest symbol in a JSAC frame is the one that is the FMCW
+  preset. See `measure_lna_input_papr`.
 """
 
 from __future__ import annotations
@@ -477,7 +482,20 @@ class SymbolDivisionBlock:
         domain=frames.DOMAIN_CFR, emits_domain=frames.DOMAIN_RX_TIME,
         accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
 
-    def __init__(self, cfg, ofdm_frame: OFDMFrame = None, *, x_ref=None):
+    class _SingleTxCfg:
+        """The stand-in cfg for a chain that has no `RadarConfig`.
+
+        `mimo_combine` reads `cfg.mimo` and `cfg.n_tx` and nothing else, so a
+        single-TX OFDM chain needs no radar config at all -- and without this default
+        `cfg=None` failed deep inside `mimo_combine` with
+        `'NoneType' object has no attribute 'mimo'`, naming nothing. `Simulation`
+        carries the same stand-in for `DechirpBlock`, for the same reason.
+        """
+        mimo = "single"
+        n_tx = 1
+
+    def __init__(self, cfg=None, ofdm_frame: OFDMFrame = None, *, x_ref=None):
+        cfg = cfg if cfg is not None else self._SingleTxCfg()
         if ofdm_frame is None and x_ref is None:
             raise ValueError(
                 "SymbolDivisionBlock needs the transmitted grid it divides by: pass "
@@ -506,13 +524,16 @@ class SymbolDivisionBlock:
             raise frames.FrameContractError(
                 f"the sensing reference grid is {tuple(X.shape)} but the received "
                 f"frame carries {Y.shape[2]} symbols x {Y.shape[3]} subcarriers")
-        live = X != 0
-        Z = torch.zeros_like(Y)
         # Divide only where the reference carries sensing information; elsewhere the
         # quotient is exactly zero (see the class docstring -- this is the split, not
-        # a guard against NaN).
-        mask = live[None, None, :, :].expand_as(Y)
-        Z[mask] = Y[mask] / X[None, None, :, :].expand_as(Y)[mask]
+        # a guard against NaN). Written as a divide-by-a-safe-denominator then mask,
+        # rather than as boolean indexing, because the indexing form materialises a
+        # full expanded copy of both operands: at the munich Ka plan one frame is
+        # [1024, 1, M, 5000] complex64 = 164 MB per symbol-set, and this runs inside a
+        # web callback.
+        live = (X != 0)
+        safe = torch.where(live, X, torch.ones_like(X))
+        Z = (Y / safe[None, None]) * live[None, None].to(Y.dtype)
         adc = mimo_combine(self.cfg, beat_from_cfr(Z))
         return {"adc": adc.to(torch.complex64),
                 "signal_domain": frames.DOMAIN_RX_TIME,
@@ -674,17 +695,34 @@ def measure_lna_input_papr(s_pars):
     PAPR. `RFFEBlock.apply_circuit` normalises by the MEAN magnitude of `ifft(s_pars)`,
     so whether the clamp engages is governed exactly by the peak-to-mean of THAT
     tensor. On the munich Ka trace the line-of-sight tap carries ~93% of the PDP energy,
-    so `ifft(H)` is a spike and the SHIPPED FMCW preset (whose waveform and modulate
-    blocks are off by default, leaving `s_pars = H`) is ~27 dB PEAKIER at the LNA than a
-    JSAC frame will be. Measured 2026-09-24, munich Ka frame 0, all 1024 elements:
-    FMCW as shipped 36.67 dB; FMCW with the waveform+modulate blocks enabled 3.95 dB;
-    JSAC (`s_pars = H*X_QPSK`) 9.61 dB; the transmitted OFDM symbol, for reference,
-    9.55 dB at Nyquist.
+    so `ifft(H)` is a spike. MEASURED 2026-09-24 on `munich_ka.pkl` frame 0, all 1024
+    elements, through the frame this module builds (5000 subcarriers, `pilot_spacing=8`,
+    QPSK, `M=4`):
 
-    So "the OFDM waveform is what makes the front end clip" is FALSE against the
-    shipped FMCW preset -- it runs the other way. Any A/B that turns a drive knob must
-    name which FMCW configuration it is compared against and quote both numbers from
-    this function at the preset's own operating point.
+    | what reaches the LNA | mean PAPR of `ifft(s_pars)` |
+    |---|---|
+    | FMCW as shipped (`s_pars = H`; the waveform/modulate blocks are off by default) | **36.67 dB** |
+    | the JSAC frame's ALL-PILOT PREAMBLE symbol | **36.67 dB** |
+    | the JSAC frame's DATA symbols | **19.34 dB** |
+    | (an earlier note measured FMCW WITH the waveform+modulate blocks enabled at 3.95 dB) |  |
+
+    Read the second row: `X == 1` makes `Y` the bare CFR, so the preamble symbol IS the
+    shipped FMCW preset's tensor and has bit-identically its PAPR. **The peakiest symbol
+    in a JSAC frame is the one that is the FMCW arm.**
+
+    The data symbols measure 19.34 dB here and not the ~9.6 dB an earlier note recorded,
+    and the difference is structural rather than a discrepancy: that measurement used a
+    fully data-modulated grid, while this frame carries a constant-valued pilot every
+    8th subcarrier. A periodic comb of equal values is an impulse TRAIN in time, so the
+    comb adds ~10 dB of peak-to-mean on its own. A frame with a sparser comb or
+    randomised pilot values measures differently -- which is the point of measuring per
+    configuration rather than quoting a figure.
+
+    So "the OFDM waveform is what makes the front end clip" is FALSE against the shipped
+    FMCW preset -- it runs the other way, by 17.3 dB on the data symbols and by 0.0 dB
+    on the preamble. Any A/B that turns a drive knob must name which FMCW configuration
+    it is compared against and quote both numbers from this function at the preset's own
+    operating point.
     """
     h = torch.fft.ifft(torch.as_tensor(s_pars), dim=-1)
     flat = h.reshape(-1, h.shape[-1])
@@ -697,12 +735,20 @@ def measure_papr_db(tx_wave, *, oversample=1):
     """Mean per-symbol PAPR (dB) of a transmitted time record, at a STATED oversampling
     factor -- both halves are card-bound and neither is optional.
 
-    Measured 2026-09-24 on 400 random QPSK symbols, 5000-point grid: mean 9.55 dB at
-    Nyquist, 10.03 dB at 4x oversampling (the standard convention), per-symbol max
-    11.75 / 12.21 dB. An earlier draft's "99.9th percentile 12.41 dB" was a percentile
-    of pooled instantaneous sample power -- a different quantity from PAPR, above the
-    observed per-symbol maximum -- and is WITHDRAWN. Quote the mean and the
+    Measured 2026-09-24 on 400 random QPSK symbols, 5000-point grid with NO pilot comb:
+    mean 9.55 dB at Nyquist, 10.03 dB at 4x oversampling (the standard convention),
+    per-symbol max 11.75 / 12.21 dB. An earlier draft's "99.9th percentile 12.41 dB" was
+    a percentile of pooled instantaneous sample power -- a different quantity from PAPR,
+    above the observed per-symbol maximum -- and is WITHDRAWN. Quote the mean and the
     oversampling factor.
+
+    ON THE FRAME THIS MODULE ACTUALLY BUILDS the figure is higher, and the difference is
+    structural: `pilot_spacing=8` puts a CONSTANT value on every 8th subcarrier, and a
+    periodic comb of equal values is an impulse train in time. Measured on the munich Ka
+    plan: data symbols 19.62 dB at Nyquist (19.62 dB at 4x), and the all-pilot preamble
+    **36.99 dB = 10*log10(5000) exactly**, because `X == 1` on every subcarrier IS a
+    time-domain impulse. Quote the number for the frame on the screen, not the textbook
+    one.
     """
     x = torch.as_tensor(tx_wave)
     x = x.reshape(-1, x.shape[-1])

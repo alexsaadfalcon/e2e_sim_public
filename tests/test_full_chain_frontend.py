@@ -27,7 +27,7 @@ from e2e.chain.link_budget import (ThermalNoiseBlock, TxPowerStage,     # noqa: 
 from e2e.chain.receive import (RANGE_CONVENTIONS, RangeTransformBlock,  # noqa: E402
                                range_axis_m)
 from e2e.chain.waveform import (WAVEFORM_KINDS, JSACSignal,             # noqa: E402
-                                OFDMISACSignal, WaveformBlock)
+                                OFDMSignal, WaveformBlock)
 from e2e.circuit.rffe_model import circuit_model_batch, get_RX_config, noise_cascade
 from e2e.radar_config import BENCHMARK_V1_KA, C_MPS, MUNICH_KA_FMCW     # noqa: E402
 
@@ -370,7 +370,8 @@ def test_fmcw_is_the_default_and_is_constant_envelope():
 def test_ofdm_declares_subcarrier_axes_and_a_real_papr():
     """OFDM's cube fast axis counts SUBCARRIERS until the range transform runs, and its
     envelope is not constant -- the two facts a product and a PA respectively need."""
-    out = WaveformBlock(kind="ofdm", bw=1e9, sample_rate=3e9, n_t=80).apply({})
+    out = WaveformBlock(kind="ofdm", bw=1e9, sample_rate=3e9, n_t=80,
+                        n_subcarriers=64, cp_len=16).apply({})
     assert out["waveform_kind"] == "ofdm"
     assert out["waveform"]["cube_axes"] == frames.CUBE_AXES_OFDM
     assert out["waveform"]["constant_envelope"] is False
@@ -383,22 +384,47 @@ def test_ofdm_declares_subcarrier_axes_and_a_real_papr():
 
 def test_ofdm_keeps_the_transmitted_grid_the_receiver_divides_by():
     """`H_est = Y/X` needs the actual `X`. A receiver that re-guesses it is a different
-    receiver, so the waveform hands the grid on rather than regenerating it."""
-    sig = OFDMISACSignal({"bw": 1e9, "fft_size": 64, "cp_len": 16, "seed": 1})
+    receiver, so the waveform hands the grid on rather than regenerating it.
+
+    RENAMED 2026-09-24: the half-built `OFDMISACSignal` became two classes, `OFDMSignal`
+    (comms, no mixing block) and `JSACSignal` (the hybrid, symbol-division mixing), over
+    one shared `OFDMFrame` -- see `e2e/comms/ofdm_isac.py`. The property under test is
+    unchanged and now reads off the frame, which is the object the mixer and the
+    demapper both hold.
+    """
+    sig = OFDMSignal({"n_subcarriers": 64, "subcarrier_spacing_hz": 1e6, "cp_len": 16,
+                      "seed": 1, "n_symbols": 1})
     t = torch.arange(80, dtype=torch.float32) / 3e9
     sig.generate(t)
-    assert sig.tx_freq.shape == (1, 64)
-    assert sig.tx_bits.numel() == sig.modem().data_bits_per_symbol_block
+    assert sig.frame().tx_grid.shape == (1, 64)
+    # n_symbols=1 is the all-pilot preamble alone: no data symbols, hence no bits.
+    assert sig.frame().tx_bits.numel() == 0
+
+    two = OFDMSignal({"n_subcarriers": 64, "subcarrier_spacing_hz": 1e6, "cp_len": 16,
+                      "seed": 1, "n_symbols": 2, "pilot_spacing": 8})
+    assert two.frame().tx_bits.numel() == two.frame()._data.data_bits_per_symbol_block
 
 
-def test_jsac_is_registered_but_refuses_with_the_contract_in_the_message():
-    """A registered-and-refusing class, not an absent one: the branch point on the
-    diagram is real and the contract an implementation owes is written down."""
+def test_jsac_is_implemented_and_differs_from_ofdm_only_in_its_mixing_mode():
+    """REPLACES `test_jsac_is_registered_but_refuses_...` (2026-09-24): the class was a
+    registered-and-refusing placeholder and is now implemented, so the assertion moves
+    from "refuses with the contract in the message" to the property that contract
+    described.
+
+    The two OFDM-grid classes transmit the SAME frame and differ in exactly one
+    attribute -- `mixing` -- which decides whether a mixing block runs and therefore
+    which products the chain can read out. That one line is the whole distinction
+    between "comms" and "hybrid", and pinning it here is what stops `jsac` from
+    quietly becoming `ofdm` with a second tab.
+    """
     assert "jsac" in WAVEFORM_KINDS
-    with pytest.raises(NotImplementedError, match="JSAC_WAVEFORM_2026-09-24"):
-        WaveformBlock(kind="jsac", bw=1e9, sample_rate=3e9, n_t=64).apply({})
-    with pytest.raises(NotImplementedError):
-        JSACSignal({}).record_metadata()
+    md = {"n_subcarriers": 64, "subcarrier_spacing_hz": 1e6, "cp_len": 16,
+          "seed": 1, "n_symbols": 2, "pilot_spacing": 8}
+    ofdm, jsac = OFDMSignal(dict(md)), JSACSignal(dict(md))
+    assert (ofdm.mixing, jsac.mixing) == (None, "symbol_division")
+    assert torch.equal(ofdm.frame().tx_grid, jsac.frame().tx_grid)
+    assert jsac.record_metadata()["kind"] == "jsac"
+    assert jsac.record_metadata()["cube_axes"] == frames.CUBE_AXES_OFDM
 
 
 def test_an_unknown_waveform_kind_still_names_the_registry():

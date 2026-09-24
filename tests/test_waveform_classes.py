@@ -562,3 +562,55 @@ def test_the_lna_input_papr_measurement_runs_the_way_the_review_measured_it():
         f"the bare CFR measured {bare:.2f} dB at the LNA and the OFDM-carrying frame "
         f"{with_grid:.2f} dB. If this has inverted, re-measure before any card claims "
         f"the OFDM waveform is what drives the front end into its clamp.")
+
+
+def test_the_all_pilot_preamble_is_the_fmcw_presets_own_tensor_at_the_lna():
+    """The PAPR story's sharpest edge, pinned so a card cannot tell it backwards.
+
+    `X == 1` on the preamble makes `Y = H`, so the preamble symbol IS the bare CFR --
+    the exact tensor the shipped FMCW preset hands the front end (its waveform and
+    modulate blocks are off by default). Its LNA-input PAPR is therefore not merely
+    similar to FMCW's, it is IDENTICAL, while the data symbols are far lower.
+
+    MEASURED 2026-09-24 on `munich_ka.pkl` frame 0, 1024 elements, this module's frame
+    (5000 subcarriers, pilot_spacing 8, QPSK, M=4): bare CFR 36.67 dB, preamble
+    36.67 dB, data symbols 19.34 dB. So the peakiest symbol in a JSAC frame is the one
+    that IS the FMCW arm, and "the OFDM waveform is what drives the front end into its
+    clamp" is false in both directions at once.
+    """
+    cfr = _cfr(n_rx=32, seed=17)
+    frame = oi.OFDMFrame(n_subcarriers=N_SC, subcarrier_spacing_hz=1.0, n_symbols=3,
+                         pilot_spacing=4, bits_per_symbol=2)
+    y = oi.apply_ofdm_channel(cfr, frame.tx_grid)
+
+    bare = oi.measure_lna_input_papr(cfr)
+    preamble = oi.measure_lna_input_papr(y[:, :, :1, :])
+    assert preamble == pytest.approx(bare, abs=1e-4), (
+        "the all-pilot preamble is Y = H*1 = H, so it must measure EXACTLY the bare "
+        "CFR's PAPR. If it does not, the preamble is no longer all-ones and O2's "
+        "parity point has moved with it.")
+    assert oi.measure_lna_input_papr(y[:, :, 1:, :]) < bare
+
+
+def test_the_all_pilot_preamble_is_a_time_domain_impulse():
+    """`10*log10(N)` exactly, because `X == 1` on every subcarrier IS an impulse.
+
+    Worth a test rather than a comment: it is why the frame's WORST transmitted PAPR is
+    the preamble's and not a data symbol's, and it is the reason a card must quote the
+    per-symbol figure for the frame on the screen rather than the textbook OFDM number.
+    """
+    frame = oi.OFDMFrame(n_subcarriers=N_SC, subcarrier_spacing_hz=1.0, n_symbols=1)
+    assert oi.measure_papr_db(frame.tx_wave) == pytest.approx(
+        10.0 * math.log10(N_SC), abs=0.01)
+
+
+def test_the_mixing_block_needs_no_radar_config():
+    """A single-TX OFDM chain has no `RadarConfig` and should not need one: the block
+    reads `cfg.mimo` and `cfg.n_tx` and nothing else. Before the stand-in existed,
+    `cfg=None` failed deep inside `mimo_combine` with
+    `'NoneType' object has no attribute 'mimo'`, naming nothing that could fix it.
+    """
+    frame = oi.OFDMFrame(n_subcarriers=N_SC, subcarrier_spacing_hz=1.0, n_symbols=1)
+    out = oi.SymbolDivisionBlock(None, frame).apply(
+        {"s_pars": oi.apply_ofdm_channel(_cfr(n_rx=4), frame.tx_grid)})
+    assert out["adc"].shape == (4, 1, N_SC)
