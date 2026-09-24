@@ -24,6 +24,7 @@ Then open http://127.0.0.1:8050
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -396,6 +397,12 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
+#: Longest chip that fits ONE line at 20/700 in a 746 px column (measured on the
+#: rendered page, 2026-09-24). Past it the VALUE moves to the caption -- see
+#: `_ab_arm_chip` and `_ab_arm_chip_overflow`.
+ARM_CHIP_MAX_CHARS = 58
+
+
 def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     """The ARM CHIP (layout spec section 2.3): just the knob and its value, e.g.
     "A -- ADC 12 bit (as built)". The full banner line above is not deleted -- it is
@@ -405,7 +412,44 @@ def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     bid, key, _value_b = preset.ab
     label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
     value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
-    return f"{arm.upper()} — {label} {value}"
+    chip = f"{arm.upper()} — {label} {value}"
+    if len(chip) > ARM_CHIP_MAX_CHARS:
+        # Thrust 4's knob value is prose ("canonical Tessera geometry (50 um
+        # presented)") and at 20/700 the whole chip wrapped to two lines, which put
+        # that screen 18 px over the 150 px budget above the first panel (measured,
+        # 2026-09-24). The value is neither dropped nor truncated: it moves to the
+        # FRONT of this arm's one-line caption (`_arm_caption`), still on screen at
+        # 16 px. Nothing here ever ends in an ellipsis.
+        return f"{arm.upper()} — {label}"
+    return chip
+
+
+def _ab_arm_chip_overflow(preset: "DemoPreset", arm: str) -> str:
+    """The knob VALUE `_ab_arm_chip` had to leave off, or "" when it fitted on the
+    chip. Rendered at the front of that arm's one-line caption, so a value too long for
+    a chip is MOVED, never lost -- on Thrust 4 it is the only thing on screen that
+    shows arm B ran a different geometry at all (hostile round 10, section 1.7)."""
+    value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
+    return "" if _ab_arm_chip(preset, arm).endswith(value) else value
+
+
+#: Longest run-identity line that fits ONE line at 18/600 across 1520 px of content
+#: minus the transport and (on the cancel path) the CANCELLED chip -- measured on the
+#: rendered page, 2026-09-24. Past it the line is SHORTENED AT A CLAUSE BOUNDARY, never
+#: cut mid-phrase: acceptance check 12 forbids a truncation mark in visible text, and
+#: CSS `text-overflow: ellipsis` draws one that does not even appear in `innerText`, so
+#: a clipped line passed an ellipsis-count check while visibly ending in "..." on
+#: screen (found on the Thrust 5 render, 2026-09-24).
+RUN_IDENTITY_MAX_CHARS = 100
+#: Characters the CANCELLED chip costs this line on the cancel path.
+RUN_IDENTITY_CHIP_COST = 26
+
+
+def _clause_head(text: str, seps=(": ", " -- ", " vs ")) -> str:
+    """`text` up to its first clause separator, or `text` unchanged. The result is a
+    complete phrase, so nothing needs marking as elided."""
+    cuts = [c for c in (text.find(sep) for sep in seps) if c > 0]
+    return text[:min(cuts)].rstrip() if cuts else text
 
 
 def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int) -> str:
@@ -414,29 +458,49 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
 
         Thrust 5 - classical CFAR - munich (Ka-band, 30 GHz) - 5 frames - run #1 14:29:06
 
-    Every part is read from the run itself; nothing is typed."""
+    Every part is read from the run itself; nothing is typed. When the preset's own
+    label is long prose it is shortened at a clause boundary rather than clipped -- the
+    full label, the full source string and the frame count all remain in the banner,
+    which is the first line of each arm's Details disclosure.
+    """
     import time as _time
     n_run = axis_meta.get("n_steps_run", n_steps)
-    parts = []
+    frames = (f"{n_run} of {n_steps} frames" if n_run != n_steps
+              else f"{n_steps} frames")
+    run = f"run #{n_clicks} {_time.strftime('%H:%M:%S')}"
+    thrust = f"Thrust {preset.thrust}" if preset is not None else ""
+    label = ""
     if preset is not None:
-        parts.append(f"Thrust {preset.thrust}")
-        # The preset's own label already starts "Thrust N - ..."; printing the thrust
-        # twice on one line is what pushed this line past the page width and made CSS
-        # clip it with an ellipsis on the first render (2026-09-24). Same for the
-        # source's "Sionna frames: " prefix: the environment name is the identity, the
-        # loader is not.
-        label = preset.label
-        prefix = f"Thrust {preset.thrust} - "
-        if label.startswith(prefix):
-            label = label[len(prefix):]
-        parts.append(label)
-    source = axis_meta.get("source")
-    if source:
-        parts.append(source.replace("Sionna frames: ", ""))
-    parts.append(f"{n_run} of {n_steps} frames" if n_run != n_steps
-                 else f"{n_steps} frames")
-    parts.append(f"run #{n_clicks} {_time.strftime('%H:%M:%S')}")
-    return CAPTION_SEP.join(p for p in parts if p)
+        # The label already starts "Thrust N - ..." (or "Thrust N (LEAD) - ...");
+        # printing the thrust twice on one line is part of what pushed this past the
+        # page width.
+        label = re.sub(rf"^Thrust {preset.thrust}(?![0-9])[^-]*-\s*", "", preset.label)
+    # "Sionna frames: munich (Ka-band, 30 GHz)" -> the environment IS the identity,
+    # the loader is not.
+    source = (axis_meta.get("source") or "").replace("Sionna frames: ", "")
+
+    # A ladder of progressively shorter forms, each made of WHOLE clauses. The first
+    # that fits wins; the last rung always fits.
+    candidates = [
+        [thrust, label, source, frames, run],
+        [thrust, _clause_head(label), source, frames, run],
+        # The source's parenthetical is a mouthful ("Corpus Replay (live chain from
+        # stored channel): test split from ..."); the environment NAME is the identity.
+        [thrust, _clause_head(label),
+         _clause_head(source, (": ", " (")), frames, run],
+        [thrust, _clause_head(label), frames, run],
+        [thrust, frames, run],
+    ]
+    # A cancelled run also draws an amber `CANCELLED -- N of M frames` chip in this
+    # same row, which takes ~230 px out of the line's own width (measured on
+    # cancel_results.png, 2026-09-24) -- so the budget is smaller on that path.
+    budget = (RUN_IDENTITY_MAX_CHARS - RUN_IDENTITY_CHIP_COST
+              if axis_meta.get("cancelled") else RUN_IDENTITY_MAX_CHARS)
+    for parts in candidates:
+        line = CAPTION_SEP.join(x for x in parts if x)
+        if len(line) <= budget:
+            return line
+    return CAPTION_SEP.join(x for x in candidates[-1] if x)
 
 
 #: RETRACTED (layout spec section 2.3, 2026-09-24). Run notes used to be truncated at
@@ -494,8 +558,17 @@ def _arm_caption(payload: Dict[str, Any]) -> str:
     section 2.3). The headline of this arm's first run note -- which on every Thrust 5
     screen is the live-vs-stored ADC gate's own number, the statistic the presenter
     must be able to read without opening anything."""
+    parts = []
+    overflow = payload.get("_arm_chip_value")
+    if overflow:
+        parts.append(overflow)
     notes = payload.get("_notes") or []
-    return _note_headline(notes[0]) if notes else ""
+    if notes:
+        parts.append(_note_headline(notes[0]))
+    line = CAPTION_SEP.join(parts)
+    # ONE line, and the column clips at ~86 characters at 16 px -- if both facts do not
+    # fit, the knob value wins: the run note is in Details in full either way.
+    return line if len(line) <= 86 else (parts[0] if parts else "")
 
 
 # =================================================================================
@@ -855,6 +928,7 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 data_a["_banner"] = f"{line_a} -- B did not run (cancelled)  ||  {result_a['banner']}"
                 data_a["_ab"] = True
                 data_a["_arm_chip"] = _ab_arm_chip(ab_preset, "a")
+                data_a["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "a")
                 _meta_a = outputs_a.get("_axis_meta") or {}
                 data_a["_run_identity"] = _run_identity_line(
                     ab_preset, _meta_a, n_clicks, n_steps)
@@ -882,9 +956,11 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             data_a["_banner"] = f"{line_a}  ||  {result_a['banner']}"
             data_a["_ab"] = True
             data_a["_arm_chip"] = _ab_arm_chip(ab_preset, "a")
+            data_a["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "a")
             data_b["_banner"] = f"{line_b}  ||  {result_b['banner']}"
             data_b["_ab"] = True
             data_b["_arm_chip"] = _ab_arm_chip(ab_preset, "b")
+            data_b["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "b")
             _meta_a = outputs_a.get("_axis_meta") or {}
             data_a["_run_identity"] = _run_identity_line(ab_preset, _meta_a,
                                                          n_clicks, n_steps)

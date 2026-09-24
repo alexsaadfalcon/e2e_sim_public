@@ -168,6 +168,14 @@ _GEOMETRY_JS = """() => {
            h: document.documentElement.scrollHeight},
     rootTop: R(root).y,
     firstPanelTop: firstPanel,
+    // CSS `text-overflow: ellipsis` draws a mark that is NOT in innerText, so a
+    // clipped run-identity line passed an ellipsis-count check while visibly ending
+    // in "..." on screen (found on the Thrust 5 render, 2026-09-24). Measure the
+    // overflow instead.
+    clippedChrome: Array.from(root.querySelectorAll(
+        '.run-identity, .arm-chip-label, .arm-caption'))
+      .filter(e => e.scrollWidth > e.clientWidth + 1)
+      .map(e => e.textContent.slice(0, 60)),
     panels: panels,
     fontSizes: sizes,
     nDetails: root.querySelectorAll('details').length,
@@ -177,7 +185,10 @@ _GEOMETRY_JS = """() => {
     nPlotlySliders: root.querySelectorAll('.slider-container').length,
     nPlotlyButtons: root.querySelectorAll('.updatemenu-button').length,
     nFigureTitles: root.querySelectorAll('.js-plotly-plot .gtitle').length,
-    plotBg: Array.from(root.querySelectorAll('.js-plotly-plot .bg'))
+    // `.cartesianlayer .bg` -- the PLOT-AREA rect only. A bare `.bg` also matches
+    // annotation pills and Plotly Table cell fills, which made a one-background
+    // screen look like a five-background one (measured, 2026-09-24).
+    plotBg: Array.from(root.querySelectorAll('.js-plotly-plot .cartesianlayer .bg'))
               .map(e => e.getAttribute('style') || ''),
     visibleText: (root.innerText || '')
   };

@@ -142,7 +142,12 @@ def test_run_stores_a_banner_and_the_previous_run(monkeypatch):
 
     second, *_ = appmod._run_pipeline(2, None, 2, "", first)
     assert second["_previous"]["_banner"] == first["_banner"]
-    assert set(second["_previous"]) == {"fft", "_banner"}
+    # The store gained "_run_identity" with the 2026-09-24 layout change (the one-line
+    # run-identity row that replaced the `Results` H3 and the run half of the banner).
+    # The banner itself is NOT gone -- it is the first line of the arm's Details
+    # disclosure -- so both keys must be there, and nothing else.
+    assert set(second["_previous"]) == {"fft", "_banner", "_run_identity"}
+    assert "run #1" in second["_previous"]["_run_identity"]
 
 
 def test_cancelled_run_banner_says_partial(monkeypatch):
@@ -167,14 +172,21 @@ def test_results_tab_renders_banner_current_and_previous():
     data = {"fft": fig, "_banner": "run #2  |  now",
             "_previous": {"fft": fig, "_banner": "run #1  |  earlier"}}
     text = str(appmod._render_results(data, "tab-results"))
-    assert "This run: run #2" in text and "Previous run" in text and "run #1" in text
+    # Both arms' full banners are still on the page -- as the first line of each arm's
+    # Details disclosure (layout spec 2026-09-24, section 2.3). The bold 2-4 line
+    # banner that used to sit above each column wrapped across the 13 px A/B gutter
+    # and read as one garbled paragraph at podium distance (hostile round 10, defect
+    # 2.6); what sits there now is the arm CHIP, which for a run with no A/B preset
+    # falls back to "This run" / "Previous run".
+    assert "run #2  |  now" in text and "run #1  |  earlier" in text
+    assert "This run" in text and "Previous run" in text
     assert text.count("Graph(") == 2
 
 
 # ------------------------------------------------------------------------------------
 # Detector figure: names its operating point, legend readable
 # ------------------------------------------------------------------------------------
-def test_detector_figure_title_names_detector_and_threshold_and_legend_is_dark():
+def test_detector_panel_names_detector_and_threshold_and_its_legend_is_readable():
     from webapp.pipeline_runner import figures_from_outputs
 
     obj = np.zeros((3, 8, 16), dtype=np.float32)
@@ -186,13 +198,27 @@ def test_detector_figure_title_names_detector_and_threshold_and_legend_is_dark()
                        "detector": {"mode": "cfar", "threshold": 0.66,
                                     "label": "CA-CFAR (guard 2, train 6)"}},
     }
+    from webapp.pipeline_runner import panel_of, panel_text
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    title = fig.layout.title.text
-    assert "CA-CFAR (guard 2, train 6)" in title and ">= 0.66" in title
-    assert fig.layout.legend.bgcolor == "#2d3436"
+    # The detector and its operating point are still named ON the panel -- as the HTML
+    # title and caption, since the figure carries no title any more (layout spec
+    # 2026-09-24). `panel_text` is title + caption + Details.
+    assert "CA-CFAR (guard 2, train 6)" in panel_of(fig)["title"]
+    assert ">= 0.66" in panel_text(fig) or "≥ 0.66" in panel_text(fig)
+    # The legend is ONE inline 17 px line on the PANEL background now, not a 72 px
+    # dark block (layout spec section 4). The dark block existed so a white open
+    # ground-truth circle had a visible swatch; on the white panel that job is done by
+    # the marker's own dark outline, which is what this now pins.
+    assert fig.layout.legend.bgcolor == "rgba(0,0,0,0)"
+    assert fig.layout.legend.font.size == 17
+    gt = next(t for t in fig.data if "ground truth" in (t.name or ""))
+    assert gt.marker.line.color == "#2d3436" and gt.marker.line.width == 1
     names = {t.name for t in fig.data}
-    assert "detections (n=1)" in names
-    assert any(nm.startswith("ground truth (n=1)") for nm in names)  # legend now states the match box
+    assert any("detections (n=1)" in nm for nm in names)
+    assert any("ground truth (n=1)" in nm for nm in names)
+    # The match RULE moved to the caption: as a legend entry it was a 100-character
+    # sentence inside that dark block (layout spec section 4, "Detector map").
+    assert "hit = cross inside the box" in panel_text(fig)
 
 
 def test_subspace_error_frames_are_integers_from_one():
@@ -272,7 +298,7 @@ def test_before_after_pair_shares_one_y_range():
     assert cur["subspace_err"]["layout"]["yaxis"]["range"][1] == pytest.approx(0.63 * 1.05)
 
 
-def test_single_result_card_takes_the_full_row():
+def test_single_result_card_takes_one_fixed_width_panel_not_the_full_row():
     import plotly.graph_objects as go
 
     import webapp.app as appmod
@@ -280,7 +306,15 @@ def test_single_result_card_takes_the_full_row():
     one = str(appmod._render_results({"range_az": go.Figure().to_dict()}, "tab-results"))
     two = str(appmod._render_results({"a": go.Figure().to_dict(), "b": go.Figure().to_dict()},
                                      "tab-results"))
-    assert "1 1 100%" in one and "1 1 45%" in two
+    # NOT the full row any more (layout spec 2026-09-24, section 2.1, "single-arm
+    # rule"): at 1523 px the lone thrust-1 map rendered 1080x230, a 4.7:1 strip with
+    # ~700 px of white beside its wrapped title (hostile round 10, defect 10). One
+    # product -> ONE 1008 px panel; two or more -> the same two-up 746 px grid the A/B
+    # case uses, so the same product has the same rectangle on every screen.
+    assert f"{appmod.SINGLE_PANEL_WIDTH}px" in one and one.count("Graph(") == 1
+    # (The single-ARM header row is itself an `ab-cell-single` cell in both cases, so
+    # that class is not what distinguishes them -- the panel WIDTH is.)
+    assert f"{appmod.SINGLE_PANEL_WIDTH}px" not in two and two.count("Graph(") == 2
 
 
 # ------------------------------------------------------------------------------------

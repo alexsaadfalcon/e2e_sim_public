@@ -20,8 +20,21 @@ import pytest
 
 from e2e.ml.metrics import MatchCriterion
 from webapp import detector_scoreboard as ds
+from webapp.pipeline_runner import FIGURE_HEIGHT, PANEL_ROW_TABLE, panel_of, panel_text
 
 _C = MatchCriterion()  # the real, frozen tolerances -- never hardcoded here (see below)
+
+
+def _find(seq, pred, what: str):
+    """`next(x for x in seq if pred(x))`, but a miss fails as a named AssertionError
+    instead of a `StopIteration` that pytest reports as a teardown `RuntimeError`
+    (2026-09-24 layout rewrite: several rows this file used to find in the TABLE moved
+    to the panel's Details list, and a bare `next(...)` against the wrong list used to
+    surface as an opaque generator crash rather than a clear assertion)."""
+    for x in seq:
+        if pred(x):
+            return x
+    raise AssertionError(f"no {what} found in {seq!r}")
 
 
 # --------------------------------------------------------------------------------
@@ -125,14 +138,6 @@ def _table(fig):
     return table
 
 
-def _content_row_height(table) -> int:
-    """Total data-row height: `cells.height` is one scalar for the whole table (a
-    Plotly Table constraint -- there is no per-row height), raised to the tallest
-    row's line count when a multi-line row (the CI-caveat/OOD rows) is present, so
-    every row here is that same height."""
-    return len(table.cells.values[0]) * table.cells.height
-
-
 def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     target = (10.0, 0.0, "vehicle")
     hit = (10.0, 0.0, 0.9, 10.0)
@@ -177,10 +182,13 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     assert "GT varies/frame" in row[hit_rate_key]
     # Threshold moved out of the header (a long "{arm} -- threshold {thr}" string
     # wrapped to two lines inside the header's declared height and clipped the
-    # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the title.
+    # table's last row, see `_TABLE_HEADER_HEIGHT`'s comment) and into the panel's
+    # one-line CAPTION (2026-09-24 redesign: the figure itself carries no title any
+    # more -- see `panel_of`/`panel_caption` in webapp.pipeline_runner). The caption
+    # is visible without opening anything, same visibility the old title had.
     assert table.header.values[0] == "classical CFAR"
     assert table.header.values[1] == "count"
-    assert "0.50" in fig.layout.title.text
+    assert "0.50" in panel_of(fig)["caption"][0]
 
 
 def test_scoreboard_figure_no_scored_frames_reads_na_not_zero():
@@ -197,8 +205,11 @@ def test_scoreboard_figure_fonts_are_legible_at_distance():
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
     table = _table(fig)
-    assert table.header.font.size >= 18
-    assert table.cells.font.size >= 18
+    # 17, not >= 18 (2026-09-24 layout redesign): 17 px is the new in-figure floor
+    # (layout spec section 3) and this table is built to exactly it -- the old >= 18
+    # assertion pinned a stricter number than the shipped floor.
+    assert table.header.font.size >= 17
+    assert table.cells.font.size >= 17
     # 3 (this-frame) + 3 (cumulative) numbers -- at most 8, per spec
     # ("cumulative unmatched detections" dropped, 4th hostile-expert read, 2026-09-23).
     _labels, values = table.cells.values
@@ -210,17 +221,24 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     0.66") wrapped to two lines inside its declared single-line height, stealing
     room from the bottom of the table and clipping the last ("hit rate") row --
     CFAR and the neural-detector arms run the same code and must show identical
-    rows (rehearsal, 2026-09-23). Checked geometrically (the domain the figure's
-    own height/margin leaves for the table must fit header + all data rows), since
-    a Plotly figure object carries no rendered pixel truth to assert on directly."""
+    rows (rehearsal, 2026-09-23).
+
+    RETIRED geometric check (2026-09-24 layout redesign): the table's height used to
+    be DERIVED from its own row/line count, so "does the content fit the domain" was
+    a real question with a real failure mode. It no longer is -- `scoreboard_figure`
+    now fixes the figure at `FIGURE_HEIGHT[PANEL_ROW_TABLE]` first and computes
+    `row_height` FROM that fixed budget (`(FIGURE_HEIGHT - header) // n_rows`), so
+    "does it fit" is true by construction for any n_rows <= 8 and asserting it would
+    only be re-deriving the same arithmetic `scoreboard_figure` already ran. What
+    survives as a real invariant -- the fixed height and the row content -- is
+    checked directly below instead."""
     scores = ds.score_frames([[]], None)
     long_name = "a very long arm name, e.g. an ML checkpoint's parent directory"
     fig = ds.scoreboard_figure(scores, arm_name=long_name, threshold=0.5,
                                match_rule_text="rule")
     table = _table(fig)
-    domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
-    content_height = table.header.height + _content_row_height(table)
-    assert domain_height >= content_height
+    assert fig.layout.height == FIGURE_HEIGHT[PANEL_ROW_TABLE]
+    assert fig.layout.margin.t == 0 and fig.layout.margin.b == 0
     # All 6 base rows are always present in the underlying data, for every arm -- the
     # rendering bug above was purely geometric, not a difference in what is computed.
     # ("cumulative unmatched detections" was dropped, 4th hostile-expert read,
@@ -231,14 +249,11 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     target_recall = beat_cfar_data["target_recall"]
     n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
                     if a.get("operating_point"))
-    # Every label/value is now pre-wrapped to fit its column (see `scoreboard_figure`'s
-    # `_TABLE_COL_CHARS` comment) -- reassemble before comparing, same convention the
-    # subline tests already use for `_wrap_text`'s output. "cumulative hits"/"recall"
-    # moved their qualifier into the VALUE column (Change, 2026-09-23 coordinator
-    # re-check) so neither label wraps past one line.
+    # No row may wrap at all now (`scoreboard_figure` asserts this itself and fails
+    # loudly instead) -- so, unlike before 2026-09-24, no `<br>` reassembly is needed
+    # here; a label/value that needed one would already have failed inside the
+    # figure builder.
     labels, values = table.cells.values
-    labels = [l.replace("<br>", " ") for l in labels]
-    values = [v.replace("<br>", " ") for v in values]
     row = dict(zip(labels, values))
     assert labels == ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
                       "cumulative hits", "unmatched / frame, these 0 frames",
@@ -252,31 +267,33 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     assert row["recall (hits / GT), this run"] == "n/a (0fr; GT varies/frame)"
 
 
-def test_scoreboard_figure_header_count_label_and_threshold_in_title():
+def test_scoreboard_figure_header_count_label_and_threshold_in_caption():
+    """Was "...in_title": the figure itself carries no title any more (2026-09-24
+    redesign) -- the threshold now lives in the panel's one-line HTML caption, built
+    by `webapp.pipeline_runner.set_panel` (see `panel_of`)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="CA-CFAR (guard 2, train 6)",
                                threshold=0.66, match_rule_text="rule")
     table = _table(fig)
     # The header's second column used to be an empty dark cell.
     assert table.header.values[1] == "count"
-    assert "0.66" in fig.layout.title.text
+    assert panel_of(fig)["title"] == "Detector scoreboard"
+    assert "0.66" in panel_of(fig)["caption"][0]
 
 
-def test_scoreboard_figure_match_rule_is_wrapped_to_fit_the_card():
+def test_scoreboard_match_rule_is_reachable_verbatim_in_details():
+    """Was "...is_wrapped_to_fit_the_card": the match rule used to be a figure
+    annotation, wrapped with `_wrap_text` to fit the card's pixel width. 2026-09-24
+    redesign: it is now a Details line (HTML, wraps itself in the browser), carried
+    VERBATIM -- `_wrap_text` is no longer applied to it at all, so there is nothing
+    left to assert about line width; the substance that survives is "the real match
+    rule sentence is reachable, unmodified, in one click" (panel_text's whole point)."""
     scores = ds.score_frames([[]], None)
     long_rule = ds.match_rule_text()
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text=long_rule)
-    ann = fig.layout.annotations[0]
-    lines = ann.text.split("<br>")
-    assert len(lines) >= 2, "the real match rule sentence is too long for one line"
-    assert all(len(line) <= 70 for line in lines)
-    # Wrapping must not drop or reorder any word. The annotation now also carries the
-    # precision-ceiling caveat (finding 1) appended after the match rule -- split it
-    # back off before comparing, since that sentence is this test's own concern
-    # (see test_scoreboard_annotation_states_the_precision_ceiling_caveat).
-    match_rule_part = ann.text.split("<br>labels omit")[0]
-    assert " ".join(match_rule_part.split("<br>")) == long_rule
+    details = panel_of(fig)["details"]
+    assert long_rule in details, f"match rule not carried verbatim: {details}"
 
 
 def test_wrap_text_never_exceeds_max_chars_and_preserves_words():
@@ -306,12 +323,17 @@ def test_default_beat_cfar_json_exists():
 
 
 def test_stored_pr_figure_one_trace_per_arm(beat_cfar_data):
+    """The figure carries no title any more (2026-09-24 redesign) -- both clauses this
+    used to pin on `fig.layout.title.text` now live in the panel's Details (the file
+    name in the "scored offline: ..." line, the frame count in the same line), reached
+    via `panel_text`."""
     fig = ds.stored_pr_figure(highlight_arm="classical CFAR")
     assert len(fig.data) == len(beat_cfar_data["arms"])
     names = [tr.name for tr in fig.data]
     assert any(n.startswith("classical CFAR") for n in names)
-    assert "beat_cfar.json" in fig.layout.title.text
-    assert str(len(beat_cfar_data["arms"][0]["gt_per_frame"])) in fig.layout.title.text
+    text = panel_text(fig)
+    assert "beat_cfar.json" in text
+    assert str(len(beat_cfar_data["arms"][0]["gt_per_frame"])) in text
 
 
 def test_stored_pr_figure_highlights_bold(beat_cfar_data):
@@ -323,8 +345,12 @@ def test_stored_pr_figure_highlights_bold(beat_cfar_data):
 
 
 def test_stored_pr_figure_fonts_are_legible():
+    """The figure title-font check is retired (2026-09-24): the title is now HTML
+    (`panel_of(fig)["title"]`), not a figure element, so it has no `fig.layout.title.
+    font` to assert on any more -- its own legibility is a page-CSS concern, covered
+    by `tests/test_webapp_layout_acceptance.py`'s MIN_PAGE_FONT_PX checks, not this
+    module. The in-figure body/legend font floor this test still owns is unchanged."""
     fig = ds.stored_pr_figure()
-    assert fig.layout.title.font.size >= 16
     assert fig.layout.font.size >= 16
 
 
@@ -349,8 +375,11 @@ def test_stored_pr_figure_fallback_when_arm_lacks_pr_curve(tmp_path):
     marker_trace = next(tr for tr in fig.data if tr.mode == "markers")
     assert "no curve arm" in marker_trace.name
     assert "recall-0.5 pt only" in marker_trace.name
-    ann_texts = " ".join(a.text for a in fig.layout.annotations)
-    assert "no curve arm" in ann_texts and "no stored PR curve" in ann_texts
+    # The fallback banner used to be a figure annotation; 2026-09-24 redesign moves it
+    # to a Details line instead (background info, one click away -- the marker trace's
+    # own name above is what stays visible without opening anything).
+    details_text = panel_text(fig)
+    assert "no curve arm" in details_text and "no stored PR curve" in details_text
 
 
 def test_stored_pr_figure_raises_on_missing_arms_key(tmp_path):
@@ -389,10 +418,13 @@ def test_scoreboard_subline_states_the_recall_matched_calibration(beat_cfar_data
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule")
-    # The sentence is long enough that `_wrap_text` line-breaks it (like every other
-    # multi-line subline in this module) -- reassemble before substring-checking so
-    # this test doesn't depend on exactly where the wrap falls.
-    subline = fig.layout.title.text.replace("<br>", " ")
+    # 2026-09-24 redesign: the subline is now the LAST Details line (see
+    # `scoreboard_figure`'s docstring), carried verbatim -- Details is HTML and wraps
+    # itself, so `_wrap_text` is never applied to it and there is no `<br>` to
+    # reassemble any more (unlike the pre-2026-09-24 figure-title subtitle this
+    # replaced). `panel_text` is used rather than pulling the exact list index so this
+    # test does not also pin the subline's POSITION among the other Details lines.
+    subline = panel_text(fig)
     target_recall = beat_cfar_data["target_recall"]
     n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
                     if a.get("operating_point"))
@@ -404,12 +436,20 @@ def test_scoreboard_subline_states_the_recall_matched_calibration(beat_cfar_data
 
 
 def test_scoreboard_subline_falls_back_when_beat_cfar_json_missing(tmp_path):
-    """No recall/split numbers to state -> a shorter subline, never an invented one."""
+    """No recall/split numbers to state -> a shorter subline, never an invented one.
+
+    2026-09-24 redesign: the figure carries no title at all any more -- the panel's
+    HTML title is a fixed constant ("Detector scoreboard", never numbers), the
+    threshold lives in the caption (visible), and the fallback subline (short,
+    because there is nothing to calibrate against) is the last Details line."""
     scores = ds.score_frames([[]], None)
     missing = tmp_path / "no_such_beat_cfar.json"
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule", beat_cfar_json_path=missing)
-    assert fig.layout.title.text == "Detector scoreboard<br><sup>threshold 0.50</sup>"
+    panel = panel_of(fig)
+    assert panel["title"] == "Detector scoreboard"
+    assert panel["caption"][0] == "threshold 0.50"
+    assert panel["details"][-1] == "threshold 0.50"
 
 
 def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
@@ -467,7 +507,10 @@ def test_scoreboard_offline_block_cfar_arm_has_no_self_reference(beat_cfar_data)
 
 def test_scoreboard_offline_block_omits_stripe_row_for_classical_cfar(beat_cfar_data):
     """classical CFAR has no rank-1 stripe artifact -- beat_cfar.json's stripe_rank1
-    has no entry for it, and the row must be omitted, not shown as 0 or 'n/a'."""
+    has no entry for it, and the row must be omitted, not shown as 0 or 'n/a'. The CI
+    row is checked in Details too (2026-09-24 redesign moved it there for every arm,
+    so "not in the table" alone would be true even for an arm that DID have a CI row
+    -- see `test_scoreboard_offline_block_includes_ci_when_raddetnet_ci_json_has_a_row`)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="CFAR", threshold=0.66,
                                match_rule_text="rule",
@@ -475,28 +518,38 @@ def test_scoreboard_offline_block_omits_stripe_row_for_classical_cfar(beat_cfar_
     labels, _values = _table(fig).cells.values
     assert "AP, offline test split" in labels
     assert "rank-1 stripe vs ground truth" not in labels
-    assert "delta AP vs CFAR, 95% CI" not in labels
+    details = panel_of(fig)["details"]
+    assert not any(d.startswith("delta AP vs CFAR, 95% CI:") for d in details)
 
 
 def test_scoreboard_offline_block_includes_ci_when_raddetnet_ci_json_has_a_row():
     """`raddetnet_ci.json` scores raddetnet against CFAR; the row's numbers are read
     from the file at test time (never a copy pasted into this assertion), so this
-    cannot silently drift from what the file stores (CLAUDE.md's provenance rule)."""
+    cannot silently drift from what the file stores (CLAUDE.md's provenance rule).
+
+    BACKGROUND, not visible-without-digging (2026-09-24 redesign): the table's <=8
+    visible rows are only the FA/frame and AP rows (`scoreboard_figure`'s docstring);
+    every other offline row, this CI row included, moved to the panel's Details as a
+    "<label>: <value>" line -- reachable in one click, no longer in the table."""
     import json
     ci_data = json.loads(ds.DEFAULT_RADDETNET_CI_JSON.read_text())
     comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
-    expected = (f"{comp['delta_AP']:+.3f} [{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]")
-    assert row["delta AP vs CFAR, 95% CI"] == expected
+    details = panel_of(fig)["details"]
+    line = _find(details, lambda d: d.startswith("delta AP vs CFAR, 95% CI:"),
+                what="the delta-AP-vs-CFAR CI Details line")
+    expected = (f"delta AP vs CFAR, 95% CI: {comp['delta_AP']:+.3f} "
+               f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]")
+    assert line == expected
 
 
 def test_scoreboard_offline_block_omits_ci_row_when_ci_file_missing(tmp_path, beat_cfar_data):
     """No `raddetnet_ci.json` for this deployment -> the row is dropped, not filled
-    with an invented interval."""
+    with an invented interval. Checked in Details now (2026-09-24 redesign): the row
+    was never in the visible table to begin with (see the test above), so "not in
+    `labels`" would pass trivially regardless of whether this file exists."""
     import json
     path = tmp_path / "beat_cfar.json"
     path.write_text(json.dumps(beat_cfar_data))
@@ -506,8 +559,8 @@ def test_scoreboard_offline_block_omits_ci_row_when_ci_file_missing(tmp_path, be
                                match_rule_text="rule", beat_cfar_json_path=path,
                                beat_cfar_arm_name="raddetnet",
                                raddetnet_ci_json_path=missing_ci)
-    labels, _values = _table(fig).cells.values
-    assert "delta AP vs CFAR, 95% CI" not in labels
+    details = panel_of(fig)["details"]
+    assert not any(d.startswith("delta AP vs CFAR, 95% CI:") for d in details)
 
 
 def test_scoreboard_offline_block_absent_by_default():
@@ -522,17 +575,19 @@ def test_scoreboard_offline_block_absent_by_default():
 
 
 def test_scoreboard_offline_block_rows_never_clip_the_table():
-    """Same geometric check as
-    `test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length`, extended
-    to the offline block: its extra rows must grow the declared table height, not
-    just get appended past where the domain ends."""
+    """RETIRED geometric check (2026-09-24 redesign, see
+    `test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length`'s docstring
+    for why): the offline block no longer grows the table past its base row count at
+    all -- it contributes at most its 2 promoted rows (FA/frame, AP), never more, so
+    the table never exceeds 8 rows and the figure height is the same fixed constant
+    regardless of how many offline rows an arm has (the rest go to Details)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
     table = _table(fig)
-    domain_height = fig.layout.height - fig.layout.margin.t - fig.layout.margin.b
-    content_height = table.header.height + _content_row_height(table)
-    assert domain_height >= content_height
+    assert fig.layout.height == FIGURE_HEIGHT[PANEL_ROW_TABLE]
+    labels, _values = table.cells.values
+    assert len(labels) <= 8
 
 
 # --------------------------------------------------------------------------------
@@ -540,10 +595,12 @@ def test_scoreboard_offline_block_rows_never_clip_the_table():
 # highlighted arm's bootstrap CI vs CFAR, read from raddetnet_ci.json.
 # --------------------------------------------------------------------------------
 def test_stored_pr_figure_states_in_distribution_qualifier():
+    """Was a figure title/subtitle; 2026-09-24 redesign moves it to Details (this
+    figure has no title at all any more -- see `stored_pr_figure`'s docstring)."""
     fig = ds.stored_pr_figure()
-    subline = fig.layout.title.text
-    assert "in-distribution: held-out scenes of the training corpus" in subline
-    assert "one training seed per curve" in subline
+    text = panel_text(fig)
+    assert "in-distribution: held-out scenes of the training corpus" in text
+    assert "one training seed per curve" in text
 
 
 def test_stored_pr_figure_highlighted_arm_legend_carries_the_ci(beat_cfar_data):
@@ -611,15 +668,19 @@ def test_stored_pr_figure_null_arm_shows_the_real_definition_not_the_stored_name
 # into this test as a bare number either.
 # --------------------------------------------------------------------------------
 def test_scoreboard_annotation_states_the_precision_ceiling_caveat():
+    """Was a figure annotation (a single merged string with the match rule); 2026-09-24
+    redesign moves it to its own Details line, unwrapped and un-merged -- see
+    `scoreboard_figure`'s docstring. Background info (a click away), not one of the
+    <=8 promoted table rows."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
-    ann = fig.layout.annotations[0]
-    text = ann.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert f"precision ceiling {ds.PRECISION_CEILING_F83:.2f}" in text
     assert "labels omit ~3 real scatterers per frame inside 40 m" in text
     assert "unmatched is an upper bound on false alarms" in text
-    # The match rule sentence must still be present, unmerged/undropped.
+    # The match rule sentence must still be present, as its own Details line (no
+    # longer merged into one annotation with this caveat).
     assert "rule" in text
     # No bare "F-ledger"/"F83" tag on screen (hostile-expert read, 2026-09-23, item 8):
     # a visitor cannot look that up.
@@ -632,25 +693,31 @@ def test_scoreboard_annotation_states_the_precision_ceiling_caveat():
 # 3x3 peak-grouping every detector here is scored under, and the caption must say so.
 # --------------------------------------------------------------------------------
 def test_scoreboard_annotation_states_the_peak_grouping_caveat():
+    """Was a figure annotation; now its own Details line (see the precision-ceiling
+    test above for the same move)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
-    ann = fig.layout.annotations[0]
-    text = ann.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert "3x3" in text
     assert "grouped to local peaks" in text
     assert "same rule for every detector" in text
     assert "wide target can draw extra unmatched hits" in text
 
 
-def test_scoreboard_annotation_geometry_still_fits_with_two_sentences():
-    """The new caveat sentence lengthens the annotation the table's own bottom margin
-    must leave room for -- same geometric contract as the row-clipping tests above,
-    now covering the annotation block instead of the row block."""
+def test_scoreboard_figure_height_is_fixed_regardless_of_caveat_sentence_count():
+    """Was "...geometry_still_fits_with_two_sentences", pinning the OLD bottom margin
+    growing with the annotation's wrapped-line count (`_TABLE_ANNOTATION_LINE_PX`,
+    now retired along with the annotation itself -- 2026-09-24 redesign). The figure
+    carries no annotation-based caveats any more (they are Details lines, off the
+    figure entirely, see the tests above), so there is nothing left for the bottom
+    margin to grow with: it is a fixed, always-zero constant, whatever the real match
+    rule's length is."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text=ds.match_rule_text())
-    assert fig.layout.margin.b >= 5 * ds._TABLE_ANNOTATION_LINE_PX
+    assert fig.layout.margin.b == 0
+    assert fig.layout.height == FIGURE_HEIGHT[PANEL_ROW_TABLE]
 
 
 # --------------------------------------------------------------------------------
@@ -675,11 +742,12 @@ def test_hit_gate_scale_note_states_the_beamwidth_and_native_range_bins():
 
 
 def test_scoreboard_annotation_states_the_hit_gate_scale_caveat():
+    """Was a figure annotation; now its own Details line (see the precision-ceiling
+    test above for the same move)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
-    ann = fig.layout.annotations[0]
-    text = ann.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert "32-element array beamwidth" in text
     assert "native range bins" in text
 
@@ -714,7 +782,13 @@ def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
     4th hostile-expert read (2026-09-23): the row used to say the seed spread was
     merely "comparable to" the CI half-width; it must instead say WHICH is bigger,
     computed from raddetnet_ci.json's own numbers at test time -- never a hardcoded
-    "0.040 > 0.032", since the CI file (and so the half-width) can be regenerated."""
+    "0.040 > 0.032", since the CI file (and so the half-width) can be regenerated.
+
+    Both the CI row and this caveat live in Details now (2026-09-24 redesign, see
+    `test_scoreboard_offline_block_includes_ci_when_raddetnet_ci_json_has_a_row`),
+    immediately adjacent in the same order `_offline_arm_rows` builds them -- checked
+    with an explicit search rather than a bare `next(...)`, so a missing row fails as
+    an assertion, not a generator error."""
     import json
     ci_data = json.loads(ds.DEFAULT_RADDETNET_CI_JSON.read_text())
     comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
@@ -724,11 +798,11 @@ def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
-    ci_idx = labels.index("delta AP vs CFAR, 95% CI")
-    caveat_label, caveat_value = labels[ci_idx + 1], values[ci_idx + 1]
-    caveat_text = (caveat_label + " " + caveat_value).replace("<br>", " ")
+    details = panel_of(fig)["details"]
+    ci_idx = next((i for i, d in enumerate(details)
+                  if d.startswith("delta AP vs CFAR, 95% CI:")), None)
+    assert ci_idx is not None, f"no CI Details line found in {details!r}"
+    caveat_text = details[ci_idx + 1]
     assert f"seed spread {ds.SEED_TO_SEED_AP_SPREAD_F86:.3f}" in caveat_text
     assert f"{op} CI half-width {half_width:.3f}" in caveat_text
     # No "(F86)" ledger tag on screen (hostile-expert read, 2026-09-23, item 8): a
@@ -748,7 +822,12 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     the AP-only rows never showed. The row itself no longer names the corpus by its
     internal tag or the seeds by number (hostile-expert read, 2026-09-23, item 8) --
     it reads "out-of-distribution corpus" / "2 seeds"; this test still reads the real
-    numbers from the file, just not the internal identifiers."""
+    numbers from the file, just not the internal identifiers.
+
+    BACKGROUND, not visible-without-digging (2026-09-24 redesign): neither OOD row is
+    one of the table's <=8 promoted rows (only FA/frame and AP are) -- both are now
+    Details lines, found with an explicit search (a bare `next(...)` against the old
+    TABLE labels raised a bare `StopIteration` here once these rows moved)."""
     import json
     ood_arms = {a["name"]: a for a in json.loads(ds.DEFAULT_OOD_JSON.read_text())["arms"]}
     s42, s43 = ood_arms["raddetnet_s42"], ood_arms["raddetnet_s43"]
@@ -757,22 +836,21 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
-    ood_header = next(l for l in labels if l.startswith("OOD AP,"))
-    assert "b1_bench_v2" not in ood_header and "s42" not in ood_header
-    assert "out-of-distribution corpus" in ood_header
-    ap_row_value = row[ood_header]
-    assert "2 seeds" in ap_row_value
-    assert f"{s42['AP']:.3f}" in ap_row_value and f"{s43['AP']:.3f}" in ap_row_value
-    assert f"{cfar['AP']:.3f}" in ap_row_value
+    details = panel_of(fig)["details"]
+    ap_line = _find(details, lambda d: d.startswith("OOD AP,"), what="the OOD AP Details line")
+    assert "b1_bench_v2" not in ap_line and "s42" not in ap_line
+    assert "out-of-distribution corpus" in ap_line
+    assert "2 seeds" in ap_line
+    assert f"{s42['AP']:.3f}" in ap_line and f"{s43['AP']:.3f}" in ap_line
+    assert f"{cfar['AP']:.3f}" in ap_line
 
-    fa_row_value = row["OOD unmatched/frame"]
+    fa_line = _find(details, lambda d: d.startswith("OOD unmatched/frame:"),
+                    what="the OOD unmatched/frame Details line")
     s42_fa = s42["operating_point"]["fp_per_frame"]
     s43_fa = s43["operating_point"]["fp_per_frame"]
     cfar_fa = cfar["operating_point"]["fp_per_frame"]
-    assert f"{s42_fa:.1f}" in fa_row_value and f"{s43_fa:.1f}" in fa_row_value
-    assert f"{cfar_fa:.1f}" in fa_row_value
+    assert f"{s42_fa:.1f}" in fa_line and f"{s43_fa:.1f}" in fa_line
+    assert f"{cfar_fa:.1f}" in fa_line
     # The finding itself, checked from the real numbers rather than hardcoded: the
     # best-AP seed (s42, higher AP than s43) still has a WORSE (higher) FA/frame than
     # CFAR out of distribution.
@@ -781,6 +859,9 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
 
 
 def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat_cfar_data):
+    """Checked in Details now (2026-09-24 redesign): neither OOD row was ever in the
+    visible table to begin with (see the test above), so checking `labels` alone
+    would pass trivially whether or not this file exists."""
     import json
     path = tmp_path / "beat_cfar.json"
     path.write_text(json.dumps(beat_cfar_data))
@@ -790,8 +871,9 @@ def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_json_path=path,
                                beat_cfar_arm_name="raddetnet", ood_json_path=missing_ood)
-    labels, _values = _table(fig).cells.values
-    assert not any(l.startswith("OOD AP,") or l == "OOD unmatched/frame" for l in labels)
+    details = panel_of(fig)["details"]
+    assert not any(d.startswith("OOD AP,") or d.startswith("OOD unmatched/frame:")
+                  for d in details)
 
 
 # --------------------------------------------------------------------------------
@@ -804,6 +886,10 @@ def test_default_third_corpus_json_exists():
 
 
 def test_scoreboard_offline_block_includes_third_corpus_row_for_raddetnet():
+    """BACKGROUND, not visible-without-digging (2026-09-24 redesign): the 3rd-corpus
+    row is not one of the table's <=8 promoted rows -- it lives in Details, found with
+    an explicit search rather than a bare `next(...)` (which raised a bare
+    `StopIteration` against the old TABLE labels once this row moved)."""
     import json
     arms = {a["name"]: a for a in json.loads(ds.DEFAULT_THIRD_CORPUS_JSON.read_text())["arms"]}
     s42, s43, cfar = arms["raddetnet_s42"], arms["raddetnet_s43"], arms["classical CFAR"]
@@ -811,34 +897,39 @@ def test_scoreboard_offline_block_includes_third_corpus_row_for_raddetnet():
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
-    label = next(l for l in labels if l.startswith("3rd corpus AP,"))
-    assert "D4" in label
-    assert str(s42["operating_point"]["n_frames"]) in label
-    value = row[label]
-    assert f"{s42['AP']:.3f}" in value and f"{s43['AP']:.3f}" in value
-    assert f"{cfar['AP']:.3f}" in value
+    details = panel_of(fig)["details"]
+    line = _find(details, lambda d: d.startswith("3rd corpus AP,"),
+                what="the 3rd-corpus AP Details line")
+    assert "D4" in line
+    assert str(s42["operating_point"]["n_frames"]) in line
+    assert f"{s42['AP']:.3f}" in line and f"{s43['AP']:.3f}" in line
+    assert f"{cfar['AP']:.3f}" in line
     # F87: every arm here leads CFAR -- checked from the real numbers, not hardcoded.
     assert s42["AP"] > cfar["AP"] and s43["AP"] > cfar["AP"]
 
 
 def test_scoreboard_offline_block_third_corpus_row_for_classical_cfar_is_its_own_ap():
-    """CFAR has no seed-sibling family -- its row is just its own AP, no merge."""
+    """CFAR has no seed-sibling family -- its row is just its own AP, no merge.
+    Details, not the table (see the test above)."""
     import json
     cfar = next(a for a in json.loads(ds.DEFAULT_THIRD_CORPUS_JSON.read_text())["arms"]
                if a["name"] == "classical CFAR")
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="CFAR", threshold=0.66,
                                match_rule_text="rule", beat_cfar_arm_name="classical CFAR")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
-    label = next(l for l in labels if l.startswith("3rd corpus AP,"))
-    assert row[label] == f"{cfar['AP']:.3f}"
+    details = panel_of(fig)["details"]
+    line = _find(details, lambda d: d.startswith("3rd corpus AP,"),
+                what="the 3rd-corpus AP Details line")
+    # No sibling merge for CFAR (it has no "_s<seed>" family) -- its value is just its
+    # own AP, not the "{a}/{b} (2 seeds) CFAR {c}" merged form the sibling case uses.
+    assert line.endswith(f": {cfar['AP']:.3f}")
 
 
 def test_scoreboard_offline_block_omits_third_corpus_row_when_file_missing(tmp_path,
                                                                           beat_cfar_data):
+    """Checked in Details now (2026-09-24 redesign): this row was never in the visible
+    table to begin with (see the two tests above), so checking `labels` alone would
+    pass trivially whether or not this file exists."""
     import json
     path = tmp_path / "beat_cfar.json"
     path.write_text(json.dumps(beat_cfar_data))
@@ -848,8 +939,8 @@ def test_scoreboard_offline_block_omits_third_corpus_row_when_file_missing(tmp_p
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_json_path=path,
                                beat_cfar_arm_name="raddetnet", third_corpus_json_path=missing)
-    labels, _values = _table(fig).cells.values
-    assert not any(l.startswith("3rd corpus AP,") for l in labels)
+    details = panel_of(fig)["details"]
+    assert not any(d.startswith("3rd corpus AP,") for d in details)
 
 
 # --------------------------------------------------------------------------------
@@ -864,35 +955,41 @@ def test_scoreboard_connector_row_between_live_and_offline_blocks(beat_cfar_data
     block now renders FIRST (the comparison the table can defend), then the
     connector, then the live per-frame block -- so a reader hits the fixed-split
     numbers, then the "these vary" note, then this run's own tiny counts, in that
-    order (see `scoreboard_figure`'s inline comment)."""
+    order (see `scoreboard_figure`'s inline comment).
+
+    2026-09-24 redesign: the connector row moved OFF the table into Details, so the
+    original "must sit between the offline and live TABLE rows" ordering claim no
+    longer has a table position to sit at -- it is a background line, one click away,
+    while the live "unmatched / frame" and offline "AP," rows stay in the visible
+    table (checked below). What survives is the row's CONTENT (which frame counts it
+    names) and that it only appears when there is an offline block to point at."""
     target = (10.0, 0.0, "vehicle")
     hit = (10.0, 0.0, 0.9, 10.0)
     scores = ds.score_frames([[hit]] * 5, [[target]] * 5)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
-    labels, values = _table(fig).cells.values
-    row = dict(zip(labels, values))
+    labels, _values = _table(fig).cells.values
     n_frames = next(a["operating_point"]["n_frames"] for a in beat_cfar_data["arms"]
                     if a.get("operating_point"))
-    live_label = next(l for l in labels if l.startswith("unmatched / frame, these"))
-    connector_label = next(l for l in labels if l.endswith("live counts vary"))
-    assert "5" in live_label and "5" in connector_label
-    assert row[connector_label] == f"{n_frames}-frame numbers are the claim"
-    # Must sit BETWEEN the two blocks, not before the offline rows or after the live
-    # ones -- so a reader hits the fixed-split numbers, then the "these vary" note,
-    # then this run's own tiny live counts, in that order.
-    live_idx = labels.index(live_label)
-    connector_idx = labels.index(connector_label)
-    offline_idx = labels.index(next(l for l in labels if l.startswith("AP,")))
-    assert offline_idx < connector_idx < live_idx
+    # Still visible, in the table: the live row and the offline AP row.
+    live_label = _find(labels, lambda l: l.startswith("unmatched / frame, these"),
+                       what="the live 'unmatched / frame' table row")
+    assert any(l.startswith("AP,") for l in labels)
+    assert "5" in live_label
+    # The connector itself: a Details line ("<label>: <value>"), not a table row.
+    details = panel_of(fig)["details"]
+    connector_line = _find(details, lambda d: "live counts vary:" in d,
+                           what="the connector Details line")
+    assert "5" in connector_line
+    assert connector_line.endswith(f": {n_frames}-frame numbers are the claim")
 
 
 def test_scoreboard_no_connector_row_without_an_offline_block():
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
-    labels, _values = _table(fig).cells.values
-    assert not any(l.endswith("live counts vary") for l in labels)
+    details = panel_of(fig)["details"]
+    assert not any("live counts vary:" in d for d in details)
 
 
 # --------------------------------------------------------------------------------
@@ -934,21 +1031,24 @@ def test_scoreboard_no_row_exceeds_the_max_line_cap():
 
 
 def test_scoreboard_figure_height_fits_a_screen_for_every_arm():
-    """~1000 px (raised from the 880 px budget, 2026-09-23, wave 7 X7: the mandatory
-    hit-gate scale footnote -- `hit_gate_scale_note`, one 32-element beamwidth / one
-    native-range-bins clause -- adds a 4th wrapped annotation sentence to every arm,
-    measured +94-98 px here). The worst case (an arm with a CI row, a seed-spread
-    caveat, the connector row and a two-row OOD block -- 14 rows total) must still
-    fit, with real slack in the browser, not just in this geometric formula (a real
-    Playwright render of this exact arm's figure JSON clipped its last row at zero
-    slack, 2026-09-23: see `ds._TABLE_RENDER_SAFETY_PX`). Re-verify against a
-    rendered rehearsal PNG after any further change to this annotation."""
+    """RETIRED geometric budget (2026-09-24 layout redesign): the height used to be
+    derived from the arm's actual row/annotation-line count (a CI row, a seed-spread
+    caveat, the connector row and a two-row OOD block could push it toward a
+    ~1000 px cap, and a real Playwright render once clipped the last row at zero
+    slack -- the old `ds._TABLE_RENDER_SAFETY_PX` fudge factor this docstring used to
+    cite). Under the panel-meta contract every arm variant -- with no offline block,
+    with CFAR's (no CI/OOD rows), and with raddetnet's full offline block (CI,
+    seed-spread, OOD, 3rd-corpus, all moved to Details) -- gets the exact SAME fixed
+    height, because the table caps at <=8 visible rows and everything past that goes
+    to Details instead of growing the figure. That equality, not a "<=1000" ceiling,
+    is the real invariant now."""
     scores = ds.score_frames([[]], None)
     for beat_cfar_arm_name in (None, "classical CFAR", "raddetnet"):
         fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                    match_rule_text=ds.match_rule_text(),
                                    beat_cfar_arm_name=beat_cfar_arm_name)
-        assert fig.layout.height <= 1000, (beat_cfar_arm_name, fig.layout.height)
+        assert fig.layout.height == FIGURE_HEIGHT[PANEL_ROW_TABLE], \
+            (beat_cfar_arm_name, fig.layout.height)
 
 
 # --------------------------------------------------------------------------------

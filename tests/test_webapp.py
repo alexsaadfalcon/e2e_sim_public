@@ -769,10 +769,14 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     np.testing.assert_allclose(figs["fft"].data[0].y, expected_u)
     assert figs["fft"].layout.xaxis.title.text == "azimuth sin(θ)"
     assert figs["fft"].layout.yaxis.title.text == "elevation sin(θ)"
-    # Peak-relative with a stated clip; a bare "power (dB)" read as absolute dB.
-    # ONE line (wave 9 second hostile-expert read, 2026-09-24, item 5): a two-line
-    # colorbar title collided with the colorbar's own "0" tick on every heat map.
-    assert figs["fft"].data[0].colorbar.title.text == "dB rel. peak (clipped at -40)"
+    # Peak-relative WITH a stated clip; a bare "power (dB)" reads as absolute dB.
+    # The colour bar itself carries no title any more (layout spec, 2026-09-24,
+    # section 4): at 20 px "dB rel. peak (clipped at -67.1)" was ~310 px wide and
+    # Plotly bought that width by shrinking the plot. The same two facts are one
+    # caption clause pair above the plot, and they are still pinned here.
+    from webapp.pipeline_runner import panel_caption
+    assert figs["fft"].data[0].colorbar.title.text is None
+    assert panel_caption(figs["fft"]) == "dB rel. peak · clipped at -40.0 dB"
 
     # Negated: the range blocks use a FORWARD fft over frequency, so a physical
     # delay +tau lands on the negative fftshifted side; the axis flips sign so
@@ -1259,11 +1263,18 @@ def test_figures_from_outputs_ber_evm_constellation():
     }
     figs = figures_from_outputs(outputs)
 
-    assert figs["ber"].layout.title.text == "Comms head BER (mrc, array gain 15.0 dB)"
+    # Combining and array gain are CAPTION clauses now, not a parenthesised figure
+    # title (the figure carries no title at all -- layout spec, 2026-09-24). Same two
+    # facts, same computation; `panel_text` is title + caption + Details.
+    from webapp.pipeline_runner import panel_of, panel_text
+    assert figs["ber"].layout.title.text is None
+    assert panel_of(figs["ber"])["title"] == "Comms head BER"
+    assert "mrc combining" in panel_text(figs["ber"])
+    assert "array gain 15.0 dB" in panel_text(figs["ber"])
     assert figs["ber"].layout.yaxis.type == "log"
     assert list(figs["ber"].data[0].y) == [0.1, 0.01]
 
-    assert figs["evm"].layout.title.text == "Comms head EVM per frame"
+    assert panel_of(figs["evm"])["title"] == "Comms head EVM per frame"
 
     const = figs["comm_const"].data[0]
     import numpy as np
@@ -1272,12 +1283,17 @@ def test_figures_from_outputs_ber_evm_constellation():
     assert figs["comm_const"].layout.yaxis.scaleanchor == "x"
 
 
-def test_figures_from_outputs_ber_without_array_gain_omits_it_from_title():
+def test_figures_from_outputs_ber_without_array_gain_omits_it_from_the_caption():
     from webapp.pipeline_runner import figures_from_outputs
 
+    from webapp.pipeline_runner import panel_caption
     outputs = {"ber": [0.3], "_comms_meta": {"combining": "element0"}}
     figs = figures_from_outputs(outputs)
-    assert figs["ber"].layout.title.text == "Comms head BER (element0)"
+    # No array gain -> no array-gain clause. (The clause moved from the figure title
+    # to the panel caption with the 2026-09-24 layout change; the fact it pins --
+    # "absent means absent, never a stale number" -- is unchanged.)
+    assert "element0 combining" in panel_caption(figs["ber"])
+    assert "array gain" not in panel_caption(figs["ber"])
 
 
 # =============================================================================

@@ -24,6 +24,23 @@ reads "display 0-N m of 2N m unambig (neg.-delay half cropped)", both numbers st
 computed from the frame's own freq_plan, never typed -- this file absorbed the pin
 update as a handoff item from the pipeline_runner shard (the fix originally landed in
 webapp/pipeline_runner.py without touching this then-unowned file).
+
+LAYOUT SPEC, 2026-09-24: a figure no longer carries a title. Every clause this file
+used to pin on `fig.layout.title.text` now lives in the panel meta (`layout.meta.panel`)
+-- the gate calibration, the unambiguous-range wording and the clip provenance all moved
+into the per-arm Details body, reached through `panel_text(fig)` (title + caption + all
+of Details, one string -- see `webapp/pipeline_runner.py`'s "PANEL GEOMETRY AND THE
+PANEL-META CONTRACT" section). Repointed below rather than dropped: the defects these
+tests protect (a hand-typed calibration number, a stale ceiling reading of "unambig",
+an unclipped adaptive-clip statistic) are unrelated to where the words are drawn.
+
+The colour-bar-title precision guard (`fig.data[0].colorbar.title.text`) has no
+counterpart any more -- colour bars carry no title at all now (layout spec section 4;
+pinned once, for every product, by
+`test_webapp_layout_acceptance.py::test_no_colorbar_carries_a_title`, not duplicated
+here). What IS still this file's job is the other half of that old assertion: the
+clip value appears at 1-decimal precision, never a raw float repr -- repointed onto
+`panel_text(fig)` below.
 """
 from __future__ import annotations
 
@@ -32,6 +49,7 @@ import pytest
 
 from webapp.pipeline_runner import (
     _native_unambiguous_range_m, _radar_cube_clip_db, _range_per_gate_m, figures_from_outputs,
+    panel_text,
 )
 
 
@@ -62,7 +80,7 @@ def test_range_az_subline_states_metres_per_gate_and_unambiguous_range():
     fig = figures_from_outputs({
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     expected_gate = _range_per_gate_m(8, 3e9, 64)
     C = 2.99792458e8
     expected_full = 64 * C / (2.0 * 3e9)      # N * c/(2B): the full FFT period
@@ -81,7 +99,7 @@ def test_range_el_subline_states_metres_per_gate_too():
     fig = figures_from_outputs({
         "range_el": [re_], "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     expected_gate = _range_per_gate_m(8, 3e9, 64)
     assert f"{expected_gate:.2f} m/gate" in text
 
@@ -94,7 +112,7 @@ def test_range_az_gate_calibration_absent_without_axis_metadata():
     ra = torch.rand((8, 8)).to(torch.complex64)
     fig = figures_from_outputs({"range_az": [ra],
                                 "_axis_meta": {"range_az_bins": 8}})["range_az"]
-    assert "m/gate" not in fig.layout.title.text
+    assert "m/gate" not in panel_text(fig)
 
 
 def test_range_az_yaxis_title_stays_short_the_calibration_lives_in_the_subline():
@@ -132,10 +150,14 @@ def test_range_az_clip_tightens_for_a_high_floor_frame_and_says_so():
     expected_clip = _radar_cube_clip_db(_to_numpy_abs_db(ra))
     assert expected_clip > -40.0, "fixture must exercise the adaptive branch"
     assert fig.data[0].zmin == pytest.approx(expected_clip)
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert f"clip {expected_clip:.1f} dB (median floor + 3 dB)" in text
-    assert f"{expected_clip:.1f}" in fig.data[0].colorbar.title.text
-    assert f"{expected_clip:.6f}" not in fig.data[0].colorbar.title.text
+    # The colour bar itself carries no title any more (layout spec section 4; pinned
+    # once for every product by
+    # test_webapp_layout_acceptance.py::test_no_colorbar_carries_a_title). What this
+    # test still owns is the precision guard: the clip is stated at 1 decimal
+    # somewhere reachable, never as a raw float repr.
+    assert f"{expected_clip:.6f}" not in text
 
 
 def test_range_el_clip_uses_the_shared_floor_and_says_so_for_a_sparse_frame():
@@ -151,7 +173,7 @@ def test_range_el_clip_uses_the_shared_floor_and_says_so_for_a_sparse_frame():
                                 "_axis_meta": {"range_el_bins": 16}})["range_el"]
 
     assert fig.data[0].zmin == pytest.approx(-40.0)
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert "clip -40.0 dB (shared floor)" in text
 
 
@@ -170,5 +192,5 @@ def test_range_az_peak_minus_median_statistic_is_unaffected_by_the_new_clip():
 
     db = 10 * np.log10(power / power.max() + 1e-12)
     expected = round(float(db.max() - np.median(db)), 1)
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert f"peak - median, dB: {expected:.1f}" in text

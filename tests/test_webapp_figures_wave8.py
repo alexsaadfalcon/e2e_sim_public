@@ -33,6 +33,15 @@ cushion) above the curve's own max, so a cold-start arm's frame-1 point does not
 visually on the axis ceiling; the "warm-start settled level" reference-line annotation
 moves from its default "top left" to "top right" whenever an early frame's own error
 sits close enough to the settled level to put a data marker under the annotation text.
+
+LAYOUT SPEC, 2026-09-24: figures no longer carry a title. Every W2/W13/F96 clause this
+file used to pin on `fig.layout.title.text` now lives in the panel meta reached through
+`panel_text(fig)` (title + caption + the whole Details body -- see
+`webapp/pipeline_runner.py`'s "PANEL GEOMETRY AND THE PANEL-META CONTRACT" section).
+Repointed below, not dropped: these clauses are the same honesty content the layout
+spec's own acceptance check 15 requires to still be reachable. The `add_hline`
+"settled level" annotation (W15) is untouched -- it was never part of the removed
+title/subtitle machinery, it is a real plot annotation now and before.
 """
 from __future__ import annotations
 
@@ -42,7 +51,7 @@ import pytest
 from webapp.pipeline_runner import (
     _C, _SUBSPACE_ERR_MIN_YMAX, _SUBSPACE_ERR_SETTLED_LEVEL, _REFINE_AXIS_MIN_YMAX,
     _native_range_resolution_m, _range_per_gate_m,
-    figures_from_outputs,
+    figures_from_outputs, panel_text,
 )
 
 
@@ -60,7 +69,7 @@ def test_range_az_subline_states_direct_path_and_keeps_earliest_arrival_pin():
     fig = figures_from_outputs({
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert "0 dB = direct path" in text
     assert "not a target" in text
     # The exact substring tests/test_webapp_figures_wave3.py (unowned) pins.
@@ -74,7 +83,7 @@ def test_range_el_subline_states_direct_path_too():
     fig = figures_from_outputs({
         "range_el": [re_], "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     assert "0 dB = direct path" in text
     assert "not a target" in text
     assert "0 = earliest arrival" in text
@@ -88,24 +97,31 @@ def test_range_profile_subline_states_direct_path():
         "range_profile_agg": [prof],
         "_axis_meta": _munich_axis_meta(range_profile_bins=8),
     })["range_profile"]
-    title = fig.layout.title.text.replace("<br>", " ")
-    assert "0 dB = direct path at range 0, not a target" in title
+    text = panel_text(fig)
+    assert "0 dB = direct path at range 0, not a target" in text
     # The xlabel keeps its own, separately-pinned wording (test_webapp_figures_wave3.py).
     assert fig.layout.xaxis.title.text == "range (m; 0 = earliest arrival)"
 
 
 def test_range_profile_no_direct_path_note_without_axis_metadata():
     """No n_freqs/freq_span_hz -> nothing to state a physical claim about (mirrors the
-    range-az/range-el gate-calibration and earliest-arrival fallbacks); also guards
+    range-az/range-el gate-calibration and earliest-arrival fallbacks).
+
+    HANDOFF (2026-09-24): the comment this docstring used to carry named
     tests/test_webapp_ab.py::test_range_profile_panel_carries_the_median_floor_statistic
-    (unowned), whose regex expects the floor number at the very end of the title."""
+    (unowned) as a test this one "also guards", because that test's regex read the
+    floor number off the end of `fig.layout.title.text`. That title no longer exists
+    (layout spec, this section) -- the statistic is now `_stat_annotations`'
+    `stat_strip` annotation -- so that unowned test now fails outright on this branch
+    and needs its own repoint to the new mechanism; not fixed here, out of this
+    shard's owned files."""
     torch = pytest.importorskip("torch")
 
     prof = torch.rand(8, dtype=torch.float32)
     fig = figures_from_outputs({
         "range_profile_agg": [prof], "_axis_meta": {"range_profile_bins": 8},
     })["range_profile"]
-    assert "direct path" not in fig.layout.title.text
+    assert "direct path" not in panel_text(fig)
 
 
 # --------------------------------------------------------------------------------
@@ -118,7 +134,7 @@ def test_range_az_subline_states_native_resolution_and_ratio():
     fig = figures_from_outputs({
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
 
     gate = _range_per_gate_m(8, 3e9, 64)
     native = _native_range_resolution_m(3e9)

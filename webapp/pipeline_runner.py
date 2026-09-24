@@ -1663,12 +1663,17 @@ def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
 #: Podium-distance legibility floor (fresh-context review, 2026-09-22: every figure's
 #: browser-default 12-13 px text reads fine on a laptop and fails at the ~2 m a demo
 #: audience actually reads from). Applied, as the LAST step, to every figure this
-#: module hands back to the UI via `_make_legible`. Raised again (pixel-measured
-#: re-check, 2026-09-23): the first pass's 14-15 px tick/colorbar sizes still
-#: rendered at 8-13 px of actual ink height against this same 20 px standing
-#: threshold, and sat visibly smaller than the Detector scoreboard beside them
-#: (webapp/detector_scoreboard.py's table, already at 18-20 px) on a Thrust 5 screen
-#: -- the two halves of one screen must not visibly differ in type scale.
+#: module hands back to the UI via `_make_legible`.
+#:
+#: RETRACTED, 2026-09-24 (flagged by a test-rewrite review of this same comment): this
+#: block used to cite a "20 px standing threshold" and a scoreboard "already at
+#: 18-20 px". Neither is current. The layout spec of 2026-09-24 sets the floor at
+#: **17 px inside a figure** and 15 px anywhere on a results screen (section 3), the
+#: constants below are 18 (one px of margin over that floor), and the scoreboard's own
+#: table is now 17 px. The reason the number came DOWN rather than up is the same
+#: reason the subtitles left: at 20 px the axis/colour-bar text was itself competing
+#: with the picture for a fixed panel. `tests/test_webapp_layout_acceptance.py`
+#: (`MIN_FIGURE_FONT_PX`) is the authority; this comment is a pointer, not a copy.
 _LEGIBLE_FONT_SIZE = 18
 _LEGIBLE_TICK_SIZE = 18
 _LEGIBLE_COLORBAR_TICK_SIZE = 18
@@ -2859,9 +2864,16 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             ))
         fig.update_layout(
             xaxis_title="azimuth sin(θ)", yaxis_title="range (m)",
-            # ONE inline legend line on the panel background, 17 px, 32 px tall (was a
-            # 72 px dark block): the marker glyphs are in the trace names above, so the
-            # entry reads as "x detections (n=7)" whatever the swatch does.
+            # NO legend strip. The spec asked for a 32 px inline line (down from a
+            # 72 px dark block), but MEASURED on the rendered page a horizontal legend
+            # below the plot costs ~50 px of PLOT height, not 32 px of panel: Plotly
+            # takes the legend out of the axis domain via margin auto-expansion, which
+            # dropped this panel to 44 % of its own area against the spec's own >= 50 %
+            # (acceptance check 5, measured 2026-09-24). The legend said exactly what
+            # the statistic strip above the plot now says -- "7 detections, 5 labelled"
+            # -- so the counts are kept and the duplicate is what goes. Which glyph is
+            # which is a caption clause.
+            showlegend=False,
             legend=dict(orientation="h", yanchor="top", y=-0.22, x=0.0,
                         xanchor="left", bgcolor="rgba(0,0,0,0)",
                         font=dict(size=17, color="#2d3a4a")),
@@ -2880,7 +2892,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 annotation_position="top right",
                 annotation_xshift=-10, annotation_yshift=6,
                 annotation_bgcolor="rgba(45,58,74,0.7)",
-                annotation_font=dict(size=16, color="#ffffff"),
+                # 17 px, the in-figure floor (layout spec section 3); at 16 it was
+                # the one element on the Thrust 5 screens under it (measured,
+                # 2026-09-24).
+                annotation_font=dict(size=17, color="#ffffff"),
             )
         thr_txt = "n/a" if det_threshold is None else f"{det_threshold:.2f}"
         fig.update_layout(annotations=list(fig.layout.annotations or ())
@@ -2888,7 +2903,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                               f"{n_dets} detections, {n_gt} labelled",
                               f"frame {n_frames} of {n_frames} (last)"))
         set_panel(fig, title=panel_title,
-                  caption=[f"objectness ≥ {thr_txt}"]
+                  caption=[f"objectness ≥ {thr_txt}",
+                           "✕ detections, ○ ground-truth boxes"]
                           + ([hit_rule] if hit_rule else []),
                   details=[
                       f"detections at objectness >= {thr_txt} -- frame {n_frames} of "
@@ -2993,9 +3009,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(annotations=_stat_annotations(
             f"{errs[-1]:.2f} at frame {len(errs)}",
             f"warm-start reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
+        # SHORT (measured on the rendered page, 2026-09-24): the caption renders on ONE
+        # line with no wrap in a 746 px column at 16 px, which is ~86 characters -- the
+        # spec's 110-character budget is the hard cap, not the fitting width, and a
+        # three-clause caption here was CSS-clipped (acceptance check 12). The clause
+        # dropped from the caption ("grows ~sqrt(k), not a fraction") is unchanged in
+        # Details below.
         set_panel(fig, title="Subspace error per frame",
-                  caption=["Frobenius, unnormalised distance",
-                           "grows ~sqrt(k), not a fraction"],
+                  caption=["Frobenius, unnormalised"],
                   details=[
                       "Unnormalised distance; grows ~sqrt(k), not a fraction.",
                       f"The dashed line is the warm-start settled level "
@@ -3044,10 +3065,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # Legend below the plot, not the default top-right: at top-right it sat
                 # on top of the new right-hand axis's own tick labels, clipping "10"
                 # into "1C" (found in the Thrust 3 rehearsal, 2026-09-23).
-                legend=dict(orientation="h", yanchor="top", y=-0.30,
-                           xanchor="left", x=0.0, bgcolor="rgba(0,0,0,0)",
-                           font=dict(size=17, color="#2d3a4a")),
-                showlegend=True,
+                # No legend strip: measured on the rendered page, a horizontal legend
+                # below the plot costs ~65 px of PLOT height (Plotly takes it out of
+                # the axis domain), which put this panel at 42 % of its own area
+                # against the spec's >= 50 % (acceptance check 5, 2026-09-24). Both
+                # traces are already named by their own AXIS TITLES -- "subspace error
+                # (Frobenius)" on the left, "refinement passes/frame" on the right --
+                # and the caption says which line is which, so the legend was spending
+                # a sixth of the picture to repeat the axes.
+                showlegend=False,
             )
             # The compute-per-frame trace is the Thrust 3 A/B. Say where it ended,
             # beside the error statistic, so the "2x compute" claim has a number on
@@ -3056,7 +3082,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             fig.update_layout(annotations=_stat_annotations(
                 f"{errs[-1]:.2f} at frame {len(errs)}",
                 f"{int(n_refine_used[-1])} refinement passes/frame"))
-            set_panel(fig, title=panel["title"], caption=panel["caption"],
+            set_panel(fig, title=panel["title"],
+                      caption=list(panel["caption"])
+                              + ["solid = error (left axis), dotted = passes/frame"],
                       details=list(panel["details"]) + [
                           "The dotted red trace (right axis) is AdaOjaBlock's own "
                           "effective_n_refine() decision per frame -- the compute "
@@ -3072,12 +3100,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         bers = [float(b) for b in outputs["ber"]]
         comms_meta = outputs.get("_comms_meta") or {}
         combining = comms_meta.get("combining", "?")
-        title = f"Comms head BER ({combining}"
+        # Combining and array gain are CAPTION clauses now, not a parenthesised title
+        # (layout spec section 2.2: the title is one short line, the caption carries
+        # the qualifiers). Same two facts, same computation.
+        caption_clauses = [f"{combining} combining"]
         gains = [float(g) for g in (outputs.get("comm_array_gain_db") or [])
                  if g is not None and np.isfinite(float(g))]
         if gains:
-            title += f", array gain {np.mean(gains):.1f} dB"
-        title += ")"
+            caption_clauses.append(f"array gain {np.mean(gains):.1f} dB")
         # BER=0 (no bit errors) is common on good frames but unplottable on a log
         # axis -- Plotly drops the points and the whole figure renders empty. Clamp
         # to a display floor and say so, rather than showing a blank plot.
@@ -3092,17 +3122,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         )
         fig.update_layout(annotations=_stat_annotations(
             f"BER {bers[-1]:.2e} (last frame)"))
-        set_panel(fig, title="Comms head BER", caption=[title.strip("()") or combining],
-                  details=[f"Combining: {combining}.",
+        set_panel(fig, title="Comms head BER", caption=caption_clauses,
+                  details=[f"Combining: {combining}."
+                           + (f" Array gain {np.mean(gains):.1f} dB." if gains else ""),
                            f"Frames with 0 bit errors are shown at the {ber_floor:g} "
                            "display floor -- a log axis cannot plot an exact zero."],
                   row=PANEL_ROW_MAP)
         if any(b < ber_floor for b in bers):
-            fig.add_annotation(
-                text=f"frames with 0 bit errors shown at the {ber_floor:g} floor",
-                xref="paper", yref="paper", x=0.5, y=1.02,
-                showarrow=False, font=dict(size=11, color="#576574"),
-            )
+            # Was an 11 px in-figure annotation at y=1.02, i.e. under the statistic
+            # strip AND below the 17 px in-figure floor (layout spec section 3). It is
+            # a caption clause now: same statement, legible, and it cannot collide.
+            panel = panel_of(fig)
+            set_panel(fig, title=panel["title"],
+                      caption=list(panel["caption"])
+                              + [f"0-error frames drawn at the {ber_floor:g} floor"],
+                      details=panel["details"], row=panel["row"])
         figs["ber"] = _make_legible(fig)
 
     if outputs.get("evm"):

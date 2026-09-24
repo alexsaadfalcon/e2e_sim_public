@@ -114,8 +114,11 @@ _ARM_DISPLAY_NAMES = {
     # Shortened (Change, 2026-09-23 coordinator re-check): the original full sentence
     # was the single longest legend entry, and a right-hand vertical legend sized to
     # its longest entry squeezed the PR plot itself to a ~80 px sliver.
-    "null (random-in-GT-box)":
-        "null: random cells in train-label box (chance floor)",
+    # Shortened AGAIN (measured on the rendered page, 2026-09-24): in the two-column
+    # legend a 52-character entry overran its half of the strip and was clipped at the
+    # column edge -- and this is the one entry that must never be the one that gets
+    # cut, because it is the panel's chance floor. The full sentence is in Details.
+    "null (random-in-GT-box)": "null (chance floor)",
 }
 
 
@@ -1050,7 +1053,13 @@ _PR_MARGIN_T = 12
 #: a literal here rather than importing that private constant, since this panel's
 #: margins are this module's own layout decision, not something that should
 #: silently move if that constant's value ever changes for a heatmap's needs.
-_PR_LEGEND_STRIP_PX = 64
+#: 80, not the spec table's 64 (measured on the rendered page, 2026-09-24): at 64
+#: the two-column legend had room for 2.5 of its 3 rows, so TWO arms -- including
+#: the null / chance-floor curve, which is the honesty anchor of this panel and
+#: must never be the entry that falls off -- were silently cut off the bottom.
+#: The plot is still 324 px tall, i.e. 50.8 % of the panel's area, above
+#: acceptance check 5's floor.
+_PR_LEGEND_STRIP_PX = 80
 _PR_AXIS_MARGIN_B = 60
 _PR_MARGIN_B = _PR_LEGEND_STRIP_PX + _PR_AXIS_MARGIN_B
 
@@ -1124,6 +1133,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     fig = go.Figure()
     fallback_arms: List[str] = []
     highlight_disp_name: Optional[str] = None
+    highlight_ci: Optional[Dict[str, float]] = None
     highlight_ap: Optional[float] = None
     for a in arms:
         name = a.get("name", "?")
@@ -1149,8 +1159,14 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
             x, y = _downsample(pr["recall"], pr["precision"])
             ci = _raddetnet_ci_for_arm(name, raddetnet_ci_json_path) if bold else None
             if ci is not None:
-                trace_name = (f"{disp_name} AP {ap:.3f}, {ci['delta_AP']:+.3f} vs CFAR "
-                             f"[{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]")
+                # The delta stays ON the highlighted entry; its CONFIDENCE INTERVAL
+                # moves to the panel caption (measured on the rendered page,
+                # 2026-09-24: the full 51-character entry overran its half of the
+                # two-column legend and drew straight through the entry beside it).
+                # The caption is the more visible of the two places anyway.
+                trace_name = (f"{disp_name} AP {ap:.3f}, {ci['delta_AP']:+.3f} "
+                             "vs CFAR")
+                highlight_ci = ci
             else:
                 trace_name = f"{disp_name} (AP={ap:.3f})"
             fig.add_trace(go.Scatter(
@@ -1174,9 +1190,9 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     # re-check): this is the property "the plot is not squeezed by the legend" is
     # tested against, so it must be a real, asserted value, not an assumption about
     # what Plotly leaves alone.
-    fig.update_xaxes(title=dict(text="recall", font=dict(size=16)), range=[0, 1],
+    fig.update_xaxes(title=dict(text="recall", font=dict(size=18)), range=[0, 1],
                      domain=[0.0, 1.0])
-    fig.update_yaxes(title=dict(text="precision", font=dict(size=16)), range=[0, 1])
+    fig.update_yaxes(title=dict(text="precision", font=dict(size=18)), range=[0, 1])
     fig.update_layout(
         # Below the plot, 2 columns x ~3 rows (Change, 2026-09-24: was a single
         # centred row; `entrywidth=0.5` packs 2 entries per row, and Plotly wraps to
@@ -1185,15 +1201,29 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # length, same reasoning as the 2026-09-23 move below the plot in the first
         # place).
         legend=dict(orientation="h", entrywidthmode="fraction", entrywidth=0.5,
-                   y=-0.25, yanchor="top", x=0, xanchor="left", font=dict(size=17)),
-        font=dict(size=16),
-        margin=dict(l=_PR_MARGIN_L, r=_PR_MARGIN_R, t=_PR_MARGIN_T, b=_PR_MARGIN_B),
+                   y=-0.16, yanchor="top", x=0, xanchor="left", font=dict(size=17)),
+        # 18, not 16: the in-figure floor is 17 px (layout spec section 3) and the
+        # axis tick labels inherit this (measured on the rendered page, 2026-09-24).
+        font=dict(size=18),
+        # `autoexpand=False` (measured on the rendered page, 2026-09-24): with
+        # Plotly's default auto-expansion the horizontal legend below the plot is
+        # taken OUT of the axis domain ON TOP of the bottom margin already
+        # reserved for it, so the plot rendered 285 px tall inside a band sized
+        # for 340 and the panel sat at 45 % of its own area against the spec's
+        # >= 50 % (acceptance check 5). The margins here are hand-computed, so
+        # there is nothing for auto-expansion to discover.
+        margin=dict(l=_PR_MARGIN_L, r=_PR_MARGIN_R, t=_PR_MARGIN_T,
+                    b=_PR_MARGIN_B, autoexpand=False),
         height=_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_PR],
         paper_bgcolor=_pr.PAPER_BGCOLOR, plot_bgcolor=_pr.PLOT_BGCOLOR,
     )
 
     if highlight_arm is not None and highlight_disp_name is not None:
         caption = [f"{highlight_disp_name} highlighted, AP {highlight_ap:.3f}"]
+        if highlight_ci is not None:
+            caption.append(f"{highlight_ci['delta_AP']:+.3f} vs CFAR "
+                           f"[{highlight_ci['ci_low']:+.3f}, "
+                           f"{highlight_ci['ci_high']:+.3f}]")
     else:
         caption = [f"{n_frames} test frames, {corpus_name}"]
 
