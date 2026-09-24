@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 from dash import (
@@ -367,17 +367,63 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
-def _notes_line(axis_meta: Dict[str, Any]) -> str:
+#: Results-tab-only truncation limit for one run note (wave 9 follow-up,
+#: 2026-09-24): the Block Diagram status line (`_note_for` below) still carries the
+#: full, untruncated text -- this is purely a Results-tab display shortening, so it
+#: lives next to `_notes_line`, the function it gates, not next to `run_pipeline`
+#: (which builds the notes themselves and knows nothing about either screen).
+_NOTE_TRUNCATE_CHARS = 160
+
+
+def _truncate_note(note: str) -> str:
+    """One run note, cut at its first `" -- "` separator or `_NOTE_TRUNCATE_CHARS`
+    characters, whichever comes first (with an ellipsis) -- the Results-tab-only
+    shortening item 6's follow-up fixes (wave 9, 2026-09-24): the live-chain
+    correctness gate's own note runs its headline number, then a `" -- "`, then an
+    attribution clause that can run another 2-3 lines ("...the usual answer: it is
+    the knob the A/B turns...") -- illegible at 11 px and pushing the figures down
+    on every Thrust 5 arm, when the banner above already carries the gate's verdict.
+    A note with neither (short, no `" -- "`, e.g. the interconnect Tessera
+    surrogate's own note) is returned unchanged -- checked against both arms'
+    "evaluated at 14.25-15.75 GHz" text, which sits at the FRONT of that note and
+    survives either cut."""
+    cut = len(note)
+    sep = note.find(" -- ")
+    if 0 <= sep < cut:
+        cut = sep
+    if _NOTE_TRUNCATE_CHARS < cut:
+        cut = _NOTE_TRUNCATE_CHARS
+    if cut >= len(note):
+        return note
+    return note[:cut].rstrip() + " ..."
+
+
+def _notes_line(axis_meta: Dict[str, Any]) -> List[str]:
     """`axis_meta['notes']` (`pipeline_runner.run_pipeline`'s `run_notes` -- e.g. the
     interconnect Tessera surrogate's scale-model/frequency disclosure,
-    `InterconnectBlock.describe()`) joined into one line for the Results tab (item 6,
-    wave 9 hostile-expert read, 2026-09-23): these reached only the Block Diagram
-    tab's status line (via `_note_for` below), so a Thrust 4 Results screen carried
-    no on-screen record of the frequency it was actually evaluated at -- a visitor
-    reading only that tab, or a photograph of it, never saw the disclosure at all.
-    `''` when there are none, same convention as `_note_for`."""
-    notes = axis_meta.get("notes")
-    return "  |  ".join(notes) if notes else ""
+    `InterconnectBlock.describe()`), one TRUNCATED (`_truncate_note`) entry per note,
+    for the Results tab (item 6, wave 9 hostile-expert read, 2026-09-23 + follow-up,
+    2026-09-24): these reached only the Block Diagram tab's status line (via
+    `_note_for` below, which keeps every note's FULL text), so a Thrust 4 Results
+    screen carried no on-screen record of the frequency it was actually evaluated
+    at -- a visitor reading only that tab, or a photograph of it, never saw the
+    disclosure at all. `[]` when there are none."""
+    return [_truncate_note(n) for n in (axis_meta.get("notes") or [])]
+
+
+def _notes_block(notes_lines: List[str]):
+    """The Results-tab rendering of `_notes_line`'s return: ONE small, muted line
+    PER note, not one paragraph joined by "|" (item 6 follow-up, 2026-09-24): the
+    live-chain gate's own multi-clause note otherwise ran 3-5 lines of 11 px text on
+    every Thrust 5 arm, pushing the figures down and illegible on stage, when the
+    banner above it already carries the gate's headline verdict. Same muted style
+    as `screen_note` in `_render_results`; module-level (not nested in that
+    callback) so it is directly testable and reusable for both the current and the
+    `_previous` (arm B / before-after) block."""
+    return html.Div(
+        [html.Div(n, style={"color": "#576574", "fontSize": "14px"}) for n in notes_lines],
+        style={"marginBottom": "6px"},
+    )
 
 
 def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str,
@@ -986,17 +1032,9 @@ def _render_results(results_data, active_tab):
         children.append(html.Div(f"{prefix}{banner}",
                                  style={"color": "#2d3a4a", "fontWeight": "bold",
                                         "marginBottom": "4px"}))
-    notes_line = results_data.get("_notes")
-    if notes_line:
-        # Item 6 (wave 9 hostile-expert read, 2026-09-23): run notes (e.g. the
-        # interconnect Tessera surrogate's scale-model/frequency disclosure) used to
-        # reach only the Block Diagram tab's status line -- the Results tab, what a
-        # visitor actually photographs, carried no frequency disclosure for Thrust 4.
-        # Same muted subline style as `screen_note` below; THIS arm's own notes only
-        # (an A/B pair's arms can differ, e.g. arm B turning the interconnect band).
-        children.append(html.Div(notes_line,
-                                 style={"color": "#576574", "fontSize": "14px",
-                                        "marginBottom": "6px"}))
+    notes_lines = results_data.get("_notes")
+    if notes_lines:
+        children.append(_notes_block(notes_lines))
     screen_note = results_data.get("_screen_note")
     if screen_note:
         # The preset's own caveat, for whoever photographs this tab rather than hears
@@ -1016,11 +1054,9 @@ def _render_results(results_data, active_tab):
             f"{prev_prefix}{prev.get('_banner') or 'unlabelled'}",
             style={"color": "#576574", "fontWeight": "bold", "marginTop": "6px",
                    "marginBottom": "4px"}))
-        prev_notes_line = prev.get("_notes")
-        if prev_notes_line:
-            children.append(html.Div(prev_notes_line,
-                                     style={"color": "#576574", "fontSize": "14px",
-                                            "marginBottom": "6px"}))
+        prev_notes_lines = prev.get("_notes")
+        if prev_notes_lines:
+            children.append(_notes_block(prev_notes_lines))
         children.append(_grid(prev_figs))
     return html.Div(children)
 

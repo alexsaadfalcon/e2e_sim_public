@@ -27,16 +27,71 @@ app shard:
    (range > ~90 m, sin(azimuth) in [-1, -0.5]), empty on every munich preset checked.
 6. Run notes (`pipeline_runner.run_pipeline`'s `run_notes`) now render on the Results
    tab, one small line per arm under that arm's own banner -- previously they reached
-   only the Block Diagram tab's status line.
+   only the Block Diagram tab's status line. FOLLOW-UP (coordinator re-check, same
+   day): each note is one line, truncated at its first " -- " separator or 160 chars
+   (whichever first, `_truncate_note`) -- the live-chain gate's own note ran a
+   headline number, " -- ", then a 2-3-line attribution clause, illegible at 11 px on
+   every Thrust 5 arm and pushing the figures down; the banner above already carries
+   the gate's verdict. The FULL text is unaffected on the Block Diagram status line
+   (`_note_for`, untouched). Thrust 4's "scale model x2 (... GHz)" clause has no
+   " -- " and sits at the front of its note, so it survives either cut.
 7. (coordinator addendum, twice-corrected) The range-azimuth/range-elevation subline
    now also states, per frame, where the brightest VISIBLE (beyond the direct-path
    band) return actually is. The direct-path/leakage cell's own size is stated in
-   PHYSICAL units ("one {gate size} m gate (sub-pixel here, not visible)"), never as
-   a pixel count: a first version divided this module's own DECLARED plot-domain
-   constant by the bin count, which is not the browser's actual rendered pixel
-   height (measured wrong against the PNG: printed ~2.2 px, the real rendered gate
-   was ~1.6 px) -- a claim this module has no way to verify from inside Python, so
-   it no longer makes one.
+   PHYSICAL units ("one {gate size} m gate ..."), never as a pixel count: a first
+   version divided this module's own DECLARED plot-domain constant by the bin
+   count, which is not the browser's actual rendered pixel height (measured wrong
+   against the PNG) -- a claim this module has no way to verify from inside
+   Python, so it no longer makes one.
+
+SECOND hostile-expert read (2026-09-24, same day, against the wave-9-fixed screens
+this file already tests -- items numbered "1S..7S" below to avoid colliding with 1-7
+above):
+
+1S. (BLOCKER) Item 1's fix did not hold: the margin CODE was fixed, but the actual
+    PIXEL requirement was under-measured (the old linear "+24 px/line" extrapolation
+    was never re-verified against a real browser). A standalone Playwright
+    measurement (`.g-gtitle`/`.bg` bounding rects, not committed to the repo) found
+    a real ~11.6 px OVERLAP at the old n_lines=4 margin (108 px) and re-calibrated
+    `_PR_MARGIN_T_BASE`/`_PR_MARGIN_T_PER_LINE` (65/55) against measured, positive
+    (~20+ px) gaps at both n_lines=3 and 4; the figure's own `height` now grows with
+    the margin so the PLOT area does not shrink.
+2S. `range_profile`'s own title used a FIXED `t=40` margin that was never wired to
+    `_heatmap_margin_t` at all, so its two-line median-floor/direct-path subline
+    (added wave 7/8) ran through the plot's own top border and "0" tick on both
+    Thrust 4 arms. Now sized (and its title PINNED) the same way `_heatmap` is.
+3S. `_heatmap_margin_t`'s old per-line growth (60 px, extrapolated from one
+    wave-8 measurement) assumed Plotly auto-positions a title just above the plot;
+    measured instead, the title floats somewhere IN BETWEEN, at a position that
+    itself scales with `margin.t` -- so a 6-line subline (item 7's own growth)
+    left ~145 px of blank space ABOVE the title on thrust1_circuit_knobs.
+    `_heatmap` now PINS the title to a small, fixed offset from the card's own top
+    (`title.yref="container"`), and `_heatmap_margin_t` is re-calibrated (measured)
+    against that pin: 36 px/line, not 60.
+4S. "sub-pixel here, not visible" (item 7's own wording) was itself an unverifiable
+    -- and, on a different frame, measurably FALSE -- claim: cancel_results.png
+    frame 2 shows the direct-path gate as a visible bright stripe. Reworded to
+    state only the gate's fixed geometric size and where a stripe would sit if
+    bright, never that it is invisible.
+5S. Every heat map's colorbar title ("dB rel. peak<br>(clipped at ...)") was two
+    lines with no line-count-aware sizing of its own, and its second line
+    collided with the colorbar's "0" tick. Now one line.
+6S. RE-VERIFIED, not changed: the coordinator's second read reported the tracker
+    panel's settled-level annotation still colliding on Thrust 2 arm A / Thrust 3
+    arm B under a proposed "always top-left, shift up" redesign. A fresh render +
+    magnified crop of BOTH screens (this same session, after item 3's wave-9-first
+    `annotation_xshift` fix) found NO collision on either -- the annotation's
+    closing ")" clears the right-hand axis with a visible gap in both cases. Left
+    UNCHANGED rather than implementing an alternative that could not be reproduced
+    and would have broken wave 8's own pinned collision-avoidance test
+    (`test_settled_level_annotation_moves_when_an_early_frame_collides`, which
+    requires the two cases' `xanchor` to differ -- incompatible with "always
+    top-left"). Flagged for the coordinator to confirm against their own PNG.
+7S. `stored_pr_figure`'s title names the scene-tier subdirectory only
+    ("benchmark_v1_D2"), shared by more than one dataset root (the offline scoring
+    corpus AND the live Thrust 5 demo corpus). Now prints "{dataset root}/{tier}"
+    (e.g. "b1_bench_v3/benchmark_v1_D2"), read from the same `manifest` path every
+    other field on this title already reads.
 """
 from __future__ import annotations
 
@@ -259,9 +314,11 @@ def test_render_results_shows_each_arms_own_run_notes(monkeypatch):
 
     data, *_ = appmod._run_pipeline(1, state_a, preset.n_steps, "", None)
 
-    # Each arm carries its OWN note (arms can differ -- item 6's own requirement).
-    assert data["_notes"] == "arm-0 note: evaluated at 14.25-15.75 GHz"
-    assert data["_previous"]["_notes"] == "arm-1 note: evaluated at 14.25-15.75 GHz"
+    # Each arm carries its OWN note (arms can differ -- item 6's own requirement),
+    # ONE (short, unwrapped) note per arm -> unchanged by `_truncate_note` (no " -- "
+    # and well under 160 chars).
+    assert data["_notes"] == ["arm-0 note: evaluated at 14.25-15.75 GHz"]
+    assert data["_previous"]["_notes"] == ["arm-1 note: evaluated at 14.25-15.75 GHz"]
 
     tree = appmod._render_results(data, "tab-results")
     text = _all_text(tree)
@@ -289,7 +346,7 @@ def test_render_results_single_run_shows_notes(monkeypatch):
                         lambda outputs: {"subspace_err": go.Figure()})
 
     data, *_ = appmod._run_pipeline(1, state, 5, "", None)
-    assert data.get("_notes") == "single-run note: evaluated at 14.25-15.75 GHz"
+    assert data.get("_notes") == ["single-run note: evaluated at 14.25-15.75 GHz"]
     text = _all_text(appmod._render_results(data, "tab-results"))
     assert "single-run note: evaluated at 14.25-15.75 GHz" in text
 
@@ -315,6 +372,81 @@ def test_render_results_no_notes_key_when_axis_meta_has_none(monkeypatch):
 
     data, *_ = appmod._run_pipeline(1, state, 5, "", None)
     assert "_notes" not in data
+
+
+# --------------------------------------------------------------------------------
+# Item 6 follow-up (2026-09-24): each note truncated at its first " -- " or 160
+# chars, one line per note -- the live-chain gate's note otherwise ran 3-5 lines of
+# 11 px text on every Thrust 5 arm.
+# --------------------------------------------------------------------------------
+def test_truncate_note_cuts_at_the_first_double_dash_separator():
+    import webapp.app as appmod
+
+    # The real shape of the live-chain gate's own note (pipeline_runner.
+    # _StoredADCGateBlock.note): headline number, then " -- ", then an attribution
+    # clause long enough on its own to run past 160 chars.
+    note = ("live chain vs stored ADC over 5 frame(s): max |diff| = 1 of 8 LSB "
+           "(3-bit) (6.994e-05 absolute) -- DIFFERS -- this run's cube is not the "
+           "stored one (this run: ADC 3-bit, IF corner 1 m, front end on)")
+    truncated = appmod._truncate_note(note)
+    assert truncated == (
+        "live chain vs stored ADC over 5 frame(s): max |diff| = 1 of 8 LSB "
+        "(3-bit) (6.994e-05 absolute) ...")
+    assert "the usual answer" not in truncated
+    assert len(truncated) < len(note)
+
+
+def test_truncate_note_cuts_at_160_chars_when_no_separator_is_that_close():
+    import webapp.app as appmod
+
+    note = "x" * 200
+    truncated = appmod._truncate_note(note)
+    assert truncated == "x" * 160 + " ..."
+
+
+def test_truncate_note_leaves_a_short_note_with_no_separator_unchanged():
+    import webapp.app as appmod
+
+    note = "a short note with no separator at all"
+    assert appmod._truncate_note(note) == note
+
+
+def test_truncate_note_preserves_the_thrust4_frequency_disclosure():
+    """The exact regression this follow-up must not cause: Thrust 4's interconnect
+    note (`InterconnectBlock.describe()`, e2e/blocks.py -- not owned, read only) has
+    no " -- " and is a little over 160 chars, but the required clause sits at the
+    FRONT of it and must survive whichever cut applies."""
+    import webapp.app as appmod
+
+    note = ("Tessera TSV surrogate, scale model x2 (2x geometry, evaluated at "
+           "14.25-15.75 GHz): radius 2.5 um, pitch 30 um, height 50 um, liner "
+           "0.25 um, 300 K, ring3x3 arrangement")
+    assert " -- " not in note
+    assert len(note) > appmod._NOTE_TRUNCATE_CHARS
+    truncated = appmod._truncate_note(note)
+    assert "scale model x2 (2x geometry, evaluated at 14.25-15.75 GHz)" in truncated
+
+
+def test_notes_line_truncates_every_note_in_the_list():
+    import webapp.app as appmod
+
+    axis_meta = {"notes": ["short one", "long " + "x" * 200 + " -- attribution"]}
+    lines = appmod._notes_line(axis_meta)
+    assert lines[0] == "short one"
+    assert lines[1] == appmod._truncate_note(axis_meta["notes"][1])
+    assert lines[1].endswith(" ...")
+
+
+def test_render_results_renders_one_line_per_note_not_one_joined_paragraph():
+    """The Results tab used to join every note into one "|"-separated paragraph;
+    each note now gets its own line (checked via the rendered tree shape, not just
+    substring presence -- a joined paragraph would also contain both substrings)."""
+    import webapp.app as appmod
+
+    data = {"_notes": ["note one", "note two"]}
+    block = appmod._notes_block(data["_notes"])
+    line_texts = [_all_text(child) for child in block.children]
+    assert line_texts == ["note one", "note two"]
 
 
 # --------------------------------------------------------------------------------
@@ -359,7 +491,14 @@ def test_range_az_states_direct_path_is_invisible_and_the_brightest_visible_retu
     # height and printed a wrong number against the real PNG).
     gate_m = _range_per_gate_m(bins, freq_span_hz, n_freqs)
     assert f"0 dB cell at range 0 is one {gate_m:.2g} m gate" in text
-    assert "sub-pixel here, not visible" in text
+    # RETRACTED (wave 9, second hostile-expert read, 2026-09-24, item 4): "not
+    # visible" was itself unverifiable and measurably false on some frames
+    # (cancel_results.png frame 2 shows this gate as a visible bright stripe) --
+    # the gate's own BRIGHTNESS is real data that varies frame to frame, unlike its
+    # fixed geometric size. Says where a stripe would sit if it IS bright, never
+    # that it is invisible.
+    assert "may show as a thin stripe at the bottom edge" in text
+    assert "not visible" not in text
     assert " px" not in text
     expected_db = 10 * np.log10(0.1 / 1.0)
     expected_range = float(y_cropped[beyond[0]])
@@ -379,3 +518,157 @@ def test_direct_path_exclusion_constant_is_used_not_hardcoded_elsewhere():
     """Guards the module's own claim that the exclusion band is a single named
     constant, not a literal repeated in the note-building code."""
     assert _DIRECT_PATH_EXCLUSION_M == 2.0
+
+
+# --------------------------------------------------------------------------------
+# Second hostile-expert read (2026-09-24, same day): items 1S-7S, see module
+# docstring. Re-checks/extends the first-read tests above; does not replace them.
+# --------------------------------------------------------------------------------
+def test_stored_pr_figure_title_includes_the_dataset_root_not_just_the_tier(beat_cfar_data):
+    """Item 7S: "benchmark_v1_D2" alone is shared by more than one dataset root."""
+    import json
+    from pathlib import Path
+
+    manifest = beat_cfar_data["manifest"]
+    root, tier = Path(manifest).parent.parent.name, Path(manifest).parent.name
+    fig = ds.stored_pr_figure()
+    assert f"{root}/{tier}" in fig.layout.title.text
+    # Guards against a regression back to the bare, ambiguous tier name: the tier
+    # alone must not appear WITHOUT its root immediately before it.
+    assert f", {tier}" not in fig.layout.title.text.replace(f"{root}/{tier}", "")
+
+
+def test_pr_margin_gives_a_positive_measured_gap_not_just_a_formula(beat_cfar_data):
+    """Item 1S: the margin must be large enough in absolute terms, not merely
+    "computed from the line count" (the BLOCKER regression: the code path was
+    already line-count-driven and still overlapped). Pins the RE-CALIBRATED
+    constants directly, so a future edit that quietly shrinks them again is
+    caught here even without re-running Playwright."""
+    assert ds._PR_MARGIN_T_BASE >= 65
+    assert ds._PR_MARGIN_T_PER_LINE >= 50
+    fig = ds.stored_pr_figure()
+    # n_lines is floored at 4 (`_PR_MIN_TITLE_LINES`); this is the exact value a
+    # real headless-browser measurement (this session, not committed) found gives
+    # a ~20 px clear gap between the title's rendered bottom and the plot's top.
+    assert fig.layout.margin.t == pytest.approx(
+        ds._PR_MARGIN_T_BASE + ds._PR_MARGIN_T_PER_LINE * (ds._PR_MIN_TITLE_LINES - 2))
+    assert fig.layout.margin.t >= 170
+
+
+def test_pr_figure_height_grows_with_margin_so_the_plot_does_not_shrink():
+    """Item 1S: `height` must scale with the re-calibrated (taller) margin, or the
+    fix for the overlap would come at the cost of squeezing the PR curves down to
+    a sliver."""
+    fig = ds.stored_pr_figure()
+    assert fig.layout.height == (ds._PR_PLOT_DOMAIN_HEIGHT + fig.layout.margin.t
+                                 + ds._PR_MARGIN_B)
+
+
+def test_range_profile_title_margin_scales_with_its_own_line_count():
+    """Item 2S: `range_profile`'s panel used to hardcode `t=40` regardless of its
+    title's line count."""
+    torch = pytest.importorskip("torch")
+    from webapp.pipeline_runner import _heatmap_margin_t
+
+    prof = torch.rand(8, dtype=torch.float32)
+    fig = figures_from_outputs({
+        "range_profile_agg": [prof],
+        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_profile_bins": 8},
+    })["range_profile"]
+    assert fig.layout.title.text.count("<br>") + 1 == 2   # main + one median/direct-path line
+    assert fig.layout.margin.t == _heatmap_margin_t(fig.layout.title.text)
+    assert fig.layout.margin.t > 40, "must have grown past the old flat default"
+
+
+def test_heatmap_title_is_pinned_to_the_cards_own_top_not_floating():
+    """Item 3S: `_heatmap`'s title must be explicitly anchored to the card's own
+    top (container-relative), not left at Plotly's default floating position --
+    that default is what produced ~145 px of blank space above a 6-line title."""
+    torch = pytest.importorskip("torch")
+
+    ra = torch.rand((8, 8)).to(torch.complex64)
+    fig = figures_from_outputs({
+        "range_az": [ra],
+        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_az_bins": 8},
+    })["range_az"]
+    assert fig.layout.title.yref == "container"
+    assert fig.layout.title.yanchor == "top"
+    assert fig.layout.title.y >= 0.9
+
+
+def test_heatmap_margin_t_per_line_is_smaller_than_the_pre_pin_value():
+    """Item 3S: re-calibrated against the PINNED title (see the test above) --
+    the old 60 px/line, measured against the unpinned default, would now leave
+    the plot needlessly short since the title no longer eats into the margin
+    the same way."""
+    from webapp.pipeline_runner import _HEATMAP_MARGIN_T_PER_LINE
+    assert _HEATMAP_MARGIN_T_PER_LINE < 60
+    assert _HEATMAP_MARGIN_T_PER_LINE >= 30   # still enough to clear a real sup line
+
+
+def test_frame_layout_title_override_keeps_the_same_pin():
+    """Item 3S follow-through: a `go.Frame(layout=dict(title=...))` REPLACES the
+    whole title object, so the per-frame override used for the slider must repeat
+    the pin, or the title would jump to the floating default the moment the
+    slider moves off its initial frame."""
+    torch = pytest.importorskip("torch")
+
+    ra1 = torch.rand((8, 8)).to(torch.complex64)
+    ra2 = torch.rand((8, 8)).to(torch.complex64)
+    fig = figures_from_outputs({
+        "range_az": [ra1, ra2],
+        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_az_bins": 8},
+    })["range_az"]
+    assert len(fig.frames) == 2
+    for frame in fig.frames:
+        ft = frame.layout.title
+        assert ft.yref == "container" and ft.yanchor == "top"
+
+
+def test_heatmap_colorbar_title_is_one_line():
+    """Item 5S: a two-line colorbar title collided with the colorbar's own "0"
+    tick on every heat map."""
+    torch = pytest.importorskip("torch")
+
+    ra = torch.rand((8, 8)).to(torch.complex64)
+    fig = figures_from_outputs({"range_az": [ra]})["range_az"]
+    assert "<br>" not in fig.data[0].colorbar.title.text
+    assert "clipped at" in fig.data[0].colorbar.title.text
+
+
+def test_settled_level_annotation_clears_the_right_axis_on_both_flagged_screens():
+    """Item 6S (re-verify, not a redesign): a fresh render of the two screens the
+    second hostile read flagged (Thrust 2 arm A shape, Thrust 3 arm B shape) --
+    reproduced here as the same underlying data shape rather than the full preset
+    -- must still show the padding fix from item 3 (first read): a colliding
+    early frame moves the annotation right AND clears the axis via `xshift`."""
+    collide = figures_from_outputs(
+        {"subspace_err": [0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3, 0.3, 0.3, 0.3]}
+    )["subspace_err"]
+    ann = next(a for a in collide.layout.annotations if "settled level" in (a.text or ""))
+    assert ann.xanchor == "right"
+    assert (ann.xshift or 0) < 0
+
+
+# --------------------------------------------------------------------------------
+# Coordinator report, 2026-09-24 (after the second read): the animation slider's
+# currentvalue label ("frame N") overlapped the play/pause buttons on Thrust 5's
+# narrower (~700 px) cards -- "frame 5" rendered as "rame 5". The buttons occupy a
+# FIXED pixel width; the slider's own x is necessarily fractional (no pixel anchor
+# in Plotly's slider schema), so the fraction has to clear the worst-case (narrowest
+# real) card width, not just the wide single-card layouts this was first tuned
+# against.
+# --------------------------------------------------------------------------------
+def test_slider_buttons_x_extent_was_widened_not_silently_shrunk():
+    from webapp.pipeline_runner import _SLIDER_BUTTONS_X_EXTENT, _SLIDER_LEN, _SLIDER_X
+
+    # 0.34 is the value a standalone Playwright measurement (this session, not
+    # committed) found clears the ~139 px fixed-width button group on Thrust 5's
+    # own ~600-700 px card widths; a regression back toward the old 0.16 would
+    # silently reopen the "rame N" defect without any figure-dict test catching it
+    # (no unit test here renders in a real browser), so this guards the constant
+    # directly rather than only the derived, relative wave-2 check.
+    assert _SLIDER_BUTTONS_X_EXTENT >= 0.30
+    assert _SLIDER_X == pytest.approx(_SLIDER_BUTTONS_X_EXTENT + 0.08)
+    assert _SLIDER_LEN == pytest.approx(0.98 - _SLIDER_X)
+    assert _SLIDER_LEN > 0.4, "the slider track itself must stay usably long"

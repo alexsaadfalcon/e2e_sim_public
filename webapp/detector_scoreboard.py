@@ -1039,12 +1039,26 @@ def _raddetnet_ci_for_arm(arm_name: str, raddetnet_ci_json_path) -> Optional[Dic
 
 #: Top-margin sizing for `stored_pr_figure`'s title (main line + "<br><sup>" block) --
 #: same subtitle-line-count pattern as `pipeline_runner._heatmap_margin_t` (commit
-#: 6081e29). Calibrated against this figure's own measurements: 60 px fit the
-#: original single-sup-line title (n_lines=2); wave 8 (W5) raised it to 84 for the
-#: 2-sup-line title (n_lines=3) this module ships today -- i.e. +24 px per further
-#: wrapped line.
-_PR_MARGIN_T_BASE = 60          # n_lines == 2 (main title + 1 sup line)
-_PR_MARGIN_T_PER_LINE = 24
+#: 6081e29). RE-CALIBRATED (wave 9, second hostile read, 2026-09-24): the previous
+#: 60/+24-per-line constants were a LINEAR extrapolation from one measured point
+#: (wave 8's 60 -> 84 for n_lines 2 -> 3) that was never re-verified against the
+#: browser; a real Playwright measurement of this exact figure (`gd.querySelector
+#: ('.g-gtitle')` vs `'.bg'` bounding rects, see notes/tools -- standalone script,
+#: not committed) found the title's rendered BOTTOM moves at only ~HALF the rate of
+#: `margin.t` (Plotly centers an auto-positioned title within its margin band
+#: rather than pinning it to the band's top), while the plot's own top edge moves
+#: 1:1 with `margin.t` -- so undershooting the per-line cost compounds: at n_lines=3
+#: the old 84 measured a bare 0 px gap (title bottom == plot top, exactly the
+#: "wave 8 fixed it with zero slack" pattern this file's table-margin comments
+#: already warn about elsewhere), and at n_lines=4 the extrapolated 108 measured an
+#: 11.6 px OVERLAP -- the exact "sco1ed" defect the second hostile read reported.
+#: These values are calibrated to a real ~18-22 px gap at both n_lines=3 (unused
+#: while `_PR_MIN_TITLE_LINES` floors every call to 4, kept for any future caller
+#: that passes a shorter title) and n_lines=4 (a doubled 24 px/line surrogate for
+#: the true "add half back" relationship, cheaper to reason about than re-deriving
+#: the half-rate formula per call).
+_PR_MARGIN_T_BASE = 65          # n_lines == 2 (main title + 1 sup line)
+_PR_MARGIN_T_PER_LINE = 55
 #: Both A/B arms of a Thrust-5 preset draw this SAME figure (`webapp.app._arm_result`
 #: appends one more "<br><sup>" line to arm B's copy, saying the curve is identical on
 #: both arms), and the two must render at the SAME margin or their plot axes do not
@@ -1056,6 +1070,14 @@ _PR_MARGIN_T_PER_LINE = 24
 #: own actual line count -- means arm A (3 lines) and arm B (4, after its append) get
 #: byte-identical margins without `_arm_result` needing to know or match this number.
 _PR_MIN_TITLE_LINES = 4
+#: Fixed bottom margin (legend) -- named so the height formula below can share it
+#: rather than repeating the literal.
+_PR_MARGIN_B = 110
+#: Plot area (px) preserved regardless of the top margin's own growth -- the figure's
+#: total `height` is computed as this plus both margins (mirrors
+#: `pipeline_runner._HEATMAP_PLOT_DOMAIN_HEIGHT`'s pattern) so the re-calibration
+#: above (item 1, wave 9 second hostile read) grows the CARD, not shrinks the PLOT.
+_PR_PLOT_DOMAIN_HEIGHT = 280
 
 
 def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
@@ -1084,7 +1106,18 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         raise ValueError(f"{beat_cfar_json_path}: 'arms' is empty -- nothing to plot")
 
     manifest = data.get("manifest", "")
-    corpus_name = Path(manifest).parent.name if manifest else "?"
+    # DATASET ROOT included (item 7, wave 9 second hostile read, 2026-09-24): the
+    # scene-tier subdirectory name alone ("benchmark_v1_D2") is shared by more than
+    # one dataset root -- both the offline scoring corpus this figure is titled after
+    # (b1_bench_v3/benchmark_v1_D2) and the live Thrust 5 demo corpus
+    # (b1_demo_cfr/benchmark_v1_D2) -- so a bare "benchmark_v1_D2" reads as one
+    # corpus when it names two. Read from the SAME `manifest` path every other field
+    # on this title already reads (never typed) -- same convention
+    # `run_pipeline`'s `trained_on` string and `_third_corpus_rows_for_arm`'s tier
+    # parsing use elsewhere (`Path(manifest).parent.parent.name`, the dataset root).
+    corpus_tier = Path(manifest).parent.name if manifest else "?"
+    corpus_root = Path(manifest).parent.parent.name if manifest else ""
+    corpus_name = f"{corpus_root}/{corpus_tier}" if corpus_root else corpus_tier
     n_frames = None
     for a in arms:
         gpf = a.get("gt_per_frame")
@@ -1176,8 +1209,12 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # re-check): the wrapped 2-row case must not overlap the x-axis title below
         # it, which `automargin=True` below cannot solve for a LEGEND (that flag only
         # covers axis titles/ticks).
-        margin=dict(l=50, r=20, t=margin_t, b=110),
-        height=480,
+        margin=dict(l=50, r=20, t=margin_t, b=_PR_MARGIN_B),
+        # `height` grows WITH `margin_t` (item 1 re-calibration, wave 9 second
+        # hostile read) so the plot area itself (`_PR_PLOT_DOMAIN_HEIGHT`) stays
+        # fixed rather than shrinking every time the top margin does -- was a bare
+        # 480 (implicitly plot=480-84-110=286 at the old, insufficient margin).
+        height=_PR_PLOT_DOMAIN_HEIGHT + margin_t + _PR_MARGIN_B,
     )
     if fallback_arms:
         fig.add_annotation(

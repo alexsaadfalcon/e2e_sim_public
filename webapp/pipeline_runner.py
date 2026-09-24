@@ -1792,24 +1792,57 @@ _HEATMAP_MARGIN_R = 20
 #: (`_heatmap_margin_t`), so a wording change that adds or removes a wrapped line
 #: cannot silently under-provision the margin again.
 _HEATMAP_MARGIN_T_BASE = 40       # one-line title, no subline (pre-2026-09-23 default)
-#: Raised 45 -> 60 (wave 8, W2/W13): the range-azimuth/range-elevation subline grew a
-#: 4th title line (direct-path + native-resolution clauses), and at 45/line the last
-#: wrapped line's descenders were measurably cut by the plot (rehearsal PNG,
-#: thrust1_circuit_knobs, single wide panel) even though `_heatmap_margin_t`'s line
-#: count was correct -- 45px/line was calibrated at n=3 and undercounted the actual
-#: rendered height of a title-font-plus-<sup>-sublines block at n=4. Re-verified on
-#: the wave-8 wording at n=4 (thrust1/thrust2/thrust4 rehearsal PNGs) with no overlap.
-_HEATMAP_MARGIN_T_PER_LINE = 60  # each further wrapped title/subline line
+#: RETRACTED (wave 9, second hostile-expert read, 2026-09-24, item 3): this file's
+#: title used to be positioned by Plotly's DEFAULT auto-placement, which (measured
+#: via a standalone Playwright script against `.g-gtitle`/`.bg` bounding rects, not
+#: committed -- see `_heatmap`'s title `yref`/`y`/`yanchor` below) sits the title
+#: somewhere BETWEEN the card top and the plot, at a position that itself shifts
+#: with `margin.t` -- so the "60 px/line" this constant used to hold (raised from 45
+#: at wave 8 after a real clipping bug) was calibrated to stop the title's BOTTOM
+#: from colliding with the plot, without controlling where its TOP landed. At the
+#: n=6 line count item 7's own subline growth produced, that put ~145 px of blank
+#: space ABOVE the title (thrust1_circuit_knobs rehearsal PNG) -- correct at the
+#: bottom, wasteful at the top. `_heatmap` below now PINS the title to a small,
+#: fixed offset from the card's own top (`yref="container", y=1.0`), which
+#: decouples the title's position from `margin.t` entirely.
+#:
+#: RE-TUNED once already, same pass: a first pin attempt (`y=0.995`, pad 6) still
+#: measured a NEGATIVE gap to the card's own top edge (the title's own rendered
+#: glyph box starts above its nominal anchor point) and the rendered PNG confirmed
+#: it -- the top of "Range-azimuth power" was visibly clipped by the card border
+#: (thrust1_circuit_knobs). `y=1.0` (the true top, not "nearly 1.0" -- a fractional
+#: y off the true top scales with the figure's OWN height, which varies with
+#: `margin.t`, defeating the whole point of pinning) with a larger, re-measured
+#: `pad.t` (26, not 6) clears that with a small positive margin, confirmed
+#: independent of line count (same measured gap at n_lines=3 and 6, unlike the
+#: fractional-y attempt).
+_HEATMAP_MARGIN_T_BASE2 = 60      # n_lines == 2 (main title + 1 sup line), title PINNED
+_HEATMAP_MARGIN_T_PER_LINE = 45  # each further wrapped title/subline line, title PINNED
 _HEATMAP_MARGIN_B = 40
 _HEATMAP_PLOT_DOMAIN_HEIGHT = 280
+#: How far below the card's own top edge the pinned title sits (pixels, `title.pad.t`
+#: with `yref="container", y=1.0`) -- fixed regardless of the figure's own height,
+#: unlike the old floating position. See the constants above for the re-tuning this
+#: was measured against (a smaller pad here clipped the title's own top).
+_HEATMAP_TITLE_TOP_PAD = 26
 
 
 def _heatmap_margin_t(title: str) -> int:
     """Top margin sized from how many lines `title` (a Plotly "<br>"-joined title,
     possibly with a "<br><sup>...</sup>" subline that `_wrap_text` may itself have
-    wrapped further) actually renders as -- see `_HEATMAP_MARGIN_T_BASE`."""
+    wrapped further) actually renders as -- see `_HEATMAP_MARGIN_T_BASE2`. Assumes
+    the caller ALSO pins the title near the card's own top (`_heatmap`'s title
+    `yref`/`y`/`yanchor`/`pad`) -- the two-point calibration behind
+    `_HEATMAP_MARGIN_T_BASE2`/`_PER_LINE` was measured against that pinned
+    position, not Plotly's (unpinned) default. `n_lines <= 1` (no subline at all,
+    e.g. the azimuth-elevation FFT panel) keeps the original, separately-safe
+    single-line value -- the two-point fit above was never measured at n=1 and a
+    single MAIN-title-font line is taller than a `<sup>` line, so extrapolating the
+    per-line slope down to n=1 would UNDER-provision it."""
     n_lines = (title or "").count("<br>") + 1
-    return _HEATMAP_MARGIN_T_BASE + _HEATMAP_MARGIN_T_PER_LINE * (n_lines - 1)
+    if n_lines <= 1:
+        return _HEATMAP_MARGIN_T_BASE
+    return _HEATMAP_MARGIN_T_BASE2 + _HEATMAP_MARGIN_T_PER_LINE * (n_lines - 2)
 
 
 def _heatmap(data_db, title: str, *, x=None, y=None,
@@ -1823,7 +1856,13 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
         # clip is a computed float (e.g. -36.233...) that reads as false precision
         # and says nothing about WHY it differs from the shared -40 dB (rehearsal,
         # 2026-09-23) -- see the `radar_cube` branch of `figures_from_outputs`.
-        colorbar_title = f"dB rel. peak<br>(clipped at {zmin:g})"
+        # ONE line (item 5, wave 9 second hostile-expert read, 2026-09-24): the old
+        # "<br>"-split two-line version had its own second line ("(clipped at
+        # -40.0)") collide with the colorbar's own "0" tick on every heat map --
+        # the colorbar sizes its own reserved title band differently from the main
+        # title (no `_heatmap_margin_t`-style line-count sizing exists for it), so a
+        # two-line colorbar title had nothing keeping it clear of the bar's ticks.
+        colorbar_title = f"dB rel. peak (clipped at {zmin:g})"
     fig = go.Figure(
         data=go.Heatmap(
             z=data_db, x=x, y=y, zmin=zmin, zmax=0,
@@ -1832,7 +1871,16 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
     )
     margin_t = _heatmap_margin_t(title)
     fig.update_layout(
-        title=title,
+        # PINNED near the card's own top edge, not Plotly's default (floating,
+        # off-center) position (item 3, wave 9 second hostile-expert read,
+        # 2026-09-24) -- `yref="container"` measures `y` against the WHOLE figure
+        # canvas (unaffected by `margin.t`), so the title's position no longer
+        # drifts down as the margin grows with line count, which is what left
+        # ~145 px of blank space above a 6-line title (thrust1_circuit_knobs
+        # rehearsal PNG) even though the margin itself was tall enough. See
+        # `_heatmap_margin_t`'s docstring: its own calibration assumes this pin.
+        title=dict(text=title, yref="container", y=1.0, yanchor="top",
+                   pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
         xaxis_title=xlabel,
         yaxis_title=ylabel,
         margin=dict(l=_HEATMAP_MARGIN_L, r=_HEATMAP_MARGIN_R,
@@ -1918,7 +1966,23 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
 #: rehearsal 2026-09-23); a small margin is added on top for the currentvalue
 #: label's own width even though it is left-anchored (defense in depth against a
 #: future font-size bump).
-_SLIDER_BUTTONS_X_EXTENT = 0.16
+#:
+#: RAISED 0.16 -> 0.34 (coordinator report, 2026-09-24, read on
+#: thrust5_detector_cfar_results.png's Range-Doppler panel: the currentvalue label
+#: "frame 5" rendered as "rame 5", its "f" hidden under the pause button). The
+#: buttons occupy a FIXED PIXEL width (~139 px, measured via a standalone
+#: Playwright script -- icon glyph size does not scale with the figure), while the
+#: slider's own `x` is necessarily a FRACTION of the card's width (Plotly's slider
+#: layout has no pixel-anchored x) -- so one fixed fraction can only clear a fixed
+#: pixel width down to some minimum card width, and 0.16 (`_SLIDER_X`=0.24) cleared
+#: it only on the WIDE single-card Thrust 1/single-figure layouts this was
+#: originally calibrated against (rehearsal 2026-09-23): on Thrust 5's ~700 px
+#: multi-card cards, 0.24 lands the label's left edge at ~131-159 px, inside or
+#: barely past the ~139 px button width. Re-measured against the SAME real card
+#: widths (600-700 px, Thrust 5's own two-column layout) and the wide single-card
+#: case (Thrust 1, ~1560 px): 0.34 (`_SLIDER_X`=0.42) clears the buttons by
+#: 11-52 px across that whole range.
+_SLIDER_BUTTONS_X_EXTENT = 0.34
 _SLIDER_X = _SLIDER_BUTTONS_X_EXTENT + 0.08
 _SLIDER_LEN = 0.98 - _SLIDER_X
 #: The button/slider row's own y (paper fraction, below the plot) and the bottom
@@ -2147,6 +2211,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # number this module has no way to verify from inside Python. Says
                 # "sub-pixel" (true at any plausible render size for a 1 m gate
                 # against a 100+ m axis) instead of a specific, wrong pixel count.
+                #
+                # RETRACTED (wave 9, second hostile-expert read, 2026-09-24, item
+                # 4): "not visible" was itself a claim this module cannot verify --
+                # the direct-path gate's BRIGHTNESS varies frame to frame (it is
+                # real data, not a fixed leakage floor), and on
+                # cancel_results.png frame 2 it renders as a visible bright stripe
+                # across the full azimuth axis at range 0. What IS true regardless
+                # of the frame's own brightness is the gate's geometric size: one
+                # display gate tall against a 100+ m axis. Says that, and where a
+                # stripe would sit if it IS bright enough to show, rather than
+                # asserting invisibility this module cannot check.
                 def _direct_path_note(frame_db_2d: np.ndarray) -> str:
                     if not _beyond_direct_path.any():
                         return ""
@@ -2156,8 +2231,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     bright_db = float(sub.flat[i_flat])
                     bright_range_m = float(y[_beyond_direct_path][r_idx])
                     return (f"; 0 dB cell at range 0 is one {_gate_m:.2g} m gate "
-                            f"(sub-pixel here, not visible); brightest visible "
-                            f"return: {bright_db:.1f} dB at {bright_range_m:.0f} m")
+                            f"(may show as a thin stripe at the bottom edge); "
+                            f"brightest visible return: {bright_db:.1f} dB at "
+                            f"{bright_range_m:.0f} m")
                 direct_path_notes = [_direct_path_note(f) for f in frames_db]
             else:
                 direct_path_notes = [""] * len(frames_db)
@@ -2174,7 +2250,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 clip_note = f"; clip {clip_db:.1f} dB (median floor + 3 dB)"
             else:
                 clip_note = f"; clip {clip_db:.1f} dB (shared floor)"
-            colorbar_title = f"dB rel. peak<br>(clipped at {clip_db:.1f})"
+            # ONE line (item 5S, wave 9 second hostile-expert read, 2026-09-24):
+            # see `_heatmap`'s own colorbar_title comment -- a two-line version
+            # collided with the colorbar's own "0" tick.
+            colorbar_title = f"dB rel. peak (clipped at {clip_db:.1f})"
             # The main title is short enough to fit the two-card layout's ~600 px
             # ("Range-Azimuth power (non-coherent over elevation)" ran off the right
             # edge there, rehearsal 2026-09-23); the qualifier moves into a
@@ -2211,7 +2290,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # in step with the slider, the same way the title already is.
             corner_texts = [f"peak-median {d:.1f} dB" for d in dyn_range_db]
             fig.add_annotation(**_corner_annotation(corner_texts[-1]))
-            frame_layouts = [dict(title=dict(text=t), annotations=[_corner_annotation(c)])
+            # The per-frame title override must repeat the SAME pin `_heatmap` set
+            # on the base figure (item 3, wave 9 second hostile read, 2026-09-24):
+            # a `go.Frame(layout=dict(title=dict(text=t)))` REPLACES the whole
+            # title object, not just its text, so a frame update without
+            # `yref`/`y`/`yanchor`/`pad` would revert to Plotly's floating default
+            # position the moment the slider moved off its initial frame.
+            frame_layouts = [dict(title=dict(text=t, yref="container", y=1.0,
+                                            yanchor="top", pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
+                                  annotations=[_corner_annotation(c)])
                             for t, c in zip(titles, corner_texts)]
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
@@ -2260,14 +2347,25 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # annotation collided with the title text at this font size (rehearsal,
         # 2026-09-23).
         floor_db = float(np.median(prof_db)) if prof_db.size else float("nan")
+        rp_title = (f"Range profile (non-coherent over channels)"
+                   f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}"
+                   f"{direct_path_note}</sup>")
+        # Margin sized from the title's OWN line count (item 2, wave 9 second
+        # hostile-expert read, 2026-09-24), the same `_heatmap_margin_t` this
+        # module's other panels already use: the fixed t=40 here fit only a
+        # one-line title and was never updated when the median-floor/direct-path
+        # subline turned this into two, so the subline rendered THROUGH the "0"
+        # tick and the plot's own top border on both Thrust 4 arms.
+        rp_margin_t = _heatmap_margin_t(rp_title)
         fig.update_layout(
-            title=f"Range profile (non-coherent over channels)"
-                 f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}"
-                 f"{direct_path_note}</sup>",
+            # PINNED the same way `_heatmap` pins its own title (item 3's fix
+            # applies here too: `_heatmap_margin_t`'s calibration now assumes it).
+            title=dict(text=rp_title, yref="container", y=1.0, yanchor="top",
+                      pad=dict(t=_HEATMAP_TITLE_TOP_PAD)),
             xaxis_title=xlabel,
             yaxis_title="power (dB rel. peak)",
-            margin=dict(l=40, r=20, t=40, b=40),
-            height=360,
+            margin=dict(l=40, r=20, t=rp_margin_t, b=40),
+            height=320 + rp_margin_t,
         )
         figs["range_profile"] = _make_legible(fig)
 
@@ -2302,7 +2400,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # The provenance of the clip goes in the panel's title subline, NOT the colorbar
         # title: a long colorbar title squeezed the heat map to a sliver at two-card
         # width (rehearsal 2026-09-23, all three Thrust 5 screens).
-        rd_clip_title = f"dB rel. peak<br>(clipped at {rd_clip:.1f})"
+        # ONE line (item 5S, wave 9 second hostile-expert read, 2026-09-24): see
+        # `_heatmap`'s own colorbar_title comment.
+        rd_clip_title = f"dB rel. peak (clipped at {rd_clip:.1f})"
         # Shortened (Change 3, 2026-09-23 hostile-expert re-read): the previous
         # subline ("(non-coherent over channels); clip -36.2 dB = this frame's median
         # floor + 3 dB") ran past the two-card (~600 px) panel edge and was clipped
