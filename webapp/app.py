@@ -1430,10 +1430,15 @@ def _render_results(results_data, active_tab):
     identity_children = [html.Span(identity, className="run-identity")]
     if cancelled:
         identity_children.append(_cancelled_chip(cancelled))
-    header_row = html.Div([
-        html.Div(identity_children, className="run-identity-cell"),
-        _transport_bar(),
-    ], className="run-identity-row")
+    # A screen whose products carry no animation frames (Thrust 3: one line plot) gets
+    # NO transport: a play button and a slider that do nothing are a control the
+    # presenter can press and be ignored by, which is worse than their absence.
+    animated = any((fig.get("frames") or []) for fig in list(figs.values())
+                   + list(prev_figs.values()) if isinstance(fig, dict))
+    header_row = html.Div(
+        [html.Div(identity_children, className="run-identity-cell")]
+        + ([_transport_bar()] if animated else []),
+        className="run-identity-row")
 
     children = [header_row, html.Div(className="section-rule")]
 
