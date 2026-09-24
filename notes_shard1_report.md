@@ -168,8 +168,10 @@ Nothing was deleted. The one assertion retired by design
 (`test_range_az_nondivisible_nfreqs_zero_gate_and_energy`) carries its one-line reason
 and the contract section.
 
-All 21 owned test files run green (≈400 tests, 4 skips: the Sionna-gated and
-`munich_ka`-gated ones where the file is absent — both present and passing here).
+All 21 owned test files run green: **412 passed, 4 skipped** in 104 s
+(`CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m pytest <the 21 files>`, run at
+`223db23`). The 4 skips are the marker-gated ones (`sionna`/`slow`/`gui`); the two
+`munich_ka`-gated oracles RAN and passed, since the file is present on this machine.
 
 ---
 
