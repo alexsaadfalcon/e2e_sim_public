@@ -362,8 +362,10 @@ def test_crop_keeps_exactly_the_v10_display_half():
     assert torch.equal(half["cube"], full["cube"][..., :n // 2 + 1])
     # Same calibration for the bins they share: cropping keeps bins, not metres.
     assert torch.allclose(half["range_axis"], full["range_axis"][:n // 2 + 1])
-    assert float(full["range_axis"][-1]) == pytest.approx(
-        (n - 1) * (C_MPS / 2.0) / (n * df))
+    # The DEFAULT convention is `bistatic_path` (c*tau) since the owner's 2026-09-24
+    # ballot -- see tests/test_full_chain_frontend.py for that decision's own oracles.
+    assert full["range_convention"] == "bistatic_path"
+    assert float(full["range_axis"][-1]) == pytest.approx((n - 1) * C_MPS / (n * df))
 
 
 def test_adc_to_rd_range_half_parity():

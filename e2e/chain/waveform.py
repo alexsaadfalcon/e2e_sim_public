@@ -83,12 +83,88 @@ from e2e.circuit.tx_pa import TxPA
 from e2e.frames import FrameCapabilities
 
 
-class RandomWidebandSignal:
-    """Bandlimited complex noise waveform (folded in from signal_generator -- see the
-    module docstring's "Waveform classes" section for provenance and rough edges)."""
+# ================================================================================
+# The waveform CLASSES -- the one branch point on the one chain.
+# ================================================================================
+# The owner's 2026-09-24 ballot made the waveform a three-way choice rather than a
+# hardcoded FMCW chirp. The three classes below share ONE contract so the blocks
+# downstream of the branch (the dechirp / mixing block, the range transform, the
+# products) do not have to know which one ran -- they read the metadata it returns.
+#
+# THE CONTRACT a waveform class implements:
+#
+#   .kind                 -- the registry name ("fmcw" | "ofdm" | "jsac").
+#   .generate(t)          -> complex64 samples of the transmitted complex envelope on
+#                            the time grid `t`. This is the legacy entry point and is
+#                            what `WaveformBlock` puts in `tx_wave`.
+#   .record_metadata()    -> a dict describing how the RECEIVED record is organised,
+#                            which is what the rest of the chain actually needs:
+#         "kind"          -- the class name again, so a product can refuse by name;
+#         "cube_axes"     -- {"slow": ..., "fast": ...}, the pair
+#                            `frames.require_cube_axes` checks. FMCW yields
+#                            (chirp, range_bin); OFDM yields (symbol, subcarrier).
+#         "n_fast"        -- samples per chirp / subcarriers per symbol;
+#         "n_slow"        -- chirps / symbols per frame;
+#         "delta_f_hz"    -- the fast-axis spacing the range axis calibrates from,
+#                            or None when the class cannot name one;
+#         "constant_envelope" -- whether the transmitted envelope is unit modulus.
+#                            This is not decoration: it is the precondition under which
+#                            the dechirp commutes with the front end's envelope
+#                            nonlinearity (`e2e/chain/frontend.py`), and the reason the
+#                            TX PA is inert on FMCW and bites on OFDM (PAPR ~10 dB).
+#
+# See notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 2 for the option table this
+# implements, and `notes/JSAC_WAVEFORM_2026-09-24.md` (a research note that did not yet
+# exist when this was written) for which hybrid `jsac` is to be.
+
+WAVEFORM_KINDS = ("fmcw", "ofdm", "jsac")
+
+
+class _WaveformClass:
+    """Shared base: holds `metadata` and supplies the default record description.
+
+    Subclasses override `generate` and, where they differ, `record_metadata`.
+    """
+
+    kind = None
+    constant_envelope = False
 
     def __init__(self, metadata: dict):
-        self.metadata = metadata
+        self.metadata = dict(metadata or {})
+
+    def generate(self, t):                                   # pragma: no cover - abstract
+        raise NotImplementedError(
+            f"waveform class {type(self).__name__} does not implement generate()")
+
+    def record_metadata(self):
+        md = self.metadata
+        bw = float(md.get("bw") or 0.0)
+        n_fast = md.get("n_fast")
+        delta_f = md.get("delta_f_hz")
+        if delta_f is None and n_fast:
+            delta_f = bw / float(n_fast) if bw else None
+        return {
+            "kind": self.kind,
+            "cube_axes": dict(frames.CUBE_AXES_FMCW),
+            "n_fast": n_fast,
+            "n_slow": md.get("n_slow", 1),
+            "delta_f_hz": delta_f,
+            "constant_envelope": self.constant_envelope,
+        }
+
+
+class RandomWidebandSignal(_WaveformClass):
+    """Bandlimited complex noise waveform (folded in from signal_generator -- see the
+    module docstring's "Waveform classes" section for provenance and rough edges).
+
+    NOT one of the three registered `WAVEFORM_KINDS`: it is a probe waveform with
+    no sensing or comms consumer in the repo, kept because existing call sites use it.
+    Its envelope is not constant, so nothing that relies on the dechirp/nonlinearity
+    commutation may be run on it.
+    """
+
+    kind = "wideband"
+    constant_envelope = False
 
     def generate(self, t):
         sample_rate = 1 / (t[1] - t[0])
@@ -108,17 +184,22 @@ class RandomWidebandSignal:
         return signal
 
 
-class FMCWSignal:
-    """Ideal linear-FMCW chirp: constant slope k = bw / chirp_duration.
+class FMCWSignal(_WaveformClass):
+    """Ideal linear-FMCW chirp: constant slope k = bw / chirp_duration. THE DEFAULT.
 
     The linearity is an APPROXIMATION shared by the whole sensing chain (see
     `e2e.chain.rd_synth`'s scope list): a real PLL/VCO sweep deviates from the ideal
     ramp (chirp nonlinearity), smearing the dechirped beat tone and raising the
-    close-in sidelobe floor. Deliberately not modelled in v1.1.
+    close-in sidelobe floor. Deliberately not modelled.
+
+    `constant_envelope = True` is load-bearing, not a label: it is the precondition
+    that makes `|b[n]| = |r(t_n)|` exact and therefore licenses running the front end
+    on the beat record (`e2e/chain/frontend.py`). It is also why the TX PA is inert
+    here -- a Rapp nonlinearity applied to a unit-modulus signal is a constant.
     """
 
-    def __init__(self, metadata: dict):
-        self.metadata = metadata
+    kind = "fmcw"
+    constant_envelope = True
 
     def generate(self, t):
         bw = self.metadata['bw']
@@ -138,9 +219,151 @@ class FMCWSignal:
         return signal
 
 
+class OFDMISACSignal(_WaveformClass):
+    """OFDM waveform, sensed by SYMBOL DIVISION -- the JSAC-capable option.
+
+    Sensing works differently from FMCW and the difference is the whole point: there is
+    no dechirp. The receiver estimates `H_est = Y_q / X_q` per subcarrier (LS on an
+    all-pilot symbol, `e2e/comms/channel.py`), and THAT estimate is the frequency-domain
+    record the range transform then compresses. So the cube's fast axis counts
+    SUBCARRIERS, not range bins, until the transform runs -- which is exactly why
+    `cube_axes` travels in state and why a product built for `(chirp, range_bin)`
+    refuses this waveform by name instead of drawing a plausible picture of nothing.
+
+    The envelope is NOT constant (PAPR ~10 dB), with two consequences the chain must
+    respect: the TX PA's Rapp nonlinearity is live here where it is inert on FMCW, and
+    the front end's clamp (`rffe_model.py`'s clamp-at-cubic-peak) engages where an FMCW
+    chirp never reaches it. Nothing about `FrontEndBlock`'s placement argument survives
+    on this path either: the dechirp/nonlinearity commutation is a unit-modulus
+    identity, so on OFDM the front end must act on the actual sampled record.
+
+    IMPLEMENTED AS FAR AS `e2e/comms/ofdm.py` ALLOWS: this class builds the transmitted
+    time-domain symbol (pilot-loaded, CP-prefixed) via `OFDMModem`, and reports the
+    record layout. The RECEIVE bridge -- `Y/X` per subcarrier into the spine's frequency
+    record -- lives in the comms package (`e2e/comms/isac.py` does the CFR version
+    today) and is wired by the shard that owns it.
+
+    CP CAVEAT, stated because it is a real constraint and not a default: the cyclic
+    prefix must exceed the channel's delay SPREAD, not its fourth-strongest path. F94
+    records the munich Ka diffuse families reaching 454 ns, so a CP below ~1/4 symbol
+    on that trace produces inter-symbol interference that the range transform will
+    faithfully render as clutter. Read it off the PDP; do not assume the default.
+    """
+
+    kind = "ofdm"
+    constant_envelope = False
+
+    def __init__(self, metadata: dict):
+        super().__init__(metadata)
+        self.fft_size = int(self.metadata.get("fft_size", 64))
+        self.cp_len = int(self.metadata.get("cp_len", self.fft_size // 4))
+        self.n_symbols = int(self.metadata.get("n_symbols", 1))
+        self.bits_per_symbol = int(self.metadata.get("bits_per_symbol", 2))
+        self._modem = None
+
+    def modem(self):
+        """The `OFDMModem` this waveform transmits through, built lazily so importing
+        the waveform module does not drag in the comms package."""
+        if self._modem is None:
+            from e2e.comms.ofdm import OFDMModem
+            self._modem = OFDMModem(
+                fft_size=self.fft_size, cp_len=self.cp_len,
+                bits_per_symbol=self.bits_per_symbol,
+                **{k: v for k, v in self.metadata.items()
+                   if k in ("n_active", "pilot_spacing")})
+        return self._modem
+
+    def generate(self, t):
+        """The transmitted time-domain OFDM record (CP included), truncated or
+        zero-padded to `t`'s length so it drops into `WaveformBlock` unchanged.
+
+        Pilot-loaded random data: the sensing path only needs a KNOWN `X`, and using
+        the modem's own pilot/data machinery keeps the transmitted grid identical to
+        what the comms head will divide by.
+        """
+        from e2e.comms.ofdm import random_bits
+        modem = self.modem()
+        n_bits = modem.data_bits_per_symbol_block * self.n_symbols
+        bits = random_bits(n_bits, seed=self.metadata.get("seed", 0))
+        # `modulate` returns (tx_time, tx_freq); the transmitted GRID is kept because
+        # the sensing path divides by it (`H_est = Y/X`) and the comms head demaps
+        # against it -- a receiver that re-guesses `X` is not the same receiver.
+        tx_time, tx_freq = modem.modulate(bits, self.n_symbols)
+        self.tx_freq = tx_freq
+        self.tx_bits = bits
+        tx = tx_time.reshape(-1)
+        n_t = int(t.shape[0])
+        if tx.shape[0] < n_t:
+            tx = torch.cat([tx, tx.new_zeros(n_t - tx.shape[0])])
+        return tx[:n_t].to(torch.complex64)
+
+    def record_metadata(self):
+        md = super().record_metadata()
+        md.update({
+            "cube_axes": dict(frames.CUBE_AXES_OFDM),
+            "n_fast": self.fft_size,
+            "n_slow": self.n_symbols,
+            "cp_len": self.cp_len,
+            "delta_f_hz": (float(self.metadata["bw"]) / self.fft_size
+                           if self.metadata.get("bw") else None),
+        })
+        return md
+
+
+class JSACSignal(_WaveformClass):
+    """The hybrid sensing-and-communication waveform. REGISTERED, NOT IMPLEMENTED.
+
+    It is a registered class rather than an absent one on purpose: the branch point on
+    the diagram is real, the contract it must satisfy is written down, and a caller
+    asking for it gets a refusal that says what is missing instead of a KeyError that
+    says the option does not exist.
+
+    WHICH hybrid is an open research question at the time of writing. The two candidates
+    the contract (section 2) costs out:
+
+      * **OFDM-ISAC** -- one OFDM waveform doing both jobs; sensing by symbol division.
+        Already half-built as `OFDMISACSignal` above; a JSAC preset on top of it is the
+        cheaper path.
+      * **FMCW with embedded data** -- chirp-to-chirp PSK on the SLOW axis. Sensing is
+        unchanged after code removal (the data is a known unit-modulus factor per
+        chirp, so the radar divides it out exactly and the cube is bit-for-bit what it
+        would have been); comms decodes the phase at the sync/line-of-sight range bin.
+        Multi-chirp frames only -- munich frames are single-chirp, so they carry zero
+        bits and this option is corpus-only.
+
+    `notes/JSAC_WAVEFORM_2026-09-24.md` is to decide between them. Implementing it is
+    the other shard's task; what THIS class owes it is the contract above
+    (`record_metadata` must name the cube axes and whether the envelope is constant),
+    plus a `generate` that produces the transmitted record.
+    """
+
+    kind = "jsac"
+    constant_envelope = False
+
+    def generate(self, t):
+        raise NotImplementedError(
+            "the JSAC hybrid waveform is registered but not implemented: which hybrid "
+            "it is (OFDM-ISAC, or FMCW with chirp-to-chirp PSK on the slow axis) is "
+            "still open -- see notes/JSAC_WAVEFORM_2026-09-24.md and this class's "
+            "docstring for the contract an implementation must satisfy. Use "
+            "kind='fmcw' (or 'ofdm') until it lands."
+        )
+
+    def record_metadata(self):
+        raise NotImplementedError(
+            "JSACSignal.record_metadata: see generate() -- the hybrid is not chosen yet."
+        )
+
+
+#: The waveform registry -- the `kind` switch on `WaveformBlock`. "fmcw" is the
+#: default and the only one a v1.1 preset selects; "ofdm" and "jsac" are the v1.2
+#: options the contract's section 2 costs out. "wideband" is not one of
+#: `WAVEFORM_KINDS`: it is a probe waveform with no consumer (see its docstring).
 _WAVEFORM_CLASSES = {
     "wideband": RandomWidebandSignal,
     "fmcw": FMCWSignal,
+    "ofdm": OFDMISACSignal,
+    "jsac": JSACSignal,
 }
 
 
@@ -214,9 +437,10 @@ def fmcw_plan_from_freq_plan(freq_plan, *, n_rx, n_chirps=1, fs_hz=None,
 class WaveformBlock:
     """SOURCE: synthesizes the transmitted complex envelope `tx_wave`.
 
-    `kind` selects one of the waveform classes above ('wideband' / 'fmcw' --
+    `kind` selects one of the waveform classes above -- 'fmcw' (the default),
+    'ofdm', 'jsac' (see WAVEFORM_KINDS), or the unregistered probe 'wideband'.
     'narrowband' was an all-ones placeholder, deleted in the C2 fold-in; asking for
-    it raises with this history); `fc`/`bw`/`sample_rate`/`chirp_duration` feed the
+    it raises with this history. `fc`/`bw`/`sample_rate`/`chirp_duration` feed the
     class's `metadata` dict verbatim (see the module docstring's note on `fc`
     currently being inert). `n_t` sizes the time axis directly (defaults to
     `round(chirp_duration * sample_rate)`). The single generated
@@ -276,7 +500,13 @@ class WaveformBlock:
         # normalizes dtype.
         wave = wave.to(device=dev, dtype=torch.complex64)
         tx_wave = wave.view(1, 1, -1).expand(self.n_tx, self.n_chirp, self.n_t).clone()
-        return {"tx_wave": tx_wave}
+        # The record description travels WITH the waveform, so the dechirp/mixing
+        # block and the products read what this waveform actually produced instead of
+        # assuming FMCW. `cube_axes` is the pair `frames.require_cube_axes` checks --
+        # it is what makes a product refuse an OFDM cube by name.
+        record = self._signal.record_metadata()
+        return {"tx_wave": tx_wave, "waveform": record,
+                "waveform_kind": record["kind"]}
 
 
 class TxPABlock:

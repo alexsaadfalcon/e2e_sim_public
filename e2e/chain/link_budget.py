@@ -205,18 +205,47 @@ class ThermalNoiseBlock:
         RCS, wavelength and R^4 -- transmit power is the only missing factor);
       * add complex Gaussian noise of power `k*T*B*F`.
 
+    ONE INJECTION (`mode`, added 2026-09-24 for the FULL one-chain contract,
+    notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.4)
+    ------------------------------------------------------------------------
+    The chain used to inject thermal noise TWICE -- once inside the RF front end's own
+    Friis cascade (`rffe_model.py`) and once here -- which is F81's two mechanisms.
+    `mode` picks which of the two contracts this block is honouring:
+
+    * `"legacy"` (THE DEFAULT): exactly the behaviour above, unconditionally. It is the
+      default because every stored corpus on disk was generated with it, and the
+      live-vs-stored gates (`tests/test_ml_store_cfr.py`,
+      `tests/test_webapp_live_chain.py`) read max |diff| = 0 codes against those files.
+      Changing the default would silently invalidate them.
+    * `"once"`: there is exactly one thermal injection per chain, at the antenna
+      reference. If a `FrontEndBlock` ran upstream it already made it (stamping
+      `state['noise_injected_by']`), so this block adds NOTHING and becomes the
+      provenance record; if none did, this block IS the injection, with
+      `F = cfg.noise_figure_db`. In `"once"` mode `sqrt(P_tx)` is NOT applied here
+      either -- it belongs at the source (`TxPowerStage`), so that receiver noise
+      cannot scale with transmit power, which is the actual defect behind F81.
+
     Deterministic from `seed`, per frame, in the same style as `ImpairmentBlock`: frame i
     uses `seed + i`, so two runs with the same seed reproduce bit-identically and a
     different seed does not.
     """
 
-    def __init__(self, cfg, *, seed: int = 0, enabled: bool = True):
+    #: How this block relates to the rest of the chain's noise. See the class
+    #: docstring's "ONE INJECTION" section.
+    MODES = ("legacy", "once")
+
+    def __init__(self, cfg, *, seed: int = 0, enabled: bool = True, mode: str = "legacy"):
         from e2e.chain.receive import _RX_TIME
 
+        if mode not in self.MODES:
+            raise ValueError(
+                f"unknown ThermalNoiseBlock mode {mode!r}; expected one of {self.MODES}"
+            )
         self.frame_capabilities = _RX_TIME
         self.cfg = cfg
         self.seed = int(seed)
         self.enabled = bool(enabled)
+        self.mode = mode
         self._frame_idx = 0
 
     def reset(self):
@@ -240,17 +269,76 @@ class ThermalNoiseBlock:
                 "Either build the RF front end with physical_scale=True (the default for "
                 "ML corpus generation), or disable the link budget."
             )
-        scaled = adc * tx_amplitude_scale(self.cfg)
-        out = add_thermal_noise(scaled, self.cfg, seed=self.seed + self._frame_idx)
+        injected_by = state.get("noise_injected_by")
+        if self.mode == "legacy":
+            # v1.0/v1.1: sqrt(P_tx) here AND a kTBF floor here, regardless of whether
+            # the front end already injected one. This is F81's second mechanism, and
+            # it is the default ONLY because every stored corpus was generated with it
+            # -- the live-vs-stored gate reads max |diff| = 0 codes on it.
+            scaled = adc * tx_amplitude_scale(self.cfg)
+            out = add_thermal_noise(scaled, self.cfg, seed=self.seed + self._frame_idx)
+            floor_w = thermal_noise_power_w(self.cfg)
+        elif injected_by is not None:
+            # mode="once" and the front end already put the floor in, referenced to its
+            # OWN Friis cascade. Adding a second kTBF here is the double-count F81
+            # names. This block becomes the provenance record and nothing else -- and
+            # it does NOT re-apply sqrt(P_tx) either, which now lives at the source
+            # (`TxPowerStage`) so receiver noise cannot scale with transmit power.
+            out = adc
+            floor_w = None
+        else:
+            # mode="once" with no front end on the chain: THIS is the one injection,
+            # with F = cfg.noise_figure_db. sqrt(P_tx) is still the source's job.
+            out = add_thermal_noise(adc, self.cfg, seed=self.seed + self._frame_idx)
+            floor_w = thermal_noise_power_w(self.cfg)
         self._frame_idx += 1
         # Recorded so a frame can always say what floor it was generated against -- the
         # number that makes every impairment dB value on it meaningful.
         return {"adc": out,
+                "noise_injected_by": injected_by or "thermal_floor",
                 "link_budget": {
                     "tx_power_dbm": _get(self.cfg, "tx_power_dbm", DEFAULT_TX_POWER_DBM),
                     "noise_figure_db": _get(self.cfg, "noise_figure_db",
                                             DEFAULT_NOISE_FIGURE_DB),
                     "noise_bandwidth_hz": noise_bandwidth_hz(self.cfg),
                     "thermal_noise_w": thermal_noise_power_w(self.cfg),
+                    "mode": self.mode,
+                    "injected_here": floor_w is not None,
+                    "injected_by": injected_by or "thermal_floor",
                     "seed": self.seed + self._frame_idx - 1,
                 }}
+
+
+class TxPowerStage:
+    """`sqrt(P_tx)` AT THE SOURCE -- the scalar that turns an arbitrary-unit traced
+    amplitude into an absolute received voltage.
+
+    It used to live inside `ThermalNoiseBlock`, beside the noise draw. That is the
+    coupling F81 is really about: with the transmit-power scaling applied at the same
+    place as (and therefore AFTER) the receiver's own noise, raising `P_tx` raised the
+    signal and the floor together, and the SNR would not move. Put here, at the head of
+    the chain, `P_tx` scales the signal only and the floor stays where physics puts it.
+
+    Consumes and rewrites `s_pars` (DOMAIN_CFR), because it is a property of the
+    transmitted waveform and belongs before anything receive-side runs. It is a scalar
+    multiply and commutes with every linear stage between here and the dechirp, so
+    placing it at the source costs nothing and says something.
+
+    Added 2026-09-24 for the FULL one-chain contract (section 1.4). Pair it with
+    `ThermalNoiseBlock(mode="once")`; a chain running the legacy mode must NOT also
+    carry this stage or `P_tx` is applied twice.
+    """
+
+    def __init__(self, cfg, *, enabled: bool = True):
+        from e2e import frames as _frames
+        self.frame_capabilities = _frames.FrameCapabilities(
+            domain=_frames.DOMAIN_CFR, chirps=_frames.CHIRP_NATIVE, accepts_mimo=True)
+        self.cfg = cfg
+        self.enabled = bool(enabled)
+
+    def apply(self, state):
+        if not self.enabled:
+            return {}
+        scale = tx_amplitude_scale(self.cfg)
+        return {"s_pars": state["s_pars"] * scale,
+                "tx_amplitude_scale": float(scale)}

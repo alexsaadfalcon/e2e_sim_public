@@ -461,12 +461,20 @@ class QuantizerBlock:
 #: labelling choice: the frames are a TX->RX-array link with `normalize_delays=True`,
 #: so a bin's delay tau is an EXCESS delay over the line of sight, and the metre it is
 #: quoted in changes every number on every card (contract section 3.6, ballot Q2).
-#:   "monostatic_c2"  -- c*tau/2, the range a monostatic radar would report for the
-#:                       same delay. Today's cards' convention. THE DEFAULT, so
-#:                       nothing on screen moves until the owner says so.
-#:   "bistatic_path"  -- c*tau, the excess PATH LENGTH, physically exact for what the
-#:                       frames actually are.
-RANGE_CONVENTIONS = ("monostatic_c2", "bistatic_path")
+#:   "bistatic_path"  -- c*tau, the excess PATH LENGTH. THE DEFAULT since the owner's
+#:                       2026-09-24 ballot answer ("if bistatic, math should be
+#:                       correct"): the munich link is TX at [8.5,21,27] to an RX array
+#:                       at [45,90,1.5], ~82 m apart, traced with
+#:                       `normalize_delays=True`, so a bin's delay is an EXCESS delay
+#:                       over the line of sight and c*tau is exactly what it measures.
+#:                       On the munich Ka plan: 9.99 cm per bin, a 499.55 m window.
+#:   "monostatic_c2"  -- c*tau/2, the range a MONOSTATIC radar would report for the same
+#:                       delay. The v1.0 cards' convention, kept as the alternative
+#:                       (5 cm/bin, 249.78 m) -- it is neither a range nor a path length
+#:                       for this geometry, which is why it is no longer the default.
+#: Switching convention is a single scalar on every metre the chain quotes; nothing
+#: about the cube itself changes, which is why the axis is computed once, here.
+RANGE_CONVENTIONS = ("bistatic_path", "monostatic_c2")
 
 #: Metres per second of delay, per convention.
 _CONVENTION_SCALE = {"monostatic_c2": C_MPS / 2.0, "bistatic_path": C_MPS}
@@ -515,7 +523,7 @@ def delta_f_from_cfg(cfg):
         return None
 
 
-def range_axis_m(n_bins, delta_f_hz, n_fft, convention="monostatic_c2"):
+def range_axis_m(n_bins, delta_f_hz, n_fft, convention="bistatic_path"):
     """Physical range (m) of cube bins `0 .. n_bins-1` as a float64 tensor, or None
     when the chain carries no frequency plan to calibrate against.
 
@@ -596,7 +604,7 @@ class RangeTransformBlock:
     WINDOWS = ("none", "hann", "hamming")
 
     def __init__(self, cfg=None, *, window="hann", dc_removal=True,
-                 convention="monostatic_c2", crop_negative_delay=True,
+                 convention="bistatic_path", crop_negative_delay=True,
                  delta_f_hz=None):
         window = "none" if window is None else str(window)
         if window not in self.WINDOWS:
