@@ -12,6 +12,11 @@ A figure dictionary is not the screen. Run this after any change to the presets,
 runner's figures or the app layout, and READ THE PNGS; the summary alone does not
 count as having looked.
 
+With ``--only``, an existing ``summary.json`` in ``--out`` is merged: only the entries
+for the presets actually run (and ``cancel_journey`` only if the cancel journey ran) are
+replaced, the rest of the previous full run's entries are kept. A full run (no ``--only``)
+always writes a fresh file.
+
 Needs Playwright and its Chromium (``playwright install chromium``), torch and the
 frames each preset replays. The two GPU jobs a training campaign may have in flight
 are unaffected: this only reads checkpoints.
@@ -20,6 +25,7 @@ are unaffected: this only reads checkpoints.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import pathlib
@@ -29,6 +35,26 @@ from typing import Any, Dict, List
 
 _TIMEOUT_MS = 20000
 _RUN_TIMEOUT_MS = 240000
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+
+def _merge_summary(existing: Dict[str, Any], new: Dict[str, Any],
+                    preset_order: List[str]) -> Dict[str, Any]:
+    """Combine a previous full (or partial) run's summary with the entries from this
+    run, keeping every existing entry this run didn't touch. Result is ordered by
+    ``preset_order`` (the registry's stage order), with ``cancel_journey`` last if
+    present in either input."""
+    merged = {**existing, **new}
+    ordered: Dict[str, Any] = {}
+    for pid in preset_order:
+        if pid in merged:
+            ordered[pid] = merged[pid]
+    if "cancel_journey" in merged:
+        ordered["cancel_journey"] = merged["cancel_journey"]
+    return ordered
 
 
 def _pick_preset(page, label: str) -> None:
@@ -113,7 +139,7 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             status = _status_after(page)
             summary[p.id] = {"label": p.label, "n_steps": n_steps,
                              "wall_s": round(wall, 2), "figures": titles,
-                             "status": status}
+                             "status": status, "rendered_at": _now_iso()}
             print(f"{p.id}: n={n_steps} {wall:.1f}s figs={len(titles)} "
                   f"status={status[:100]}", flush=True)
             ctx.close()
@@ -148,12 +174,20 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             page.screenshot(path=str(out / "cancel_results.png"), full_page=True)
             status = _status_after(page)
             summary["cancel_journey"] = {"preset": p.id, "wall_s": round(wall, 2),
-                                         "status": status}
+                                         "status": status, "rendered_at": _now_iso()}
             print(f"cancel ({p.id}, 20 frames): {wall:.1f}s status={status}", flush=True)
             ctx.close()
         browser.close()
 
-    (out / "summary.json").write_text(json.dumps(summary, indent=2))
+    preset_order = [p.id for p in PRESETS]
+    summary_path = out / "summary.json"
+    if only and summary_path.exists():
+        try:
+            existing = json.loads(summary_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        summary = _merge_summary(existing, summary, preset_order)
+    summary_path.write_text(json.dumps(summary, indent=2))
     return summary
 
 
