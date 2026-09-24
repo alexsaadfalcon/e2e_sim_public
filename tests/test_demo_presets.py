@@ -274,14 +274,17 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     ~0.5 dB (peak-median 76.85 -> 76.57); wave 8 (2026-09-23, W4) found the rendered
     panel actually prints 76.9 -> 76.6 (0.3 dB) -- the same move range-azimuth shows,
     refuting the old "elevation is the one that moves" framing -- so the card now
-    quotes THAT on-screen number instead."""
+    quotes THAT on-screen number instead. Wave 9 (2026-09-24, item 1.1): a hostile
+    read of the rendered PNG found the elevation cut actually prints 76.9 -> 76.5
+    (0.4 dB), slightly MORE than the azimuth cut's 76.7 -> 76.4 (0.3 dB), not the
+    same move -- corrected again."""
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert "2.7" not in p.screen_note
     assert "2.7" not in p.blurb
     assert not any("2.7" in s for s in p.say + p.do_not_say)
     assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
     assert "barely move" in p.screen_note
-    assert "76.9" in p.blurb and "76.6" in p.blurb and "on screen" in p.blurb
+    assert "76.9" in p.blurb and "76.5" in p.blurb and "on screen" in p.blurb
     assert "76.85" not in p.blurb and "76.57" not in p.blurb
     # Wave 7 (2026-09-23, F94): the old cross-reference to Thrust 3's cold-start first
     # frame ("about 0.6") compared error values at k=8; this preset now runs at k=2

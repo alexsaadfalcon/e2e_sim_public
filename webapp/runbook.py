@@ -1,7 +1,6 @@
 """Generate ``docs/DEMO_RUNBOOK.md`` from the demo presets -- never hand-copy them.
 
-    python -m webapp.runbook [--out docs/DEMO_RUNBOOK.md] \\
-        [--summary e2e/main/figures/rehearsal/summary.json] [--check]
+    python -m webapp.runbook [--out docs/DEMO_RUNBOOK.md] [--check]
 
 ``docs/DEMO_RUNBOOK.md`` used to be hand-written from ``webapp/demo_presets.py`` --
 copying each preset's blurb / live_knobs / say / do_not_say verbatim. That is two
@@ -15,8 +14,16 @@ in), "What you are looking at" (the enabled product panels + the A/B arm labels,
 both read from the registry/dataclass, never typed), "Second knob (optional)" (the
 ``live_knobs`` entries that are not themselves the built-in A/B knob, with the
 registry's own label/min/max/default), then the preset's ``blurb``, ``say`` and
-``do_not_say`` exactly as the dataclass states them today. Wall time comes from a
-rehearsal ``summary.json`` when that preset has an entry there, else "measure".
+``do_not_say`` exactly as the dataclass states them today.
+
+Wall time is NOT embedded (fixed 2026-09-24, cross-shard bug): a rehearsal
+``summary.json``'s ``wall_s`` changes every time anyone reruns ``webapp.rehearse``,
+so a committed doc that quoted it went stale on every rehearsal, independent of any
+preset change -- a drifting value baked into a durable document. Every preset's
+click sequence instead prints one fixed sentence pointing at the two places the
+CURRENT number lives (the rehearsal summary and the preflight timing pass); the "at
+most 15 s" figure in that sentence is ``webapp.preflight.WARN_SECONDS``, imported,
+never retyped.
 
 The "Before the audience" / "If something goes wrong" sections describe UI
 mechanics (button labels, status strings), not preset data; they are template text
@@ -24,19 +31,20 @@ in this module, checked against ``webapp/app.py`` / ``webapp/block_diagram.py`` 
 hand, with drift-prone counts (frame ceilings, how many presets set `ab`, the
 frame-count range presets ship at) computed at generation time.
 
-Deliberately torch-free: only ``webapp.demo_presets``, ``webapp.pipeline_registry``
-and the standard library are imported, so the doc can be regenerated (and
-``--check``ed) on any machine, CI included, without installing torch/Sionna.
+Deliberately torch-free: only ``webapp.demo_presets``, ``webapp.pipeline_registry``,
+``webapp.preflight`` (for the ``WARN_SECONDS`` constant -- its module-level imports
+are stdlib-only, torch is imported lazily inside ``check_environment``) and the
+standard library are imported, so the doc can be regenerated (and ``--check``ed) on
+any machine, CI included, without installing torch/Sionna.
 """
 from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from webapp.demo_presets import PRESETS, DemoPreset, apply_preset
 from webapp.pipeline_registry import (
@@ -46,12 +54,27 @@ from webapp.pipeline_registry import (
     PRODUCT_IDS,
     ParamSpec,
 )
+#: Torch-free: WARN_SECONDS is a module-level float in webapp/preflight.py, defined
+#: before that module's only heavy import (torch, inside check_environment) -- see
+#: tests/test_runbook.py::test_runbook_module_imports_without_torch, which actually
+#: verifies this in a subprocess rather than trusting the claim.
+from webapp.preflight import WARN_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_OUT = _REPO_ROOT / "docs" / "DEMO_RUNBOOK.md"
-_DEFAULT_SUMMARY = _REPO_ROOT / "e2e" / "main" / "figures" / "rehearsal" / "summary.json"
 _CLI = "python -m webapp.runbook"
 _WIDTH = 79
+
+#: Fixed 2026-09-24 (cross-shard bug): this used to be a per-preset number read from
+#: a rehearsal summary.json, which changes every time anyone reruns
+#: `webapp.rehearse` -- so the committed doc went stale on every rehearsal, with no
+#: change to any preset. One fixed sentence, same for every preset, pointing at
+#: where the CURRENT number lives instead of embedding one.
+_WALL_TIME_NOTE = (
+    "Wall time: read the last rehearsal's "
+    "`e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing "
+    f"pass; presets are sized to stay under the {WARN_SECONDS:g} s WARN budget."
+)
 
 
 def _wrap(text: str, indent: str = "", subsequent_indent: Optional[str] = None) -> str:
@@ -152,19 +175,11 @@ def _second_knobs(preset: DemoPreset) -> List[Tuple[str, str, str]]:
     return [(b, k, how) for (b, k, how) in preset.live_knobs if (b, k) != ab_key]
 
 
-def _wall_time(preset: DemoPreset, summary: Dict[str, Any]) -> str:
-    entry = summary.get(preset.id)
-    if not entry or entry.get("wall_s") is None:
-        return f"measure (no entry for this preset in the rehearsal summary; n_steps={preset.n_steps})"
-    n = entry.get("n_steps", preset.n_steps)
-    return f"**{entry['wall_s']:.2f}s** (n_steps={n}, from the rehearsal summary)"
-
-
 # =====================================================================================
 # Per-preset section
 # =====================================================================================
 
-def _render_preset(i: int, preset: DemoPreset, summary: Dict[str, Any]) -> str:
+def _render_preset(i: int, preset: DemoPreset) -> str:
     lines: List[str] = []
     lines.append(f"## {i}. {preset.label}\n")
 
@@ -180,7 +195,7 @@ def _render_preset(i: int, preset: DemoPreset, summary: Dict[str, Any]) -> str:
         f'The param editor opens on {open_desc}; the operator card shows "Loaded: '
         f'{preset.label} (Thrust {preset.thrust}, {preset.n_steps} frames)".'))
     lines.append(_numbered(2,
-        f"Click **Run pipeline**.{arm_sentence} Wall time: {_wall_time(preset, summary)}."))
+        f"Click **Run pipeline**.{arm_sentence} {_WALL_TIME_NOTE}"))
     lines.append(_numbered(3, "The app switches to the **Results** tab automatically."))
     lines.append("")
 
@@ -320,17 +335,17 @@ def _trouble(n_min: int, n_max: int) -> str:
 # Top-level render + CLI
 # =====================================================================================
 
-def render(presets: List[DemoPreset], summary: Dict[str, Any], cmd: str = _CLI) -> str:
-    """Render the full runbook markdown for `presets` given a rehearsal `summary`
-    dict (preset id -> {"wall_s": ..., "n_steps": ...}, as written by
-    `webapp.rehearse`; missing/empty is fine, every preset just reads "measure").
+def render(presets: List[DemoPreset], cmd: str = _CLI) -> str:
+    """Render the full runbook markdown for `presets`.
 
     No commit SHA is embedded: a SHA inside a file committed AT that SHA can
     never equal the commit that contains it, so a `--check` gate tied to one
     would fail at every commit that doesn't touch the presets -- exactly the
     drifting-value-in-a-durable-document failure this generator exists to
-    avoid. Regenerate after any change to `webapp/demo_presets.py` or the
-    rehearsal summary; `--check` is what enforces that, not a SHA comparison."""
+    avoid. Regenerate after any change to `webapp/demo_presets.py`; `--check`
+    is what enforces that, not a SHA comparison. Wall time is deliberately NOT
+    an input here either, for the same reason (see the module docstring and
+    `_WALL_TIME_NOTE`) -- a rehearsal run is not a `render()` input."""
     n_steps_vals = [p.n_steps for p in presets] or [0]
     n_ab = sum(1 for p in presets if p.ab is not None)
 
@@ -338,45 +353,35 @@ def render(presets: List[DemoPreset], summary: Dict[str, Any], cmd: str = _CLI) 
     parts.append("# Demo runbook -- CogniSense Annual Review\n\n" + _wrap(
         f"Generated by `{cmd}` from `webapp/demo_presets.py` (every preset's "
         "blurb / live_knobs / say / do_not_say -- the source of truth) and "
-        "`webapp/pipeline_registry.py` (product-panel labels, knob ranges); "
-        "wall times come from a rehearsal summary when a preset has an entry "
-        'there, else "measure". Every UI label quoted below is the exact '
-        "string in `webapp/app.py` or `webapp/block_diagram.py`. Regenerate "
-        "after any change to `webapp/demo_presets.py` or the rehearsal "
-        "summary.") + "\n")
+        "`webapp/pipeline_registry.py` (product-panel labels, knob ranges). "
+        "Wall time is not embedded (it drifts on every rehearsal); each click "
+        "sequence instead points at where the current number lives. Every UI "
+        "label quoted below is the exact string in `webapp/app.py` or "
+        "`webapp/block_diagram.py`. Regenerate after any change to "
+        "`webapp/demo_presets.py`.") + "\n")
     parts.append(_BEFORE_AUDIENCE)
     parts.append("Preset stage order (`PRESETS` in `webapp/demo_presets.py`):\n")
     parts.append("\n".join(f"{i}. {p.label}" for i, p in enumerate(presets, 1)) + "\n")
     parts.append(_click_mechanics(len(presets), n_ab))
     parts.append("---\n")
     for i, p in enumerate(presets, 1):
-        parts.append(_render_preset(i, p, summary))
+        parts.append(_render_preset(i, p))
         parts.append("---\n")
     parts.append(_trouble(min(n_steps_vals), max(n_steps_vals)))
     return "\n".join(parts).rstrip() + "\n"
-
-
-def _load_summary(path: Path) -> Dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=str(_DEFAULT_OUT),
                     help="path to write the generated runbook")
-    ap.add_argument("--summary", default=str(_DEFAULT_SUMMARY),
-                    help="rehearsal summary.json to read wall times from")
     ap.add_argument("--check", action="store_true",
                     help="don't write; exit 1 (and print a diff) if --out differs "
                          "from what would be generated")
     args = ap.parse_args(argv)
 
     out_path = Path(args.out)
-    summary = _load_summary(Path(args.summary))
-    content = render(PRESETS, summary)
+    content = render(PRESETS)
 
     if args.check:
         existing = out_path.read_text(encoding="utf-8") if out_path.is_file() else ""
