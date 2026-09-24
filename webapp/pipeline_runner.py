@@ -1624,6 +1624,14 @@ def _native_unambiguous_range_m(freq_span_hz: float, n_freqs: int) -> float:
     return (n_freqs // 2) * _C / (2.0 * freq_span_hz)
 
 
+def _native_range_resolution_m(freq_span_hz: float) -> float:
+    """Native (un-binned) round-trip range resolution (m): c / (2*B) -- what ONE raw
+    frequency sample is worth in range, i.e. `_range_per_gate_m` at `per=1`, before
+    display binning groups `per` of them into a gate (wave 8, W13: nothing on screen
+    stated the ratio between a display gate and the frame's own native resolution)."""
+    return _C / (2.0 * freq_span_hz)
+
+
 def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
     """fftshifted range DISPLAY-gate index -> physical range (meters).
 
@@ -1673,6 +1681,14 @@ _LEGIBLE_COLORBAR_TITLE_SIZE = 20
 _SUBSPACE_ERR_MIN_YMAX = 0.65
 #: The warm-started settled tracking floor the Thrust 2/3 cards quote.
 _SUBSPACE_ERR_SETTLED_LEVEL = 0.06
+#: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
+#: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
+#: max (A: 0-5, B: 0-10), so a real 2x difference in compute spent per frame rendered
+#: at the SAME pixel height on both screens -- pinning both to one common range is
+#: what makes that difference visible as a difference in bar/marker height rather than
+#: only in the printed numbers. 10 is AdaOjaBlock's own default n_refine ceiling
+#: (`subspace_n_refine`'s "none"-arm fallback default, see `run_pipeline`).
+_REFINE_AXIS_MIN_YMAX = 10.0
 
 
 def _make_legible(fig: go.Figure) -> go.Figure:
@@ -1749,7 +1765,14 @@ _HEATMAP_MARGIN_R = 20
 #: (`_heatmap_margin_t`), so a wording change that adds or removes a wrapped line
 #: cannot silently under-provision the margin again.
 _HEATMAP_MARGIN_T_BASE = 40       # one-line title, no subline (pre-2026-09-23 default)
-_HEATMAP_MARGIN_T_PER_LINE = 45  # each further wrapped title/subline line
+#: Raised 45 -> 60 (wave 8, W2/W13): the range-azimuth/range-elevation subline grew a
+#: 4th title line (direct-path + native-resolution clauses), and at 45/line the last
+#: wrapped line's descenders were measurably cut by the plot (rehearsal PNG,
+#: thrust1_circuit_knobs, single wide panel) even though `_heatmap_margin_t`'s line
+#: count was correct -- 45px/line was calibrated at n=3 and undercounted the actual
+#: rendered height of a title-font-plus-<sup>-sublines block at n=4. Re-verified on
+#: the wave-8 wording at n=4 (thrust1/thrust2/thrust4 rehearsal PNGs) with no overlap.
+_HEATMAP_MARGIN_T_PER_LINE = 60  # each further wrapped title/subline line
 _HEATMAP_MARGIN_B = 40
 _HEATMAP_PLOT_DOMAIN_HEIGHT = 280
 
@@ -2036,15 +2059,25 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # DIFFERENT, absolute range axis from the ADC dechirp geometry and
                 # must NOT carry this note -- webapp/demo_presets.py's thrust5
                 # scripts already say the absolute-range story for those on screen.
-                earliest_arrival_note = "; 0 = earliest arrival"
-                # Calibration nobody stated on screen (wave 7, X6/X7): a hostile-expert
-                # read found the "20-22 m stripe" quoted on three cards was off the
-                # true delays because no panel said what a display gate is worth in
-                # metres, or how far the axis can go before it wraps. Computed from
-                # this frame's own freq_plan + display bin count, not hand-typed.
+                # Wave 8, W2: a hostile-expert read found no screen states that the 0 dB
+                # reference AT range 0 is this leakage band, not a target -- stated
+                # directly; "(0 = earliest arrival)" is kept verbatim so it still reads
+                # as the SAME claim tests/test_webapp_figures_wave3.py (an unowned file)
+                # already pins in this subline.
+                earliest_arrival_note = ("; 0 dB = direct path at range 0 "
+                                         "(0 = earliest arrival), not a target")
+                # Calibration nobody stated on screen (wave 7, X6/X7; sharpened wave 8,
+                # W13): no panel said what a display gate is worth relative to the
+                # frame's own NATIVE frequency-sampling resolution, or how far the axis
+                # can go before it wraps. Computed from this frame's own freq_plan +
+                # display bin count, never hand-typed.
+                _native_m = _native_range_resolution_m(freq_span_hz)
+                _gate_m = _range_per_gate_m(bins, freq_span_hz, n_freqs)
+                _ratio = _gate_m / _native_m if _native_m > 0 else float("nan")
                 gate_note = (
-                    f"; {_range_per_gate_m(bins, freq_span_hz, n_freqs):.2f} m/gate, "
-                    f"unambig {_native_unambiguous_range_m(freq_span_hz, n_freqs):.0f} m")
+                    f"; {_gate_m:.2f} m/gate ({_native_m * 100:.0f} cm native, "
+                    f"{_ratio:.0f}:1); unambig "
+                    f"{_native_unambiguous_range_m(freq_span_hz, n_freqs):.0f} m")
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
@@ -2089,12 +2122,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # range_az's subline (qualifier + peak-median stat + note) is well past
             # what a two-card (~700 px) panel fits on one line -- it clipped mid-word
             # ("...range 0 = earliest arriv", rehearsal PNG,
-            # thrust4_interconnect_range_profile). Shortened again (wave 8) to drop
-            # "range " from the earliest-arrival clause, keeping the common (shared-
-            # floor) case to 3 total lines; `_heatmap_margin_t` sizes the top margin
-            # from however many lines this actually wraps to (up to 4, on the
-            # adaptive-clip branch's longer "(median floor + 3 dB)" wording), rather
-            # than a fixed budget tuned for one wording snapshot.
+            # thrust4_interconnect_range_profile). Wave 8 (W2/W13) grew both the
+            # earliest-arrival clause (states the 0 dB = direct-path claim explicitly,
+            # not just "0 = earliest arrival") and the gate clause (native resolution +
+            # ratio, not just the display gate), which no longer fits the shared-floor
+            # case in 3 total lines at this qualifier length -- measured at 4 (see
+            # `test_range_az_subline_...` in test_webapp_figures_wave7.py). Left as 4
+            # rather than cut either clause for a line count: `_heatmap_margin_t` sizes
+            # the top margin from however many lines this actually wraps to, exactly so
+            # a wording change that adds a line does not silently under-provision it.
             sublines = [f"({qualifier}); peak - median, dB: {d:.1f}"
                        f"{earliest_arrival_note}{gate_note}{clip_note}" for d in dyn_range_db]
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
@@ -2120,9 +2156,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # panels above (see that loop's comment) -- this panel only ever runs on
             # the same delay-normalised munich frames, never a corpus-replay frame.
             xlabel = "range (m; 0 = earliest arrival)"
+            # Wave 8, W2: state the SAME 0 dB = direct-path caveat the range-azimuth/
+            # range-elevation sublines now carry (see that loop) -- this panel's own
+            # 0 dB point (range 0) is exactly that leakage band.
+            direct_path_note = "; 0 dB = direct path at range 0, not a target"
         else:
             x = np.arange(bins_rp)
             xlabel = "range (bins)"
+            direct_path_note = ""
         peak = max(float(prof.max()), 1e-12)
         prof_db = 10 * np.log10(prof / peak + 1e-12)
         x = np.asarray(x)
@@ -2149,7 +2190,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         floor_db = float(np.median(prof_db)) if prof_db.size else float("nan")
         fig.update_layout(
             title=f"Range profile (non-coherent over channels)"
-                 f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}</sup>",
+                 f"<br><sup>median floor, dB rel. peak: {floor_db:.1f}"
+                 f"{direct_path_note}</sup>",
             xaxis_title=xlabel,
             yaxis_title="power (dB rel. peak)",
             margin=dict(l=40, r=20, t=40, b=40),
@@ -2349,8 +2391,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # to autoscale/tozero to 0.06, which reads as "the tracker is diverging". The
         # floor comes from the presets' own measured range -- T2's B arm (mantissa
         # 6->1) reaches ~0.63, T3's cold start begins ~0.57 -- so a near-floor curve now
-        # reads as flat near zero instead of filling the plot height.
-        top = max(_SUBSPACE_ERR_MIN_YMAX, (max(errs) if errs else 0.0) * 1.05)
+        # reads as flat near zero instead of filling the plot height. Headroom above
+        # the curve's own max is BOTH relative (5%) AND a fixed absolute cushion
+        # (wave 8, W15: a cold-start arm's frame-1 point sat visually on the axis
+        # ceiling -- close enough to `top` that the marker's own radius touched the
+        # border even though the data value was strictly below it).
+        top = max(_SUBSPACE_ERR_MIN_YMAX,
+                 (max(errs) * 1.05 + 0.03) if errs else 0.0)
         fig.update_yaxes(range=[0.0, top])
         fig.update_xaxes(dtick=1)
         # The settled warm-start level the cards quote, so "is 0.06 good?" has an
@@ -2359,10 +2406,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # sits well above this line (e.g. a cold-start/rank-collapse run reaching
         # ~0.62), an unqualified "settled level (0.06)" reads as if it were THIS run's
         # level rather than a separate warm-start reference case.
+        # Collision avoidance (wave 8, W15): "top left" puts the text right beside the
+        # FIRST few frames at y ~= the settled level -- a cold-start/refine-gate curve
+        # that itself passes near 0.06 early (e.g. T3-B's frame 2) puts a marker right
+        # under the annotation. Moved to the right end of the line instead whenever an
+        # early frame's error sits within this band; unaffected runs (the common case)
+        # keep the original "top left" placement.
+        _early = errs[:min(4, len(errs))]
+        _annotation_collides = any(
+            abs(e - _SUBSPACE_ERR_SETTLED_LEVEL) <= 0.03 for e in _early)
         fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash", line_color="#576574",
                      annotation_text=(f"warm-start settled level "
                                       f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference)"),
-                     annotation_position="top left",
+                     annotation_position=("top right" if _annotation_collides
+                                          else "top left"),
                      annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
         fig.update_layout(
             title=("Subspace error (Frobenius) per frame<br><sup>unnormalised distance; "
@@ -2393,9 +2450,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 mode="lines+markers", name="refinement passes/frame",
                 line=dict(dash="dot", color="#c0392b"), marker=dict(symbol="square"),
                 yaxis="y2"))
+            # Pinned range, not `rangemode="tozero"` (wave 8, W3): that only anchors
+            # zero, it does not stop each arm autoscaling to its OWN max -- an A/B pair
+            # at fixed-effort 5 vs the refine gate's 10 rendered as 0-5 and 0-10, so the
+            # 2x difference in compute spent sat at the SAME pixel height on both
+            # screens and was invisible. This function only ever sees ONE run's own
+            # data, so it cannot look at the OTHER arm's max directly -- instead the
+            # floor (`_REFINE_AXIS_MIN_YMAX`, AdaOjaBlock's own refine-gate ceiling) is
+            # what both arms of the shipped Thrust 3 A/B actually share: the "none" arm
+            # never exceeds its fixed effort (5) and the "refine" arm never exceeds its
+            # own ceiling (10), so both floor to the SAME 0-10 range and a genuine 2x
+            # reads as a height difference. Headroom (a fixed +1, not a %, so it cannot
+            # round back down to the floor) only grows the axis past 10 for a run whose
+            # OWN data exceeds that shared ceiling (e.g. a more aggressive gate at a
+            # different aperture, wave 7 X1) -- otherwise-clipped, not otherwise-shared.
+            _max_refine_used = max(int(n) for n in n_refine_used)
+            refine_top = (_max_refine_used + 1 if _max_refine_used > _REFINE_AXIS_MIN_YMAX
+                         else _REFINE_AXIS_MIN_YMAX)
             fig.update_layout(
                 yaxis2=dict(title="refinement passes/frame", overlaying="y",
-                           side="right", rangemode="tozero", showgrid=False),
+                           side="right", range=[0, refine_top], showgrid=False),
                 # Legend below the plot, not the default top-right: at top-right it sat
                 # on top of the new right-hand axis's own tick labels, clipping "10"
                 # into "1C" (found in the Thrust 3 rehearsal, 2026-09-23).
