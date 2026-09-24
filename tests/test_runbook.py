@@ -74,11 +74,15 @@ def test_render_does_not_embed_wall_times():
     whenever anyone rehearsed after the doc was last generated -- a drifting
     value baked into a durable document. The doc must instead print one fixed
     sentence, the same for every preset, naming where the CURRENT number lives
-    (the rehearsal summary and the preflight timing pass) with the WARN budget
-    read from webapp.preflight.WARN_SECONDS, never a number that came from an
-    actual run."""
+    (the rehearsal summary and the preflight timing pass).
+
+    Wave 10 (2026-09-24, item 3.2, hostile round 9): RETRACTED the "presets are
+    sized to stay under the 15 s WARN budget" clause this test used to pin --
+    false on 5 of 7 presets (rehearsal summary: 14-27 s with both arms).
+    Replaced with an honest range ("roughly 15-30 s for both arms"); this test no
+    longer imports webapp.preflight.WARN_SECONDS since nothing in the rendered
+    doc derives from it any more."""
     from webapp.demo_presets import PRESETS
-    from webapp.preflight import WARN_SECONDS
     from webapp.runbook import render
 
     doc = render(PRESETS)
@@ -94,8 +98,137 @@ def test_render_does_not_embed_wall_times():
     assert doc.count("Wall time: read the last rehearsal's") == len(PRESETS)
     assert "summary.json" in flat and "`wall_s`" in flat
     assert "preflight timing pass" in flat
-    # The WARN budget is read from webapp.preflight, not retyped.
-    assert f"{WARN_SECONDS:g} s WARN budget" in flat
+    # The retracted claim must not reappear, on this run or any future one.
+    assert "warn budget" not in flat
+    assert "roughly 15-30 s for both arms" in flat
+
+
+def test_render_has_no_previous_run_divider_label():
+    """Wave 10 (2026-09-24, item 3.1, hostile round 9): webapp/app.py only prints
+    the "Previous run (for before/after): " label when `_ab` is false; every
+    preset here sets `ab`, so the divider that actually renders is a bare
+    horizontal rule. The runbook must not tell the presenter to look for a label
+    the app never draws for these seven presets."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    assert '"Previous run" divider' not in doc
+    assert "no label" in _flat(doc)
+
+
+def test_render_gives_a_prepared_line_for_every_preset_while_it_runs():
+    """Wave 10 (2026-09-24, item 3.2, hostile round 9): each Run takes 14-27 s
+    (rehearsal summary, both arms); the three Thrust 5 screens back to back are
+    ~77 s of dead air. Every preset's click sequence must carry a "While it runs,
+    say:" line, and it must be that preset's own FIRST `say` bullet (never
+    hand-typed, so it cannot drift from the card)."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert doc.count("**While it runs, say:**") == len(PRESETS)
+    for p in PRESETS:
+        assert p.say, p.id  # every preset has a say list (test_demo_presets.py)
+        # `_flat`, not raw `doc`: `_bullet` wraps at 79 cols, so a long say
+        # bullet's exact text may straddle a line break in the rendered source.
+        assert _flat(p.say[0]) in flat, p.id
+
+
+def test_render_gives_the_rdp_slider_rule_a_thrust_5_exception():
+    """Wave 10 (2026-09-24, item 3.3, hostile round 9): the RDP slider rule is
+    actively harmful on Thrust 5 -- the objectness/scoreboard/PR panels have no
+    slider (pinned to the last frame); dragging the Range-Doppler panel's slider
+    desyncs it from the frozen detections."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert "thrust 5 exception" in flat.lower()
+    assert "desyncs the cube" in flat.lower()
+
+
+def test_render_lists_all_four_thrust5_panels():
+    """Wave 10 (2026-09-24, item 3.4, hostile round 9): two product blocks
+    (radar_cube, detector) render FOUR panels on every Thrust 5 screen -- the
+    scoreboard and PR-curve panels are not separately toggleable blocks, so the
+    generic per-product enumeration undercounted them by half."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    for p in PRESETS:
+        if p.thrust != 5:
+            continue
+        section = doc[doc.index(f'## {PRESETS.index(p) + 1}. {p.label}'):]
+        section = section[:section.index("### Second knob")]
+        assert "Range-Doppler power" in section, p.id
+        assert "Detector scoreboard" in section, p.id
+        assert "scored offline" in section, p.id
+        assert ("CFAR objectness" in section
+               or "Neural detector objectness" in section), p.id
+
+
+def test_render_quotes_rendered_panel_titles_not_block_diagram_labels():
+    """Wave 10 (2026-09-24, item 3.5, hostile round 9): the "What you are looking
+    at" section used to quote BLOCKS_BY_ID node labels ("Radar Cube
+    (Range-Doppler)", "Detector (CFAR | ML)") -- strings that never appear on the
+    rendered Results tab. It must quote the actual panel titles there instead.
+    (The block label is still correct, and kept, in "Second knob (optional)" --
+    that section names the BLOCK the knob lives on, not a panel.)"""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    for i, p in enumerate(PRESETS, 1):
+        start = doc.index(f"## {i}. {p.label}")
+        section = doc[start:doc.index("### Second knob", start)]
+        assert "Radar Cube (Range-Doppler)" not in section, p.id
+        assert "Detector (CFAR | ML)" not in section, p.id
+    assert '"Range-azimuth power"' in doc
+    assert '"Range-Doppler power"' in doc
+
+
+def test_panel_titles_match_the_rendered_source():
+    """Wave 10 (2026-09-24, item 3.5, hostile round 9): the panel-title constants
+    in webapp/runbook.py are hand-typed (the true strings are f-string title
+    expressions with computed numbers inline, inside torch-tolerant modules this
+    torch-free generator does not import) -- so this test, which MAY import
+    torch, greps those modules' own source text for the literal substrings, and
+    catches a rename there that generation time cannot see."""
+    pytest.importorskip("torch")
+    from webapp.runbook import _DETECTOR_PANEL_TITLES, _PANEL_TITLES
+
+    pipeline_runner_src = (_REPO_ROOT / "webapp" / "pipeline_runner.py").read_text(encoding="utf-8")
+    scoreboard_src = (_REPO_ROOT / "webapp" / "detector_scoreboard.py").read_text(encoding="utf-8")
+    for bid, title in _PANEL_TITLES.items():
+        # Not anchored to a closing quote: several titles are the FIRST part of
+        # a longer f-string title (e.g. "...<br><sup>clip ...</sup>"), so only
+        # the literal substring, not "the whole quoted string", is stable.
+        assert title in pipeline_runner_src, (bid, title)
+    for mode, title in _DETECTOR_PANEL_TITLES.items():
+        assert f'"{title}"' in pipeline_runner_src, (mode, title)
+    assert '"Detector scoreboard' in scoreboard_src
+    assert '"scored offline: ' in scoreboard_src
+
+
+def test_render_tells_thrust_1_and_4_to_scroll_the_param_pane():
+    """Wave 10 (2026-09-24, item 3.6, hostile round 9): the Thrust 1 and Thrust 4
+    param editors clip mid-sentence at the bottom of the pane; the knob the click
+    sequence just named is below the fold on both."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    for p in PRESETS:
+        section = doc[doc.index(f'## {PRESETS.index(p) + 1}. {p.label}'):]
+        section = section[:section.index("### What you are looking at")]
+        if p.thrust in (1, 4):
+            assert "Scroll the param pane" in _flat(section), p.id
+        else:
+            assert "Scroll the param pane" not in _flat(section), p.id
 
 
 def test_render_drops_element_id_parentheticals():

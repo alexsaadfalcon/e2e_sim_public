@@ -21,10 +21,14 @@ change to `webapp/demo_presets.py`.
 5. Presenting over RDP: advance frames with the Results-tab figure's own frame
    **slider** (the widget Plotly draws under each heatmap/animation), never the
    ▶ (Play) control -- its ~350 ms/frame animation stutters over the link.
+   **Thrust 5 exception** (wave 10, item 3.3, hostile round 9): the
+   objectness/scoreboard/PR panels have NO slider (pinned to the last frame) --
+   only the Range-Doppler panel does. Dragging it desyncs the cube from the
+   frozen detections; leave it alone on those three screens.
 
 Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
-1. Thrust 1 - RF circuit knobs vs image quality
+1. Thrust 1 - RF circuit knobs vs the image's noise floor
 2. Thrust 2 - feature-reduction (AFE) error vs end result
 3. Thrust 3 - adaptive feature extraction: cold-start acquisition
 4. Thrust 4 - a worse interconnect, on the range profile
@@ -49,27 +53,30 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   to the **Results** tab automatically.
 - Every one of the 7 presets below sets `ab`, so one click on **Run pipeline**
   runs BOTH arms A and B and renders both on the Results tab (A on top, B
-  below, under a "Previous run" divider) -- there is no second Run click needed
-  for the built-in A/B; the "Second knob" step in each section below is a
-  *manual, additional* change on top of that.
+  below, under a plain divider line -- no label) -- there is no second Run
+  click needed for the built-in A/B; the "Second knob" step in each section
+  below is a *manual, additional* change on top of that.
 
 ---
 
-## 1. Thrust 1 - RF circuit knobs vs image quality
+## 1. Thrust 1 - RF circuit knobs vs the image's noise floor
 
 ### Click sequence
-1. Open **Demo preset:**, select "Thrust 1 - RF circuit knobs vs image
-   quality", click **Load preset**. The param editor opens on **RF Front-End
-   (RFFE)** (first knob: **LNA bias current (mA)**); the operator card shows
-   "Loaded: Thrust 1 - RF circuit knobs vs image quality (Thrust 1, 5 frames)".
+1. Open **Demo preset:**, select "Thrust 1 - RF circuit knobs vs the image's
+   noise floor", click **Load preset**. The param editor opens on **RF
+   Front-End (RFFE)** (first knob: **LNA bias current (mA)**); the operator
+   card shows "Loaded: Thrust 1 - RF circuit knobs vs the image's noise floor
+   (Thrust 1, 5 frames)". Scroll the param pane; the knob is below the fold.
 2. Click **Run pipeline**. Both arms run in one click (A = 8 mA, B = 0.5 mA).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** LNA bias 0.5->8 mA is worth about twelve dB
+  (+-0.6-0.9 dB).
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Range-Azimuth**.
+- Product panel(s) this preset enables: **"Range-azimuth power"**.
 - Arm banners on screen: "A (as loaded): LNA bias current (mA) 8 mA -- before"
   / "B: LNA bias current (mA) 0.5 mA -- after".
 
@@ -79,53 +86,53 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   MHz is -13.5 dB here, re-measured 2026-09-23 -- the block panel's 17 dB is
   the front end's own noise-power scaling, a different quantity)
 
-Press Run once: both arms run and appear alike (A, top, 8 mA / B, bottom, 0.5
-mA), each panel printing its own peak-median statistic (about 66 vs 54 dB) --
-the ~12 dB difference is in the statistic, not the picture. Signal is
-deliberately set just below the model's input-referred noise (1e-7 vs 1.36e-7
-V) -- a real 1024-element radar's per-element SNR, recovered by coherent gain.
-Manual path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz
-(see live_knobs).
+Press Run once: both arms appear alike (A, top, 8 mA / B, bottom, 0.5 mA), each
+printing its own peak-median (about 66 vs 54 dB) -- the difference, about
+twelve dB, is in the statistic, not the picture. Signal is set just below the
+model's input-referred noise (1e-7 vs 1.36e-7 V; a real radar's per-element
+SNR, recovered by coherent gain). Manual: LNA bias is the A/B above; second
+knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
 
 ### Say
 - LNA bias 0.5->8 mA is worth about twelve dB (+-0.6-0.9 dB).
 - At default signal level (1e-5) these knobs do nothing (0.5 dB, under the 40
   dB floor).
-- Below ~4 mA the LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the twelve
-  dB leaves the attenuator regime (4->8 mA: +1.6 dB).
-- There is no trade-off today: nothing clips; the IF filter only sets noise
-  variance (1 MHz = 1 ms sweep vs 20 us at 50 MHz).
+- Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB leaves
+  the attenuator regime (4->8 mA: +1.6 dB).
+- No trade-off today: nothing clips; the IF filter only sets noise variance (1
+  MHz = 1 ms sweep vs 20 us at 50 MHz).
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); real multipath sits near 37 m and 68 m (F93/F94).
+  (0 dB); multipath: ~36 m on the panel (37.1 m true delay) and 68 m (F93/F94).
 - Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB (0.17 dB
-  agreement, 2026-09-21). Absolute dBm is NOT: input level is free; quote noise
-  figure/relative dB only.
+  agreement) validates the mechanism and gives what Friis alone can't -- this
+  knob's AFE/tracker/detector effect. Absolute dBm is NOT quotable: input level
+  is free.
 - Channel mismatch: all 1024 elements share one config (get_RX_config
-  broadcasts one value); gain/phase mismatch is structurally zero; a
-  per-element spread is a small change, on the list.
-- What end-to-end buys over Friis: 0.17 dB agreement validates the noise
-  mechanism; Friis can't give this knob's effect on the AFE, tracker or
-  detector.
+  broadcasts one value); mismatch is structurally zero; a per-element spread is
+  a small change.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; native range resolution 5 cm, binned 20:1 to 1 m gates.
+  |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
 - Peak-to-median dynamic range measures how empty the map is (median set by
-  empty gates), not target SNR; it moves with the noise floor, which this knob
+  empty gates), not target SNR; it moves with the noise floor this knob
   changes.
 - The 0 dB reference is a single range-0 gate too small to see; the panel
   prints the brightest visible return (read it off the screen); every dB on the
   map is relative to the direct path.
+- Thrust 1 runs at signal_scaling 1e-7 (legacy mode): peak-median ~66 dB is ~11
+  dB below Thrust 2's ~77 dB, same frames -- a different operating point, not
+  scene.
 
 ### Do NOT say
 - Any DC power readout: PRX is U-shaped, MINIMUM at best quality (8.45 V rail,
-  100-200 mV chain).
+  100-200 mV).
 - The compression regime (scaling 1e-1..1e-3): worse live than silence.
 - That gm scales linearly with bias -- true only at 8 mA; say
-  'constant-overdrive power scaling'.
-- Anything about IIP3: constant across 0.5-10 mA, unlike a real LNA.
+  'constant-overdrive scaling'.
+- Anything about IIP3: constant across 0.5-10 mA.
 - Any gain knob: peak normalization removes it.
 - Any absolute dBm sensitivity: the input scale is arbitrary.
-- That the brightest thing on the picture is the 0 dB reference -- it is not
-  visible.
+- That the thin stripe at the bottom edge, when it shows, is a target -- it is
+  the range-0 direct path, the 0 dB reference.
 
 ---
 
@@ -140,12 +147,14 @@ Manual path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz
 2. Click **Run pipeline**. Both arms run in one click (A = 6 bit, B = 1 bit).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** As loaded the curve starts near 0, settles at about
+  0.06 by frame 2; the knob compares SETTLED levels, 0.06 vs 0.32.
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Range-Azimuth**, **Range-Elevation**,
-  **Subspace Error**.
+- Product panel(s) this preset enables: **"Range-azimuth power"**,
+  **"Range-elevation power"**, **"Subspace error (Frobenius) per frame"**.
 - Arm banners on screen: "A (as loaded): FP mantissa bits 6 bit -- before" /
   "B: FP mantissa bits 1 bit -- after".
 
@@ -168,11 +177,11 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
   peak-median numbers on the screen; that is at the ~0.1 dB run-to-run floor,
   so the image is not the story; the tracker curve is (about 5x above the 0.06
   reference on arm B).
-- No detection metric is wired to this view; say so before asked what it means
-  for P_d or false alarms.
+- No detection metric is wired here; say so before asked what it means for P_d
+  or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); real multipath sits near 37 m and 68 m.
-- Tracker k was re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
+  (0 dB); multipath: ~36 m on the panel (37.1 m true delay) and 68 m.
+- Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
   retrace (rank 3-4, F94); k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
@@ -190,8 +199,8 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
   is right for a compute datapath, wrong for analog control (compress.py).
 - That the picture does not respond: both images move a few tenths of a dB, at
   the run-to-run floor -- not evidence either way; the tracker curve is.
-- That a higher compression ratio would look better: 512 of 1024 lets the
-  tracker see drift; observability drops at 16x.
+- That a higher compression ratio looks better: 512 of 1024 lets the tracker
+  see drift; observability drops at 16x.
 - Peak-to-median dynamic range as evidence compression is good: it improves as
   compression worsens.
 - That k=8 still applies: degenerate here (F94); Thrust 2/3 both run at k=2
@@ -211,11 +220,15 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
    passes/frame), B = adaptive gate (shipped default, 10 passes/frame
    baseline)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** Cold start, k=2 (largest spike-free rank, F94),
+  measured over 8 frames. Quote 'about' -- nondeterministic at ~5e-3, never the
+  third decimal.
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Subspace Error**.
+- Product panel(s) this preset enables: **"Subspace error (Frobenius) per
+  frame"**.
 - Arm banners on screen: "A (as loaded): gap_response fixed effort (5
   passes/frame) -- before" / "B: gap_response adaptive gate (shipped default,
   10 passes/frame baseline) -- after".
@@ -226,46 +239,48 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
 
 Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: FIXED 5
 passes/frame, settling near 0.16, never reaching B's ~0.06 floor in 8 frames --
-about 2.5x higher throughout. Arm B: the shipped adaptive gate, 10 passes/frame
-baseline (right axis 0-12; a small-gap file would climb to 60, not this one).
-Over 8 frames: A about 0.6 -> 0.31 -> 0.19; B about 0.30 -> 0.09 by frame 2,
-settled from frame 3 -- a frame ahead, at a lower floor, for 2x the passes
-(flat 5 vs flat 10). It never escalates here: k=2's gap stays well clear of
+about 2.5x higher. Arm B: the shipped adaptive gate, 10 passes/frame baseline
+(right axis 0-12; a small-gap file would climb to 60, not this one). Over 8
+frames: A about 0.6 -> 0.31 -> about 0.2; B about 0.30 -> 0.09 by frame 2,
+settled from frame 3. It never escalates here: k=2's gap stays well clear of
 0.01.
 
 ### Say
 - Cold start, k=2 (largest spike-free rank, F94), measured over 8 frames. Quote
   'about' -- nondeterministic at ~5e-3, never the third decimal.
-- The A/B statistic is frames-to-acquire vs passes-per-frame, both on screen: B
-  pays 2x the compute for a lower floor and one frame sooner.
-- This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 neither arm
-  converges in this many frames -- why m is not a live knob here.
+- The A/B statistic is the settled floor at 5 vs 10 passes/frame -- A never
+  reaches B's, about 2.5x higher throughout.
+- This is 2:1 compression (m=512 of 1024). At 16:1/64:1 neither arm converges
+  in this many frames -- why m is not a live knob here.
 - There is deliberately no image here: the picture doesn't change during
-  acquisition -- the error curve shows what the tracker hasn't yet learned.
+  acquisition -- the error curve shows what the tracker hasn't learned yet.
   Without the AFE it looks identical -- do not toggle it.
 - Prepared answer -- 'does your gap diagnostic work at Ka?': at k=2 the gap
-  sits far above 0.01, so the gate never escalates -- the 2x on screen IS
-  baseline, not reaction. At k=4 (not shipped) the gap collapses and the gate
-  spends 6x more, but the cluster still spikes -- 'mitigated'.
-- The run is not faster than a full SVD: scoring runs the full SVD every frame
-  for ground truth. The 45x microbenchmark is real, the run time is not.
+  sits far above 0.01, so it never escalates -- the 2x on screen IS baseline.
+  At k=4 (not shipped) the gap collapses, the gate spends 6x more, but the
+  cluster still spikes -- 'mitigated'.
+- The run is not faster than a full SVD: scoring runs the full SVD every frame.
+  The 45x microbenchmark is real, the run time is not.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; native range resolution 5 cm, binned 20:1 to 1 m gates.
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the tracker's acquisition curve here, not Thrust 1's picture.
+- Prepared answer -- both arms are cold starts; the dashed line is a
+  WARM-started settled level. Arm B (10 passes) reaches it from cold; arm A (5
+  passes) does not.
 
 ### Do NOT say
 - Anything with an interferer: three confounders, and the sign of the response
-  flips with a knob that is not on screen.
+  flips with a knob not on screen.
 - 'k = 2 is the optimum' in raw subspace_err: the metric ceilings at sqrt(2) =
   1.41.
 - The AFE on/off toggle as 'the effect of adaptive feature extraction': 2:1,
   costs 3 dB, the picture looks identical.
 - subspace_err beside an m=16 run: the warm tracker's error GROWS with frames
   there (0.125 -> 0.807 over six).
-- That the gate 'always fires' or 'escalates' at Ka: measured false here (flat
-  5 on A / 10 on B, 8/8 frames). F94's escalation claim was pre-fix (8d1e251),
-  at k=8 -- retracted at k=2.
+- That the gate 'always fires' or 'escalates' at Ka: false here (flat 5 on A /
+  10 on B, 8/8 frames). F94's escalation claim was pre-fix (8d1e251), at k=8 --
+  retracted at k=2.
 
 ---
 
@@ -276,15 +291,20 @@ settled from frame 3 -- a frame ahead, at a lower floor, for 2x the passes
    profile", click **Load preset**. The param editor opens on **Interconnect**
    (first knob: **Tessera: TSV height (um)**); the operator card shows "Loaded:
    Thrust 4 - a worse interconnect, on the range profile (Thrust 4, 3 frames)".
+   Scroll the param pane; the knob is below the fold.
 2. Click **Run pipeline**. Both arms run in one click (A = canonical Tessera
    geometry (50 um presented), B = TSV height -> 30.01 um presented (largest
    skirt mover)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** This is the LIVE public Tessera/UIC surrogate
+  (checkpoint, not a CSV) -- the run-notes line under the banner names the
+  scale factor and frequency.
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Range-Azimuth**, **Range Profile**.
+- Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
+  profile (non-coherent over channels)"**.
 - Arm banners on screen: "A (as loaded): Tessera: TSV height (um) canonical
   Tessera geometry (50 um presented) -- before" / "B: Tessera: TSV height (um)
   TSV height -> 30.01 um presented (largest skirt mover) -- after".
@@ -294,40 +314,42 @@ settled from frame 3 -- a frame ahead, at a lower floor, for 2x the passes
   'default'): manual third option, not part of the A/B: source='default' +
   case='default' selects the old SYNTHETIC 11-tap boxcar placeholder
 
-THE HONEST STORY: the interconnect is NOT the limiting element at this
-display's floor -- median floor is -50.3 dB on both arms; any difference of
-about 0.1 dB between the arms' printed range-azimuth peak-median statistic is
-the run-to-run floor, not the knob. This is the LIVE public Tessera/UIC TSV
+THE HONEST STORY: the interconnect is NOT the limiting element here; any ~0.1
+dB difference between the arms' printed statistics (either panel) is the
+run-to-run floor, not the knob. This is the LIVE public Tessera/UIC TSV
 surrogate (InterconnectBlock(source='tessera'), scale x2 / half frequency at Ka
 band; see the run-notes line under the banner). Arm A: canonical geometry, 50
-um presented (= 100 um model geometry at scale x2). Arm B drops TSV height to
-its presented low end -- OFFLINE the biggest single-knob mover of the skirt
-(3.53 dB native flat-frame move) -- bulk DELAY, an offline metric the range
-profile cannot show; a group-delay/|S21| overlay would. That move sits below
-the printed median floor.
+um presented (= 100 um model geometry). Arm B drops TSV height to its presented
+low end -- OFFLINE the biggest single-knob mover of the skirt (3.53 dB native
+flat-frame move) -- bulk DELAY, sits below the printed median floor; a
+group-delay/|S21| overlay would show it.
 
 ### Say
 - This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- the
   run-notes line under the banner names the scale factor and frequency.
 - Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; doi
   10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are theirs.
-- In-band |S21| is invisible on this display for every knob (<0.03 dB span);
-  A/B moves TSV height because it measurably moves the skirt.
+- In-band |S21| is invisible on this display (<0.03 dB span); A/B moves TSV
+  height because it measurably moves the skirt.
 - Crosstalk is now modelled -- NEXT/FEXT between vias -- with F89's numbers on
   the screen note; per-ELEMENT broadcast is still unmodelled.
 - 77 GHz shipped CSVs are not reconciled with the 30 GHz frames -- caption
   real-CSV results shape-only.
 - Range 0-2 m is not a target: range 0 = earliest arrival
-  (normalize_delays=True). Peaks near 37, 46, 68, 79, 113 m are multipath; the
-  120-125 m rise is the skirt wrapping at 125 m.
-- Skin depth goes as f^-1/2, not f^-1: conductor loss is under-estimated by
-  sqrt(2) (~0.2 dB of 0.5 dB in-band loss), substrate coupling by up to 2x;
-  trends/shape exact (F91).
+  (normalize_delays=True). Peaks near 37-113 m are multipath; the 120-125 m
+  rise is the skirt wrapping at 125 m.
+- Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated by
+  sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; trends/shape
+  exact (F91).
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
 - The 0 dB reference is a single range-0 gate too small to see; the panel
   prints the brightest visible return (read it off the screen); every dB on the
   map is relative to the direct path.
+- What Thrust 4 DID establish: the live surrogate's six knobs run end to end
+  through the real chain, and in-band |S21| moves <0.03 dB across all of them
+  -- at this floor, the interconnect is not the limiting element. A negative
+  result, stated as one.
 
 ### Do NOT say
 - That crosstalk is structurally absent -- RETRACTED: the surrogate models
@@ -353,12 +375,18 @@ the printed median floor.
 2. Click **Run pipeline**. Both arms run in one click (A = 12-bit ADC (as
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** SAY FIRST: the frames change here. Thrusts 1-4 ran
+  munich frames (125 m, range-azimuth); this is the benchmark corpus (100 m,
+  range-Doppler). STORED is the ray-traced channel -- everything after runs
+  live, so the ADC knob reaches the detector.
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Radar Cube (Range-Doppler)**,
-  **Detector (CFAR | ML)**.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
+  frame slider), **"CFAR objectness"** (no slider -- pinned to the last frame),
+  **"Detector scoreboard"**, and the offline PR-curve panel (**"scored offline:
+  ... test frames"**).
 - Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
   before" / "B: ADC bits 3-bit ADC (same frames) -- after".
 
@@ -368,35 +396,36 @@ the printed median floor.
 
 The held-out TEST frames, replayed as the STORED RAY-TRACED CHANNEL: the RF
 front end, dechirp, thermal floor, impairments, IF high-pass and ADC all run
-LIVE from that channel with the values on screen, then CA-CFAR. Press Run once:
-A is the 12-bit ADC the corpus was generated at, B the same frames re-digitised
-at 3 bits. Measured over the 5 frames: 16 hits / 45 unmatched (9.0 per frame)
-at 12 bits, 13 / 36 (7.2) at 3 bits. Thresholds are each detector's recall-0.5
-point on the 172-frame split; on 5 frames recall varies, so compare the
-172-frame FA/frame rows, not the crosses.
+LIVE from that channel, then CA-CFAR. Press Run once: A is the 12-bit ADC the
+corpus was generated at, B the same frames re-digitised at 3 bits. Measured
+over 5 frames: 16 hits / 45 unmatched (9.0/frame) at 12 bits, 13 / 36 (7.2) at
+3 bits. Thresholds are each detector's recall-0.5 point on the 172-frame split;
+on 5 frames recall varies, so compare the 172-frame FA/frame rows, not the
+crosses.
 
 ### Say
-- SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich frames
-  (125 m, range-azimuth); this is the benchmark corpus (100 m, range-Doppler).
-  STORED is the ray-traced channel -- everything after runs live, so the ADC
-  knob reaches the detector.
-- The gate that makes this honest: at generation settings, the live cube is
-  BIT-IDENTICAL to the stored one -- max |diff| = 0 ADC codes. Move a knob and
-  that number leaves zero; that difference is the whole demonstration.
-- Classical CFAR scores AP 0.301 on this split offline; chance floor 0.081
-  (b1_bench_v3, 12-bit default impairments) -- the counts on screen are 5 live
-  frames of a different corpus, a demonstration not a re-measurement.
+- SAY FIRST: the frames change here. Thrusts 1-4 ran munich frames (125 m,
+  range-azimuth); this is the benchmark corpus (100 m, range-Doppler). STORED
+  is the ray-traced channel -- everything after runs live, so the ADC knob
+  reaches the detector.
+- The gate that makes this honest: at generation settings the live cube is
+  BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes). Move a knob and
+  that leaves zero -- the whole demonstration.
+- Classical CFAR scores AP 0.301 offline; chance floor 0.081 (b1_bench_v3,
+  12-bit). The counts on screen are 5 live frames of a different corpus -- a
+  demonstration, not a re-measurement.
 - The CFAR map spans 0-50 m; the 10 m strip above the dashed line is unscored
-  (labels/scoring stop at 40 m). The 0-100 m panel is Range-Doppler power,
-  unlabelled.
+  (labels/scoring stop at 40 m). The 0-100 m panel is Range-Doppler power with
+  its own frame slider; the detector panel has none -- it is pinned to the LAST
+  frame, and the slider does not move it.
 - Ground truth omits ~3 real strongly-scattering objects per frame inside 40 m,
   so a detector firing on every real object has a precision ceiling of 0.64 --
   some 'false alarms' are real objects.
 - Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); corpus targets
   are slower by construction, so a 20 m/s car would alias.
 - Unmatched detections can DROP at deeper quantisation: quantisation noise
-  raises the CA-CFAR estimate, so fewer weak peaks clear the threshold -- a
-  loss of sensitivity, not a quality gain (5 frames cannot resolve the knob).
+  raises the CA-CFAR estimate, so fewer weak peaks clear threshold -- a loss of
+  sensitivity, not a quality gain.
 - This detector sits at its 172-frame recall-0.5 threshold, yet gives 0.53
   recall on these 5 frames; the matched-recall FA comparison is made on that
   172-frame split -- 5 frames cannot reproduce a recall.
@@ -425,12 +454,16 @@ point on the 172-frame split; on 5 frames recall varies, so compare the
    1 m (as built), B = IF high-pass corner 25 m (attenuates ~4.3 dB at 22 m)).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** The learned detector LOSES to CFAR: 0.127 vs 0.301,
+  chance floor 0.081. Say it first.
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Radar Cube (Range-Doppler)**,
-  **Detector (CFAR | ML)**.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
+  frame slider), **"Neural detector objectness"** (no slider -- pinned to the
+  last frame), **"Detector scoreboard"**, and the offline PR-curve panel
+  (**"scored offline: ... test frames"**).
 - Arm banners on screen: "A (as loaded): Corner range (m) IF high-pass corner 1
   m (as built) -- before" / "B: Corner range (m) IF high-pass corner 25 m
   (attenuates ~4.3 dB at 22 m) -- after".
@@ -443,47 +476,49 @@ The same live chain, decoded by the ported FFTRadNet checkpoint (rd input;
 offline test AP 0.127 vs CFAR's 0.301). Its objectness map is a range-profile x
 fixed-azimuth-prior STRIPE, not peaks: the network never learns azimuth (F83).
 A/B moves the IF high-pass corner from 1 m (real receiver) to a deliberately
-broken 25 m, attenuating (not discarding) returns inside 25 m -- about 4.3 dB
-at the targets' ~22 m range: unmatched/frame falls 26.60 -> 12.20, hits 15 -> 4
-(scoreboard). Threshold is pinned at recall-0.5 (0.22); at default 0.5 this
-checkpoint draws nothing.
+broken 25 m, attenuating (not discarding) returns inside 25 m -- ~4.3 dB at ~22
+m: unmatched/frame falls 26.60 -> 12.20, hits 15 -> 4. Threshold is pinned at
+recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 
 ### Say
 - The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say
-  it first; the diagnosis is the result.
+  it first.
 - B is not a plausible receiver -- a 25 m high-pass corner, 25x the real one --
   the point is a front-end setting reaches the detector at all: unmatched/frame
-  26.60 -> 12.20, hits 15 -> 4 (scoreboard).
+  26.60 -> 12.20, hits 15 -> 4.
 - At A's operating point, offline expects ~29 crosses/frame = 26.4 FA + 3.0
   hits (beat_cfar.json); these 5 live frames give 26.60 unmatched/frame -- same
   regime, not the same number.
-- Both ported networks emit a near-separable f(range) * g(azimuth) map: rank-1
-  energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under azimuth-only
-  matching they score no better than a constant map.
+- Both ported networks emit a near-separable f(range)*g(azimuth) map: rank-1
+  energy 0.89/0.76 vs 0.31 for ground truth. Under azimuth-only matching they
+  score no better than a constant map.
 - F83's mechanism: neither head converts channel phase into an angle bin. An
   architecture with range x azimuth as its spatial plane scores 0.476 and
-  passes the controls this one fails -- load the RADDetNet preset, read its
-  caveats first.
-- This checkpoint trained on a different corpus from these frames; its rd input
-  scaling comes from that corpus (screen note). Moving a knob takes it further
-  out of its training distribution.
-- On Arm B some frames score TP = 0 (every cross a miss): that is the mechanism
-  on display, not an accident -- the 25 m corner attenuates the same near-range
-  returns this checkpoint was trained to fire on.
+  passes controls this one fails -- load RADDetNet, read its caveats first.
+- This checkpoint trained on a different corpus; its rd input scaling comes
+  from that corpus (screen note). Moving a knob takes it further out of its
+  training distribution.
+- On Arm B some frames score TP = 0: the mechanism on display, not an accident
+  -- the 25 m corner attenuates the same near-range returns this checkpoint was
+  trained to fire on.
 - You cannot see the 4.3 dB: both maps are peak-normalised and the peak sits
-  inside 25 m; what you see is the floor coming up relative to a peak
-  attenuated along with it.
+  inside 25 m; you see the floor coming up relative to a peak attenuated along
+  with it.
 - This detector sits at its 172-frame recall-0.5 threshold, yet gives 0.50
-  recall on these 5 frames; the matched-recall FA comparison is made on that
-  172-frame split -- 5 frames cannot reproduce a recall.
+  recall on these 5 frames (the LAST one; no slider here -- the Range-Doppler
+  slider does not move it) -- 5 frames cannot reproduce a recall.
+- The PR legend's 'fftradnet_rd_b5' is this checkpoint (b5_fftradnet_v3).
+- This scoreboard's bootstrap also shows seed spread 0.040 exceeding CI
+  half-width 0.029 -- doesn't change the verdict here (already loses), but is
+  what undermines RADDetNet's lead claim.
 
 ### Do NOT say
 - 'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.
 - 'We fixed azimuth': the stripe statistic refutes it on the next slide.
-- That the 25 m corner measures receiver-design sensitivity: it is an
-  illustration on 5 frames, not a sweep.
-- That this is a benchmark of SSMRadNet/FFTRadNet: the fault is on our side,
-  and the collaborator README says so.
+- That the 25 m corner measures receiver-design sensitivity: an illustration on
+  5 frames, not a sweep.
+- That this benchmarks SSMRadNet/FFTRadNet: the fault is on our side
+  (collaborator README).
 
 ---
 
@@ -498,12 +533,17 @@ checkpoint draws nothing.
 2. Click **Run pipeline**. Both arms run in one click (A = 12-bit ADC (as
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; presets are sized to stay under the 15 s WARN budget.
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 3. The app switches to the **Results** tab automatically.
+- **While it runs, say:** The defensible sentence: a learned head on the
+  classical front end beats a CFAR threshold on the same cube, in-distribution
+  -- say that, not 'beats CFAR' (F85 addendum).
 
 ### What you are looking at
-- Product panel(s) this preset enables: **Radar Cube (Range-Doppler)**,
-  **Detector (CFAR | ML)**.
+- Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
+  frame slider), **"Neural detector objectness"** (no slider -- pinned to the
+  last frame), **"Detector scoreboard"**, and the offline PR-curve panel
+  (**"scored offline: ... test frames"**).
 - Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
   before" / "B: ADC bits 3-bit ADC (same frames) -- after".
 
@@ -513,14 +553,13 @@ checkpoint draws nothing.
 
 THE REAL CLAIM, first: at matched recall (0.5) on the 172-frame split,
 RADDetNet racks up fewer false alarms than CFAR -- 2.99 vs 6.24 FA/frame (6.24
-on the CFAR screen; AP 0.476 vs 0.301, controls pass). On the 5 live frames
-below, fewer crosses can mean fewer hits, since these frames aren't
+also printed on this screen; AP 0.476 vs 0.301, controls pass). On the 5 live
+frames below, fewer crosses can mean fewer hits since these aren't
 recall-matched -- read the scoreboard's FA rows, not the crosses. The same live
 chain runs RADDetNet (Doppler as channels, range x azimuth as the spatial
 plane) on CFAR's cube. A/B re-digitises the stored channel at 3 bits: hits go
-10 -> 5, five frames -- read it as 'the knob reaches the detector', not a
-ranking. Out of distribution the result is seed-dependent (F86); say so
-unprompted.
+10 -> 5 -- the knob reaching the detector, not a ranking. Out of distribution
+the result is seed-dependent (F86); say so unprompted.
 
 ### Say
 - The defensible sentence: a learned head on the classical front end beats a
@@ -530,29 +569,29 @@ unprompted.
   b1_bench_v3, 12-bit default impairments); re-scored bit-identically. Paired
   scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI [+0.145, +0.208];
   +0.148 vs the best of nine classical baselines (0.328).
-- The counts on screen are 5 live frames of a different corpus -- a
+- The counts on screen are 5 live frames of a different corpus, the LAST shown
+  (no slider here; the Range-Doppler slider does not move it) -- a
   demonstration, never a re-measurement of AP; recall here (0.33) cannot
-  reproduce the 172-frame recall-0.5 threshold these arms are set at.
+  reproduce the 172-frame recall-0.5 threshold.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.328 -- above shipped CFAR (0.301), but the best classical
   still loses to RADDetNet (0.476).
-- Four learned arms were screened on this test split: three ported
-  architectures and this one designed to the F83 diagnosis; all four are in
-  beat_cfar.json, none dropped.
-- THE CAVEAT: on an unseen earlier-generator corpus (b1_bench_v2), CFAR scores
-  0.179/13.2 FA; this checkpoint (seed 42) 0.208/15.1; seed 43 0.153/20.7
-  (F86). Out of distribution it does NOT reliably beat CFAR.
+- Four learned arms were screened: three ported architectures and this one
+  designed to the F83 diagnosis; all four are in beat_cfar.json, none dropped.
+- THE CAVEAT: on b1_bench_v2 (unseen), seed 42 scores 0.208 vs CFAR 0.179; seed
+  43 0.153 -- NOT a reliable OOD win (F86). Seed spread 0.040 exceeds the CI
+  half-width 0.032: the lead rests on 3 seeds + the joint arm, not the CI
+  alone.
 
 ### Do NOT say
-- 'Beats CFAR', unqualified: the verified claim is in-distribution and on
-  CFAR's own front end (F85 addendum).
-- That 5 hits at 3 bits vs 10 at 12 bits measures the cost of 3-bit
-  quantisation: 5 frames at one threshold shows the knob reaches the detector,
-  not measures it.
+- 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's
+  front end (F85 addendum).
+- That 5 hits at 3 bits vs 10 at 12 bits measures quantisation cost: 5 frames
+  at one threshold shows the knob reaches the detector, not measures it.
 - Do not volunteer generalisation/robustness; if asked, read the OOD and
   3rd-corpus rows as printed (a third corpus never trained on; the lead holds)
-  and stop -- 0.487 on v2 is in-distribution, not OOD (F86).
+  and stop there.
 - That this is what the professor asked for: it is a detector designed to the
   F83 diagnosis, not a port of the collaborators' architectures.
 - That the model converged: val AP peaks at epoch 14 of 40 and decays to

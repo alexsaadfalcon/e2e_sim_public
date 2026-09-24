@@ -101,18 +101,34 @@ def test_thrust5_screen_notes_state_the_live_chain_and_scope_the_offline_numbers
     """Owner wording, 2026-09-23 (the live-chain architecture change): a visitor
     reading only the Results-tab note must see WHAT IS STORED (the ray-traced
     channel), WHAT IS COMPUTED (the ADC chain, live, at the knobs on screen), which
-    corpus the offline numbers belong to, and that a live count is a demonstration
-    rather than a re-measurement. Checked by substring, not an exact-prefix pin
-    (2026-09-23 owner course-correction reworded/tightened the note to make room for
-    the mandatory corpus-band disclosure -- see the test below -- so the exact string
-    is no longer stable; the required CONTENT is)."""
+    corpus the offline numbers belong to, and that a live count is shown for
+    reference rather than re-measured live. Checked by substring, not an
+    exact-prefix pin (2026-09-23 owner course-correction reworded/tightened the
+    note to make room for the mandatory corpus-band disclosure -- see the test
+    below -- so the exact string is no longer stable; the required CONTENT is).
+    Wave 10 (2026-09-24, item 2.12, hostile round 9): "are a demo when live, not a
+    re-measurement" was ungrammatical -- reworded to "are shown for reference, not
+    re-measured live", so this test no longer pins "demo"/"re-measurement" as
+    literal substrings, only the content they used to carry."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         note = PRESETS_BY_ID[pid].screen_note.lower()
         assert "stored ray-traced channel" in note and "b1_demo_cfr" in note, pid
         assert "adc chain" in note and "live" in note, pid
         assert "beat_cfar.json" in note and "b1_bench_v3" in note, pid
-        assert "demo" in note and "re-measurement" in note, pid
+        assert "shown for reference" in note and "not re-measured live" in note, pid
         assert "training distribution" in note, pid
+
+
+def test_thrust5_screen_notes_lead_with_the_band_disclosure():
+    """Wave 10 (2026-09-24, item 4.6, hostile round 9): "the single most
+    attackable fact on the screen" was buried sixth of eight clauses; moved to be
+    the FIRST clause. The note must still end on the scoring-crop clause (see
+    test_resolve_screen_note_drops_vmax_clause_when_manifest_is_unreadable in
+    tests/test_webapp_ab.py, which pins the resolved ending)."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        note = PRESETS_BY_ID[pid].screen_note
+        assert note.startswith("corpus traced at 77 GHz"), pid
+        assert "scoring crop 40 m" in note, pid
 
 
 def test_thrust5_screen_notes_disclose_the_corpus_band():
@@ -198,6 +214,46 @@ def test_thrust1_sits_at_the_weak_signal_operating_point():
     assert st["rffe"]["params"]["scale_mode"] == "legacy"
     assert st["rffe"]["params"]["signal_scaling"] == pytest.approx(1e-7)
     assert st["rffe"]["params"]["lna_bias_ma"] == 8.0 and st["rffe"]["params"]["if_bw_mhz"] == 15.0
+
+
+def test_thrust1_label_names_the_noise_floor_not_image_quality():
+    """Wave 10 (2026-09-24, item 4.5, hostile round 9): "vs image quality" oversold
+    the screen -- both panels are pixel-identical (do-not-change 5.1) and the
+    card's own say list concedes the moved statistic isn't target SNR."""
+    p = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    assert p.label == "Thrust 1 - RF circuit knobs vs the image's noise floor"
+    assert "image quality" not in p.label.lower()
+
+
+def test_thrust1_and_2_multipath_number_matches_the_panel():
+    """Wave 10 (2026-09-24, item 1.7, hostile round 9): the panel subtitles print
+    "36 m" (1 m display gates rounding the true 37.1 m delay, F94); the cards used
+    to tell the presenter to read "37 m" off the screen, a number not printed
+    there."""
+    for pid in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error"):
+        p = PRESETS_BY_ID[pid]
+        assert any("~36 m" in s and "37.1 m" in s for s in p.say), pid
+        assert not any("near 37 m" in s for s in p.say), pid
+
+
+def test_thrust1_names_the_operating_point_difference_from_thrust2():
+    """Wave 10 (2026-09-24, item 4.1, hostile round 9): peak-median moves 11 dB
+    between consecutive slides (T1 ~66 dB, T2 ~77 dB on the same munich frames);
+    the cause is T1's deliberate legacy signal_scaling, not a different scene --
+    name it before the room asks."""
+    p = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    assert any("signal_scaling 1e-7" in s and "operating point" in s.lower()
+              for s in p.say)
+
+
+def test_thrust1_stripe_do_not_say_holds_on_every_frame():
+    """Wave 10 (2026-09-24, item 2.6, hostile round 9): RETRACTED "it is not
+    visible" -- false on frame 2 (a yellow 1-px stripe at range 0 is the brightest
+    thing on the map that frame). Reworded to a claim that holds on every frame."""
+    p = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    assert not any("it is not visible" in s.lower() for s in p.do_not_say)
+    assert any("thin stripe" in s.lower() and "when it shows" in s.lower()
+              for s in p.do_not_say)
 
 
 # ------------------------------------------------------------------------------------
@@ -378,10 +434,12 @@ def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
     "about" rather than a fixed third decimal, and the say list tells the operator
     why. Numbers re-measured 2026-09-23 (round 2, visible-acquisition arms) on the
     current file at k=2 (see the preset's `overrides` comment): arm A about
-    0.6 -> 0.31 -> 0.19, arm B about 0.30 -> 0.09."""
+    0.6 -> 0.31 -> ~0.2 (wave 10, 2026-09-24, item 1.10: "0.19" read ~0.20 on the
+    03:0x re-render, off by 2x the card's own ~5e-3 nondeterminism floor -- rounded
+    to "about 0.2"), arm B about 0.30 -> 0.09."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb
-    assert "0.57" not in p.blurb and "0.595" not in p.blurb
+    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb and "about 0.2" in p.blurb
+    assert "0.57" not in p.blurb and "0.595" not in p.blurb and "0.19" not in p.blurb
     assert any("nondeterministic" in s.lower() and "third decimal" in s.lower()
               for s in p.say)
 
@@ -401,15 +459,30 @@ def test_thrust3_gate_measured_as_a_no_op_at_the_shipped_k():
     assert any("gap diagnostic" in s.lower() for s in p.say)
 
 
-def test_thrust3_frames_to_acquire_vs_passes_statistic_is_on_the_card():
-    """Round-6 review: the A/B statistic must be frames-to-acquire vs passes-per-frame,
-    both stated on the card (and rendered on screen via the subspace_err figure's
-    second trace, see tests/test_webapp_ab.py)."""
+def test_thrust3_settled_floor_vs_passes_statistic_is_on_the_card():
+    """Round-6 review established the card needs an A/B statistic, both stated and
+    rendered (the subspace_err figure's second trace, see tests/test_webapp_ab.py).
+    Wave 10 (2026-09-24, item 1.4, hostile round 9): RETRACTED "frames-to-acquire ...
+    one frame sooner" -- arm A never reaches B's floor in 8 frames (contradicted the
+    blurb's own honest claim on the same card). The statistic is now the settled
+    FLOOR at two fixed pass counts (5 vs 10), not a race with an undefined winner."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
     assert any("frame 3" in s for s in [p.blurb] + p.say)
     assert any("frame 2" in s for s in [p.blurb] + p.say)
     assert any("passes-per-frame" in s.lower() or "passes/frame" in s.lower()
               for s in p.say)
+    assert any("settled floor" in s.lower() and "5 vs 10 passes" in s.lower()
+              for s in p.say)
+    assert not any("frames-to-acquire" in s.lower() for s in p.say + p.do_not_say + [p.blurb])
+    assert not any("one frame sooner" in s.lower() for s in p.say + p.do_not_say + [p.blurb])
+
+
+def test_thrust3_explains_the_warm_start_reference_line():
+    """Wave 10 (2026-09-24, item 4.3, hostile round 9): prepared answer for "why does
+    one cold run hit the warm floor and the other never does?" -- both arms are cold
+    starts; the dashed line is a WARM-started level."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    assert any("cold start" in s.lower() and "warm" in s.lower() for s in p.say)
 
 
 def test_thrust4_runs_the_live_tessera_surrogate_ab_on_height():
@@ -490,6 +563,78 @@ def test_thrust4_card_answers_the_skin_depth_question():
     assert any("sqrt(2)" in s and "f91" in s.lower() for s in p.say)
 
 
+def test_thrust4_card_never_claims_the_median_floor_is_identical_on_both_arms():
+    """Wave 10 (2026-09-24, item 1.2, hostile round 9): a re-render printed median
+    floor -50.3 (A) vs -50.4 (B) -- the floor is the statistic that moved by ~0.1 dB
+    that run, while range-azimuth peak-median printed identically (76.6/76.6). The
+    card must not claim a specific panel holds still; it must generalise to
+    "either panel"."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert "on both arms" not in p.blurb.lower()
+    assert "either panel" in p.blurb.lower()
+    assert "run-to-run floor" in p.blurb.lower()
+
+
+def test_thrust4_crosstalk_clause_quotes_presented_pitch_with_model_in_parens():
+    """Wave 10 (2026-09-24, item 1.3, hostile round 9): the run-notes line under the
+    banner quotes PRESENTED Tessera geometry (pitch 30 um); the crosstalk clause used
+    to quote the same shipped pitch in MODEL units (60 um) with no unit noted -- one
+    screen, two conventions. Converted to presented-with-model-in-parens, and the
+    model->presented conversion must come from the imported Ka scale constant, never
+    a hand-typed '/2' or '2'."""
+    from webapp.demo_presets import (
+        _TESSERA_CROSSTALK_SHIPPED_PITCH_MODEL_UM, _TESSERA_CROSSTALK_SHIPPED_PITCH_UM,
+        _TESSERA_CROSSTALK_TRAINING_PITCH_MODEL_UM, _TESSERA_CROSSTALK_TRAINING_PITCH_UM,
+        _TESSERA_KA_SCALE,
+    )
+    assert _TESSERA_CROSSTALK_TRAINING_PITCH_UM == (
+        _TESSERA_CROSSTALK_TRAINING_PITCH_MODEL_UM / _TESSERA_KA_SCALE)
+    assert _TESSERA_CROSSTALK_SHIPPED_PITCH_UM == (
+        _TESSERA_CROSSTALK_SHIPPED_PITCH_MODEL_UM / _TESSERA_KA_SCALE)
+    # The shipped pitch, presented, matches the run-notes convention (30 um) --
+    # cross-checked against the registry's own presented default, not re-typed.
+    from webapp.pipeline_registry import BLOCKS_BY_ID
+    pitch_spec = next(ps for ps in BLOCKS_BY_ID["interconnect"].params
+                      if ps.key == "tessera_pitch_um")
+    assert _TESSERA_CROSSTALK_SHIPPED_PITCH_UM == pitch_spec.default
+
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert f"{_TESSERA_CROSSTALK_SHIPPED_PITCH_UM:g} um presented" in p.screen_note
+    assert f"({_TESSERA_CROSSTALK_SHIPPED_PITCH_MODEL_UM:g} um model" in p.screen_note
+    assert f"{_TESSERA_CROSSTALK_TRAINING_PITCH_UM:g} um presented" in p.screen_note
+    assert f"({_TESSERA_CROSSTALK_TRAINING_PITCH_MODEL_UM:g} um model" in p.screen_note
+
+
+def test_thrust4_screen_note_uses_one_crosstalk_vocabulary():
+    """Wave 10 (2026-09-24, item 1.11, hostile round 9): the run-notes line says
+    'ring3x3 arrangement'; the screen note used to say 'this default single-via
+    one' for the same fact -- both correct, two vocabularies. Matched wording."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert "single-via" not in p.screen_note.lower()
+    assert "ring3x3" in p.screen_note.lower()
+    assert "one signal via" in p.screen_note.lower()
+
+
+def test_thrust4_does_not_claim_50_dB_below_the_noise_floor():
+    """Wave 10 (2026-09-24, item 1.8, hostile round 9): the range-profile axis runs
+    0 to -60 dB and the offline skirt levels quoted (-53.90 -> -57.43 dB) sit INSIDE
+    that range -- not 50 dB below the panel's own -50.3 dB printed floor. Retracted,
+    not reworded: the honest sentence right next to it already says the same panel
+    prints a different statistic."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert "50 db below" not in p.screen_note.lower()
+    assert "not the statistic the panel" in p.screen_note.lower()
+
+
+def test_thrust4_says_what_it_did_establish():
+    """Wave 10 (2026-09-24, item 4.2, hostile round 9): a prepared answer for "then
+    why is this a thrust?" -- the negative result (six knobs run live, in-band |S21|
+    moves <0.03 dB across all of them) stated as a finding, not left implicit."""
+    p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert any("did establish" in s.lower() and "negative result" in s.lower()
+              for s in p.say)
+
+
 def test_thrust5_ml_card_admits_the_shown_frame_scores_zero():
     """X9: the displayed frame (TP = 0, all crosses miss on Arm B) is the mechanism
     on display -- the near-range corner filter removing the returns this checkpoint
@@ -530,6 +675,32 @@ def test_thrust5_raddetnet_card_leads_with_the_matched_recall_fa_comparison():
     raddetnet_fa = next(a for a in data["arms"] if a["name"] == "raddetnet")[
         "operating_point"]["fp_per_frame"]
     assert f"{raddetnet_fa:.2f}" in p.blurb and f"{cfar_fa:.2f}" in p.blurb
+    # Wave 10 (2026-09-24, item 1.6, hostile round 9): the number is printed on
+    # THIS screen, same row -- do not send the presenter to the CFAR preset for it.
+    assert "on the cfar screen" not in p.blurb.lower()
+
+
+def test_thrust5_raddetnet_drops_the_contradictory_v2_clause():
+    """Wave 10 (2026-09-24, item 1.5, hostile round 9): the do_not_say used to add
+    "0.487 on v2 is in-distribution, not OOD" -- 0.487 is the JOINT checkpoint's
+    number (trained partly on v2), not this seed-42 checkpoint's; the say list
+    already states a DIFFERENT number (0.208) for THIS checkpoint on v2. Two
+    incompatible statements about "v2" on one card -- dropped, not disambiguated."""
+    p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    assert "0.487" not in p.blurb
+    assert not any("0.487" in s for s in p.say + p.do_not_say)
+
+
+def test_thrust5_raddetnet_names_the_seed_spread_vs_ci_caveat():
+    """Wave 10 (2026-09-24, item 4.4, hostile round 9): the scoreboard prints "seed
+    spread 0.040 > CI half-width 0.032" under the +0.175 AP lead claim -- a
+    statistician finds the CI-understates-uncertainty issue in ten seconds if the
+    card has no sentence for it. The claim must rest on the three-seeds-plus-joint-
+    arm replication (F86), not the CI alone."""
+    p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    assert any("seed spread" in s.lower() and "ci half-width" in s.lower()
+              for s in p.say)
+    assert any("not the ci alone" in s.lower() for s in p.say)
 
 
 def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain():
@@ -540,6 +711,34 @@ def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain()
         assert st["radar_cube"]["enabled"] and st["detector"]["enabled"]
         for bid in ("fft", "range_az", "range_el", "range_profile", "subspace_err", "comms"):
             assert st[bid]["enabled"] is False, (pid, bid)
+
+
+def test_thrust5_all_cards_say_the_detector_panel_is_frame_pinned():
+    """Wave 10 (2026-09-24, item 2.2, hostile round 9): on all three T5 screens
+    the objectness/scoreboard panel has no frame slider (pinned to the last
+    frame) while the Range-Doppler panel does -- the runbook's usual "advance
+    with the slider" instruction would desync them if the presenter didn't know."""
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        p = PRESETS_BY_ID[pid]
+        assert any("slider" in s.lower() and "range-doppler" in s.lower()
+                  for s in p.say), pid
+
+
+def test_thrust5_ml_names_the_pr_legend_alias():
+    """Wave 10 (2026-09-24, item 3.7, hostile round 9): the panel title/scoreboard
+    say b5_fftradnet_v3, the PR legend says fftradnet_rd_b5 -- one name, stated."""
+    p = PRESETS_BY_ID["thrust5_detector_ml"]
+    assert any("fftradnet_rd_b5" in s and "b5_fftradnet_v3" in s for s in p.say)
+
+
+def test_thrust5_ml_and_raddetnet_name_the_seed_spread_caveat():
+    """Wave 10 (2026-09-24, item 4.4, hostile round 9): both scoreboards print
+    "seed spread ... > CI half-width ..." -- a statistician finds the CI understates
+    uncertainty in ten seconds if the card has no sentence for it."""
+    for pid in ("thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        p = PRESETS_BY_ID[pid]
+        assert any("seed spread" in s.lower() and "ci half-width" in s.lower()
+                  for s in p.say), pid
 
 
 def test_thrust5_ml_threshold_is_pinned_below_the_blank_figure_point():

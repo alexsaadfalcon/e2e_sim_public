@@ -21,21 +21,34 @@ Wall time is NOT embedded (fixed 2026-09-24, cross-shard bug): a rehearsal
 so a committed doc that quoted it went stale on every rehearsal, independent of any
 preset change -- a drifting value baked into a durable document. Every preset's
 click sequence instead prints one fixed sentence pointing at the two places the
-CURRENT number lives (the rehearsal summary and the preflight timing pass); the "at
-most 15 s" figure in that sentence is ``webapp.preflight.WARN_SECONDS``, imported,
-never retyped.
+CURRENT number lives (the rehearsal summary and the preflight timing pass).
+
+Wave 10 (2026-09-24, item 3.2, hostile round 9): the previous fixed sentence
+claimed "presets are sized to stay under the 15 s WARN budget" -- false on five of
+seven presets (measured 14-27 s with both arms in the same rehearsal summary this
+generator points at). Replaced with an honest range ("roughly 15-30 s for both
+arms; talk over it") and a "While it runs, say:" line per preset, rendered from
+that preset's own FIRST ``say`` bullet -- so a ~15-77 s dead-air gap (the three
+Thrust 5 screens back to back) always has a prepared line, not a fixed-budget claim
+the data itself contradicts.
 
 The "Before the audience" / "If something goes wrong" sections describe UI
 mechanics (button labels, status strings), not preset data; they are template text
 in this module, checked against ``webapp/app.py`` / ``webapp/block_diagram.py`` by
 hand, with drift-prone counts (frame ceilings, how many presets set `ab`, the
-frame-count range presets ship at) computed at generation time.
+frame-count range presets ship at) computed at generation time. Panel TITLES quoted
+in "What you are looking at" (wave 10, item 3.5) are hand-typed constants, not
+imported: the true strings are f-string title expressions with computed numbers
+inside ``webapp/pipeline_runner.py`` / ``webapp/detector_scoreboard.py`` (torch-
+tolerant modules this one deliberately does not import), so
+``tests/test_runbook.py``'s ``test_panel_titles_match_the_rendered_source`` (which
+IS allowed to import torch) greps their source for these exact literal substrings,
+catching a rename here that this module cannot see at generation time.
 
-Deliberately torch-free: only ``webapp.demo_presets``, ``webapp.pipeline_registry``,
-``webapp.preflight`` (for the ``WARN_SECONDS`` constant -- its module-level imports
-are stdlib-only, torch is imported lazily inside ``check_environment``) and the
-standard library are imported, so the doc can be regenerated (and ``--check``ed) on
-any machine, CI included, without installing torch/Sionna.
+Deliberately torch-free: only ``webapp.demo_presets`` and
+``webapp.pipeline_registry`` and the standard library are imported, so the doc can
+be regenerated (and ``--check``ed) on any machine, CI included, without installing
+torch/Sionna.
 """
 from __future__ import annotations
 
@@ -54,11 +67,6 @@ from webapp.pipeline_registry import (
     PRODUCT_IDS,
     ParamSpec,
 )
-#: Torch-free: WARN_SECONDS is a module-level float in webapp/preflight.py, defined
-#: before that module's only heavy import (torch, inside check_environment) -- see
-#: tests/test_runbook.py::test_runbook_module_imports_without_torch, which actually
-#: verifies this in a subprocess rather than trusting the claim.
-from webapp.preflight import WARN_SECONDS
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_OUT = _REPO_ROOT / "docs" / "DEMO_RUNBOOK.md"
@@ -70,10 +78,15 @@ _WIDTH = 79
 #: `webapp.rehearse` -- so the committed doc went stale on every rehearsal, with no
 #: change to any preset. One fixed sentence, same for every preset, pointing at
 #: where the CURRENT number lives instead of embedding one.
+#: wave 10 (2026-09-24, item 3.2, hostile round 9): RETRACTED the "15 s WARN
+#: budget" claim -- false on 5 of 7 presets (rehearsal summary: 14-27 s with both
+#: arms). Replaced with an honest range; the "while it runs, say:" line (rendered
+#: per preset from that preset's own first `say` bullet, see `_render_preset`)
+#: gives the presenter something prepared for the dead air instead.
 _WALL_TIME_NOTE = (
     "Wall time: read the last rehearsal's "
     "`e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing "
-    f"pass; presets are sized to stay under the {WARN_SECONDS:g} s WARN budget."
+    "pass; a Run takes roughly 15-30 s for both arms -- talk over it."
 )
 
 
@@ -149,14 +162,6 @@ def _opening_block(preset: DemoPreset) -> Tuple[str, str]:
     return (_block_label(bid), _param_label(bid, key))
 
 
-def _enabled_product_labels(preset: DemoPreset) -> List[str]:
-    """Product-block labels this preset's as-loaded (arm A) state enables, in
-    registry order -- read from `apply_preset`, never from a hand-kept list, so a
-    preset that stops disabling a product is reflected here automatically."""
-    state = apply_preset(preset)
-    return [_block_label(bid) for bid in PRODUCT_IDS if state[bid]["enabled"]]
-
-
 def _ab_lines(preset: DemoPreset) -> Optional[Tuple[str, str]]:
     """(A's banner line, B's banner line), matching `webapp.app._ab_arm_line` --
     None if this preset has no built-in A/B."""
@@ -176,8 +181,55 @@ def _second_knobs(preset: DemoPreset) -> List[Tuple[str, str, str]]:
 
 
 # =====================================================================================
+# wave 10 (2026-09-24, item 3.5, hostile round 9): the RENDERED panel titles, not
+# the block-diagram node labels (`BLOCKS_BY_ID[bid].label`, e.g. "Radar Cube
+# (Range-Doppler)", "Detector (CFAR | ML)") the previous version of this module
+# quoted. Hand-typed, not imported: the true strings are f-string title
+# expressions with computed numbers inline (clip dB, corpus name, frame counts)
+# inside webapp/pipeline_runner.py and webapp/detector_scoreboard.py, which this
+# module deliberately does not import (both are torch-tolerant, not torch-free at
+# call time). tests/test_runbook.py::test_panel_titles_match_the_rendered_source
+# (which IS allowed to import torch) greps those two files' source for these exact
+# literal substrings, so a rename there is caught here rather than silently
+# quoting a string nobody sees on screen.
+# =====================================================================================
+_PANEL_TITLES = {
+    "range_az": "Range-azimuth power",
+    "range_el": "Range-elevation power",
+    "range_profile": "Range profile (non-coherent over channels)",
+    "radar_cube": "Range-Doppler power",
+    "subspace_err": "Subspace error (Frobenius) per frame",
+}
+#: The two rendered titles for the "detector" product block -- which one shows
+#: depends on the preset's own `detector.mode` override, not the block itself.
+_DETECTOR_PANEL_TITLES = {"cfar": "CFAR objectness", "ml": "Neural detector objectness"}
+
+
+def _panel_title(bid: str, preset: DemoPreset) -> str:
+    """The rendered panel title for product block `bid` under `preset` -- the
+    constant from `_PANEL_TITLES`/`_DETECTOR_PANEL_TITLES`, falling back to the
+    registry's own block label only for a product this runbook has not been
+    taught the rendered title of yet (so a future product block degrades to the
+    old behaviour instead of crashing generation)."""
+    if bid == "detector":
+        mode = apply_preset(preset)["detector"]["params"].get("mode", "cfar")
+        return _DETECTOR_PANEL_TITLES.get(mode, _block_label(bid))
+    return _PANEL_TITLES.get(bid, _block_label(bid))
+
+
+# =====================================================================================
 # Per-preset section
 # =====================================================================================
+
+#: wave 10 (2026-09-24, item 3.6, hostile round 9): the Thrust 1 and Thrust 4
+#: param editors clip mid-sentence at the bottom of the pane (rehearsal PNG,
+#: round 9 item 2.5) -- the knob the click sequence just named (Tessera: TSV
+#: height (um) on T4; LNA bias current (mA) on T1, though that one opens
+#: visible -- the SECOND control below it does not) is below the fold on both.
+#: Keyed by thrust number, not preset id, since the fold is a param-pane-height
+#: fact, not a per-preset one.
+_SCROLL_PARAM_PANE_THRUSTS = {1, 4}
+
 
 def _render_preset(i: int, preset: DemoPreset) -> str:
     lines: List[str] = []
@@ -188,24 +240,48 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
     ab = _ab_lines(preset)
     arm_sentence = (f" Both arms run in one click (A = {preset.ab_label_a}, "
                     f"B = {preset.ab_label_b})." if preset.ab is not None else "")
+    scroll_note = (" Scroll the param pane; the knob is below the fold."
+                   if preset.thrust in _SCROLL_PARAM_PANE_THRUSTS else "")
 
     lines.append("### Click sequence")
     lines.append(_numbered(1,
         f'Open **Demo preset:**, select "{preset.label}", click **Load preset**. '
         f'The param editor opens on {open_desc}; the operator card shows "Loaded: '
-        f'{preset.label} (Thrust {preset.thrust}, {preset.n_steps} frames)".'))
+        f'{preset.label} (Thrust {preset.thrust}, {preset.n_steps} frames)".'
+        f'{scroll_note}'))
     lines.append(_numbered(2,
         f"Click **Run pipeline**.{arm_sentence} {_WALL_TIME_NOTE}"))
     lines.append(_numbered(3, "The app switches to the **Results** tab automatically."))
+    if preset.say:
+        # wave 10 (2026-09-24, item 3.2, hostile round 9): a prepared line for the
+        # 15-30 s dead air, always the preset's own first `say` bullet -- never
+        # hand-typed, so it cannot drift from the card.
+        lines.append(_bullet(f"**While it runs, say:** {preset.say[0]}"))
     lines.append("")
 
     lines.append("### What you are looking at")
-    products = _enabled_product_labels(preset)
-    if products:
-        lines.append(_bullet("Product panel(s) this preset enables: "
-                             + ", ".join(f"**{p}**" for p in products) + "."))
+    if preset.thrust == 5:
+        # wave 10 (2026-09-24, item 3.4, hostile round 9): two product blocks
+        # (radar_cube, detector) render FOUR panels on every Thrust 5 screen --
+        # the scoreboard and PR-curve panels are not separately toggleable
+        # blocks, so the generic per-product enumeration below would undercount
+        # them by half.
+        det_title = _panel_title("detector", preset)
+        lines.append(_bullet(
+            f'Four panels render: **"{_panel_title("radar_cube", preset)}"** '
+            f'(Range-Doppler, has its own frame slider), **"{det_title}"** '
+            '(no slider -- pinned to the last frame), **"Detector scoreboard"**, '
+            'and the offline PR-curve panel (**"scored offline: ... test '
+            'frames"**).'))
     else:
-        lines.append(_bullet("This preset enables no product panel (check the block state)."))
+        state = apply_preset(preset)
+        enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
+        if enabled_bids:
+            titles = [_panel_title(bid, preset) for bid in enabled_bids]
+            lines.append(_bullet("Product panel(s) this preset enables: "
+                                 + ", ".join(f'**"{t}"**' for t in titles) + "."))
+        else:
+            lines.append(_bullet("This preset enables no product panel (check the block state)."))
     if ab is not None:
         lines.append(_bullet(f'Arm banners on screen: "{ab[0]}" / "{ab[1]}".'))
     lines.append("")
@@ -263,15 +339,23 @@ _BEFORE_AUDIENCE = """## Before the audience
 5. Presenting over RDP: advance frames with the Results-tab figure's own frame
    **slider** (the widget Plotly draws under each heatmap/animation), never the
    ▶ (Play) control -- its ~350 ms/frame animation stutters over the link.
+   **Thrust 5 exception** (wave 10, item 3.3, hostile round 9): the
+   objectness/scoreboard/PR panels have NO slider (pinned to the last frame) --
+   only the Range-Doppler panel does. Dragging it desyncs the cube from the
+   frozen detections; leave it alone on those three screens.
 """
 
 
 def _click_mechanics(n_presets: int, n_ab: int) -> str:
     if n_ab == n_presets:
+        # wave 10 (2026-09-24, item 3.1, hostile round 9): RETRACTED "under a
+        # 'Previous run' divider" -- webapp/app.py only prints that label when
+        # `_ab` is false; every preset here sets `ab`, so the divider that
+        # actually renders is a bare horizontal rule with no text.
         ab_sentence = (f"Every one of the {n_presets} presets below sets `ab`, so one "
                        "click on **Run pipeline** runs BOTH arms A and B and renders "
-                       "both on the Results tab (A on top, B below, under a "
-                       "\"Previous run\" divider) -- there is no second Run click "
+                       "both on the Results tab (A on top, B below, under a plain "
+                       "divider line -- no label) -- there is no second Run click "
                        "needed for the built-in A/B; the \"Second knob\" step in each "
                        "section below is a *manual, additional* change on top of "
                        "that.")
