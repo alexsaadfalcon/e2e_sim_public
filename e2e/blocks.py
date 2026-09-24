@@ -25,6 +25,13 @@ _ELEMENTWISE = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
 _PER_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_BROADCAST)
 # SINGLE_CHIRP: the historical contract -- no MIMO, one chirp.
 _SINGLE_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_SINGLE)
+# SNAPSHOT_STACK: the compressor's real contract. The sensing matrix acts on the
+# ELEMENT axis alone, so every (slow index, range bin) column of the cube is one more
+# snapshot and the slow axis may be as long as it likes. No MIMO, because a TX axis
+# would change what the element index means. This replaces _SINGLE_CHIRP on the AFE and
+# the tracker (2026-09-24): the OFDM/JSAC waveform classes hand them M symbols, and the
+# restriction to one was a property of `cube.view(-1, n_range)`, not of the algorithm.
+_SNAPSHOT_STACK = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_NATIVE)
 # CUBE: consumes the ONE range-compressed cube the spine's RangeTransformBlock emits
 # (`e2e/chain/receive.py`). Every range product declares this, which is what makes
 # "ask for a product without the spine" a named FrameContractError naming
@@ -642,9 +649,13 @@ class AFEBlock:
     second implementation.
     """
 
-    # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
-    # compressed measurement is defined for a single chirp of a single-TX frame.
-    frame_capabilities = _SINGLE_CHIRP
+    # The measurement matrix A acts on the ELEMENT axis only (`A V` never indexes the
+    # last axis), so it is defined for ANY number of snapshot columns -- one per
+    # (slow index, range bin) pair. CHIRP_SINGLE lifted 2026-09-24 for the OFDM/JSAC
+    # waveform classes, whose frames carry M symbols on the slow axis; `M == 1` takes
+    # the identical code path with the identical tensor, so no FMCW number moves.
+    # `accepts_mimo=False` stays: a TX axis would change what the element index means.
+    frame_capabilities = _SNAPSHOT_STACK
 
     def __init__(self, exp=5, mantissa=6):
         self.exp = exp
@@ -689,12 +700,15 @@ class AdaOjaBlock:
     information about the drift magnitude, so it barely rotates the subspace and does
     not track fast drift. See ROADMAP.md.
 
-    The tracker's state is a d-dimensional basis for ONE aperture snapshot, so it
-    declares the single-chirp/no-MIMO contract: a multi-chirp or MIMO frame would
-    silently change what `d` indexes.
+    The tracker's state is a d-dimensional basis for the APERTURE, and `d` indexes
+    elements. Snapshots are columns: one per (slow index, range bin) pair, so a
+    multi-chirp or multi-symbol frame supplies more of them rather than changing what
+    `d` means. A MIMO frame WOULD change it, so `accepts_mimo=False` stays.
+    (CHIRP_SINGLE lifted 2026-09-24 with the OFDM/JSAC waveform classes; see
+    `MeasurementStage.apply` for the snapshot stacking and why `M == 1` is unchanged.)
     """
 
-    frame_capabilities = _SINGLE_CHIRP
+    frame_capabilities = _SNAPSHOT_STACK
 
     _GAP_RESPONSES = ("none", "refine", "coast")
     #: Recognised `method` values -- anything else used to fall through to the legacy path.
@@ -1011,13 +1025,7 @@ class MeasurementStage:
                 f"{frames.component_name(self)}: expects a cube "
                 f"[n_rx, n_chirp, n_range], got shape {tuple(cube.shape)}"
             )
-        if cube.shape[1] != 1:
-            raise frames.FrameContractError(
-                f"{frames.component_name(self)}: multiple chirps not supported yet "
-                f"(expected n_chirp == 1), got cube shape {tuple(cube.shape)}; the "
-                f"measurement matrix is defined for one chirp's range-bin snapshots."
-            )
-        frames.require_cube_axes(state, self)
+        frames.require_cube_axes(state, self, slow=None)
         # Refine the subspace estimate n_refine times: each pass re-draws the sensing
         # matrix from the CURRENT estimate and re-estimates, so A's anchor rows converge
         # onto this frame's subspace (a stale anchor from the previous frame otherwise
@@ -1032,10 +1040,18 @@ class MeasurementStage:
             n_refine = get_n_refine(state.get("sv_gap_norm"))
         else:
             n_refine = getattr(self.subspace_block, "n_refine", 1)
-        # The snapshots: one column per RANGE BIN of the single chirp (contract 5.4 --
-        # "all range-bin snapshots of the cube per chirp"). `view(-1, n_range)` on a
-        # single-chirp cube is exactly `cube[:, 0, :]`, i.e. one row per element.
-        V = cube.view(-1, cube.shape[-1])
+        # The snapshots: one column per (SLOW INDEX, RANGE BIN) pair (contract 5.4 --
+        # "all range-bin snapshots of the cube per chirp"), one row per element.
+        #
+        # `reshape(n_el, -1)` and NOT the old `view(-1, n_range)`: on a single-chirp
+        # cube those are the same tensor, bit for bit, which is why no FMCW number
+        # moves -- but on a multi-slow cube the old form folds the SLOW axis into the
+        # ELEMENT axis and tracks the subspace of something that is not an aperture.
+        # That silent-wrong-answer shape is exactly why the chirp axis was pinned to 1
+        # here; with the fold fixed the pin is unnecessary, and lifting it is what lets
+        # an M-symbol OFDM/JSAC frame through the compressor (2026-09-24).
+        n_el, n_slow, n_range = cube.shape
+        V = cube.reshape(n_el, n_slow * n_range)
         if self.afe_block:
             for _ in range(n_refine):
                 A = self.subspace_block.gen_A_ada()
@@ -1047,9 +1063,8 @@ class MeasurementStage:
             if not self.reconstruct:
                 # Stay in the measurement space: dim 0 now counts MEASUREMENTS, not
                 # antennas, and the contract says so for everything downstream.
-                n_chirp, n_range = cube.shape[1], cube.shape[2]
                 return {
-                    "cube": X.view(X.shape[0], n_chirp, n_range),
+                    "cube": X.reshape(X.shape[0], n_slow, n_range),
                     "U": self.subspace_block.oja.U,
                     "sensing_matrix": Aq,
                     "aperture_shape": state.get("aperture_shape"),
@@ -1057,7 +1072,7 @@ class MeasurementStage:
                     "n_refine_used": n_refine,
                 }
             Xt = self.afe_block.reconstruct(Aq, X)
-            cube = Xt.view(cube.shape)
+            cube = Xt.reshape(cube.shape)
             return {"cube": cube, "U": self.subspace_block.oja.U,
                     "n_refine_used": n_refine}
         else:
@@ -1176,7 +1191,11 @@ class FFTBlock:
         self.array_shape = array_shape
 
     def apply(self, state_dict):
-        frames.require_cube_axes(state_dict, self)
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
         shape = _aperture_shape_for(state_dict, self.array_shape, 'FFTBlock')
         grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
         return {'fft': frames.broadcast_over_chirps(grid, self._map)}
@@ -1244,7 +1263,11 @@ class RangeAzBlock:
         self.array_shape = array_shape
 
     def apply(self, state_dict):
-        frames.require_cube_axes(state_dict, self)
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
         shape = _aperture_shape_for(state_dict, self.array_shape, 'RangeAzBlock')
         grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
         return {'range_az': frames.broadcast_over_chirps(grid, self._map)}
@@ -1289,7 +1312,11 @@ class RangeElBlock:
         self.array_shape = array_shape
 
     def apply(self, state_dict):
-        frames.require_cube_axes(state_dict, self)
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
         shape = _aperture_shape_for(state_dict, self.array_shape, 'RangeElBlock')
         grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
         return {'range_el': frames.broadcast_over_chirps(grid, self._map)}
@@ -1353,24 +1380,34 @@ class RangeProfileBlock:
         dimension=frames.DIMENSION_ANY,
     )
 
-    def __init__(self, bins=256):
+    def __init__(self, bins=256, slow_index=None):
         self.bins = bins
+        # WHICH slow index to profile, or None (the default) to integrate them
+        # NON-COHERENTLY in power -- the same convention RangeAzBlock uses for the
+        # collapsed elevation axis. On a single-chirp cube the mean over one element is
+        # the identity, so every FMCW number is unchanged (2026-09-24, with the
+        # CHIRP_SINGLE lift). `slow_index=0` is what a JSAC preset wants: symbol 0 is
+        # the all-pilot preamble and therefore the FMCW-parity point, while the data
+        # symbols carry the division's `1/|X|^2` noise amplification.
+        self.slow_index = slow_index
 
     def apply(self, state_dict):
-        frames.require_cube_axes(state_dict, self)
-        cube = state_dict['cube']                      # [n_channels, n_chirp, n_range]
+        frames.require_cube_axes(state_dict, self, slow=None)
+        cube = state_dict['cube']                      # [n_channels, n_slow, n_range]
         if cube.dim() != 3:
             raise frames.FrameContractError(
-                f"RangeProfileBlock: expects a cube [n_ch, n_chirp, n_range], got "
+                f"RangeProfileBlock: expects a cube [n_ch, n_slow, n_range], got "
                 f"shape {tuple(cube.shape)}"
             )
-        if cube.shape[1] != 1:
-            raise frames.FrameContractError(
-                "RangeProfileBlock: multiple chirps not supported yet (expected "
-                f"n_chirp == 1), got cube shape {tuple(cube.shape)}"
-            )
-        channels = cube[:, 0, :]                       # [n_channels, n_range]
-        power = torch.abs(channels) ** 2
+        if self.slow_index is not None:
+            if not 0 <= self.slow_index < cube.shape[1]:
+                raise frames.FrameContractError(
+                    f"RangeProfileBlock(slow_index={self.slow_index}) but the cube's "
+                    f"slow axis has {cube.shape[1]} entries"
+                )
+            power = torch.abs(cube[:, self.slow_index, :]) ** 2
+        else:
+            power = torch.mean(torch.abs(cube) ** 2, dim=1)   # [n_channels, n_range]
         power = _power_bin(power, self.bins, dim=1)    # n_range cube bins -> bins gates
         agg = torch.mean(power, dim=0)                  # non-coherent combine over channels
         return {'range_profile': power, 'range_profile_agg': agg}

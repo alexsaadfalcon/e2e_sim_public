@@ -157,15 +157,29 @@ CUBE_AXES_OFDM = {"slow": "symbol", "fast": "subcarrier"}
 def require_cube_axes(state, component, slow="chirp", fast="range_bin"):
     """Raise FrameContractError unless the chain's `cube_axes` match what `component`
     consumes. A chain carrying no `cube_axes` at all is treated as FMCW
-    (`CUBE_AXES_FMCW`) -- the only waveform the v1.1 spine builds.
+    (`CUBE_AXES_FMCW`) -- the waveform the default spine builds.
+
+    `slow=None` means the component is INDIFFERENT to what the slow axis counts, and
+    that is a real distinction rather than a loophole (added 2026-09-24 with the OFDM /
+    JSAC waveform classes). The angle products broadcast over the slow axis and read
+    only the fast one -- a range-azimuth map of symbol 2 is exactly as meaningful as a
+    range-azimuth map of chirp 2 -- so they must accept a JSAC cube. `RadarCubeBlock`
+    does not: its whole product is an FFT ALONG the slow axis, and a Doppler transform
+    over OFDM symbols of one time-invariant stored channel is a delta at bin 0 dressed
+    up as a velocity measurement. That one keeps `slow="chirp"` and refuses by name.
     """
     axes = state.get("cube_axes") or CUBE_AXES_FMCW
     want = {"slow": slow, "fast": fast}
-    if dict(axes) != want:
+    got = dict(axes)
+    mismatch = (got.get("fast") != fast
+                or (slow is not None and got.get("slow") != slow))
+    if mismatch:
+        want_str = ("any" if slow is None else repr(slow))
         raise FrameContractError(
-            f"{component_name(component)} consumes a cube whose axes are "
-            f"{want}, but the chain's cube is {dict(axes)} -- the waveform that "
-            f"produced it is not the one this product reads."
+            f"{component_name(component)} consumes a cube whose fast axis is "
+            f"{fast!r} and whose slow axis is {want_str}, but the chain's cube is "
+            f"{got} -- the waveform that produced it is not the one this product "
+            f"reads."
         )
     return axes
 

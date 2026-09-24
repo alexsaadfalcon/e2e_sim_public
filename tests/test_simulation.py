@@ -312,13 +312,17 @@ def test_downstream_block_reserved_key_raises(make_env_block):
         sim.run(n_steps=1)
 
 
-def test_multiple_chirps_assertion(make_env_block):
-    """A multi-chirp frame must stop at the first stage that declares chirps='single'.
+def test_multiple_chirps_flow_through_the_compressor(make_env_block):
+    """REWRITTEN 2026-09-24: this test pinned the restriction, and the restriction is
+    gone.
 
-    Since the per-block capability contract landed, the chirp axis is no longer
-    rejected pipeline-wide: it flows through the element-wise stages and trips at
-    MeasurementStage, whose measurement matrix is defined for one chirp. The error
-    names that stage and the blocks it drives.
+    It used to assert that a multi-chirp frame STOPS at `MeasurementStage`, whose
+    measurement matrix was said to be "defined for one chirp". That was never true of
+    the matrix -- `A` acts on the element axis alone -- it was true of the reshape
+    underneath it. With the reshape fixed, the slow axis is a snapshot axis and an
+    M-symbol OFDM/JSAC frame runs through the compressor, which is the whole point of
+    lifting it. What this test now pins is that the frame arrives intact: the tracked
+    basis still indexes ELEMENTS, and the cube keeps its slow axis.
     """
     env = make_env_block(n_frames=1, n_freqs=32)
     sim = Simulation(
@@ -327,20 +331,15 @@ def test_multiple_chirps_assertion(make_env_block):
     )
     sim.reset()
 
-    # Stub get_S_pars to return a frame with two chirps (shape[2] == 2). The reshape of
-    # s_pars_orig still needs n_rx_x * n_rx_y * F elements, so widen F accordingly is not
-    # required here -- get_U_true / s_pars_orig view operate before the assertion only on
-    # the original single-chirp frame, so feed a valid single-chirp frame for those and
-    # swap in a multi-chirp tensor for the assertion path.
     real_get_s_pars = env.get_S_pars
 
     def _two_chirp_s_pars():
-        base = real_get_s_pars()  # shape (n_rx, 1, 1, F)
+        base = real_get_s_pars()               # shape (n_rx, 1, 1, F)
         return torch.cat([base, base], dim=2)  # shape (n_rx, 1, 2, F)
 
     env.get_S_pars = _two_chirp_s_pars
-    with pytest.raises(ValueError, match=r"MeasurementStage\[AdaOjaBlock\]: multiple chirps not supported yet"):
-        sim.feed_forward()
+    sim.feed_forward()
+    assert sim.subspace_block.oja.U.shape[0] == N_RX
 
 
 def test_mimo_assertion(make_env_block):
@@ -540,18 +539,28 @@ def test_single_chirp_product_shape_is_unchanged_by_the_capability_contract(make
     assert outputs['range_az'][0].shape == (bins, n_range)
 
 
-def test_multichirp_frame_stops_at_the_first_single_chirp_component(make_env_block):
-    """The AFE/subspace path declares chirps='single'; the error must name that stage
-    rather than surfacing as a raw matmul shape error deeper in."""
+def test_multichirp_frame_runs_through_the_afe_and_keeps_its_slow_axis(make_env_block):
+    """REWRITTEN 2026-09-24 -- companion to
+    `test_multiple_chirps_flow_through_the_compressor`, with the AFE in the loop.
+
+    The old version asserted the AFE/subspace path REFUSED a 2-chirp frame by name.
+    The refusal is lifted (see that test for why it was really a reshape bug), so what
+    is asserted now is that the reconstruction round trip preserves the cube's shape:
+    with `reconstruct=True` the compressed measurements are mapped back onto the
+    element axis and the slow axis is untouched. If the reshape ever folds the two
+    again, this shape check is what catches it.
+    """
+    n_chirp = 2
     sim = Simulation(
-        _multichirp_env(make_env_block, 2),
-        _downstream(), K,
+        _multichirp_env(make_env_block, n_chirp),
+        [RangeAzBlock(bins=8)], K,
         afe_block=AFEBlock(),
         subspace_block=AdaOjaBlock(N_RX, K),
     )
     sim.reset()
-    with pytest.raises(ValueError, match=r"MeasurementStage\[AdaOjaBlock/AFEBlock\]"):
-        sim.feed_forward()
+    sim.feed_forward()
+    # CHIRP_BROADCAST: the angle product grows a leading slow axis only when n_slow > 1.
+    assert sim.get_outputs()['range_az'][0].shape[0] == n_chirp
 
 
 # ------------------------------------------------- replay: a chain that starts mid-way

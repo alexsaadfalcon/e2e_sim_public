@@ -557,11 +557,41 @@ def test_product_refuses_a_cube_from_the_wrong_waveform(synth):
         RangeAzBlock(bins=32).apply(state)
 
 
-def test_measurement_stage_refuses_a_multichirp_cube():
-    cube = torch.zeros(16, 4, 8, dtype=torch.complex64, device=device)
+def test_measurement_stage_stacks_snapshots_over_the_slow_axis():
+    """REPLACES `test_measurement_stage_refuses_a_multichirp_cube` (2026-09-24).
+
+    That test pinned `cube.shape[1] == 1`, and what the restriction was really
+    protecting was the reshape: `cube.view(-1, n_range)` folds the SLOW axis into the
+    ELEMENT axis, so on a multi-slow cube the tracker would have estimated the subspace
+    of something that is not an aperture -- a silent wrong answer, correctly refused.
+    With `reshape(n_el, n_slow * n_range)` the fold is gone and every (slow, range)
+    column is simply one more snapshot, which is what lets an M-symbol OFDM/JSAC frame
+    through the compressor. So the assertion moves from "refuses" to "stacks", and the
+    property that must not rot is asserted directly: the element axis is preserved and
+    the single-slow case is BIT-IDENTICAL to what it always was.
+    """
+    n_el, n_slow, n_range = 16, 4, 8
+    g = torch.Generator(device="cpu").manual_seed(7)
+    cube = (torch.randn(n_el, n_slow, n_range, generator=g)
+            + 1j * torch.randn(n_el, n_slow, n_range, generator=g)).to(
+                dtype=torch.complex64, device=device)
+
+    stage = MeasurementStage(None, AdaOjaBlock(d=n_el, k=1, m=4))
+    out = stage.apply({"cube": cube, "aperture_shape": (4, 4)})
+    assert out["U"].shape[0] == n_el     # the basis still indexes ELEMENTS, not columns
+
+    # The single-slow path is the historical tensor, exactly.
+    one = cube[:, :1, :]
+    assert torch.equal(one.reshape(n_el, -1), one.view(-1, n_range))
+
+
+def test_measurement_stage_refuses_a_non_cube():
+    """The shape guard that is NOT lifted: a 4-D frame is not a cube."""
     stage = MeasurementStage(None, AdaOjaBlock(d=16, k=1, m=4))
-    with pytest.raises(frames.FrameContractError, match="multiple chirps"):
-        stage.apply({"cube": cube, "aperture_shape": (4, 4)})
+    with pytest.raises(frames.FrameContractError, match="expects a cube"):
+        stage.apply({"cube": torch.zeros(16, 1, 4, 8, dtype=torch.complex64,
+                                         device=device),
+                     "aperture_shape": (4, 4)})
 
 
 def test_two_sources_on_one_chain_raise(make_env_block):

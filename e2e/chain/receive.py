@@ -664,10 +664,17 @@ class RangeTransformBlock:
         delta_f = self.resolve_delta_f(state)
         axis = range_axis_m(n_keep, delta_f, n_samples, self.convention)
         per_bin = float(axis[1] - axis[0]) if axis is not None and n_keep > 1 else None
+        # The fast axis is range bins BY CONSTRUCTION -- that is what this block does --
+        # but WHAT THE SLOW AXIS COUNTS is the waveform's business, not this block's, so
+        # it is carried through from whatever mixing block ran upstream (chirps after a
+        # dechirp, symbols after a symbol division). Hardcoding "chirp" here would have
+        # made every JSAC cube claim to be a chirp cube and `RadarCubeBlock` would have
+        # computed a Doppler transform over OFDM symbols without complaint.
+        slow = (state.get("cube_axes") or frames.CUBE_AXES_FMCW).get("slow", "chirp")
         return {
             "cube": cube,
             "signal_domain": frames.DOMAIN_CUBE,
-            "cube_axes": dict(frames.CUBE_AXES_FMCW),
+            "cube_axes": {"slow": slow, "fast": "range_bin"},
             "range_axis": axis,
             "range_axis_m_per_bin": per_bin,
             "range_convention": self.convention,
