@@ -114,34 +114,121 @@ def fake_env(grid, torch_device):
 # Composition: RFFE/interconnect really are on the path by default
 # --------------------------------------------------------------------------------
 def test_rffe_and_interconnect_present_in_default_composition(tmp_path, fake_env):
+    """The DEFAULT composition is the one-chain contract's order (section 1.2).
+
+    REWRITTEN 2026-09-24. This test used to assert the v1.0 order -- `CircuitStage`
+    before the dechirp -- which is now `composition="legacy_impulse"` and is asserted
+    in `test_the_legacy_composition_is_the_v1_0_order` below. The front end has MOVED,
+    onto the beat record after the dechirp; the assertions that survive unchanged are
+    the two that are about the composition doing its job rather than about the order:
+    the interconnect is still a frequency-domain stage before the dechirp, and the
+    front end is still sized to the radar's own receive-channel count.
+    """
+    from e2e.chain.frontend import FrontEndBlock
+    from e2e.chain.link_budget import ThermalNoiseBlock, TxPowerStage
+    from e2e.chain.receive import RangeTransformBlock
+
     sim = chain_generate.build_chain_simulation(
         scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
     )
     stage_types = [type(s) for s in sim.serial_stages]
-    assert CircuitStage in stage_types
-    assert InterconnectStage in stage_types
-    assert DechirpBlock in stage_types
-    assert QuantizerBlock in stage_types
+    for expected in (TxPowerStage, InterconnectStage, DechirpBlock, FrontEndBlock,
+                     ThermalNoiseBlock, QuantizerBlock, RangeTransformBlock):
+        assert expected in stage_types, f"{expected.__name__} missing from the spine"
+    assert CircuitStage not in stage_types, (
+        "the FULL composition puts the front end on the beat record; a CircuitStage "
+        "here means the v1.0 impulse placement is back")
 
-    circuit_stage = next(s for s in sim.serial_stages if isinstance(s, CircuitStage))
-    assert isinstance(circuit_stage.rffe_block, RFFEBlock)
+    front = next(s for s in sim.serial_stages if isinstance(s, FrontEndBlock))
     # RFFEBlock defaults to the imaging array's element count -- the composition MUST
-    # override it to the radar's actual receive-channel count, or apply_circuit's
-    # view() raises on the very first frame (see build_chain_simulation's docstring).
-    assert circuit_stage.rffe_block.n == _CFG.n_rx
+    # override it to the radar's actual receive-channel count, or the per-element
+    # config table does not line up with the frame (see build_chain_simulation).
+    assert front.n == _CFG.n_rx
+    assert front.placement == "beat"
 
     interconnect_stage = next(s for s in sim.serial_stages if isinstance(s, InterconnectStage))
     assert isinstance(interconnect_stage.interconnect_block, InterconnectBlock)
 
-    # Ordering: RFFE and interconnect precede the dechirp bridge (they operate in the
-    # frequency domain, before the chain crosses into RX time).
+    # Ordering, as the contract's table reads it: transmit power at the SOURCE; the
+    # interconnect in the frequency domain before the dechirp; the front end and the
+    # one thermal injection on the beat record after it; the range transform last,
+    # because it is what crosses into the cube domain the products consume.
+    i = stage_types.index
+    assert i(TxPowerStage) < i(InterconnectStage) < i(DechirpBlock)
+    assert i(DechirpBlock) < i(FrontEndBlock) < i(ThermalNoiseBlock)
+    assert i(ThermalNoiseBlock) < i(QuantizerBlock) < i(RangeTransformBlock)
+    assert i(RangeTransformBlock) == len(stage_types) - 1
+
+    # ONE thermal injection: the floor block runs in "once" mode, which adds nothing
+    # when the front end already injected. Two floors is F81.
+    floor = next(s for s in sim.serial_stages if isinstance(s, ThermalNoiseBlock))
+    assert floor.mode == "once"
+
+
+def test_the_legacy_composition_is_the_v1_0_order(tmp_path, fake_env):
+    """The order the stored corpora were generated under, asserted where it can be
+    read -- this is the assertion the test above carried until 2026-09-24.
+
+    It exists for the bit-parity gates (`tests/test_ml_store_cfr.py`,
+    `tests/test_webapp_live_chain.py`, max |diff| = 0 CODES) and for nothing else; see
+    `chain_generate.COMPOSITION_LEGACY`. Keeping the old assertions alive on the arm
+    they are still true of is what stops "the composition changed" from being
+    indistinguishable from "the corpora stopped reproducing".
+    """
+    from e2e.chain.frontend import FrontEndBlock
+    from e2e.chain.link_budget import ThermalNoiseBlock, TxPowerStage
+
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+        composition="legacy_impulse",
+    )
+    stage_types = [type(s) for s in sim.serial_stages]
+    assert CircuitStage in stage_types
+    assert FrontEndBlock not in stage_types
+    assert TxPowerStage not in stage_types, (
+        "under the legacy order sqrt(P_tx) lives inside ThermalNoiseBlock -- a "
+        "TxPowerStage here would apply it twice")
+
+    circuit_stage = next(s for s in sim.serial_stages if isinstance(s, CircuitStage))
+    assert isinstance(circuit_stage.rffe_block, RFFEBlock)
+    assert circuit_stage.rffe_block.n == _CFG.n_rx
+
     dechirp_idx = stage_types.index(DechirpBlock)
     assert stage_types.index(CircuitStage) < dechirp_idx
     assert stage_types.index(InterconnectStage) < dechirp_idx
+    floor = next(s for s in sim.serial_stages if isinstance(s, ThermalNoiseBlock))
+    assert floor.mode == "legacy"
 
-    downstream_types = [type(b) for b in sim.downstream_blocks]
-    assert RadarCubeBlock in downstream_types
-    assert SinkBlock in downstream_types
+
+def test_an_unknown_composition_is_refused_by_name(tmp_path, fake_env):
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="unknown composition"):
+        chain_generate.build_chain_simulation(
+            scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+            composition="beat",
+        )
+
+
+def test_the_sink_runs_where_the_record_it_persists_still_exists(tmp_path, fake_env):
+    """MOVED 2026-09-24 from `downstream_blocks` into the SERIAL list, deliberately.
+
+    A corpus sample stores the DIGITISED BEAT RECORD. The range transform that now
+    ends the spine crosses into the cube domain, and `Simulation` drops the previous
+    domain's payload at a crossing (it must -- a stale `adc` outliving the crossing is
+    how a block computes silently on pre-transform data). So the sink has to run before
+    it. `SinkBlock` is documented as working in either position and returns `{}` from
+    both, so nothing about what it writes changed.
+    """
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+    )
+    from e2e.chain.receive import RangeTransformBlock
+
+    stage_types = [type(s) for s in sim.serial_stages]
+    assert SinkBlock in stage_types
+    assert stage_types.index(SinkBlock) < stage_types.index(RangeTransformBlock)
+    assert [type(b) for b in sim.downstream_blocks] == [RadarCubeBlock]
 
 
 def test_rffe_and_interconnect_are_config_gated_off(tmp_path, fake_env):

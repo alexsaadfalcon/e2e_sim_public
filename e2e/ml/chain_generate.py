@@ -9,13 +9,24 @@ out of the SAME blocks the runtime pipeline uses, ray-traces via
 `e2e.environment.blocks.RTEnvironmentBlock`, and runs it frame by frame:
 
     RTEnvironmentBlock (ray-traced CFR + labels)
-        -> CircuitStage(RFFEBlock)        # RF front end -- ON by default, see below
+        -> TxPowerStage                   # sqrt(P_tx) at the SOURCE (link budget on)
         -> InterconnectStage(InterconnectBlock)   # ON by default
         -> DechirpBlock                   # crossing: CFR -> RX-time ADC
+        -> FrontEndBlock                  # RF front end ON THE BEAT RECORD -- ON by default
+        -> ThermalNoiseBlock(mode="once") # the ONE thermal injection
         -> ImpairmentBlock                # phase noise / leakage / clutter, per-frame
+        -> IFHighPassBlock                # ON by default
         -> QuantizerBlock                 # ADC digitization
-        -> RadarCubeBlock                 # range-Doppler product (downstream)
-        -> SinkBlock                      # persists adc + labels + meta (downstream)
+        -> SinkBlock                      # persists adc + labels + meta (serial)
+        -> RangeTransformBlock            # crossing: RX-time ADC -> range cube
+        -> RadarCubeBlock                 # Doppler half -> range-Doppler (downstream)
+
+THAT ORDER IS THE ONE-CHAIN CONTRACT's (notes/ONE_CHAIN_CONTRACT_2026-09-24.md section
+1.2), and it is what this module builds by DEFAULT as of 2026-09-24. The order the
+stored corpora were generated under -- front end on `ifft(CFR)` before the dechirp,
+`sqrt(P_tx)` applied inside the thermal block -- is reachable as
+`build_chain_simulation(..., composition="legacy_impulse")` and exists only for those
+corpora's bit-parity gates; see `COMPOSITION_LEGACY`.
 
 RFFE/interconnect are config-gated (`use_rffe`/`use_interconnect`) but default ON --
 that is the point of this module: the pre-migration generator realized zero of the
@@ -52,6 +63,7 @@ from e2e.blocks import CircuitStage, InterconnectBlock, InterconnectStage, RFFEB
 from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import (IFHighPassBlock, ImpairmentBlock, QuantizerBlock,
                                RadarCubeBlock)
+from e2e.chain.transforms import range_transform_for
 from e2e.environment.blocks import RTEnvironmentBlock
 from e2e.frames import FrameCapabilities
 from e2e.ml.blocks import CFRCaptureStage, SinkBlock
@@ -59,6 +71,27 @@ from e2e.ml.dataset import DATASETS_DIR, finalize_input_scale
 from e2e.simulation import Simulation
 
 DEFAULT_LABEL_CLASSES = ("vehicle", "pedestrian")
+
+#: THE composition this module builds by default (owner 2026-09-24, ballot answer 1B;
+#: notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2). The front end acts on the
+#: SAMPLED BEAT RECORD after the dechirp, `sqrt(P_tx)` is applied at the source, and
+#: thermal noise is injected exactly ONCE -- which is what makes
+#: `tests/test_ml_link_budget.py`'s two F81 properties hold instead of being xfails.
+COMPOSITION_FULL = "full"
+
+#: The v1.0 order: `CircuitStage(RFFEBlock)` on `ifft(CFR)` BEFORE the dechirp,
+#: `ThermalNoiseBlock(mode="legacy")` carrying `sqrt(P_tx)` itself, and no
+#: `TxPowerStage`. It exists for exactly ONE reason -- the stored corpora
+#: (`b1_demo_cfr`, `b1_demo_cfr_ka`, every `benchmark_v1*`) were generated that way and
+#: `tests/test_ml_store_cfr.py` / `tests/test_webapp_live_chain.py` read max |diff| = 0
+#: CODES against them, a zero tolerance that a differently-ordered RNG consumption
+#: fails at any noise level. It is a recorded fact about files on disk, not an
+#: alternative physics: F97c measures the two placements' signal paths as agreeing to
+#: BELOW ONE LSB (8.6e-05 rel-RMSE vs a 1.76e-04 LSB) and their noise floors to
+#: 8.1e-7 dB. Nothing new should select it.
+COMPOSITION_LEGACY = "legacy_impulse"
+
+COMPOSITIONS = (COMPOSITION_FULL, COMPOSITION_LEGACY)
 
 #: Interconnect transfer function used for ML corpora. See build_chain_simulation for why
 #: the block's own placeholder default is not used here.
@@ -173,7 +206,8 @@ class _ChainFlagsStage:
     )
 
     def __init__(self, use_rffe: bool, use_interconnect: bool, use_link_budget: bool,
-                quant_bits: int, f0_hz: float, band_hz: Tuple[float, float]):
+                quant_bits: int, f0_hz: float, band_hz: Tuple[float, float],
+                composition: str = COMPOSITION_FULL):
         self._extra: Dict[str, Any] = {
             "use_rffe": bool(use_rffe),
             "use_interconnect": bool(use_interconnect),
@@ -181,6 +215,14 @@ class _ChainFlagsStage:
             "quant_bits": int(quant_bits),
             "f0_hz": float(f0_hz),
             "band_hz": [float(band_hz[0]), float(band_hz[1])],
+            # WHICH chain made this frame (added 2026-09-24, one-chain contract
+            # section 3.5 / 5.4). Without it a stored corpus cannot say whether its
+            # front end sat on `ifft(CFR)` before the dechirp or on the beat record
+            # after it, and a live-vs-stored gate reading max |diff| != 0 has no way
+            # to name the cause. See `COMPOSITIONS`.
+            "composition": str(composition),
+            "front_end_placement": ("impulse" if composition == COMPOSITION_LEGACY
+                                    else "beat"),
         }
 
     def apply(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -206,8 +248,16 @@ def build_chain_simulation(
     use_link_budget: bool = True,
     use_if_hpf: bool = True, if_hpf_kwargs: Optional[Dict[str, Any]] = None,
     store_cfr: bool = False, store_paths: bool = False,
+    composition: str = COMPOSITION_FULL,
 ) -> Simulation:
     """Compose ONE radar-ML `Simulation` run (see module docstring for the block list).
+
+    `composition` (added 2026-09-24) picks the stage ORDER, and it is the one-chain
+    contract's central decision rather than a style flag -- see `COMPOSITION_FULL` /
+    `COMPOSITION_LEGACY`. `"full"` (the default) is the physics: `sqrt(P_tx)` at the
+    source, the front end on the beat record, ONE thermal injection. `"legacy_impulse"`
+    reproduces the order the stored corpora were generated under, for their bit-parity
+    gates and nothing else.
 
     `coherent_targets` / `antenna_pattern` are the 2026-08-17 target-physics fix and are
     forwarded to `RTEnvironmentBlock` (they are ignored when the caller supplies its own
@@ -278,6 +328,14 @@ def build_chain_simulation(
         samples_per_src=samples_per_src,
     )
 
+    if composition not in COMPOSITIONS:
+        raise ValueError(
+            f"unknown composition {composition!r}; expected one of {COMPOSITIONS}. "
+            f"{COMPOSITION_FULL!r} is the contract's chain; {COMPOSITION_LEGACY!r} "
+            f"exists only to reproduce a stored corpus bit-for-bit."
+        )
+    legacy = composition == COMPOSITION_LEGACY
+
     serial_stages: List[Any] = []
 
     # Chain-topology provenance (see _ChainFlagsStage): a pass-through, so its
@@ -285,7 +343,8 @@ def build_chain_simulation(
     # placed first only so it reads first.
     serial_stages.append(_ChainFlagsStage(use_rffe, use_interconnect, use_link_budget,
                                           quant_bits, cfg.f0_hz,
-                                          _interconnect_band_hz(cfg)))
+                                          _interconnect_band_hz(cfg),
+                                          composition=composition))
 
     # FIRST, ahead of even the transmit tributary: the frame as it ENTERS the chain is
     # what "store the ray-traced channel" means -- anything later would have the RF
@@ -308,6 +367,14 @@ def build_chain_simulation(
         ))
         serial_stages.append(TxPABlock(pa))
         serial_stages.append(ModulateBlock(tx_pa=pa, bandwidth_hz=float(cfg.bandwidth_hz)))
+    # sqrt(P_tx) AT THE SOURCE under the FULL composition (contract section 1.4): the
+    # transmit-power scalar belongs to the transmitted waveform, and applying it here
+    # -- ahead of everything receive-side -- is what stops receiver noise scaling with
+    # transmit power. Under the legacy order it stays inside ThermalNoiseBlock, where
+    # it was when the corpora were generated, and where F81 measured its coupling.
+    if use_link_budget and not legacy:
+        from e2e.chain.link_budget import TxPowerStage
+        serial_stages.append(TxPowerStage(cfg))
     if use_rffe:
         kwargs = dict(rffe_kwargs or {})
         kwargs.setdefault("n", int(cfg.n_rx))
@@ -325,7 +392,9 @@ def build_chain_simulation(
         # so replaying a stored s_pars through the composed chain twice reproduced
         # nothing downstream of it (measured rel-RMSE 0.58-0.62 on the ADC output).
         kwargs.setdefault("seed", impairment_seed)
-        serial_stages.append(CircuitStage(RFFEBlock(**kwargs)))
+        rffe = RFFEBlock(**kwargs)
+        if legacy:
+            serial_stages.append(CircuitStage(rffe))
     if use_interconnect:
         # The block's own default is an unnormalised 11-tap boxcar placeholder, which
         # convolves the range profile with an 11-sample boxcar: a point target smears
@@ -338,15 +407,32 @@ def build_chain_simulation(
         ic_kwargs.setdefault("band_hz", _interconnect_band_hz(cfg))
         serial_stages.append(InterconnectStage(InterconnectBlock(**ic_kwargs)))
     serial_stages.append(DechirpBlock(cfg))
-    # The link budget goes BETWEEN dechirp and impairments, and the position is the whole
-    # point. Impairments are specified relative to a reference; before this stage runs
-    # there is no absolute reference in the chain for them to be relative TO, so they were
-    # calibrated against the only thing available -- the cube's own contents, which scale
-    # with the target. That is F35's ceiling and F42's missing floor, and both dissolve
-    # once the cube is on an absolute scale with a real k*T*B*F floor beneath it.
+    # THE FRONT END, on the beat record (contract section 1.1 fact 3, F97b/F97c). For
+    # an ideal linear chirp the dechirp commutes with a memoryless ENVELOPE
+    # nonlinearity, so the LNA/mixer cascade applies unchanged to the beat samples --
+    # and there it sees the signal a real amplifier sees, referenced to the beat sample
+    # rate, instead of `ifft(CFR)`, a signal no amplifier sees (F96). `from_rffe`
+    # carries every knob across, including a hand-edited per-element config table.
+    if use_rffe and not legacy:
+        from e2e.chain.frontend import FrontEndBlock
+        serial_stages.append(FrontEndBlock.from_rffe(rffe, cfg))
+    # The link budget goes BETWEEN the front end and the impairments, and the position
+    # is the whole point. Impairments are specified relative to a reference; before this
+    # stage runs there is no absolute reference in the chain for them to be relative TO,
+    # so they were calibrated against the only thing available -- the cube's own
+    # contents, which scale with the target. That is F35's ceiling and F42's missing
+    # floor, and both dissolve once the cube is on an absolute scale with a real k*T*B*F
+    # floor beneath it.
+    #
+    # mode: under the FULL composition this is ONE injection in the whole chain --
+    # `"once"` adds nothing when the front end already injected (it stamps
+    # `noise_injected_by`) and is the only floor when no front end is configured, so
+    # the two mechanisms F81 measured cannot both run. `"legacy"` is both of them, as
+    # the corpora were generated.
     if use_link_budget:
         from e2e.chain.link_budget import ThermalNoiseBlock
-        serial_stages.append(ThermalNoiseBlock(cfg, seed=impairment_seed))
+        serial_stages.append(ThermalNoiseBlock(
+            cfg, seed=impairment_seed, mode=("legacy" if legacy else "once")))
     serial_stages.append(
         ImpairmentBlock(cfg, impairment_chain_params, seed=impairment_seed)
     )
@@ -360,15 +446,34 @@ def build_chain_simulation(
         serial_stages.append(IFHighPassBlock(cfg, **(if_hpf_kwargs or {})))
     serial_stages.append(QuantizerBlock(bits=quant_bits))
 
-    downstream_blocks = [RadarCubeBlock(cfg),
-                         SinkBlock(out_dir, tag=tag, store_cfr=store_cfr,
-                                   store_paths=store_paths)]
+    # The SINK is a serial stage, not a downstream block, and the position is load
+    # bearing: what a corpus sample stores is the DIGITISED BEAT RECORD (`adc`), and
+    # the range transform that follows crosses into the cube domain, at which point
+    # `Simulation` drops the previous domain's payload from state (it must -- a stale
+    # `adc` outliving the crossing is how a block computes silently on pre-transform
+    # data). So the sink runs where the record it persists still exists. `SinkBlock`
+    # is documented as working in either position and returns `{}` either way, so no
+    # output moves; the `.npz` keys and contents are unchanged.
+    serial_stages.append(SinkBlock(out_dir, tag=tag, store_cfr=store_cfr,
+                                   store_paths=store_paths))
+    # THE range transform -- the one range FFT (contract section 1.2 row 11), built on
+    # the SCORED protocol (`transforms.RD_RANGE_PROTOCOL`: hann, DC removal,
+    # uncropped), which is the protocol every stored corpus was compressed under and
+    # `RadarCubeBlock` now refuses a departure from by name. Present in BOTH
+    # compositions: `RangeTransformBlock` + `rd_from_cube` IS `adc_to_rd`, operation
+    # for operation, so the legacy arm's `radar_cube` is bit-identical to what it was
+    # when `RadarCubeBlock` ran the range FFT itself.
+    serial_stages.append(range_transform_for(cfg))
+
+    downstream_blocks = [RadarCubeBlock(cfg)]
 
     return Simulation(
         environment_block=env,
         downstream_blocks=downstream_blocks,
         k=k,
         serial_stages=serial_stages,
+        radar_cfg=cfg,
+        composition=composition,
     )
 
 
