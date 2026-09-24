@@ -376,7 +376,15 @@ class Simulation:
         n_tx = payload.shape[1]
         if n_tx == 1:
             return
+        # The cfg that MATTERS is the one the spine's dechirp will actually read --
+        # a caller composing its own `serial_stages` supplies a full RadarConfig there
+        # and never touches `self.radar_cfg`. Find the bridge, ask it.
         cfg = self.radar_cfg
+        for stage in self.serial_stages:
+            caps = frames.capabilities_of(stage)
+            if caps.emits_domain == frames.DOMAIN_RX_TIME and hasattr(stage, "cfg"):
+                cfg = stage.cfg
+                break
         cfg_tx = int(getattr(cfg, "n_tx", 1)) if cfg is not None else 1
         scheme = str(getattr(cfg, "mimo", "single")).lower() if cfg is not None else "single"
         if cfg_tx == n_tx and scheme in ("tdm", "ddma"):
