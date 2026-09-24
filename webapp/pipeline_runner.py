@@ -129,6 +129,13 @@ def _resolve_interconnect_band_hz(state: Dict[str, Dict[str, Any]], env_block: A
     return carrier - span / 2.0, carrier + span / 2.0
 
 
+#: The Ka-band carrier the munich frames (and every Sionna-path screen) run at, in GHz
+#: -- used ONLY to decide whether a replayed corpus's own recorded carrier is that
+#: band or a legacy one worth marking as such in the run-identity line (see the
+#: `_axis_meta["band"]` assignment in `run_pipeline`). Matches
+#: `_resolve_interconnect_band_hz`'s own 30 GHz fallback carrier above.
+KA_BAND_CARRIER_GHZ = 30.0
+
 #: Last-resort fallback for `_corpus_live_interconnect_band_hz`, when `corpus_cfg` is
 #: missing or its own resolution raises: the literal every corpus generated at
 #: f0=77 GHz used before 2026-09-23 (see `e2e.ml.chain_generate.
@@ -1510,6 +1517,20 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         outputs["_axis_meta"]["source"] = (
             f"Corpus Replay ({path}): {_p(state, 'corpus_environment', 'split')} split "
             f"from frame {_p(state, 'corpus_environment', 'start_frame')}")
+        # The corpus's OWN carrier, in the run-identity line (hostile round 11, H4):
+        # these frames are a 77 GHz trace while every Sionna screen announces
+        # "munich (Ka-band, 30 GHz)" in the same 18 px line, and that discrepancy was
+        # only disclosed mid-sentence in the 15 px foot note. Read off the corpus's
+        # recorded `RadarConfig.f0_hz` -- never typed here, so a re-traced corpus
+        # relabels itself. "(legacy)" marks a carrier that is NOT the Ka-band
+        # re-founding every other screen runs at (F93, 2026-09-23); a corpus at that
+        # carrier prints the band alone.
+        _f0 = getattr(corpus_cfg, "f0_hz", None)
+        if _f0:
+            _ghz = float(_f0) / 1e9
+            outputs["_axis_meta"]["band"] = (
+                f"{_ghz:g} GHz corpus"
+                + ("" if abs(_ghz - KA_BAND_CARRIER_GHZ) < 1.0 else " (legacy)"))
     elif _enabled(state, "rt_environment"):
         outputs["_axis_meta"]["source"] = (
             f"RT Environment: {_p(state, 'rt_environment', 'scenario_name')}")
@@ -1737,17 +1758,20 @@ FIGURE_HEIGHT = {k: v - PANEL_HEADER_HEIGHT - PANEL_PADDING
 #: every map -- hostile round 10, defect 6); `b` holds the axis title and ticks at the
 #: 18 px podium floor; `l` holds the rotated y-axis title; `r` is a small pad, with the
 #: colour bar living in the width Plotly reserves beyond it.
-#: 72, not the spec table's 52: the strip carries TWO lines -- the headline statistic
-#: (26 px) and, above it, the per-frame readouts that must stay visible without
-#: expanding anything (the brightest visible return, and which frame the clock is
-#: parked on). At one line the two collided on a 545 px plot (measured on the first
-#: render, 2026-09-24: 215 px + 356 px of text in 545 px).
-_FIG_MARGIN_T = 68
+#: 46, down from 68 (hostile round 11, D8): the strip is ONE line now -- headline
+#: number bold, per-frame readouts after a separator, one size (`_stat_annotations`)
+#: -- instead of a 17 px prose line stacked above a 26 px number. The 22 px that
+#: bought goes straight back into the picture.
+_FIG_MARGIN_T = 46
 _FIG_MARGIN_B = 46
-#: 56/8, not 64/16: every px here is bought from the plot, and acceptance check 5
-#: wants the plot area at >= 50 % of the panel. 56 still clears the rotated y-axis
-#: title plus three-digit ticks at the 18 px podium floor (measured).
-_FIG_MARGIN_L = 44
+#: 72, not 44 (hostile round 11, D7): `margin.l` is a FLOOR, not the value -- Plotly's
+#: auto-expansion then grows it to whatever THIS panel's y-axis ticks happen to need,
+#: so the plot origin landed at x = 100 (objectness), 107 (subspace), 112 (maps),
+#: 115 (range profile) down ONE column and the left edge visibly staggered. 72 is
+#: above the widest of those (71, measured on the rendered page 2026-09-24), so
+#: auto-expansion has nothing left to add and every panel of every kind starts at the
+#: same x. Raise it, never lower it, if a future axis needs more room.
+_FIG_MARGIN_L = 72
 _FIG_MARGIN_R = 4
 
 #: Backwards-compatible aliases (several callers and tests still name these).
@@ -1761,11 +1785,17 @@ _HEATMAP_PLOT_DOMAIN_HEIGHT = 540 - PANEL_HEADER_HEIGHT - PANEL_PADDING \
 #: Statistic strip typography (layout spec section 3). The headline statistic is the
 #: A/B story on Thrusts 1, 2 and 4 and stays on the picture -- but above the axes, in
 #: a strip reserved for it, never over the data.
-_STAT_FONT_SIZE = 26
-#: The second, smaller line in the same strip: the per-frame readouts that must stay
-#: visible without expanding anything (the brightest visible return; which frame the
-#: clock is parked on) but must not compete with the headline number.
-_STAT_SUB_FONT_SIZE = 17
+#: 19, down from 26 (hostile round 11, D8): the strip is one line now, so the whole
+#: statistic -- headline plus per-frame readouts, ~62 characters at its longest --
+#: has to cross a 594 px map at ONE size. 18 px keeps that inside the figure width
+#: (measured on the rendered page: 8.7 px per character at 17 px, so ~68 characters
+#: fit the 658 px between the y-axis and the figure edge) and stays above the 17 px
+#: in-figure floor; the
+#: headline is separated by WEIGHT (bold) instead of by size.
+_STAT_FONT_SIZE = 18
+#: Retained name: the per-frame readouts are in the same annotation, at the same
+#: size, as the headline now -- see `_stat_annotations`.
+_STAT_SUB_FONT_SIZE = _STAT_FONT_SIZE
 #: Retained name (tests pin it): the headline statistic's size.
 _STAT_CALLOUT_FONT_SIZE = _STAT_FONT_SIZE
 
@@ -1872,29 +1902,43 @@ _STAT_ANNOTATION_FLAG = "stat_strip"
 
 
 def _stat_annotations(stat: str, sub: str = "", *, arm: str = "a") -> List[Dict[str, Any]]:
-    """The reserved statistic strip above the plot: the headline number left-aligned in
-    the arm's colour, and (optionally) the smaller per-frame readouts right-aligned on
-    the same line.
+    """The reserved statistic strip above the plot: ONE line, ONE size, headline
+    number bold, then the per-frame readouts after a separator --
+
+        **66.0 dB peak−median** · brightest −13.8 dB @ 37 m · frame 4 of 5
 
     Anchored to the AXES' own domain (`x domain`/`y domain`) at y > 1, so the strip sits
     entirely in the figure's top margin and can never cover a return (hostile round 10,
     defect 6 / acceptance check 8). No background pill: there is nothing underneath it
-    to hide any more."""
-    out = [dict(text=stat, xref="x domain", yref="y domain", x=0.0, y=1.02,
-                showarrow=False, xanchor="left", yanchor="bottom", align="left",
-                name=_STAT_ANNOTATION_FLAG,
-                font=dict(size=_STAT_FONT_SIZE,
-                          color=ARM_COLORS.get(arm, ARM_COLORS["a"])))]
-    if sub:
-        # ABOVE the headline number, not beside it: side by side, a 26 px statistic
-        # and a 17 px readout do not both fit across one plot width, and they
-        # overlapped on the first render (2026-09-24). Both left-aligned, so the strip
-        # reads as one block: small context line, then the number, then the picture.
-        out.append(dict(text=sub, xref="x domain", yref="y domain", x=0.0, y=1.13,
-                        showarrow=False, xanchor="left", yanchor="bottom", align="left",
-                        name=_STAT_ANNOTATION_FLAG + "_sub",
-                        font=dict(size=_STAT_SUB_FONT_SIZE, color="#576574")))
-    return out
+    to hide any more.
+
+    ONE annotation, not two (hostile round 11, D8): the strip used to stack a 17 px
+    prose line ABOVE a 26 px number, re-creating in miniature the inverted hierarchy
+    the whole redesign was about -- and it cost the strip 22 px of plot height on
+    every map. One line at one weight-graded size does the same job in less space.
+    """
+    text = f"<b>{stat}</b>" + (f"{CAPTION_SEP}{sub}" if sub else "")
+    return [dict(text=text, xref="x domain", yref="y domain", x=0.0, y=1.02,
+                 showarrow=False, xanchor="left", yanchor="bottom", align="left",
+                 name=_STAT_ANNOTATION_FLAG,
+                 font=dict(size=_STAT_FONT_SIZE,
+                           color=ARM_COLORS.get(arm, ARM_COLORS["a"])))]
+
+
+def _keep_non_stat_annotations(fig) -> List[Dict[str, Any]]:
+    """Every annotation on `fig` that is NOT the statistic strip, as plain dicts.
+
+    `fig.update_layout(annotations=...)` REPLACES the list, and `add_hline(...,
+    annotation_text=...)` puts its label in that same list -- so setting the statistic
+    after drawing a reference line silently deleted the line's label. That is exactly
+    how the subspace panels came to carry an unlabelled grey dashed line at 0.06,
+    from a DIFFERENT (warm-start) run, sitting where arm B lands, with its
+    "reference, not this run" caveat reachable only in Details (hostile round 11, H1).
+    Callers that set a statistic on a figure with reference lines compose the two
+    lists with this."""
+    return [a.to_plotly_json() if hasattr(a, "to_plotly_json") else dict(a)
+            for a in (fig.layout.annotations or ())
+            if not str(getattr(a, "name", "") or "").startswith(_STAT_ANNOTATION_FLAG)]
 
 
 def _corner_annotation(text: str, *, y: float = 1.06) -> Dict[str, Any]:
@@ -2759,16 +2803,35 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         else:
             rd_clip_provenance = f"clip {rd_clip:.1f} dB (shared floor)"
         rd_frames = [_rd_db(c) for c in outputs["radar_cube"]]
-        rd_stats = [f"{_peak_minus_median_db(d):.1f} dB peak−median"
-                    for d in rd_frames]
-        rd_subs = [f"frame {i + 1} of {len(rd_frames)}" for i in range(len(rd_frames))]
+        # THE HEADLINE IS THE RUN MEDIAN, not this frame's value (hostile round 11,
+        # H2): measured on the rendered screens, arm A's per-frame peak−median went
+        # 52.8 dB (frame 4) -> 32.6 dB (frame 5), so the A/B gap this panel exists to
+        # show moved 9.3 -> 3.7 dB in one frame step and any reviewer who dragged the
+        # transport got a different headline number than the presenter had said. The
+        # per-frame value is still on screen, as the small readout beside it, and the
+        # full per-frame spread is in Details -- what changes is which of the two the
+        # room reads as THE number. Computed here, never typed.
+        rd_per_frame = [_peak_minus_median_db(d) for d in rd_frames]
+        rd_median = float(np.median(rd_per_frame))
+        rd_stats = [f"{rd_median:.1f} dB peak−median (run median)"] * len(rd_frames)
+        rd_subs = [f"this frame {v:.1f} · frame {i + 1} of {len(rd_frames)}"
+                   for i, v in enumerate(rd_per_frame)]
         fig = _heatmap(first, x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
                        z_share=Z_SHARE_KEEP_CLIP)
         fig.update_layout(annotations=_stat_annotations(rd_stats[-1], rd_subs[-1]))
+        # "sparse scene: mostly dark on purpose" ON THE DEFAULT SCREEN (hostile round
+        # 11, D9): these two near-empty blue panels are a quarter of the first screen
+        # on three of seven presets, and the sentence explaining that the emptiness is
+        # deliberate (and the scale honest) was only in Details.
+        # The caption budget is ONE 16 px line in a 746 px column (~86 characters) and
+        # the sharing pass appends "same colour scale on both arms" to arm A's copy,
+        # so the unit clause moves to Details to make room: the colour bar is the
+        # only thing this clause was labelling, and it is beside the panel.
         set_panel(fig, title="Range-Doppler power",
-                  caption=[_DB_COLORBAR_PREFIX, rd_clip_caption],
+                  caption=[rd_clip_caption, "sparse scene, dark on purpose"],
                   details=[
-                      "Non-coherent (power) integration over channels.",
+                      "Non-coherent (power) integration over channels; the colour "
+                      f"scale is {_DB_COLORBAR_PREFIX} of this frame.",
                       rd_clip_provenance + ": this panel's display clip is a "
                       "deliberate decision about what to hide, so sharing it across "
                       "arms only unifies the two clips instead of pushing the limit "
@@ -2776,6 +2839,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       "A sparse automotive scene at a ~25 dB clip is mostly flat dark "
                       "blue on purpose; the scale is not stretched to make it look "
                       "busy.",
+                      # The spread the headline median hides, stated where the
+                      # headline is defined (H2).
+                      f"peak−median per frame over this run: "
+                      + ", ".join(f"{v:.1f}" for v in rd_per_frame)
+                      + f" dB (median {rd_median:.1f}, the headline; the strip's "
+                      "small readout is the frame the clock is parked on).",
                   ], row=PANEL_ROW_MAP)
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             fig, rd_frames,
@@ -2792,13 +2861,22 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         det_threshold = float(det_meta.get("threshold", 0.0)) if det_meta else None
         # Name the detector and its operating point ON the panel: the three Thrust 5
         # presets are compared across screens, and their cross counts are set by the
-        # threshold as much as by the detector. This panel is the last frame while the
-        # cube beside it animates; the statistic strip says which frame it is.
+        # threshold as much as by the detector. This panel FOLLOWS THE CLOCK, like
+        # every other animated panel on the screen (hostile round 11, H3): it used to
+        # be pinned to the last frame while the range-Doppler cube above it looped, so
+        # the transport said "frame 4 of 5", this panel said "frame 5 of 5 (last)",
+        # and the crosses the room counted were from a different frame than the cube
+        # they were counted against. The per-frame objectness, detections and ground
+        # truth are all already in `outputs`; nothing new is computed.
         panel_title = f"{title} — {det_label}" if det_label else title
-        det = outputs[key][-1]
-        if hasattr(det, "detach"):
-            det = det.detach().cpu().numpy()
-        obj = np.asarray(det)[0]                      # [n_range, n_azimuth], in [0, 1]
+
+        def _obj_map(d):
+            if hasattr(d, "detach"):
+                d = d.detach().cpu().numpy()
+            return np.asarray(d)[0]                   # [n_range, n_azimuth], in [0, 1]
+
+        obj_frames = [_obj_map(d) for d in outputs[key]]
+        obj = obj_frames[-1]
         n_r, n_a = obj.shape
         g = rx.get("grid") or {}
         max_r = float(g.get("max_range_m") or n_r)
@@ -2819,16 +2897,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         ))
         # Decoded detections (filled) and, for a replayed corpus frame, the stored
         # ground truth (hollow) -- drawn at the surface range the metric matches on.
-        dets = (outputs.get(key + "s") or [[]])[-1]
-        n_dets = len(dets) if dets else 0
-        if dets:
-            fig.add_trace(go.Scatter(
-                x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
-                name=f"✕ detections (n={len(dets)})",
-                marker=dict(symbol="x", size=14, color="#ff3b3b", line=dict(width=2)),
-                text=[f"score {d[2]:.2f}" for d in dets],
-            ))
-        gt = (outputs.get("gt_detections") or [[]])[-1]
+        # Per frame, in the same frame order as the objectness maps above, so the
+        # animation steps all three together (H3).
+        det_frames = list(outputs.get(key + "s") or [])
+        gt_frames = list(outputs.get("gt_detections") or [])
+
+        def _at(frames, i):
+            return (frames[i] if i < len(frames) else []) or []
+
+        dets = _at(det_frames, len(obj_frames) - 1)
+        n_dets = len(dets)
+        # ALWAYS added, even when this frame has no detections: the animation
+        # addresses traces by INDEX, so a trace that appears only on some frames
+        # would shift the ground-truth trace under it.
+        fig.add_trace(go.Scatter(
+            x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
+            name=f"✕ detections (n={n_dets})",
+            marker=dict(symbol="x", size=14, color="#ff3b3b", line=dict(width=2)),
+            text=[f"score {d[2]:.2f}" for d in dets],
+        ))
+        gt = _at(gt_frames, len(obj_frames) - 1)
         n_gt = len(gt) if gt else 0
         hit_rule = ""
         if gt:
@@ -2844,13 +2932,16 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             from e2e.ml.metrics import MatchCriterion
             crit = MatchCriterion()
             r_tol, az_tol = crit.max_range_err_m, crit.max_sin_az_err
-            for d in gt:
-                cx, cy = d[1], d[3]
-                fig.add_shape(
-                    type="rect", xref="x", yref="y",
-                    x0=cx - az_tol, x1=cx + az_tol, y0=cy - r_tol, y1=cy + r_tol,
-                    line=dict(color="#ffffff", width=2), fillcolor="rgba(0,0,0,0)",
-                )
+
+            def _gt_rects(gt_list):
+                """This frame's tolerance boxes, as layout shapes (a frame's layout
+                REPLACES the shapes list, so each frame carries its own)."""
+                return [dict(type="rect", xref="x", yref="y",
+                             x0=d[1] - az_tol, x1=d[1] + az_tol,
+                             y0=d[3] - r_tol, y1=d[3] + r_tol,
+                             line=dict(color="#ffffff", width=2),
+                             fillcolor="rgba(0,0,0,0)")
+                        for d in gt_list]
             # The hit RULE moves to the caption (layout spec section 4, "Detector
             # map"): as a legend entry it was a 100-character sentence inside a dark
             # block that took 72 px of the panel.
@@ -2898,25 +2989,64 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 annotation_font=dict(size=17, color="#ffffff"),
             )
         thr_txt = "n/a" if det_threshold is None else f"{det_threshold:.2f}"
-        fig.update_layout(annotations=list(fig.layout.annotations or ())
-                          + _stat_annotations(
-                              f"{n_dets} detections, {n_gt} labelled",
-                              f"frame {n_frames} of {n_frames} (last)"))
+        # Everything on this figure that is NOT per-frame: the scoring-crop line and
+        # its tag. A frame's layout REPLACES both lists, so each frame below is built
+        # as "these, plus this frame's own boxes / statistic".
+        _static_shapes = [sh.to_plotly_json() if hasattr(sh, "to_plotly_json")
+                          else dict(sh) for sh in (fig.layout.shapes or ())]
+        _static_anns = _keep_non_stat_annotations(fig)
+
+        def _det_stat(i: int):
+            d, g = _at(det_frames, i), _at(gt_frames, i)
+            return _stat_annotations(f"{len(d)} detections, {len(g)} labelled",
+                                     f"frame {i + 1} of {n_frames}")
+
+        if gt:
+            fig.update_layout(shapes=_static_shapes + _gt_rects(gt))
+        fig.update_layout(annotations=_static_anns + _det_stat(n_frames - 1))
         set_panel(fig, title=panel_title,
                   caption=[f"objectness ≥ {thr_txt}",
                            "✕ detections, ○ ground-truth boxes"]
                           + ([hit_rule] if hit_rule else []),
                   details=[
-                      f"detections at objectness >= {thr_txt} -- frame {n_frames} of "
-                      f"{n_frames} (last).",
-                      "This panel is pinned to the LAST frame while the range-Doppler "
-                      "cube above it loops on the clock, so the two can read as "
-                      "different frames.",
+                      f"detections at objectness >= {thr_txt}; the panel shows the "
+                      f"frame the transport is parked on, of {n_frames}.",
+                      "This panel steps with the same clock as the range-Doppler "
+                      "cube above it, so both always show the SAME frame; the "
+                      "scoreboard's \"last frame\" rows do not follow the clock and "
+                      "say so.",
                       (f"Ground truth boxes ARE the match tolerance: {hit_rule}."
                        if hit_rule else ""),
                       (f"labels & scoring stop at {scoring_max_r:g} m."
                        if scoring_max_r is not None else ""),
                   ], row=PANEL_ROW_MAP)
+        # One frame per stored frame: the objectness map (trace 0), this frame's
+        # detections (trace 1) and this frame's ground-truth boxes + statistic
+        # (layout). The detections trace is always present, so trace 1 is trace 1 on
+        # every frame (H3).
+        if len(obj_frames) > 1:
+            def _frame(i, z):
+                data = [{"type": "heatmap", "z": z},
+                        {"type": "scatter",
+                         "x": [d[1] for d in _at(det_frames, i)],
+                         "y": [d[3] for d in _at(det_frames, i)]}]
+                traces = [0, 1]
+                if gt:
+                    # Trace 2 is the ground-truth marker trace, which only exists on a
+                    # replayed corpus frame -- it has to step too, or the white dots
+                    # stay on the last frame's labels while their boxes move.
+                    data.append({"type": "scatter",
+                                 "x": [d[1] for d in _at(gt_frames, i)],
+                                 "y": [d[3] for d in _at(gt_frames, i)]})
+                    traces.append(2)
+                return go.Frame(
+                    name=str(i), data=data, traces=traces,
+                    layout=dict(
+                        shapes=_static_shapes + (_gt_rects(_at(gt_frames, i))
+                                                 if gt else []),
+                        annotations=_static_anns + _det_stat(i)))
+
+            fig.frames = [_frame(i, z) for i, z in enumerate(obj_frames)]
         figs[key] = _make_legible(fig)
 
         # Scoreboard: TP/FP/FN this frame + cumulative hits/false alarms/FA-per-frame/
@@ -3006,17 +3136,26 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         )
         # The statistic the presenter reads off this panel: where the curve ended, and
         # against what reference. Reserved strip above the plot, same as every map.
-        fig.update_layout(annotations=_stat_annotations(
-            f"{errs[-1]:.2f} at frame {len(errs)}",
-            f"warm-start reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
+        # COMPOSED with the reference line's own label, never replacing it (H1) --
+        # see `_keep_non_stat_annotations`.
+        fig.update_layout(annotations=_keep_non_stat_annotations(fig)
+                          + _stat_annotations(
+                              f"{errs[-1]:.2f} at frame {len(errs)}",
+                              f"dashed = warm-start reference "
+                              f"{_SUBSPACE_ERR_SETTLED_LEVEL:g} (separate run)"))
         # SHORT (measured on the rendered page, 2026-09-24): the caption renders on ONE
         # line with no wrap in a 746 px column at 16 px, which is ~86 characters -- the
         # spec's 110-character budget is the hard cap, not the fitting width, and a
         # three-clause caption here was CSS-clipped (acceptance check 12). The clause
         # dropped from the caption ("grows ~sqrt(k), not a fraction") is unchanged in
         # Details below.
+        # The caption names EVERY line style on the plot. It used to enumerate two of
+        # the three ("solid = error, dotted = passes/frame"), leaving the grey dashed
+        # horizontal -- a level from a different, warm-start run, drawn exactly where
+        # arm B settles -- as the one unexplained mark on the screen (H1).
         set_panel(fig, title="Subspace error per frame",
-                  caption=["Frobenius, unnormalised"],
+                  caption=["Frobenius, unnormalised",
+                           "dashed = warm-start settled level (reference run)"],
                   details=[
                       # Verbatim from the retired subtitle, lower case and all: the
                       # honesty pin in tests/test_webapp_layout_acceptance.py matches
@@ -3082,12 +3221,18 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # beside the error statistic, so the "2x compute" claim has a number on
             # screen that does not require reading the right-hand axis.
             panel = panel_of(fig)
-            fig.update_layout(annotations=_stat_annotations(
-                f"{errs[-1]:.2f} at frame {len(errs)}",
-                f"{int(n_refine_used[-1])} refinement passes/frame"))
+            fig.update_layout(annotations=_keep_non_stat_annotations(fig)
+                              + _stat_annotations(
+                                  f"{errs[-1]:.2f} at frame {len(errs)}",
+                                  f"{int(n_refine_used[-1])} refinement passes/frame"))
+            # ALL THREE line styles, and only them: with the passes/frame trace on,
+            # "Frobenius, unnormalised" moves out of the caption (the y-axis title
+            # and Details both still carry it) so the three styles fit one line at
+            # 16 px in a 746 px column (H1).
             set_panel(fig, title=panel["title"],
-                      caption=list(panel["caption"])
-                              + ["solid = error (left axis), dotted = passes/frame"],
+                      caption=["solid = error (left axis)",
+                               "dotted = passes/frame",
+                               "dashed = warm-start reference"],
                       details=list(panel["details"]) + [
                           "The dotted red trace (right axis) is AdaOjaBlock's own "
                           "effective_n_refine() decision per frame -- the compute "
@@ -3095,6 +3240,33 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                           "axes are pinned to one range, so a real 2x reads as a "
                           "height difference.",
                       ], row=panel["row"])
+        # THE TRANSPORT (hostile round 11, D10): every other screen has exactly one
+        # clock; Thrust 3's had none, because nothing on it carried animation frames.
+        # The line now GROWS with the clock -- frame i draws the first i points and
+        # prints that frame's own error (and passes/frame) in the statistic strip --
+        # so the same single transport drives this screen too, and the acquisition
+        # story is something the audience watches happen rather than reads off a
+        # finished curve. The reference line's own label is re-attached to every
+        # frame: a frame layout REPLACES the annotations list (H1).
+        _keep = _keep_non_stat_annotations(fig)
+        _n_refine = None
+        if n_refine_used and len(n_refine_used) == len(errs):
+            _n_refine = [int(n) for n in n_refine_used]
+        if len(errs) > 1:
+            frames = []
+            for i in range(len(errs)):
+                data = [{"type": "scatter", "y": errs[:i + 1]}]
+                traces = [0]
+                sub = f"dashed = warm-start reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}"
+                if _n_refine is not None:
+                    data.append({"type": "scatter", "y": _n_refine[:i + 1]})
+                    traces.append(1)
+                    sub = f"{_n_refine[i]} refinement passes/frame"
+                frames.append(go.Frame(
+                    name=str(i), data=data, traces=traces,
+                    layout=dict(annotations=_keep + _stat_annotations(
+                        f"{errs[i]:.2f} at frame {i + 1}", sub))))
+            fig.frames = frames
         figs["subspace_err"] = _make_legible(fig)
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):

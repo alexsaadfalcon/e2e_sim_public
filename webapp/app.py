@@ -56,6 +56,7 @@ from webapp.pipeline_runner import (
     apply_arm_style,
     decode_plotly_array,
     figures_from_outputs,
+    _panel_dict,
     panel_of,
     placeholder_figure,
     prewarm_tessera_interconnect,
@@ -384,6 +385,26 @@ def _resolve_screen_note(preset: "DemoPreset", block_state: Dict[str, Any]) -> s
     return note
 
 
+#: A screen-note clause that only makes sense when BOTH arms are on screen. Matched
+#: case-insensitively against each ";"-separated clause by `_one_arm_screen_note`.
+_TWO_ARM_CLAUSE = re.compile(
+    r"both arms|two arms|other arm|either arm|arm A\b|arm B\b|A/B", re.IGNORECASE)
+
+
+def _one_arm_screen_note(note: str) -> str:
+    """`note` with every two-arm clause removed -- what a SINGLE-arm screen prints.
+
+    The cancel journey renders one map, from one arm, under an amber "arm B did not
+    run" chip, and then printed the preset's own foot note describing "the two maps
+    share one colour scale ... the 0.5 mA arm's background is visibly brighter": a
+    comparison that did not happen, on the one screen that says so itself (hostile
+    round 11, C1). The note text belongs to the preset (webapp/demo_presets.py); the
+    RENDERING rule is here. Clauses are dropped whole, never re-punctuated, and the
+    clip rule / geometry / band clauses beside them are untouched."""
+    clauses = [c for c in (note or "").split("; ") if not _TWO_ARM_CLAUSE.search(c)]
+    return "; ".join(clauses)
+
+
 def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     """'A (as loaded): <label> <value> -- before' or 'B: <label> <value> -- after',
     naming the knob the way the editor labels it. ONE arm's value only -- before
@@ -403,32 +424,111 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
 ARM_CHIP_MAX_CHARS = 58
 
 
+_DIGIT_RE = re.compile(r"\d")
+#: One (...) group, with its leading whitespace. Non-nested by construction: none of
+#: the presets' arm labels nests parentheses, and `_balance_parens` cleans up after
+#: any form that cuts one open.
+_PAREN_RE = re.compile(r"\s*\(([^()]*)\)")
+
+
+def _balance_parens(text: str) -> str:
+    """`text` with unmatched parentheses removed -- a cut inside a parenthetical would
+    otherwise leave a stray ")" on the largest type on the screen."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                continue
+            depth -= 1
+        out.append(ch)
+    text = "".join(out)
+    if depth and "(" in text:
+        text = text[:text.rfind("(")]
+    return text.strip(" ,;-")
+
+
+def _chip_value_forms(text: str) -> List[str]:
+    """Progressively shorter renderings of ONE arm's knob value, longest first. Every
+    rung still CARRIES THE VALUE -- that is the whole point of this ladder.
+
+    Before 2026-09-24 an over-long value was dropped from the chip entirely, so the
+    largest type on the screen read "B — gap_response" / "B — Corner range (m)", and on
+    Thrust 4 the two arms' chips were character-for-character identical over two
+    different runs (hostile round 11, defect D1). The rungs, in order:
+
+      1. the label verbatim;
+      2. minus any parenthetical carrying no digit ("(as built)", "(largest skirt
+         mover)") -- a qualifier, never the value;
+      3. a digit-bearing parenthetical cut to the comma-clause holding its first
+         number ("(shipped default, 10 passes/frame baseline)" -> "(10 passes/frame
+         baseline)");
+      4. from the first number onward, dropping the prose in front of it
+         ("canonical Tessera geometry (50 um presented)" -> "50 um presented");
+      5. (4) with every parenthetical gone;
+      6. the bare number and its unit ("50 um", "25 m", "10 passes").
+
+    A value with no digits at all (none ship today, but a preset may add one) walks
+    a clause-head ladder instead, which also never empties.
+    """
+    text = (text or "?").strip()
+    if not _DIGIT_RE.search(text):
+        head = _clause_head(text, (": ", " -- ", ", ", " ("))
+        return [text, text, head, head, head, head]
+    keep_digit_parens = _PAREN_RE.sub(
+        lambda m: m.group(0) if _DIGIT_RE.search(m.group(1)) else "", text).strip()
+
+    def _tighten(m):
+        inner = m.group(1)
+        if not _DIGIT_RE.search(inner):
+            return m.group(0)
+        parts = [p.strip() for p in inner.split(",")]
+        return " (" + next((p for p in parts if _DIGIT_RE.search(p)), inner) + ")"
+
+    tightened = _PAREN_RE.sub(_tighten, keep_digit_parens).strip()
+    start = _DIGIT_RE.search(tightened).start()
+    while start > 0 and tightened[start - 1] not in " (":
+        start -= 1
+    from_number = _balance_parens(tightened[start:])
+    no_parens = _balance_parens(_PAREN_RE.sub("", from_number))
+    m = re.search(r"[-+]?\d[\d.,]*(\s*[A-Za-z%µ°/]+)?", no_parens or tightened)
+    bare = (m.group(0).strip() if m else no_parens) or no_parens
+    return [text, keep_digit_parens, tightened, from_number, no_parens, bare]
+
+
 def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     """The ARM CHIP (layout spec section 2.3): just the knob and its value, e.g.
     "A -- ADC 12 bit (as built)". The full banner line above is not deleted -- it is
     the first line of this arm's Details disclosure -- but at podium distance a 2-4
     line bold banner per column wrapped across the 13 px gutter and read as one
-    garbled paragraph (hostile round 10, defect 2.6)."""
+    garbled paragraph (hostile round 10, defect 2.6).
+
+    The VALUE is never dropped (hostile round 11, D1): when the full label does not
+    fit one line, BOTH arms step down `_chip_value_forms`' ladder together -- the same
+    rung on both, so the two chips stay parallel and a viewer compares like with like
+    -- until both fit. Whatever the rung leaves off is still on screen, at the front
+    of that arm's one-line caption (`_ab_arm_chip_overflow` -> `_arm_caption`), and in
+    full in Details."""
     bid, key, _value_b = preset.ab
     label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
-    value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
-    chip = f"{arm.upper()} — {label} {value}"
-    if len(chip) > ARM_CHIP_MAX_CHARS:
-        # Thrust 4's knob value is prose ("canonical Tessera geometry (50 um
-        # presented)") and at 20/700 the whole chip wrapped to two lines, which put
-        # that screen 18 px over the 150 px budget above the first panel (measured,
-        # 2026-09-24). The value is neither dropped nor truncated: it moves to the
-        # FRONT of this arm's one-line caption (`_arm_caption`), still on screen at
-        # 16 px. Nothing here ever ends in an ellipsis.
-        return f"{arm.upper()} — {label}"
-    return chip
+    forms_a = _chip_value_forms(preset.ab_label_a or "?")
+    forms_b = _chip_value_forms(preset.ab_label_b or "?")
+    rung = len(forms_a) - 1
+    for i, (va, vb) in enumerate(zip(forms_a, forms_b)):
+        if (len(f"A — {label} {va}") <= ARM_CHIP_MAX_CHARS
+                and len(f"B — {label} {vb}") <= ARM_CHIP_MAX_CHARS):
+            rung = i
+            break
+    value = (forms_a if arm == "a" else forms_b)[rung]
+    return f"{arm.upper()} — {label} {value}"
 
 
 def _ab_arm_chip_overflow(preset: "DemoPreset", arm: str) -> str:
-    """The knob VALUE `_ab_arm_chip` had to leave off, or "" when it fitted on the
-    chip. Rendered at the front of that arm's one-line caption, so a value too long for
-    a chip is MOVED, never lost -- on Thrust 4 it is the only thing on screen that
-    shows arm B ran a different geometry at all (hostile round 10, section 1.7)."""
+    """The FULL knob value when `_ab_arm_chip` had to shorten it, or "" when the chip
+    already carries it whole. Rendered at the front of that arm's one-line caption, so
+    a value too long for a chip is MOVED, never lost -- on Thrust 4 it is what says
+    which Tessera geometry this arm actually ran (hostile round 10, section 1.7)."""
     value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
     return "" if _ab_arm_chip(preset, arm).endswith(value) else value
 
@@ -450,6 +550,36 @@ def _clause_head(text: str, seps=(": ", " -- ", " vs ", " (")) -> str:
     complete phrase, so nothing needs marking as elided."""
     cuts = [c for c in (text.find(sep) for sep in seps) if c > 0]
     return text[:min(cuts)].rstrip() if cuts else text
+
+
+#: Words carrying no identity, ignored when asking "does this clause already say what
+#: the SOURCE slot says?" (`_preset_slot`).
+_SLOT_STOPWORDS = frozenset(("the", "a", "an", "of", "from", "in", "on", "with"))
+
+
+def _preset_slot(label: str, source: str) -> str:
+    """Slot 2 of the run-identity line: this preset's OWN short name, under one
+    convention on every screen (hostile round 11, C7 -- the three Thrust 5 screens
+    used to put a provenance claim, a claim-plus-condition and a model name in the
+    same slot).
+
+    The rule: walk the label's clauses left to right and take the first one that is
+    not already said by the SOURCE slot beside it. "live chain from the stored
+    channel: classical CFAR" beside a source of "Corpus Replay (live chain from
+    stored channel)" therefore prints "classical CFAR" -- the detector, which is what
+    the other two Thrust 5 screens print too -- instead of spending the slot on a
+    duplicate."""
+    src_words = {w.strip(".,;:()'").lower() for w in (source or "").split()}
+    src_words -= _SLOT_STOPWORDS
+    for clause in re.split(r":\s+|,\s+", label):
+        clause = _clause_head(clause.strip())
+        if not clause:
+            continue
+        words = {w.strip(".,;:()'").lower() for w in clause.split()} - _SLOT_STOPWORDS
+        if words and words <= src_words:
+            continue  # this clause only repeats the source slot
+        return clause
+    return _clause_head(label)
 
 
 def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int) -> str:
@@ -478,22 +608,28 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
     # "Sionna frames: munich (Ka-band, 30 GHz)" -> the environment IS the identity,
     # the loader is not.
     source = (axis_meta.get("source") or "").replace("Sionna frames: ", "")
+    slot = _preset_slot(label, source)
+    # The BAND, in the 18 px line rather than mid-sentence in the 15 px foot note
+    # (hostile round 11, H4): three of seven screens run on a 77 GHz corpus while the
+    # other four announce "munich (Ka-band, 30 GHz)" in this very line, and that
+    # discrepancy was carried by the smallest type on the page. Empty on the Sionna
+    # path, whose source string already names its band.
+    band = axis_meta.get("band") or ""
 
     # A ladder of progressively shorter forms, each made of WHOLE clauses. The first
     # that fits wins; the last rung always fits.
     candidates = [
-        [thrust, label, source, frames, run],
-        [thrust, _clause_head(label), source, frames, run],
+        [thrust, label, source, band, frames, run],
+        [thrust, slot, source, band, frames, run],
         # The source's parenthetical is a mouthful ("Corpus Replay (live chain from
         # stored channel): test split from ..."); the environment NAME is the identity.
-        [thrust, _clause_head(label),
-         _clause_head(source, (": ", " (")), frames, run],
+        [thrust, slot, _clause_head(source, (": ", " (")), band, frames, run],
         # Keep the ENVIRONMENT before giving up on the label: a screen that says only
         # "Thrust 5 . 5 frames . run #1" has lost the two facts a photograph needs
         # (which preset, which corpus). Measured on thrust5_detector_ml, 2026-09-24.
-        [thrust, _clause_head(label), _clause_head(source, (": ", " (")), run],
-        [thrust, _clause_head(label), frames, run],
-        [thrust, frames, run],
+        [thrust, slot, _clause_head(source, (": ", " (")), band, run],
+        [thrust, slot, band, frames, run],
+        [thrust, band, frames, run],
     ]
     # A cancelled run also draws an amber `CANCELLED -- N of M frames` chip in this
     # same row, which takes ~230 px out of the line's own width (measured on
@@ -566,13 +702,44 @@ def _arm_caption(payload: Dict[str, Any]) -> str:
     overflow = payload.get("_arm_chip_value")
     if overflow:
         parts.append(overflow)
-    notes = payload.get("_notes") or []
-    if notes:
-        parts.append(_note_headline(notes[0]))
+    notes = [n for n in (payload.get("_notes") or [])
+             # The environment note ("Environment 'munich (Ka-band, 30 GHz)': frames
+             # carry a 30 GHz carrier.", pipeline_runner.run_pipeline) is IDENTICAL on
+             # both arms and repeats the band the run-identity line already prints in
+             # 18 px bold -- so on Thrust 1-3 the one line reserved for "the fact this
+             # arm adds" said nothing about the arm at all (hostile round 11, H7).
+             # Skipped here only; it is unchanged in Details.
+             if not str(n).startswith("Environment '")]
+    head = _note_headline(notes[0]) if notes else ""
+    if head:
+        parts.append(head)
     line = CAPTION_SEP.join(parts)
-    # ONE line, and the column clips at ~86 characters at 16 px -- if both facts do not
-    # fit, the knob value wins: the run note is in Details in full either way.
-    return line if len(line) <= 86 else (parts[0] if parts else "")
+    # ONE line, and the column clips at ~86 characters at 16 px.
+    if len(line) <= 86 or len(parts) < 2:
+        return line if len(line) <= 86 else parts[0]
+    # Both facts, one line: something has to go. The run note wins when the chip
+    # above ALREADY carries every number the knob value has -- on Thrust 5's
+    # IF-corner A/B the chip reads "B -- Corner range (m) 25 m (attenuates ~4.3 dB at
+    # 22 m)" and the leftover adds only the words "IF high-pass corner", which the
+    # knob label itself says, while the note it was crowding out is this arm's OWN
+    # live-vs-stored ADC gate ("max |diff| = 1 of 8 LSB") -- the standard the CFAR and
+    # RADDetNet screens already meet on both arms (hostile round 11, H7).
+    # Never when the note's own headline had to be elided: a caption ending in "…"
+    # is the defect hostile round 10 (2.3) found, and the knob value is whole.
+    chip_has_the_numbers = _chip_carries_the_numbers(
+        payload.get("_arm_chip") or "", overflow)
+    if chip_has_the_numbers and not head.endswith("…"):
+        return head
+    # Otherwise the knob value wins: the run note is in Details in full either way.
+    return parts[0]
+
+
+def _chip_carries_the_numbers(chip: str, value: str) -> bool:
+    """True when every digit-bearing token of `value` is already printed on `chip` --
+    i.e. the leftover text would add words, not numbers. Used by `_arm_caption` to
+    decide which of two facts keeps the arm's one line."""
+    numbers = [tok for tok in value.split() if any(c.isdigit() for c in tok)]
+    return bool(numbers) and all(tok in chip for tok in numbers)
 
 
 # =================================================================================
@@ -723,22 +890,10 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
             arm_name = None
         if arm_name is not None:
             pr_fig = detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)
-            if arm == "b":
-                # This panel is scored offline on the fixed beat_cfar.json split and
-                # is IDENTICAL on both arms by design -- an A/B knob never touches it
-                # -- which read as a bug (two panels, same numbers) until one arm's
-                # copy said so. Said ONCE (arm B only): saying it twice invites "why
-                # does it need saying twice?" (hostile round 10, section 5.8). It is
-                # a caption clause now, not a fourth wrapped title line.
-                # `stored_pr_figure` already carries this sentence in its Details on
-                # BOTH arms (it is true of both). What arm B adds is the VISIBLE
-                # statement -- once per row, not once per panel.
-                _panel = panel_of(pr_fig)
-                _clause = "identical on both arms"
-                pr_fig.update_layout(meta=dict(
-                    (pr_fig.layout.meta or {}),
-                    panel=dict(_panel,
-                               caption=list(_panel.get("caption") or []) + [_clause])))
+            # The "identical on both arms" clause is NOT added here any more: it is a
+            # statement about a PAIR of panels, so it is attached at render time,
+            # when the page knows whether there is a second arm at all, and it goes
+            # on ARM A -- see `_mark_pr_identical_on_arm_a`.
             figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
@@ -1356,6 +1511,32 @@ def _details_lines(payload: Dict[str, Any], figs: Dict[str, Any],
     return out
 
 
+#: What arm A's stored-PR panel says when BOTH arms are on screen.
+PR_IDENTICAL_CLAUSE = "identical on both arms"
+
+
+def _mark_pr_identical_on_arm_a(figs: Dict[str, Any], prev_figs: Dict[str, Any]) -> None:
+    """Say ONCE, on arm A's caption, that the offline-scored PR panel is the same on
+    both arms -- an A/B knob never touches it, and two panels showing the same numbers
+    read as a bug until one of them says so (hostile round 10, section 5.8).
+
+    ARM A, not arm B (hostile round 11, C6): the heat-map panels put their "same
+    colour scale on both arms" clause on arm A, and two conventions for the same kind
+    of statement on one screen make the ABSENCE of a clause carry meaning.
+
+    At RENDER time, not in `_arm_result`: this is a fact about a PAIR of panels, and
+    the single-run path builds arm A's figures with the same call -- a single-arm
+    screen that printed "identical on both arms" would be describing a comparison it
+    does not show (the defect C1 names on the cancel screen)."""
+    key = "detector_pr_stored"
+    if key not in figs or key not in prev_figs:
+        return
+    panel = _panel_dict(figs[key])
+    caption = list(panel.get("caption") or [])
+    if PR_IDENTICAL_CLAUSE not in caption:
+        panel["caption"] = caption + [PR_IDENTICAL_CLAUSE]
+
+
 def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
                 screen_note: str, fallback_label: str):
     """One arm's whole header block: the arm chip, its one-line caption, and its
@@ -1422,8 +1603,22 @@ def _render_results(results_data, active_tab):
     apply_arm_style(figs, "a")
     if prev_figs:
         apply_arm_style(prev_figs, "b")
+        # The scoreboard's two OFFLINE rows are knob-invariant, so they print once,
+        # under arm A, and arm B keeps only the rows this run moved (H9). Done here
+        # rather than in the figure builder for the same reason the arm colour is:
+        # `figures_from_outputs` builds one run and does not know which arm it is.
+        from webapp import detector_scoreboard as _ds
+        for _key in set(figs) & set(prev_figs):
+            if _key.endswith("_scoreboard"):
+                _ds.fold_offline_rows_onto_arm_a(figs[_key], prev_figs[_key])
+        _mark_pr_identical_on_arm_a(figs, prev_figs)
 
     screen_note = results_data.get("_screen_note") or ""
+    if screen_note and not prev_figs:
+        # ONE arm on screen (a single-run preset, or the cancel journey's "arm B did
+        # not run"): the preset's note is written for the two-panel case, so its
+        # two-arm clauses describe a comparison this screen does not show (C1).
+        screen_note = _one_arm_screen_note(screen_note)
     identity = results_data.get("_run_identity") or results_data.get("_banner") or ""
     cancelled = results_data.get("_cancelled_chip")
 

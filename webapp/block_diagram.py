@@ -286,6 +286,39 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
     return elements
 
 
+#: How much of a parameter's help string the editor shows without opening "more".
+#: ~4 lines at 15 px in the editor column, measured on the rendered card
+#: (2026-09-24). The budget is in CHARACTERS because the cut has to land on a clause
+#: boundary, which is a property of the text, not of the box.
+_HELP_HEAD_CHARS = 170
+#: Boundaries `_help_head` is allowed to cut at, longest marker first. Each leaves a
+#: complete, readable unit behind -- so nothing on the card needs an ellipsis.
+_HELP_BOUNDARIES = (". ", "; ", " -- ")
+
+
+def _help_head(text: str, budget: int = _HELP_HEAD_CHARS) -> str:
+    """As much of one help string as fits `budget` characters while ending on a
+    sentence or clause boundary -- the whole string when it fits, which is the common
+    case. Never cuts inside a word; only a single unit longer than the budget on its
+    own falls back to a word-boundary cut with "…" (and then "more" is always there).
+    """
+    text = (text or "").strip()
+    if len(text) <= budget:
+        return text
+    cut = -1
+    for marker in _HELP_BOUNDARIES:
+        pos = text.rfind(marker, 0, budget + len(marker))
+        # +len(marker)-1: keep the boundary punctuation itself ("...skirt of the
+        # five;"), drop the space after it.
+        cut = max(cut, pos + len(marker) - 1 if pos > 0 else -1)
+    if cut > 0:
+        # A cut at " -- " leaves the dashes dangling at the end of the visible line;
+        # a cut at ". " or "; " keeps its own punctuation, which reads as written.
+        return text[:cut].rstrip(" -")
+    space = text.rfind(" ", 0, budget)
+    return (text[:space] if space > 0 else text[:budget]).rstrip(" ,;-") + "…"
+
+
 def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[Any]:
     """Build the editor controls for a single selected block."""
     spec = BLOCKS_BY_ID.get(block_id)
@@ -362,23 +395,26 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
                 **input_kwargs,
             ))
         if ps.help:
-            # Capped at 2 lines by default (line-clamp) with a "more" disclosure
-            # that reveals the full, untruncated help string -- the 5-line grey
-            # paragraph used to push the control below the fold of the column.
-            children.append(html.Div([
-                html.P(ps.help, style={
-                    "fontSize": "15px", "color": "#8395a7", "margin": "2px 0 0",
-                    "display": "-webkit-box", "WebkitLineClamp": "2",
-                    "WebkitBoxOrient": "vertical", "overflow": "hidden",
-                }),
-                html.Details([
-                    html.Summary("▸ more", style={"fontSize": "15px",
-                                                        "color": "#8395a7",
-                                                        "cursor": "pointer"}),
+            # WRAPS, never clips (hostile round 11, D13): this used to be a 2-line
+            # `-webkit-line-clamp`, which cut every help string mid-phrase -- the one
+            # on the LNA knob Thrust 1 is entirely about ended "...visible only when
+            # the signal sits near the front-end's…" on the rendered card. What shows
+            # now is `_help_head`: whole sentences/clauses up to a character budget,
+            # wrapped by the browser, with no ellipsis and no cut inside a word. The
+            # rest (only the longest few help strings have one) stays behind "more",
+            # which still holds the string in full.
+            head = _help_head(ps.help)
+            block = [html.P(head, style={"fontSize": "15px", "color": "#8395a7",
+                                         "margin": "2px 0 0"})]
+            if head != ps.help:
+                block.append(html.Details([
+                    html.Summary("▸ more", className="no-marker",
+                                 style={"fontSize": "15px", "color": "#8395a7",
+                                        "cursor": "pointer"}),
                     html.P(ps.help, style={"fontSize": "15px", "color": "#8395a7",
                                            "marginTop": "2px"}),
-                ]),
-            ], style={"marginBottom": "2px"}))
+                ]))
+            children.append(html.Div(block, style={"marginBottom": "2px"}))
     return children
 
 
@@ -413,7 +449,11 @@ def preset_notes(preset: DemoPreset) -> Any:
     # Collapsed by default (was a 750px wall of text between the tab strip and the
     # diagram); the summary names the thrust so a collapsed card still orients.
     return html.Details([
+        # `no-marker` (hostile round 11, D12): the native <details> triangle plus the
+        # literal "▸" rendered as "▶ ▸ Presenter notes" on every card, while the
+        # Results disclosures (which already suppress the native marker) render one.
         html.Summary(f"▸ Presenter notes (Thrust {preset.thrust})",
+                     className="no-marker",
                      style={"fontWeight": "bold", "cursor": "pointer",
                             "fontSize": "16px", "color": "#2d3a4a"}),
         body,
@@ -468,8 +508,15 @@ def layout() -> Any:
             value=PRESETS[0].id if PRESETS else None, clearable=False,
             style={"width": "520px", "flex": "0 0 520px"},
         ),
+        # FIXED WIDTH AND NO SHRINK on every control (hostile round 11, D11): these
+        # are flex items, so with the default `flex-shrink: 1` the bar re-divided
+        # itself around each preset's status string and "Run pipeline" rendered one
+        # line on two cards and wrapped to "Run" / "pipeline" on the other five --
+        # the same button at seven widths across the deck. Only the status span
+        # (flex: 1 1 auto) absorbs the leftover width now.
         html.Button("Load preset", id="preset-load", n_clicks=0,
                     style={"marginLeft": "8px", "width": "110px", "padding": "6px 0",
+                           "flex": "0 0 110px", "whiteSpace": "nowrap",
                            "fontWeight": "bold", "backgroundColor": "#3867d6",
                            "color": "white", "border": "none",
                            "borderRadius": "4px", "cursor": "pointer"}),
@@ -479,9 +526,10 @@ def layout() -> Any:
         # Bounded to MAX_N_STEPS on both ends of the wire: here (advisory, a typed
         # value can still exceed it) and in run_pipeline (enforced).
         dcc.Input(id="run-nsteps", type="number", value=10, min=1, max=MAX_N_STEPS,
-                  step=1, style={"width": "90px"}),
+                  step=1, style={"width": "90px", "flex": "0 0 90px"}),
         html.Button("Run pipeline", id="run-button", n_clicks=0,
                     style={"marginLeft": "12px", "width": "150px", "padding": "6px 0",
+                           "flex": "0 0 150px", "whiteSpace": "nowrap",
                            "fontWeight": "bold", "backgroundColor": "#20bf6b",
                            "color": "white", "border": "none",
                            "borderRadius": "4px", "cursor": "pointer"}),
@@ -489,6 +537,7 @@ def layout() -> Any:
         # `running=`); sets a flag the simulation polls before each frame.
         html.Button("Cancel", id="cancel-button", n_clicks=0, disabled=True,
                     style={"marginLeft": "8px", "width": "100px", "padding": "6px 0",
+                           "flex": "0 0 100px", "whiteSpace": "nowrap",
                            "backgroundColor": "#eb3b5a", "color": "white",
                            "border": "none", "borderRadius": "4px",
                            "cursor": "pointer"}),

@@ -124,6 +124,10 @@ button:disabled {
   list-style: none; user-select: none;
 }
 .details-summary::-webkit-details-marker { display: none; }
+/* Any <summary> that draws its own "▸": without this the browser's native marker
+   renders too and the card reads "▶ ▸ Presenter notes" (hostile round 11, D12). */
+.no-marker { list-style: none; }
+.no-marker::-webkit-details-marker { display: none; }
 .details-body {
   margin-top: var(--sp-2); padding: var(--sp-3);
   border: 1px solid var(--border); border-radius: 6px; background: #fbfcfd;

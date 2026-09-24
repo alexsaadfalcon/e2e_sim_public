@@ -171,10 +171,14 @@ def test_stored_pr_figure_geometry_is_a_fixed_constant_not_derived_from_a_captio
 
 
 def test_pr_figure_geometry_is_identical_between_arm_a_and_b(monkeypatch):
-    """`webapp.app._arm_result` appends the "identical on both arms" clause to arm
-    B's panel CAPTION only now (there is no title left to append a 4th line to);
-    both arms' copies of this figure must still share one geometry, or their plot
-    axes do not line up (item 1's own defect, in its new home)."""
+    """The "identical on both arms" clause goes on ARM A's panel caption (hostile
+    round 11, C6 -- the heat-map panels put their "same colour scale on both arms"
+    clause there, and two conventions for the same kind of statement on one screen
+    make the ABSENCE of a clause carry meaning), and it is added at RENDER time by
+    `webapp.app._mark_pr_identical_on_arm_a`, when the page knows there IS a second
+    arm; `_arm_result` adds it to neither arm. Both arms' copies of this figure must
+    still share one geometry, or their plot axes do not line up (item 1's own defect,
+    in its new home)."""
     import webapp.app as appmod
 
     def _outputs():
@@ -186,10 +190,21 @@ def test_pr_figure_geometry_is_identical_between_arm_a_and_b(monkeypatch):
     result_b = appmod._arm_result(1, _outputs(), 1, {}, "", "", arm="b")
     pr_a = result_a["figs"]["detector_pr_stored"]
     pr_b = result_b["figs"]["detector_pr_stored"]
-    assert "identical on both arms" in panel_caption(pr_b)
     assert "identical on both arms" not in panel_caption(pr_a)
+    assert "identical on both arms" not in panel_caption(pr_b)
     assert pr_a.layout.margin.t == pr_b.layout.margin.t
     assert pr_a.layout.height == pr_b.layout.height
+    # The render-time pass is what puts it on arm A, and only when arm B is there.
+    figs_a = {"detector_pr_stored": pr_a.to_dict()}
+    figs_b = {"detector_pr_stored": pr_b.to_dict()}
+    appmod._mark_pr_identical_on_arm_a(figs_a, figs_b)
+    assert "identical on both arms" in panel_caption(figs_a["detector_pr_stored"])
+    assert "identical on both arms" not in panel_caption(figs_b["detector_pr_stored"])
+    # A single-arm screen (the cancel journey) must not claim a comparison it does
+    # not show: no arm B, no clause.
+    figs_solo = {"detector_pr_stored": pr_a.to_dict()}
+    appmod._mark_pr_identical_on_arm_a(figs_solo, {})
+    assert "identical on both arms" not in panel_caption(figs_solo["detector_pr_stored"])
 
 
 # --------------------------------------------------------------------------------
@@ -325,10 +340,12 @@ def test_stat_strip_tracks_the_frame_it_is_shown_on():
         raise AssertionError("no stat_strip annotation")
 
     # Base figure is built from the LAST (spiky) frame -- must not read as flat.
-    assert _stat_text(fig.layout) != "0.0 dB peak−median"
+    # The strip is ONE annotation now (hostile round 11, D8): headline in bold, then
+    # the per-frame readouts after a separator, at one size.
+    assert "<b>0.0 dB peak−median</b>" not in _stat_text(fig.layout)
     # Frame 0's own override must carry frame 0's (flat) number, not the base
     # figure's.
-    assert _stat_text(fig.frames[0].layout) == "0.0 dB peak−median"
+    assert _stat_text(fig.frames[0].layout).startswith("<b>0.0 dB peak−median</b>")
 
 
 # --------------------------------------------------------------------------------

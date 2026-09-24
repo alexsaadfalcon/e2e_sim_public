@@ -149,9 +149,12 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     labels, values = table.cells.values
     row = dict(zip(labels, values))
     # Last frame (index 1) was a total miss: tp=0, fp=1, fn=1.
-    assert row["this frame: TP"] == "0"
-    assert row["this frame: unmatched (FP)"] == "1"
-    assert row["this frame: FN"] == "1"
+    # "last frame", not "this frame" (hostile round 11, H3): a Plotly Table cannot
+    # animate, so these rows never follow the screen's transport -- and the objectness
+    # map beside them now does.
+    assert row["last frame: TP"] == "0"
+    assert row["last frame: unmatched (FP)"] == "1"
+    assert row["last frame: FN"] == "1"
     # Cumulative over both frames: 1 hit, 1 false alarm. The "N/N scored" qualifier
     # moved into the value (Change, 2026-09-23 coordinator re-check).
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
@@ -255,7 +258,7 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     # figure builder.
     labels, values = table.cells.values
     row = dict(zip(labels, values))
-    assert labels == ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
+    assert labels == ["last frame: TP", "last frame: unmatched (FP)", "last frame: FN",
                       "cumulative hits", "unmatched / frame, these 0 frames",
                       "recall (hits / GT), this run"]
     assert row["cumulative hits"] == "0 (0/1 scored)"
@@ -617,8 +620,14 @@ def test_stored_pr_figure_highlighted_arm_carries_its_delta_and_ci(beat_cfar_dat
     arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
     fig = ds.stored_pr_figure(highlight_arm="raddetnet")
     trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
-    assert f"AP {arm['AP']:.3f}" in trace.name
-    assert f"{comp['delta_AP']:+.3f} vs CFAR" in trace.name
+    # SHORT form (hostile round 11, D3): "raddetnet 0.476 (+0.175)". At the previous
+    # "raddetnet AP 0.476, +0.175 vs CFAR" the entry filled its half of the
+    # two-column strip edge to edge and abutted the entry beside it with zero gap, so
+    # the two read as one string and the delta looked like it was against THAT arm.
+    # "AP" and "vs CFAR" are spelled out in the caption, with the interval.
+    assert f"{arm['AP']:.3f}" in trace.name
+    assert f"({comp['delta_AP']:+.3f})" in trace.name
+    assert len(trace.name) <= 30, trace.name
     caption = panel_caption(fig)
     assert f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]" in caption
     # ONE line in a 746 px column at 16 px is ~86 characters; past that the browser

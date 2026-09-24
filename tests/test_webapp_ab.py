@@ -875,14 +875,15 @@ def test_share_axes_keeps_a_deliberate_heatmap_crop():
 # A/B knob never touches it -- which reads as a bug (two panels, same numbers) unless
 # arm B's own copy says so.
 # ------------------------------------------------------------------------------------
-def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
+def test_the_stored_pr_panel_is_marked_identical_on_arm_a_only(monkeypatch):
     """The "identical on both arms" clause used to be appended to the mocked figure's
-    TITLE text; 2026-09-24 redesign retires figure titles entirely, so `_arm_result`
-    now appends it to the panel's CAPTION instead (via `panel_of`/`set_panel` --
-    `webapp.app._arm_result`'s own docstring). The mock below therefore has to be a
-    figure that carries panel meta in the first place (`pipeline_runner.set_panel`),
-    not a bare `layout.title` -- a figure with no panel meta at all is not what
-    `stored_pr_figure` actually returns any more."""
+    TITLE text; the 2026-09-24 redesign retired figure titles, and hostile round 11
+    (C6) moved the clause from arm B to arm A, where every other "shared between the
+    arms" statement lives. It is attached at RENDER time
+    (`webapp.app._mark_pr_identical_on_arm_a`) rather than by `_arm_result`, because
+    it is a fact about a PAIR of panels: a single-arm screen must not print it. The
+    mock below therefore has to be a figure that carries panel meta in the first
+    place (`pipeline_runner.set_panel`), not a bare `layout.title`."""
     import plotly.graph_objects as go
 
     import webapp.app as appmod
@@ -907,8 +908,14 @@ def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
 
     caption_a = panel_caption(result_a["figs"]["detector_pr_stored"])
     caption_b = panel_caption(result_b["figs"]["detector_pr_stored"])
+    # `_arm_result` itself adds it to NEITHER arm now.
     assert "identical on both arms" not in caption_a
-    assert "identical on both arms" in caption_b
+    assert "identical on both arms" not in caption_b
+    figs_a = {"detector_pr_stored": result_a["figs"]["detector_pr_stored"].to_dict()}
+    figs_b = {"detector_pr_stored": result_b["figs"]["detector_pr_stored"].to_dict()}
+    appmod._mark_pr_identical_on_arm_a(figs_a, figs_b)
+    assert "identical on both arms" in panel_caption(figs_a["detector_pr_stored"])
+    assert "identical on both arms" not in panel_caption(figs_b["detector_pr_stored"])
     # The VISIBLE clause was shortened to "identical on both arms" (2026-09-24): with
     # the highlighted arm's AP and its CI already on this line, the longer form pushed
     # the caption past the ~86 characters a 746 px column fits at 16 px and the browser
@@ -917,8 +924,10 @@ def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
     # both -- pinned on the REAL figure in
     # tests/test_detector_scoreboard.py::test_stored_pr_details_state_the_identical_on_both_arms_sentence
     # (this test's `stored_pr_figure` is a mock and carries no Details of its own).
-    # The default arm is "a" -- an ordinary single-run call must not pick up the
-    # B-only clause by accident.
+    # An ordinary single-run call must not pick the clause up by accident -- and
+    # neither must the render pass when there is no second arm to be identical to.
     result_default = appmod._arm_result(1, outputs, 5, {}, "", "")
-    assert "identical on both arms" not in (
-        panel_caption(result_default["figs"]["detector_pr_stored"]))
+    figs_solo = {"detector_pr_stored":
+                 result_default["figs"]["detector_pr_stored"].to_dict()}
+    appmod._mark_pr_identical_on_arm_a(figs_solo, {})
+    assert "identical on both arms" not in panel_caption(figs_solo["detector_pr_stored"])

@@ -174,6 +174,25 @@ def test_every_figure_has_the_same_top_margin(figs):
     assert set(tops.values()) == {pr._FIG_MARGIN_T}, tops
 
 
+def test_every_figure_has_the_same_left_margin(figs):
+    """Check 20 / hostile round 11 D7: the plot ORIGIN has to land on the same x down
+    a column, or the left edge staggers from panel to panel (measured on the rendered
+    page: 100 px objectness, 107 subspace, 109 PR, 112 maps, 115 range profile).
+
+    `margin.l` is a FLOOR -- Plotly's auto-expansion grows it to whatever each panel's
+    own y-axis ticks need -- so the constant has to be wide enough that expansion
+    never fires, and every panel kind has to use the SAME constant. The
+    stored-PR panel keeps its own copy of the number (it is a different module's
+    layout decision); this is what pins the two equal."""
+    from webapp import detector_scoreboard as ds
+
+    lefts = {key: fig.layout.margin.l for key, fig in figs.items()}
+    assert set(lefts.values()) == {pr._FIG_MARGIN_L}, lefts
+    assert ds._PR_MARGIN_L == pr._FIG_MARGIN_L, (
+        f"the stored-PR panel starts at {ds._PR_MARGIN_L} px while every other panel "
+        f"starts at {pr._FIG_MARGIN_L}")
+
+
 def test_the_same_product_has_the_same_geometry_on_two_different_runs():
     """Check 20, directly: two runs with different DATA (so different statistics, and
     different caption lengths) must produce byte-identical panel geometry."""
@@ -385,7 +404,9 @@ OLD_SUBTITLE_CLAUSES = {
     ],
     "cfar_detection": [
         "detections at objectness >=",
-        "frame 1 of 1 (last)",
+        # The panel follows the transport now (hostile round 11, H3), so what it
+        # states is which frame of how many is on screen -- not that it is pinned.
+        "the frame the transport is parked on",
         "hit = cross inside the box",
         "labels & scoring stop at",
     ],
@@ -527,11 +548,16 @@ def test_the_corpus_replay_panels_keep_their_clauses_too(detector_figs, product)
     assert not missing, f"{product} dropped: {missing} -- panel text: {text}"
 
 
-def test_the_detector_panel_says_it_is_pinned_while_the_cube_loops(detector_figs):
-    """Hostile round 10, section 3.2: the objectness panel is built from the LAST frame
-    and never animates while the range-Doppler cube above it loops on the clock, and
-    nothing on screen said so. Now the strip does."""
+def test_the_detector_panel_follows_the_same_clock_as_the_cube(detector_figs):
+    """Hostile round 11, H3 (supersedes round 10's 3.2, which only asked the pinned
+    panel to SAY it was pinned): the objectness panel carries one animation frame per
+    stored frame, so the screen's single clock steps it in lockstep with the
+    range-Doppler cube above it and the two can no longer read as different frames.
+
+    The single-frame fixture here has nothing to animate -- that is the one case where
+    no frames are correct -- so this asserts the per-frame STATISTIC, which exists
+    either way, and (on a multi-frame run, see test_webapp_figures_wave9) the frames."""
     anns = " ".join(a.text for a in
                     (detector_figs["cfar_detection"].layout.annotations or ()))
-    assert "(last)" in anns
-    assert not (detector_figs["cfar_detection"].frames or ())
+    assert "frame 1 of 1" in anns
+    assert "(last)" not in anns

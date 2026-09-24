@@ -684,21 +684,34 @@ def test_runbook_retires_the_slider_rule_and_states_the_autoplay_behaviour():
 
 def test_runbook_still_tells_the_presenter_how_to_hold_a_frame():
     """Retiring the rule must not lose the capability it protected -- a presenter
-    still needs to park a panel on one frame to talk about it."""
+    still needs to park a panel on one frame to talk about it. (Wording follows
+    webapp/runbook.py's current sentence, a10cdd1: "it stops every animated panel
+    together, both arms included".)"""
     flat = _flat(_rendered_runbook())
     assert "pause" in flat.lower()
-    assert "every panel stops together" in flat
+    assert "stops every animated panel together" in flat
 
 
-def test_runbook_keeps_the_thrust5_frame_pinned_detector_caveat():
-    """The detector/objectness panels still hold the LAST frame while the
-    Range-Doppler cube beside them now loops on its own -- which makes the desync
-    the old "leave the slider alone" rule warned about happen WITHOUT a click. The
-    runbook has to say so."""
+@pytest.mark.xfail(
+    strict=False,
+    reason="hostile round 11 H3: the objectness panel now carries one animation "
+           "frame per stored frame (webapp/pipeline_runner.figures_from_outputs) "
+           "and steps with the one transport, so the Thrust 5 exception in "
+           "webapp/runbook.py -- 'only the Range-Doppler panel has frames ... the "
+           "objectness/scoreboard/PR panels are pinned to the LAST frame' -- is "
+           "stale. That file belongs to another shard; this test states what it "
+           "has to say instead, and goes green (XPASS) when it says it.")
+def test_runbook_describes_which_thrust5_panels_follow_the_clock():
+    """After H3 the desync the old caveat warned about is gone for the objectness
+    map -- it shows the same frame as the cube above it -- and survives only for the
+    SCOREBOARD (a Plotly table is not an animatable trace, so its rows say "last
+    frame") and the offline-scored PR panel (no frames at all)."""
     flat = _flat(_rendered_runbook())
-    assert "pinned to the LAST frame" in flat
-    assert "loops by itself on the Results-tab clock" in flat
-    assert "Press pause on the cube" in flat
+    assert "objectness" in flat
+    assert "pinned to the LAST frame" not in flat, (
+        "the objectness panel follows the clock now -- the runbook must not say the "
+        "Thrust 5 panels are pinned to the last frame")
+    assert "last frame" in flat.lower()
 
 
 def test_runbook_describes_the_arms_as_side_by_side_columns():

@@ -709,7 +709,7 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                       raddetnet_ci_json_path=DEFAULT_RADDETNET_CI_JSON,
                       ood_json_path=DEFAULT_OOD_JSON,
                       third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON) -> go.Figure:
-    """A compact table: this frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
+    """A compact table: the LAST frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
     hit-rate, and (when `beat_cfar_arm_name` names a scored arm) the two headline
     offline-scoring rows the demo's numeric claims are actually about -- the numbers
     the hostile-expert read (see the module docstring) said were missing from the
@@ -825,7 +825,13 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # run's own frame count in its label, already says more, and the table's <=8-row
     # budget (2026-09-24 redesign) has even less room to spare now than the old
     # <=800 px budget did.
-    base_labels = ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
+    # "last frame", not "this frame" (hostile round 11, H3): a Plotly Table is not an
+    # animatable trace, so these three rows CANNOT follow the screen's transport the
+    # way the objectness map beside them now does -- they are the last frame scored,
+    # always. Saying "this frame" beside a panel parked on frame 4 of 5 made the
+    # audience count TP/FP/FN against a frame that was not on screen; saying "last
+    # frame" is the same number, correctly labelled.
+    base_labels = ["last frame: TP", "last frame: unmatched (FP)", "last frame: FN",
                   "cumulative hits",
                   f"unmatched / frame, these {n_scored} frames",
                   "recall (hits / GT), this run"]
@@ -957,18 +963,104 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # the table had no room for, the live/offline connector, then the 4 caveat
     # sentences and the threshold subline that used to be the figure's annotation
     # and title/subtitle.
+    # Why three rows say "last frame" on a screen whose other panels follow the clock.
+    transport_caveat = (
+        "the \"last frame\" rows are the LAST frame scored, not the frame the "
+        "transport is parked on: a table is not an animatable Plotly trace, so it "
+        "cannot step with the clock the objectness map beside it follows"
+    )
     details = ([f"{lbl}: {val}" for lbl, val in offline_detail_rows]
               + [f"{lbl}: {val}" for lbl, val in connector_rows]
               + [match_rule_text, ceiling_caveat, grouping_caveat, scale_caveat,
-                 subline])
+                 transport_caveat, subline])
 
+    # The caption states WHERE the matched-recall comparison holds, and stops
+    # instructing one the live rows cannot support (hostile round 11, H5): the two
+    # arms' live rows are at recall 0.50 and 0.13 on this run, so "compare false
+    # alarms, not hits" read as an instruction to compare the LIVE false-alarm rows,
+    # which are not at matched recall at all. Only the offline split is. ("compared
+    # at" is dropped from the reviewer's suggested wording purely for width: the
+    # caption is ONE 16 px line in a 746 px column, ~86 characters, and the threshold
+    # clause shares it.)
+    matched_at = (f"matched recall on the {n_frames_split}-frame split; "
+                 "live rows are this run"
+                 if n_frames_split is not None else
+                 "matched recall on the offline split; live rows are this run")
     _pr.set_panel(
         fig, title="Detector scoreboard",
-        caption=[f"threshold {thr_txt}",
-                "compared at matched recall — compare false alarms, not hits"],
+        caption=[f"threshold {thr_txt}", matched_at],
         details=details, row=_pr.PANEL_ROW_TABLE,
     )
     return fig
+
+
+#: Label prefixes of the scoreboard rows that are OFFLINE constants: identical on
+#: both arms of any A/B, because no knob on this screen can move them. Matched by
+#: prefix (the labels carry their own recall target / frame count) by
+#: `fold_offline_rows_onto_arm_a`.
+OFFLINE_ROW_PREFIXES = ("FA/frame", "AP, offline", "offline test split")
+#: What arm A's copy of those rows says, so printing them under ONE arm cannot read
+#: as "this arm scored that".
+OFFLINE_BOTH_ARMS_SUFFIX = ", both arms"
+
+
+def _table_cells(fig: Dict[str, Any]):
+    """`(labels, values)` of a stored scoreboard figure DICT, or `None`."""
+    for trace in (fig.get("data") or []):
+        if trace.get("type") != "table":
+            continue
+        values = (trace.get("cells") or {}).get("values")
+        if isinstance(values, list) and len(values) == 2:
+            return trace, values
+    return None
+
+
+def fold_offline_rows_onto_arm_a(fig_a: Dict[str, Any], fig_b: Dict[str, Any]) -> None:
+    """Print the knob-invariant OFFLINE rows ONCE, under arm A, and leave arm B's
+    table holding only rows that move (hostile round 11, H9).
+
+    Both scoreboards used to print byte-identical "FA/frame at recall 0.5, 172 frames"
+    and "AP, offline test split" rows under two different arm headings, which invites
+    exactly the reading the whole screen exists to prevent: "so the knob changed the
+    AP?". Arm A's copy now says `, both arms`; arm B's move into arm B's Details, in
+    full, labelled -- nothing is deleted, and the rows that DO move (this run's own
+    counts) are all that is left beside them.
+
+    Takes the two stored figure dicts for the SAME scoreboard product (arm A's and arm
+    B's) and edits them in place. A figure without a table trace is left alone."""
+    cells_a, cells_b = _table_cells(fig_a or {}), _table_cells(fig_b or {})
+    if not cells_a or not cells_b:
+        return
+    _, (labels_a, values_a) = cells_a
+    trace_b, (labels_b, values_b) = cells_b
+    for i, lbl in enumerate(labels_a):
+        if (str(lbl).startswith(OFFLINE_ROW_PREFIXES)
+                and not str(values_a[i]).endswith(OFFLINE_BOTH_ARMS_SUFFIX)):
+            values_a[i] = f"{values_a[i]}{OFFLINE_BOTH_ARMS_SUFFIX}"
+    keep = [i for i, lbl in enumerate(labels_b)
+            if not str(lbl).startswith(OFFLINE_ROW_PREFIXES)]
+    if len(keep) == len(labels_b):
+        return
+    moved = [(labels_b[i], values_b[i]) for i in range(len(labels_b))
+             if i not in keep]
+    trace_b["cells"]["values"] = [[labels_b[i] for i in keep],
+                                  [values_b[i] for i in keep]]
+    fill = (trace_b.get("cells") or {}).get("fill_color")
+    if isinstance(fill, list) and len(fill) == 2:
+        trace_b["cells"]["fill_color"] = [c[:len(keep)] if isinstance(c, list) else c
+                                          for c in fill]
+    panel = _pr_panel_dict(fig_b)
+    panel["details"] = list(panel.get("details") or []) + [
+        f"{lbl}: {val} -- scored offline, identical on both arms; printed once, "
+        "under arm A." for lbl, val in moved]
+
+
+def _pr_panel_dict(fig: Dict[str, Any]) -> Dict[str, Any]:
+    """`webapp.pipeline_runner._panel_dict`, imported lazily (that module imports this
+    one at load time -- circular import)."""
+    from webapp import pipeline_runner as _pr
+
+    return _pr._panel_dict(fig)
 
 
 def _load_beat_cfar(path) -> Dict[str, Any]:
@@ -1054,7 +1146,13 @@ def _raddetnet_ci_for_arm(arm_name: str, raddetnet_ci_json_path) -> Optional[Dic
 #: margin is a small FIXED constant like every other panel's -- see that function's
 #: docstring for where each clause went, including the arm-B-only sentence, which
 #: is now a standing Details line rather than something only arm B's copy carries.
-_PR_MARGIN_L = 64
+#: 72, matching `pipeline_runner._FIG_MARGIN_L` (hostile round 11, D7): this panel
+#: sits in the same COLUMN as the map panels on every Thrust 5 screen, and at 64 its
+#: plot origin landed 8 px left of theirs -- the stagger down the left edge the check
+#: is about. Kept as a literal rather than an import for the same reason the bottom
+#: margin below is: these are this module's own layout decisions, and the two
+#: constants are pinned equal by tests/test_webapp_layout_acceptance.py instead.
+_PR_MARGIN_L = 72
 _PR_MARGIN_R = 16
 _PR_MARGIN_T = 12
 #: Legend strip below the plot: 2 columns x 3 rows at 17 px (6 arms in beat_cfar.json
@@ -1174,8 +1272,14 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                 # 2026-09-24: the full 51-character entry overran its half of the
                 # two-column legend and drew straight through the entry beside it).
                 # The caption is the more visible of the two places anyway.
-                trace_name = (f"{disp_name} AP {ap:.3f}, {ci['delta_AP']:+.3f} "
-                             "vs CFAR")
+                # SHORTENED AGAIN (hostile round 11, D3): even without the CI, the
+                # 34-character "raddetnet AP 0.476, +0.175 vs CFAR" filled its half of
+                # the two-column strip edge to edge and abutted "fftradnet_rd_b5
+                # (AP=0.127)" beside it with ZERO gap, so the lead screen's one
+                # headline entry read as one run-on string and the delta looked like
+                # it was against fftradnet. "vs CFAR" is what the caption below
+                # spells out, in full, with the interval.
+                trace_name = f"{disp_name} {ap:.3f} ({ci['delta_AP']:+.3f})"
                 highlight_ci = ci
             else:
                 trace_name = f"{disp_name} (AP={ap:.3f})"
