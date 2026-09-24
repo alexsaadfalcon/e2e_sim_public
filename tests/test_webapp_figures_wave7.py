@@ -15,6 +15,15 @@ never hand-typed. This lives in the SUBLINE, not the yaxis title, so the short
 "range (m)" axis title (pinned by tests/test_webapp_figures_wave3.py, an unowned file)
 is untouched -- a rotated axis-title collided with the heatmap's own title at podium
 font size before that fix, which is why the title stays short.
+
+F96 (wave 11, 2026-09-24, notes/ESTABLISHED_FACTS.md): the "unambig N m" wording this
+file used to pin read as a physical range CEILING; it is actually HALF of the frame's
+own N-point FFT period, the other half cropped as negative delay (a real return
+between N/2 and N m is thrown away by the display, not out of range). The subline now
+reads "display 0-N m of 2N m unambig (neg.-delay half cropped)", both numbers still
+computed from the frame's own freq_plan, never typed -- this file absorbed the pin
+update as a handoff item from the pipeline_runner shard (the fix originally landed in
+webapp/pipeline_runner.py without touching this then-unowned file).
 """
 from __future__ import annotations
 
@@ -55,9 +64,14 @@ def test_range_az_subline_states_metres_per_gate_and_unambiguous_range():
     })["range_az"]
     text = fig.layout.title.text.replace("<br>", " ")
     expected_gate = _range_per_gate_m(8, 3e9, 64)
-    expected_unamb = _native_unambiguous_range_m(3e9, 64)
+    C = 2.99792458e8
+    expected_full = 64 * C / (2.0 * 3e9)      # N * c/(2B): the full FFT period
+    expected_half = expected_full / 2.0        # the physical half the display shows
     assert f"{expected_gate:.2f} m/gate" in text
-    assert f"unambig {expected_unamb:.0f} m" in text
+    # F96: "unambig N m" read as a physical ceiling; it is half of the frame's own
+    # N-point FFT period, the other half cropped as negative delay.
+    assert f"display 0-{expected_half:.0f} m of {expected_full:.0f} m unambig " \
+           "(neg.-delay half cropped)" in text
 
 
 def test_range_el_subline_states_metres_per_gate_too():

@@ -256,6 +256,53 @@ def test_thrust1_stripe_do_not_say_holds_on_every_frame():
               for s in p.do_not_say)
 
 
+def test_thrust1_shared_colour_scale_puts_the_floor_difference_in_the_picture():
+    """Wave 11 (2026-09-24): the owner's live test put both A/B panels on one
+    shared colour scale (zmin set by the deeper arm's floor); the old "both
+    panels show the same streaks at the same visible brightness -- the floor
+    difference is in the printed peak-median number, not the picture" claim is
+    now false -- the shared scale puts the difference in the picture (arm B's
+    background reads visibly brighter). The runbook's "While it runs, say" line
+    is preset.say[0] (webapp/runbook.py), so the new story must lead there too."""
+    p = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    for text in [p.blurb, p.screen_note]:
+        assert "same visible brightness" not in text
+        assert "shared colour scale" in text or "share one colour scale" in text
+        assert "visibly brighter" in text
+    assert "shared colour scale" in p.say[0].lower()
+    assert "brighter" in p.say[0].lower()
+
+
+@pytest.mark.parametrize("pid", ["thrust2_feature_reduction_error",
+                                 "thrust4_interconnect_range_profile"])
+def test_thrust2_and_4_point_at_the_shared_colour_scale_not_an_identical_picture(pid):
+    """Wave 11 (2026-09-24): "the picture does not respond" / "look identical"
+    read as an evidence-free claim once both panels share one colour scale --
+    both cards now tell the presenter what to actually compare (the
+    backgrounds) and name the run-to-run floor that any difference sits at."""
+    p = PRESETS_BY_ID[pid]
+    all_text = [p.blurb, p.screen_note, *p.say, *p.do_not_say]
+    assert not any("look identical" in t.lower() for t in all_text), pid
+    assert not any("does not respond" in t.lower() and "compare the backgrounds"
+                  not in t.lower() for t in all_text), pid
+    assert any("compare the backgrounds" in t.lower() for t in all_text), pid
+
+
+def test_munich_cards_disclose_the_cropped_negative_delay_half():
+    """F96 (notes/ESTABLISHED_FACTS.md): the munich Ka display's "unambiguous
+    125 m" is only the positive-delay half of a 250 m FFT window -- the other
+    half is cropped, not absent. Thrust 1's screen note must say so; Thrust 4's
+    old "skirt wrapping at the window edge" line for the 120-125 m rise
+    (actually the crop edge, not a wrap) is retracted."""
+    t1 = PRESETS_BY_ID["thrust1_circuit_knobs"]
+    assert "0-125 m of a 250 m" in t1.screen_note
+    assert "negative-delay half cropped" in t1.screen_note
+    t4 = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
+    assert any("negative-delay side at the crop edge" in s and "f96" in s.lower()
+              for s in t4.say)
+    assert not any("skirt wrapping at" in s.lower() for s in t4.say)
+
+
 # ------------------------------------------------------------------------------------
 # Wave 7 review, KA-band screens re-traced with diffuse scattering (2026-09-23): X4-X8.
 # ------------------------------------------------------------------------------------
@@ -716,12 +763,15 @@ def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain()
 def test_thrust5_all_cards_say_the_detector_panel_is_frame_pinned():
     """Wave 10 (2026-09-24, item 2.2, hostile round 9): on all three T5 screens
     the objectness/scoreboard panel has no frame slider (pinned to the last
-    frame) while the Range-Doppler panel does -- the runbook's usual "advance
-    with the slider" instruction would desync them if the presenter didn't know."""
+    frame) while the Range-Doppler panel does. Wave 11 (2026-09-24): the owner's
+    live test made every animated panel auto-play and loop on one shared clock
+    -- the Range-Doppler cube now loops rather than sitting on a static slider,
+    so the card must tell the presenter to pause it before pointing at one
+    frame's detections, not just that a slider doesn't move the detector."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         p = PRESETS_BY_ID[pid]
-        assert any("slider" in s.lower() and "range-doppler" in s.lower()
-                  for s in p.say), pid
+        assert any("range-doppler" in s.lower() and "loop" in s.lower()
+                  and "pause" in s.lower() for s in p.say), pid
 
 
 def test_thrust5_ml_names_the_pr_legend_alias():

@@ -280,6 +280,13 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
             '(no slider -- pinned to the last frame), **"Detector scoreboard"**, '
             'and the offline PR-curve panel (**"scored offline: ... test '
             'frames"**).'))
+        # wave 11 (2026-09-24, owner live test): the Results-tab clock now animates
+        # the cube WITHOUT a click, so the desync the wave-10 "leave the slider
+        # alone" note warned about is the default state of these three screens.
+        lines.append(_bullet(
+            'The Range-Doppler panel loops by itself on the Results-tab clock; the '
+            'other three hold the LAST frame. Press pause on the cube before '
+            "talking about one frame's detections."))
     else:
         state = apply_preset(preset)
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
@@ -290,7 +297,10 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         else:
             lines.append(_bullet("This preset enables no product panel (check the block state)."))
     if ab is not None:
-        lines.append(_bullet(f'Arm banners on screen: "{ab[0]}" / "{ab[1]}".'))
+        lines.append(_bullet(
+            f'Arm banners on screen: "{ab[0]}" (LEFT column) / "{ab[1]}" '
+            f'(RIGHT column) -- each product renders once per column, on the same '
+            f'row, on shared colour limits.'))
     lines.append("")
 
     lines.append("### Second knob (optional)")
@@ -354,26 +364,36 @@ _BEFORE_AUDIENCE = """## Before the audience
 4. Throwaway warm-up: pick any one preset, click **Load preset**, click
    **Run pipeline**, let it finish. This pays the ~10s torch cold start now
    instead of in front of the room.
-5. Presenting over RDP: advance frames with the Results-tab figure's own frame
-   **slider** (the widget Plotly draws under each heatmap/animation), never the
-   ▶ (Play) control -- its ~350 ms/frame animation stutters over the link.
-   **Thrust 5 exception** (wave 10, item 3.3, hostile round 9): the
-   objectness/scoreboard/PR panels have NO slider (pinned to the last frame) --
-   only the Range-Doppler panel does. Dragging it desyncs the cube from the
-   frozen detections; leave it alone on those three screens.
+5. The Results tab PLAYS ITSELF: every animated panel on it -- both A/B arms,
+   every product that has frames -- steps together on one 700 ms clock and loops
+   forever, starting by itself when the results render. Nothing to click.
+   RETIRED (owner, live test 2026-09-24): the old rule to advance frames with a
+   figure's own frame slider and never the ▶ (Play) control. It assumed Play's
+   ~350 ms/frame animation stuttered over the RDP link; the owner measured the
+   link and it does not.
+   To HOLD a frame while you talk about it, press the pause button on any panel --
+   one clock, so every panel stops together -- and ▶ to resume. Dragging a
+   slider also pauses the clock, so you can park a panel on a chosen frame.
+   **Thrust 5 exception**: only the Range-Doppler panel has frames. The
+   objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
+   clock now desyncs the cube from those frozen detections by itself, with no
+   drag at all. Pause the cube before talking about a specific frame's detections.
 """
 
 
 def _click_mechanics(n_presets: int, n_ab: int) -> str:
     if n_ab == n_presets:
-        # wave 10 (2026-09-24, item 3.1, hostile round 9): RETRACTED "under a
-        # 'Previous run' divider" -- webapp/app.py only prints that label when
-        # `_ab` is false; every preset here sets `ab`, so the divider that
-        # actually renders is a bare horizontal rule with no text.
+        # wave 11 (2026-09-24, owner live test): A/B arms render SIDE BY SIDE,
+        # one row per product (webapp/app.py `_ab_columns`). Supersedes the wave-10
+        # wording ("A on top, B below, under a plain divider line"), which itself
+        # RETRACTED an earlier "under a 'Previous run' divider" -- that label only
+        # ever printed when `_ab` was false, and every preset here sets `ab`.
         ab_sentence = (f"Every one of the {n_presets} presets below sets `ab`, so one "
                        "click on **Run pipeline** runs BOTH arms A and B and renders "
-                       "both on the Results tab (A on top, B below, under a plain "
-                       "divider line -- no label) -- there is no second Run click "
+                       "both on the Results tab SIDE BY SIDE: one row per product, "
+                       "arm A in the left column, arm B in the right, each column "
+                       "under its own banner (no divider line, no label) -- there "
+                       "is no second Run click "
                        "needed for the built-in A/B; the \"Second knob\" step in each "
                        "section below is a *manual, additional* change on top of "
                        "that.")

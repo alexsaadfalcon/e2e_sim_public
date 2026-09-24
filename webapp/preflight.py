@@ -467,9 +467,15 @@ Before the audience arrives: load and Run ONE throwaway preset (any one) so the
 session's first run pays the torch cold start now (see check 4, Warm-up) --
 not while the room is watching.
 
-Presenting over RDP: step frames with the Results-tab frame SLIDER, not the
-Play button -- Play's ~350ms/frame animation stutters over the link
-(notes/DEMO_DEFENSE.md, "Presenting over RDP").
+Presenting over RDP: the Results tab now PLAYS ITSELF. Every animated panel on
+it (both A/B arms) steps together on one 700 ms clock and loops forever, with no
+click. RETIRED (owner, live test 2026-09-24): the old "step the slider, never
+press Play" rule -- it existed because Play's ~350 ms/frame animation was assumed
+to stutter over the link, and the owner measured the frame rate over RDP as fine.
+To hold a frame while you talk about it, press the pause button (or drag the
+slider) on ANY panel -- it stops every panel; press play to resume. Thrust 5
+exception: only the Range-Doppler panel has frames; the objectness/scoreboard/PR
+panels hold the LAST frame, so the clock desyncs the cube from them by itself.
 
 Preset stage order:
 {order}

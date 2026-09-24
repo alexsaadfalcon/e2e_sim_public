@@ -18,13 +18,20 @@ change to `webapp/demo_presets.py`.
 4. Throwaway warm-up: pick any one preset, click **Load preset**, click
    **Run pipeline**, let it finish. This pays the ~10s torch cold start now
    instead of in front of the room.
-5. Presenting over RDP: advance frames with the Results-tab figure's own frame
-   **slider** (the widget Plotly draws under each heatmap/animation), never the
-   ▶ (Play) control -- its ~350 ms/frame animation stutters over the link.
-   **Thrust 5 exception** (wave 10, item 3.3, hostile round 9): the
-   objectness/scoreboard/PR panels have NO slider (pinned to the last frame) --
-   only the Range-Doppler panel does. Dragging it desyncs the cube from the
-   frozen detections; leave it alone on those three screens.
+5. The Results tab PLAYS ITSELF: every animated panel on it -- both A/B arms,
+   every product that has frames -- steps together on one 700 ms clock and loops
+   forever, starting by itself when the results render. Nothing to click.
+   RETIRED (owner, live test 2026-09-24): the old rule to advance frames with a
+   figure's own frame slider and never the ▶ (Play) control. It assumed Play's
+   ~350 ms/frame animation stuttered over the RDP link; the owner measured the
+   link and it does not.
+   To HOLD a frame while you talk about it, press the pause button on any panel --
+   one clock, so every panel stops together -- and ▶ to resume. Dragging a
+   slider also pauses the clock, so you can park a panel on a chosen frame.
+   **Thrust 5 exception**: only the Range-Doppler panel has frames. The
+   objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
+   clock now desyncs the cube from those frozen detections by itself, with no
+   drag at all. Pause the cube before talking about a specific frame's detections.
 
 Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
@@ -55,8 +62,9 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   disabled) and shows the run-status text. A completed run switches the browser
   to the **Results** tab automatically.
 - Every one of the 7 presets below sets `ab`, so one click on **Run pipeline**
-  runs BOTH arms A and B and renders both on the Results tab (A on top, B
-  below, under a plain divider line -- no label) -- there is no second Run
+  runs BOTH arms A and B and renders both on the Results tab SIDE BY SIDE: one
+  row per product, arm A in the left column, arm B in the right, each column
+  under its own banner (no divider line, no label) -- there is no second Run
   click needed for the built-in A/B; the "Second knob" step in each section
   below is a *manual, additional* change on top of that.
 
@@ -74,8 +82,8 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-- **While it runs, say:** LNA bias 0.5->8 mA is worth about twelve dB
-  (+-0.6-0.9 dB).
+- **While it runs, say:** With the shared colour scale, arm B's background
+  reads about twelve dB brighter than arm A's (+-0.6-0.9 dB); streaks match.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -84,7 +92,9 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**.
 - Arm banners on screen: "A (as loaded): LNA bias current (mA) 8 mA -- before"
-  / "B: LNA bias current (mA) 0.5 mA -- after".
+  (LEFT column) / "B: LNA bias current (mA) 0.5 mA -- after" (RIGHT column) --
+  each product renders once per column, on the same row, on shared colour
+  limits.
 
 ### Second knob (optional)
 - **RF Front-End (RFFE)** -> **IF bandwidth (MHz)** (min 1, max 50, default
@@ -92,15 +102,16 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   MHz is -13.5 dB here, re-measured 2026-09-23 -- the block panel's 17 dB is
   the front end's own noise-power scaling, a different quantity)
 
-Press Run once: both arms appear alike (A, top, 8 mA / B, bottom, 0.5 mA), each
-printing its own peak-median (about 66 vs 54 dB) -- the difference, about
-twelve dB, is in the statistic, not the picture. Signal is set just below the
-model's input-referred noise (1e-7 vs 1.36e-7 V; a real radar's per-element
-SNR, recovered by coherent gain). Manual: LNA bias is the A/B above; second
-knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
+Press Run once: the two arms (A, top, 8 mA / B, bottom, 0.5 mA) share one
+colour scale down to the deeper floor, so arm B's background reads visibly
+brighter, about twelve dB by the printed numbers (66 vs 54 dB); streaks match.
+Signal sits just below input-referred noise (1e-7 vs 1.36e-7 V; per-element
+SNR, recovered by coherent gain). Manual: LNA bias is the A/B; second knob: IF
+bandwidth 15 -> 50 MHz (see live_knobs).
 
 ### Say
-- LNA bias 0.5->8 mA is worth about twelve dB (+-0.6-0.9 dB).
+- With the shared colour scale, arm B's background reads about twelve dB
+  brighter than arm A's (+-0.6-0.9 dB); streaks match.
 - At default signal level (1e-5) these knobs do nothing (0.5 dB, under the 40
   dB floor).
 - Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB leaves
@@ -113,9 +124,8 @@ knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
   agreement) validates the mechanism and gives what Friis alone can't -- this
   knob's AFE/tracker/detector effect. Absolute dBm is NOT quotable: input level
   is free.
-- Channel mismatch: all 1024 elements share one config (get_RX_config
-  broadcasts one value); mismatch is structurally zero; a per-element spread is
-  a small change.
+- Channel mismatch: all 1024 elements share one config; mismatch is
+  structurally zero; a per-element spread is a small change.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
 - Peak-to-median dynamic range measures how empty the map is (median set by
@@ -129,8 +139,7 @@ knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
   scene.
 
 ### Do NOT say
-- Any DC power readout: PRX is U-shaped, MINIMUM at best quality (8.45 V rail,
-  100-200 mV).
+- Any DC power readout: PRX is U-shaped, MINIMUM at best quality.
 - The compression regime (scaling 1e-1..1e-3): worse live than silence.
 - That gm scales linearly with bias -- true only at 8 mA; say
   'constant-overdrive scaling'.
@@ -164,18 +173,19 @@ knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**,
   **"Range-elevation power"**, **"Subspace error (Frobenius) per frame"**.
-- Arm banners on screen: "A (as loaded): FP mantissa bits 6 bit -- before" /
-  "B: FP mantissa bits 1 bit -- after".
+- Arm banners on screen: "A (as loaded): FP mantissa bits 6 bit -- before"
+  (LEFT column) / "B: FP mantissa bits 1 bit -- after" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
 
 ### Second knob (optional)
 - None: the only `live_knobs` entry for this preset is the knob the built-in
   A/B already turns; nothing further to change manually before re-running.
 
-Press Run once: both arms appear alike (A, top, mantissa 6 bit / B, bottom, 1
-bit); the tracker panel plots a subspace-error curve against a dashed 0.06
-reference line -- A settles on it, B sits about 5x above. Both images move a
-few tenths of a dB (read the printed numbers) -- at the run-to-run floor, not
-the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
+Press Run once (A, top, mantissa 6 bit / B, bottom, 1 bit); the tracker panel
+plots a subspace-error curve against a dashed 0.06 reference line -- A settles
+on it, B sits about 5x above. With the shared colour scale, compare the
+backgrounds; any difference at the ~0.1 dB run-to-run floor is not the knob.
+Manual: AFE mantissa 6 -> 1 bit, run again.
 
 ### Say
 - As loaded the curve starts near 0, settles at about 0.06 by frame 2; the knob
@@ -206,8 +216,9 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
 ### Do NOT say
 - That the mantissa sweep models analog hardware error: AFEBlock's WEIGHT_FLOAT
   is right for a compute datapath, wrong for analog control (compress.py).
-- That the picture does not respond: both images move a few tenths of a dB, at
-  the run-to-run floor -- not evidence either way; the tracker curve is.
+- That the picture does not respond: with the shared colour scale, compare the
+  backgrounds; any difference at the ~0.1 dB run-to-run floor is not the knob
+  -- the tracker curve is the story.
 - That a higher compression ratio looks better: 512 of 1024 lets the tracker
   see drift; observability drops at 16x.
 - Peak-to-median dynamic range as evidence compression is good: it improves as
@@ -242,8 +253,9 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
 - Product panel(s) this preset enables: **"Subspace error (Frobenius) per
   frame"**.
 - Arm banners on screen: "A (as loaded): gap_response fixed effort (5
-  passes/frame) -- before" / "B: gap_response adaptive gate (shipped default,
-  10 passes/frame baseline) -- after".
+  passes/frame) -- before" (LEFT column) / "B: gap_response adaptive gate
+  (shipped default, 10 passes/frame baseline) -- after" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
@@ -321,23 +333,25 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
   profile (non-coherent over channels)"**.
 - Arm banners on screen: "A (as loaded): Tessera: TSV height (um) canonical
-  Tessera geometry (50 um presented) -- before" / "B: Tessera: TSV height (um)
-  TSV height -> 30.01 um presented (largest skirt mover) -- after".
+  Tessera geometry (50 um presented) -- before" (LEFT column) / "B: Tessera:
+  TSV height (um) TSV height -> 30.01 um presented (largest skirt mover) --
+  after" (RIGHT column) -- each product renders once per column, on the same
+  row, on shared colour limits.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
   'default'): manual third option, not part of the A/B: source='default' +
   case='default' selects the old SYNTHETIC 11-tap boxcar placeholder
 
-THE HONEST STORY: the interconnect is NOT the limiting element here; any ~0.1
-dB difference between the arms' printed statistics (either panel) is the
-run-to-run floor, not the knob. This is the LIVE public Tessera/UIC TSV
-surrogate (InterconnectBlock(source='tessera'), scale x2 / half frequency at Ka
-band; see the run-notes line under the banner). Arm A: canonical geometry, 50
-um presented (= 100 um model geometry). Arm B drops TSV height to its presented
-low end -- OFFLINE the biggest single-knob mover of the skirt (3.53 dB native
-flat-frame move) -- bulk DELAY, sits below the printed median floor; a
-group-delay/|S21| overlay would show it.
+THE HONEST STORY: the interconnect is NOT the limiting element here; with the
+shared colour scale, compare the backgrounds -- any ~0.1 dB difference between
+the arms' printed statistics (either panel) is the run-to-run floor, not the
+knob. This is the LIVE public Tessera/UIC TSV surrogate
+(InterconnectBlock(source='tessera'), scale x2 / half frequency at Ka band).
+Arm A: canonical geometry, 50 um presented (= 100 um model geometry). Arm B
+drops TSV height to its presented low end -- OFFLINE the biggest single-knob
+mover of the skirt (3.53 dB native flat-frame move) -- bulk DELAY, sits below
+the printed median floor; a group-delay/|S21| overlay would show it.
 
 ### Say
 - This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- the
@@ -352,19 +366,19 @@ group-delay/|S21| overlay would show it.
   real-CSV results shape-only.
 - Range 0-2 m is not a target: range 0 = earliest arrival
   (normalize_delays=True). Peaks near 37-113 m are multipath; the 120-125 m
-  rise is the skirt wrapping at 125 m.
+  rise is the range-0 skirt's negative-delay side at the crop edge (F96).
 - Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated by
   sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; trends/shape
   exact (F91).
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
 - The 0 dB reference is a single range-0 gate too small to see; the panel
-  prints the brightest visible return (read it off the screen); every dB on the
-  map is relative to the direct path.
+  prints the brightest visible return; every dB on the map is relative to the
+  direct path.
 - What Thrust 4 DID establish: the live surrogate's six knobs run end to end
   through the real chain, and in-band |S21| moves <0.03 dB across all of them
-  -- at this floor, the interconnect is not the limiting element. A negative
-  result, stated as one.
+  -- the interconnect is not the limiting element. A negative result, stated as
+  one.
 
 ### Do NOT say
 - That crosstalk is structurally absent -- RETRACTED: the surrogate models
@@ -405,8 +419,13 @@ group-delay/|S21| overlay would show it.
   frame slider), **"CFAR objectness"** (no slider -- pinned to the last frame),
   **"Detector scoreboard"**, and the offline PR-curve panel (**"scored offline:
   ... test frames"**).
+- The Range-Doppler panel loops by itself on the Results-tab clock; the other
+  three hold the LAST frame. Press pause on the cube before talking about one
+  frame's detections.
 - Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
-  before" / "B: ADC bits 3-bit ADC (same frames) -- after".
+  before" (LEFT column) / "B: ADC bits 3-bit ADC (same frames) -- after" (RIGHT
+  column) -- each product renders once per column, on the same row, on shared
+  colour limits.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -435,9 +454,9 @@ crosses.
   12-bit). The counts on screen are 5 live frames of a different corpus -- a
   demonstration, not a re-measurement.
 - The CFAR map spans 0-50 m; the 10 m strip above the dashed line is unscored
-  (labels/scoring stop at 40 m). The 0-100 m panel is Range-Doppler power with
-  its own frame slider; the detector panel has none -- it is pinned to the LAST
-  frame, and the slider does not move it.
+  (labels/scoring stop at 40 m). The detector, scoreboard and PR panels hold
+  the LAST frame while the Range-Doppler cube loops beside them; pause the cube
+  (its pause button) before discussing one frame's detections.
 - Ground truth omits ~3 real strongly-scattering objects per frame inside 40 m,
   so a detector firing on every real object has a precision ceiling of 0.64 --
   some 'false alarms' are real objects.
@@ -487,9 +506,13 @@ crosses.
   frame slider), **"Neural detector objectness"** (no slider -- pinned to the
   last frame), **"Detector scoreboard"**, and the offline PR-curve panel
   (**"scored offline: ... test frames"**).
+- The Range-Doppler panel loops by itself on the Results-tab clock; the other
+  three hold the LAST frame. Press pause on the cube before talking about one
+  frame's detections.
 - Arm banners on screen: "A (as loaded): Corner range (m) IF high-pass corner 1
-  m (as built) -- before" / "B: Corner range (m) IF high-pass corner 25 m
-  (attenuates ~4.3 dB at 22 m) -- after".
+  m (as built) -- before" (LEFT column) / "B: Corner range (m) IF high-pass
+  corner 25 m (attenuates ~4.3 dB at 22 m) -- after" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -508,9 +531,9 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 ### Say
 - The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say
   it first.
-- B is not a plausible receiver -- a 25 m high-pass corner, 25x the real one --
-  the point is a front-end setting reaches the detector at all: unmatched/frame
-  26.60 -> 12.20, hits 15 -> 4.
+- B is not a plausible receiver -- a 25 m high-pass corner -- the point is a
+  front-end setting reaches the detector at all: unmatched/frame 26.60 ->
+  12.20, hits 15 -> 4.
 - At A's operating point, offline expects ~29 crosses/frame = 26.4 FA + 3.0
   hits (beat_cfar.json); these 5 live frames give 26.60 unmatched/frame -- same
   regime, not the same number.
@@ -530,8 +553,9 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   inside 25 m; you see the floor coming up relative to a peak attenuated along
   with it.
 - This detector sits at its 172-frame recall-0.5 threshold, yet gives 0.50
-  recall on these 5 frames (the LAST one; no slider here -- the Range-Doppler
-  slider does not move it) -- 5 frames cannot reproduce a recall.
+  recall on these 5 frames (the LAST) -- 5 frames cannot reproduce a recall.
+  Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
+  pause it to discuss one frame.
 - The PR legend's 'fftradnet_rd_b5' is this checkpoint (b5_fftradnet_v3).
 - This scoreboard's bootstrap also shows seed spread 0.040 exceeding CI
   half-width 0.029 -- doesn't change the verdict here (already loses), but is
@@ -572,8 +596,13 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   frame slider), **"Neural detector objectness"** (no slider -- pinned to the
   last frame), **"Detector scoreboard"**, and the offline PR-curve panel
   (**"scored offline: ... test frames"**).
+- The Range-Doppler panel loops by itself on the Results-tab clock; the other
+  three hold the LAST frame. Press pause on the cube before talking about one
+  frame's detections.
 - Arm banners on screen: "A (as loaded): ADC bits 12-bit ADC (as built) --
-  before" / "B: ADC bits 3-bit ADC (same frames) -- after".
+  before" (LEFT column) / "B: ADC bits 3-bit ADC (same frames) -- after" (RIGHT
+  column) -- each product renders once per column, on the same row, on shared
+  colour limits.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -599,10 +628,10 @@ the result is seed-dependent (F86); say so unprompted.
   b1_bench_v3, 12-bit default impairments); re-scored bit-identically. Paired
   scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI [+0.145, +0.208];
   +0.148 vs the best of nine classical baselines (0.328).
-- The counts on screen are 5 live frames of a different corpus, the LAST shown
-  (no slider here; the Range-Doppler slider does not move it) -- a
-  demonstration, never a re-measurement of AP; recall here (0.33) cannot
-  reproduce the 172-frame recall-0.5 threshold.
+- The counts on screen are 5 live frames of a different corpus, LAST shown -- a
+  demonstration, not a re-measurement of AP; recall here (0.33) cannot
+  reproduce recall-0.5. Detector, scoreboard and PR panels hold that frame
+  while Range-Doppler loops; pause it to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.328 -- above shipped CFAR (0.301), but the best classical

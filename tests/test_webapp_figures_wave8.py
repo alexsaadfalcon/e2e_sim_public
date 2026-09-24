@@ -10,8 +10,16 @@ file) already pins in the same subline.
 W13: the gate-calibration clause (wave 7, X6/X7) now also states the frame's own
 NATIVE (un-binned) range resolution and the display-bin/native ratio -- computed from
 the freq_plan (native = c / (2*B); ratio = gate / native), never hand-typed -- while
-keeping the "m/gate" and "unambig N m" substrings this module's own wave-7 tests (and
-webapp/demo_presets.py's screen notes, an unowned file, via test_demo_presets.py) pin.
+keeping the "m/gate" substring this module's own wave-7 tests (and webapp/
+demo_presets.py's screen notes, an unowned file, via test_demo_presets.py) pin.
+
+F96 (wave 11, notes/ESTABLISHED_FACTS.md): the old "unambig N m" wording read as a
+physical range ceiling; it is HALF of the frame's own N-point FFT period, the other
+half cropped as negative delay. The clause now reads "display 0-N m of 2N m unambig
+(neg.-delay half cropped)", both numbers computed from the frame's own freq_plan
+(N*c/(2B) and its half), never typed -- this test file's own pinned substring is
+updated to match; tests/test_webapp_figures_wave7.py (unowned) still pins the retired
+"unambig N m" wording and needs the same update from its owner.
 
 W3: the Thrust 3 subspace-error panel's right-hand "refinement passes/frame" axis used
 to autoscale independently per run (`rangemode="tozero"` only anchors zero); a 5-pass
@@ -33,7 +41,7 @@ import pytest
 
 from webapp.pipeline_runner import (
     _C, _SUBSPACE_ERR_MIN_YMAX, _SUBSPACE_ERR_SETTLED_LEVEL, _REFINE_AXIS_MIN_YMAX,
-    _native_range_resolution_m, _native_unambiguous_range_m, _range_per_gate_m,
+    _native_range_resolution_m, _range_per_gate_m,
     figures_from_outputs,
 )
 
@@ -115,15 +123,19 @@ def test_range_az_subline_states_native_resolution_and_ratio():
     gate = _range_per_gate_m(8, 3e9, 64)
     native = _native_range_resolution_m(3e9)
     ratio = gate / native
-    unamb = _native_unambiguous_range_m(3e9, 64)
+    full_window = 64 * native
+    half_window = full_window / 2.0
 
-    # Substrings pinned by this module's own wave-7 tests (and, in webapp/
+    # "m/gate" substring pinned by this module's own wave-7 tests (and, in webapp/
     # demo_presets.py's screen notes, by test_demo_presets.py -- an unowned file).
     assert f"{gate:.2f} m/gate" in text
-    assert f"unambig {unamb:.0f} m" in text
     # New, wave-8 content: native resolution in cm and the display/native ratio.
     assert f"{native * 100:.0f} cm native" in text
     assert f"{ratio:.0f}:1" in text
+    # F96 (wave 11): "unambig N m" read as a physical ceiling; it is half of the
+    # frame's own N-point FFT period, the other half cropped as negative delay.
+    assert f"display 0-{half_window:.0f} m of {full_window:.0f} m unambig " \
+           "(neg.-delay half cropped)" in text
 
 
 def test_native_range_resolution_m_matches_direct_computation():

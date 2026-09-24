@@ -21,6 +21,7 @@ receive-side stages, whatever domain the chain itself happens to be in.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -1845,9 +1846,39 @@ def _heatmap_margin_t(title: str) -> int:
     return _HEATMAP_MARGIN_T_BASE2 + _HEATMAP_MARGIN_T_PER_LINE * (n_lines - 2)
 
 
+#: How an A/B pair's two copies of the SAME heat-map product get ONE set of colour
+#: limits (`share_heatmap_z_limits`). Declared in each figure's own `layout.meta`
+#: where the figure is built, rather than re-derived from the product key in the
+#: sharing pass, so a new panel states its own policy in one place.
+#:
+#: `Z_SHARE_REACH_FLOOR` -- the limits must REACH both arms' noise floor, because the
+#: floor IS the story on those panels (owner, live test 2026-09-24, Thrust 1 "RF
+#: circuit knobs vs the image's noise floor": arm A peak-median 65.9 dB, arm B 54.3 dB,
+#: and "55 vs 65 dB peak to median is not discernible by human eye" -- both maps'
+#: medians sat BELOW the shared -40 dB clip, so both backgrounds rendered as the same
+#: single clip colour and an 11.6 dB floor difference was invisible).
+#: `Z_SHARE_KEEP_CLIP` -- the panel's own adaptive display clip is a deliberate
+#: decision about what to HIDE (see `_radar_cube_clip_db`), so sharing only unifies the
+#: two arms' clips instead of pushing the limit down to the floor.
+Z_SHARE_REACH_FLOOR = "reach_floor"
+Z_SHARE_KEEP_CLIP = "keep_clip"
+
+#: How far BELOW the deepest per-frame median floor of either arm the shared
+#: `Z_SHARE_REACH_FLOOR` limit is placed. Mirrors `_radar_cube_clip_db`'s own 3 dB
+#: margin, in the opposite direction: that one guarantees the floor stays OUT of the
+#: displayed range, this one guarantees it stays IN it on both arms.
+_SHARED_FLOOR_MARGIN_DB = 3.0
+
+#: Prefix of the colorbar title `_heatmap` writes for a dB-scale panel; the sharing
+#: pass rewrites the clip value inside it and uses the prefix to recognise which
+#: colorbars it may rewrite at all (the detector objectness panels are heat maps too,
+#: but their z is a 0-1 score, not dB).
+_DB_COLORBAR_PREFIX = "dB rel. peak"
+
+
 def _heatmap(data_db, title: str, *, x=None, y=None,
              xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0,
-             colorbar_title: str = None) -> go.Figure:
+             colorbar_title: str = None, z_share: str = None) -> go.Figure:
     if colorbar_title is None:
         # Peak-relative, and `zmin` is a display clip, not the data floor; the
         # colorbar title says both so it is not read as absolute dB. Every caller
@@ -1887,6 +1918,12 @@ def _heatmap(data_db, title: str, *, x=None, y=None,
                     t=margin_t, b=_HEATMAP_MARGIN_B),
         height=_HEATMAP_PLOT_DOMAIN_HEIGHT + margin_t + _HEATMAP_MARGIN_B,
     )
+    if z_share is not None:
+        # Carried on the figure itself, not looked up by product key later -- see the
+        # `Z_SHARE_*` constants. `layout.meta` is Plotly's own free-form slot and
+        # survives `to_dict()`/the Dash store round trip, which is where
+        # `share_heatmap_z_limits` reads it back.
+        fig.update_layout(meta=dict(z_share=z_share))
     return fig
 
 
@@ -2078,6 +2115,223 @@ def _add_frame_animation(fig, per_frame, *, key="z", trace_idx=0, trace_type="he
     return fig
 
 
+# =====================================================================================
+# A/B shared colour limits (applied at render time, on the stored figure DICTS)
+# =====================================================================================
+
+def decode_plotly_array(v) -> list:
+    """A trace's x/y/z, after `go.Figure.to_dict()`, is EITHER a plain (possibly
+    nested) list OR plotly's compact typed-array encoding
+    (`{"dtype": ..., "bdata": <base64>}`, used for large numpy arrays since plotly
+    5.20+ -- every range_az/range_el/radar_cube axis and z here is a numpy array).
+    Decode either into a list; the typed-array form comes back FLAT (shape is not
+    restored), which is all any caller here needs. Found live in the 2026-09-22
+    rehearsal: `webapp.app._share_y_ranges` crashed reading 'dtype' as a coordinate
+    because it assumed the plain-list form. Used only for bookkeeping -- the stored
+    trace dict itself (what actually renders) is untouched.
+
+    ONE authority (`webapp.app._decode_plotly_array` delegates here): both the axis
+    sharing in the app and the colour-limit sharing below need it, and two copies of a
+    decoder for plotly's own wire format is exactly the kind of duplicate that drifts.
+    """
+    if v is None:
+        return []
+    if isinstance(v, dict) and "bdata" in v:
+        import base64
+        raw = base64.b64decode(v["bdata"])
+        return np.frombuffer(raw, dtype=np.dtype(v.get("dtype", "f8"))).tolist()
+    return list(v)
+
+
+#: Marker the shared-limits subline starts with, so `share_heatmap_z_limits` can tell
+#: an already-annotated title from a fresh one and never append its clause twice.
+_SHARED_LIMITS_MARKER = "colour limits shared with arm "
+
+#: Matches the PER-ARM "; clip -40.0 dB (shared floor)"/"(median floor + 3 dB)" clause
+#: `figures_from_outputs` bakes into the range_az/range_el subline before sharing
+#: exists, so `_apply_shared_z` can remove it rather than print it beside the shared-
+#: limits clause that supersedes it (two clips on one panel -- rendered check,
+#: thrust1_circuit_knobs wave 11 PNG, 2026-09-24). Separators between words allow
+#: either a plain space or a `_wrap_text`-inserted "<br>" line break, since this runs
+#: on the already-wrapped title text. The superseded value is not lost: the shared
+#: clause's own "(was X)" names it once (see `_apply_shared_z` below).
+#: SCOPE: only the ";"-prefixed, mid-sentence shape (range_az/range_el) -- radar_cube's
+#: own clip clause has a DIFFERENT shape (see `_RADAR_CUBE_CLIP_CLAUSE_RE` below) and is
+#: handled separately.
+_CLIP_CLAUSE_RE = re.compile(
+    r";(?:\s+|<br>)*clip(?:\s+|<br>)+-?\d+(?:\.\d+)?(?:\s+|<br>)+dB(?:\s+|<br>)+\([^)]*\)")
+
+#: Matches radar_cube's (Range-Doppler power, Thrust 5) own clip clause, which is the
+#: WHOLE subline rather than one clause mid-sentence (see the `radar_cube` branch of
+#: `figures_from_outputs`, which drops the qualifier to keep the panel under the
+#: two-card width): `"<br><sup>clip -36.2 dB (median floor + 3 dB)</sup>"`. Matches
+#: the "<br><sup>...</sup>" segment WHOLE, tags included, so removing it under
+#: sharing leaves no orphan empty "<sup></sup>" line behind -- unlike
+#: `_CLIP_CLAUSE_RE`, which only strips the inner clause because there is other
+#: subline content on either side of it to keep.
+_RADAR_CUBE_CLIP_CLAUSE_RE = re.compile(
+    r"<br><sup>clip(?:\s+|<br>)+-?\d+(?:\.\d+)?(?:\s+|<br>)+dB(?:\s+|<br>)+\([^)]*\)</sup>")
+
+
+def _strip_superseded_clip_clause(text: str) -> str:
+    """Remove whichever shape of the per-arm clip clause `text` carries (see the two
+    regexes above), so `_apply_shared_z` prints the shared clause ONCE rather than
+    beside the clause it supersedes. A title with neither shape (most panels) is
+    returned unchanged."""
+    return _RADAR_CUBE_CLIP_CLAUSE_RE.sub("", _CLIP_CLAUSE_RE.sub("", text))
+
+
+def _heatmap_floors_db(fig: Dict[str, Any]) -> List[float]:
+    """Median of this panel's own dB data for the INITIAL view and for EVERY animation
+    frame -- i.e. the panel's own noise floor, per frame, over the whole run.
+
+    Median (not min): these maps are peak-normalized, so the median IS the ambient
+    floor -- the same quantity `_peak_minus_median_db` subtracts from the peak for the
+    on-screen "peak - median" callout, so a colour limit derived from it lines up with
+    the number the card quotes.
+    """
+    floors: List[float] = []
+
+    def _add(trace):
+        if trace is None or trace.get("type") not in (None, "heatmap"):
+            return
+        z = decode_plotly_array(trace.get("z"))
+        if len(z):
+            floors.append(float(np.median(np.asarray(z, dtype=float))))
+
+    data = fig.get("data") or []
+    if data and data[0].get("type") == "heatmap":
+        _add(data[0])
+    for frame in (fig.get("frames") or []):
+        for trace in (frame.get("data") or []):
+            _add(trace)
+    return floors
+
+
+def _apply_shared_z(fig: Dict[str, Any], zmin: float, zmax: float,
+                    other_arm: str) -> None:
+    """Pin one figure dict's heat-map traces to `zmin`/`zmax`, keep its colorbar label
+    honest, and SAY on the panel that the limits are shared (and with which arm).
+
+    The clause is a fact about the picture that a photograph of the screen has no
+    other way to carry: two maps that share a colour scale look like two maps that
+    happen to be the same colour otherwise.
+    """
+    own_zmin = None
+    for trace in (fig.get("data") or []):
+        if trace.get("type") != "heatmap":
+            continue
+        if own_zmin is None and trace.get("zmin") is not None:
+            own_zmin = float(trace["zmin"])
+        trace["zmin"], trace["zmax"] = zmin, zmax
+        cbar = trace.get("colorbar")
+        if not isinstance(cbar, dict):
+            continue
+        cbar_title = cbar.get("title")
+        # `go.Figure.to_dict()` normalises `colorbar=dict(title="...")` to
+        # `{"title": {"text": "..."}}`; a hand-built dict may still hold the plain
+        # string form, so accept both.
+        text = cbar_title.get("text") if isinstance(cbar_title, dict) else cbar_title
+        if isinstance(text, str) and text.startswith(_DB_COLORBAR_PREFIX):
+            new_text = f"{_DB_COLORBAR_PREFIX} (clipped at {zmin:.1f})"
+            if isinstance(cbar_title, dict):
+                cbar_title["text"] = new_text
+            else:
+                cbar["title"] = {"text": new_text}
+
+    # Deliberately ONE line at `_wrap_text`'s 70-char width (measured: 56 chars):
+    # this subline is appended to titles that already run to six wrapped lines on the
+    # Thrust 1 screen, and every line it adds is 45 px of top margin
+    # (`_heatmap_margin_t`) taken off the plot. WHY the limits are where they are is
+    # already on the panel -- the clip clause and the "peak - median" callout -- so
+    # this clause only has to say that they are shared, with whom, and to what value.
+    # "(was X)" whenever sharing MOVED this arm's limit: the panel's existing clip
+    # clause ("clip -40.0 dB (shared floor)", "clip -29.6 dB (median floor + 3 dB)")
+    # is built per arm, before sharing exists, and is REMOVED here (`_CLIP_CLAUSE_RE`)
+    # rather than left standing beside the shared one -- two clips printed on one
+    # panel read as a bug (rendered check, thrust1 wave 11 PNG, 2026-09-24). The value
+    # it superseded is not lost: named once, in the shared clause's own "(was X)".
+    moved = f" (was {own_zmin:.1f})" if own_zmin is not None and         abs(own_zmin - zmin) > 0.05 else ""
+    clause = detector_scoreboard._wrap_text(
+        f"{_SHARED_LIMITS_MARKER}{other_arm}: zmin {zmin:.1f} dB{moved}, "
+        f"zmax {zmax:.0f} dB")
+    suffix = f"<br><sup>{clause}</sup>"
+
+    layout = fig.setdefault("layout", {})
+    title = layout.get("title")
+    if isinstance(title, dict) and isinstance(title.get("text"), str):
+        if _SHARED_LIMITS_MARKER not in title["text"]:
+            title["text"] = _strip_superseded_clip_clause(title["text"]) + suffix
+        # The top margin is sized from the title's OWN line count
+        # (`_heatmap_margin_t`); a clause appended without re-sizing it overflows
+        # DOWN into the plot rather than clipping (the exact failure mode that
+        # constant exists for). Shift the figure's height by the same delta so the
+        # plot domain keeps the height it was built with.
+        margin = layout.setdefault("margin", {})
+        old_t = margin.get("t")
+        new_t = _heatmap_margin_t(title["text"])
+        if old_t is not None and new_t != old_t:
+            margin["t"] = new_t
+            if isinstance(layout.get("height"), (int, float)):
+                layout["height"] = layout["height"] + (new_t - old_t)
+
+    for frame in (fig.get("frames") or []):
+        f_title = ((frame.get("layout") or {}).get("title"))
+        if isinstance(f_title, dict) and isinstance(f_title.get("text"), str) \
+                and _SHARED_LIMITS_MARKER not in f_title["text"]:
+            # Per-frame title overrides REPLACE the whole title object when the
+            # slider/clock moves (see `figures_from_outputs`' `frame_layouts`), so the
+            # clause has to be on every frame's copy or it vanishes on frame 2.
+            f_title["text"] = _strip_superseded_clip_clause(f_title["text"]) + suffix
+
+
+def share_heatmap_z_limits(figs: Dict[str, Any], prev_figs: Dict[str, Any],
+                           labels=("B", "A")) -> None:
+    """Give each heat-map product that BOTH arms rendered ONE zmin/zmax, computed over
+    BOTH arms and ALL their animation frames, in place.
+
+    Why this is not just "take the tighter of the two clips" (which
+    `webapp.app._share_y_ranges` already did): on a `Z_SHARE_REACH_FLOOR` panel the
+    NOISE FLOOR is the thing the A/B knob moves, and both arms' floors sat below the
+    -40 dB display clip, so both backgrounds rendered as the one clip colour. Owner,
+    live test 2026-09-24 (Thrust 1, LNA 8 mA vs 0.5 mA): "images look fine, but 55 vs.
+    65 dB peak to median is not discernible by human eye". Pushing the shared limit 3
+    dB BELOW the deepest floor either arm reaches puts both floors inside the colour
+    ramp, where an 11-12 dB difference is a visible difference in background colour.
+
+    `labels` is (the other arm's name as seen FROM `figs`, the other arm's name as seen
+    from `prev_figs`) -- i.e. the default says `figs` is arm A (so its panels are
+    "shared with arm B") and `prev_figs` is arm B.
+    """
+    for key in set(figs) & set(prev_figs):
+        pair = (figs[key], prev_figs[key])
+        policies = [((fig.get("layout") or {}).get("meta") or {}).get("z_share")
+                    if isinstance((fig.get("layout") or {}).get("meta"), dict) else None
+                    for fig in pair]
+        if policies[0] is None or policies[0] != policies[1]:
+            # An untagged panel (the detector objectness maps: heat maps, but their z
+            # is a 0-1 score, not dB) keeps whatever limits it was built with.
+            continue
+        if policies[0] == Z_SHARE_REACH_FLOOR:
+            floors = [f for fig in pair for f in _heatmap_floors_db(fig)]
+            if not floors:
+                continue
+            zmin = min(floors) - _SHARED_FLOOR_MARGIN_DB
+        else:
+            zmins = [float(tr["zmin"]) for fig in pair
+                     for tr in (fig.get("data") or [])
+                     if tr.get("type") == "heatmap" and tr.get("zmin") is not None]
+            if not zmins:
+                continue
+            # The TIGHTER (higher) of the two adaptive clips: each arm's own clip is a
+            # promise that its floor stays >= 3 dB below it (`_radar_cube_clip_db`),
+            # and the higher clip keeps that promise for both arms.
+            zmin = max(zmins)
+        zmax = 0.0
+        for fig, other in zip(pair, labels):
+            _apply_shared_z(fig, zmin, zmax, other)
+
+
 def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     """Build a dict of named Plotly figures from a simulation outputs dict."""
     figs: Dict[str, go.Figure] = {}
@@ -2099,6 +2353,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 _to_numpy_abs_db(outputs["fft"][-1]),
                 "Azimuth-Elevation power (non-coherent over range)",
                 x=u, y=u, xlabel="azimuth sin(θ)", ylabel="elevation sin(θ)",
+                z_share=Z_SHARE_KEEP_CLIP,
             ),
             [_to_numpy_abs_db(f) for f in outputs["fft"]]))
 
@@ -2154,8 +2409,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # reference AT range 0 is this leakage band, not a target -- stated
                 # directly; "(0 = earliest arrival)" is kept verbatim so it still reads
                 # as the SAME claim tests/test_webapp_figures_wave3.py (an unowned file)
-                # already pins in this subline.
-                earliest_arrival_note = ("; 0 dB = direct path at range 0 "
+                # already pins in this subline. "at range 0" dropped (wave 11, F96):
+                # the longer, computed F96 range-window clause below pushed this
+                # subline to 7 wrapped lines, past the established 6-line budget
+                # (`_apply_shared_z`'s own comment) -- shortened here rather than
+                # accepting a 7th line; the 3 substrings the wave-8/wave-3 tests pin
+                # ("0 dB = direct path", "(0 = earliest arrival)", "not a target") are
+                # untouched, only the connective "at range 0" between them is gone.
+                earliest_arrival_note = ("; 0 dB = direct path "
                                          "(0 = earliest arrival), not a target")
                 # Calibration nobody stated on screen (wave 7, X6/X7; sharpened wave 8,
                 # W13): no panel said what a display gate is worth relative to the
@@ -2165,10 +2426,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 _native_m = _native_range_resolution_m(freq_span_hz)
                 _gate_m = _range_per_gate_m(bins, freq_span_hz, n_freqs)
                 _ratio = _gate_m / _native_m if _native_m > 0 else float("nan")
+                # F96 (notes/ESTABLISHED_FACTS.md): the old "unambig 125 m" wording read
+                # as a physical range limit, but it is HALF of the frame's own N-point
+                # FFT period -- the axis is fftshifted to +-125 m and `_nonnegative_range`
+                # (this loop) then crops the negative-delay half away, so a real return
+                # between 125 and 250 m lands on the cropped side and is silently
+                # discarded, not out of range. Both numbers are computed from this
+                # frame's own freq_plan, never typed: the full period is N*c/(2B) (the
+                # native per-bin resolution above times the frame's own n_freqs), and the
+                # displayed half is exactly that divided by 2.
+                _full_window_m = n_freqs * _native_m
+                _half_window_m = _full_window_m / 2.0
                 gate_note = (
                     f"; {_gate_m:.2f} m/gate ({_native_m * 100:.0f} cm native, "
-                    f"{_ratio:.0f}:1); unambig "
-                    f"{_native_unambiguous_range_m(freq_span_hz, n_freqs):.0f} m")
+                    f"{_ratio:.0f}:1); display 0-{_half_window_m:.0f} m of "
+                    f"{_full_window_m:.0f} m unambig (neg.-delay half cropped)")
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
@@ -2279,7 +2551,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             titles = [f"{title}<br><sup>{detector_scoreboard._wrap_text(s)}</sup>"
                      for s in sublines]
             fig = _heatmap(frames_db[-1], titles[-1], x=x, y=y, xlabel=aperture_label,
-                           ylabel=ylabel, zmin=clip_db, colorbar_title=colorbar_title)
+                           ylabel=ylabel, zmin=clip_db, colorbar_title=colorbar_title,
+                           z_share=Z_SHARE_REACH_FLOOR)
             if key == "range_az" and range_az_yaxis_extent is not None:
                 # See `range_az_yaxis_extent`'s definition above the loop.
                 fig.update_yaxes(range=[0.0, range_az_yaxis_extent])
@@ -2420,7 +2693,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             _heatmap(first, rd_panel_title,
                      x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
-                     colorbar_title=rd_clip_title),
+                     colorbar_title=rd_clip_title, z_share=Z_SHARE_KEEP_CLIP),
             [_rd_db(c) for c in outputs["radar_cube"]]))
 
     det_meta = meta.get("detector") or {}

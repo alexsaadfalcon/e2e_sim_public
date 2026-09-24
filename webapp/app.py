@@ -32,6 +32,7 @@ from typing import Any, Dict, List
 import numpy as np
 from dash import (
     ALL,
+    ClientsideFunction,
     Dash,
     Input,
     Output,
@@ -48,16 +49,27 @@ from webapp.demo_presets import PRESETS, PRESETS_BY_ID, DemoPreset, PresetError,
 from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
     PipelineError,
+    decode_plotly_array,
     figures_from_outputs,
     placeholder_figure,
     prewarm_tessera_interconnect,
     run_pipeline,
     scenario_topdown_figure,
+    share_heatmap_z_limits,
 )
 from webapp.scenario_editor import map_figure, scenario_from_json_safe, summarize
 
 HOST = "127.0.0.1"
 PORT = 8050
+
+#: Results-tab animation period, ms -- one frame step per tick for every animated
+#: panel at once (see the "results-clock" Interval and webapp/assets/results_clock.js).
+#: 700 ms, not Plotly's own 350 ms ▶ default: the presenter talks over these screens,
+#: 5-frame loops at 350 ms restart every 1.75 s, and the owner measured the RDP link
+#: as comfortable at this rate ("Framerate looks fine over RDP", live test
+#: 2026-09-24) -- which is also what retired the old "step the slider, never press
+#: Play" runbook rule (webapp/runbook.py).
+RESULTS_CLOCK_MS = 700
 
 app = Dash(__name__, suppress_callback_exceptions=True, title="E2E Array Simulator")
 server = app.server  # exposed for gunicorn/WSGI if ever needed
@@ -131,6 +143,16 @@ def _app_layout() -> Any:
         # ...), which read as the identical "blank or outside 1..50" message either
         # way (bug hunt, 2026-09-23) -- the raw text lets the refusal say which.
         dcc.Store(id="run-nsteps-raw", data=None),
+
+        # ONE CLOCK for every animated panel on the Results tab (owner, live test
+        # 2026-09-24: "both as if the play button was hit (and should loop
+        # repeatedly)"; "Framerate looks fine over RDP"). Plotly's own ▶ button
+        # animates ONE panel, once, at its own rate -- two A/B arms started by hand
+        # drift apart immediately and neither loops. This Interval ticks outside the
+        # tab content (so switching tabs never unmounts it) and the clientside
+        # callback below steps EVERY animated figure to the same frame index.
+        dcc.Interval(id="results-clock", interval=RESULTS_CLOCK_MS, n_intervals=0),
+        dcc.Store(id="results-clock-tick", data=0),
 
         dcc.Tabs(id="tabs", value="tab-blocks", children=[
             dcc.Tab(label="Block Diagram", value="tab-blocks",
@@ -424,6 +446,62 @@ def _notes_block(notes_lines: List[str]):
         [html.Div(n, style={"color": "#576574", "fontSize": "14px"}) for n in notes_lines],
         style={"marginBottom": "6px"},
     )
+
+
+def _graph_card(fig_dict, *, flex: str):
+    """One bordered result card. No modebar: the zoom/export toolbar overlaps each
+    card's title at this card width, and none of its tools matter for read-only
+    results."""
+    return html.Div(
+        dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
+        style={"flex": flex, "minWidth": "0", "margin": "6px",
+               "border": "1px solid #dfe4ea", "borderRadius": "6px",
+               "padding": "4px"},
+    )
+
+
+def _grid(figs: Dict[str, Any]):
+    """The SINGLE-arm layout, unchanged: products wrap across the stage width, and a
+    lone figure takes the whole row instead of half a screen."""
+    basis = "1 1 100%" if len(figs) == 1 else "1 1 45%"
+    return html.Div([_graph_card(f, flex=basis) for f in figs.values()],
+                    style={"display": "flex", "flexWrap": "wrap"})
+
+
+#: Flex basis of ONE A/B column. Two columns at the 1600 px stage width
+#: (`_app_layout`'s maxWidth) leave ~780 px each, which is the card width
+#: `pipeline_runner`'s slider/title geometry was last re-measured against
+#: (`_SLIDER_BUTTONS_X_EXTENT`, calibrated over 600-1560 px).
+_AB_COLUMN_FLEX = "1 1 50%"
+
+
+def _ab_column_pair(left, right):
+    """One row of the side-by-side layout: arm A's cell on the left, arm B's on the
+    right, both the same width whether or not either is empty."""
+    return html.Div(
+        [html.Div(left, style={"flex": _AB_COLUMN_FLEX, "minWidth": "0"}),
+         html.Div(right, style={"flex": _AB_COLUMN_FLEX, "minWidth": "0"})],
+        style={"display": "flex", "alignItems": "flex-start"},
+    )
+
+
+def _ab_columns(header_a, header_b, figs_a: Dict[str, Any], figs_b: Dict[str, Any]):
+    """Arm A left, arm B right: a header row (each arm's own banner + run notes above
+    its own column) then ONE ROW PER PRODUCT, so the two copies of the same panel sit
+    at the same height, at the same width, next to each other.
+
+    Product order follows arm A's insertion order (which mirrors
+    `figures_from_outputs`' build order); a product only one arm produced still gets
+    its own row, with an empty cell opposite it, rather than silently shifting the
+    other arm's panels up a row."""
+    keys = list(figs_a) + [k for k in figs_b if k not in figs_a]
+    rows = [_ab_column_pair(header_a, header_b)]
+    for key in keys:
+        rows.append(_ab_column_pair(
+            _graph_card(figs_a[key], flex="1 1 100%") if key in figs_a else None,
+            _graph_card(figs_b[key], flex="1 1 100%") if key in figs_b else None,
+        ))
+    return html.Div(rows)
 
 
 def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str,
@@ -865,20 +943,12 @@ def _cancel_run(n_clicks, session_id=None):
 # =================================================================================
 
 def _decode_plotly_array(v) -> list:
-    """A heatmap trace's x/y/z, after `go.Figure.to_dict()`, is EITHER a plain list OR
-    plotly's compact typed-array encoding (`{"dtype": ..., "bdata": <base64>}` -- used
-    for large numpy arrays since plotly 5.20+; every range_az/range_el/radar_cube axis
-    here is a numpy array). Decode either into a flat list of floats. Found live in the
-    2026-09-22 rehearsal: `_share_y_ranges` crashed reading 'dtype' as a coordinate
-    because it assumed the plain-list form. Used only for axis bookkeeping -- the
-    stored trace dict itself (what actually renders) is untouched."""
-    if v is None:
-        return []
-    if isinstance(v, dict) and "bdata" in v:
-        import base64
-        raw = base64.b64decode(v["bdata"])
-        return np.frombuffer(raw, dtype=np.dtype(v.get("dtype", "f8"))).tolist()
-    return list(v)
+    """See `webapp.pipeline_runner.decode_plotly_array`, which this delegates to --
+    ONE authority for plotly's compact typed-array wire encoding, now that the
+    colour-limit sharing in `pipeline_runner` needs the same decode this module's
+    axis sharing has needed since the 2026-09-22 rehearsal. Kept as a name here
+    because the tests that pinned that rehearsal regression call it."""
+    return decode_plotly_array(v)
 
 
 def _union_fixed_range(pair, axis: str):
@@ -980,6 +1050,28 @@ def _share_y_ranges(figs, prev_figs) -> None:
                 fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = [0.0, top]
 
 
+#: The `window.dash_clientside` namespace webapp/assets/results_clock.js registers,
+#: and the function on it this callback drives. Named constants so the test that pins
+#: the wiring reads the same two strings the app and the asset do.
+RESULTS_CLOCK_NAMESPACE = "e2eResultsClock"
+RESULTS_CLOCK_FUNCTION = "tick"
+
+# Autoplay + loop, one clock (owner, live test 2026-09-24). Every animated figure
+# inside #results-tab-content -- BOTH A/B arms, every product with Plotly frames --
+# is stepped to the same frame index on every tick and wraps forever, starting by
+# itself the moment the results render. The work is clientside because it is pure
+# browser animation: a serverside callback would round-trip a full figure per frame
+# over the link the owner is presenting across. See results_clock.js for the pause/
+# resume handling (Plotly's own ▶/❚❚ buttons drive THIS clock instead of their own
+# one-shot animation, so the two arms can never drift apart).
+app.clientside_callback(
+    ClientsideFunction(namespace=RESULTS_CLOCK_NAMESPACE,
+                       function_name=RESULTS_CLOCK_FUNCTION),
+    Output("results-clock-tick", "data"),
+    Input("results-clock", "n_intervals"),
+)
+
+
 @app.callback(
     Output("results-tab-content", "children"),
     Input("results-store", "data"),
@@ -1002,62 +1094,64 @@ def _render_results(results_data, active_tab):
     # That already keeps Range Profile grouped with its FFT/range siblings, so no
     # re-sort is needed here; each figure carries its own title (set where it is
     # built) rather than a second, easily-stale title map duplicated in this tab.
-    def _grid(figs):
-        cards = []
-        # A lone figure (Thrust 1) takes the whole row instead of half a screen.
-        basis = "1 1 100%" if len(figs) == 1 else "1 1 45%"
-        for key, fig_dict in figs.items():
-            cards.append(html.Div(
-                # No modebar: the zoom/export toolbar overlaps each card's title at
-                # this card width, and none of its tools matter for read-only results.
-                dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
-                style={"flex": basis, "minWidth": "420px", "margin": "6px",
-                       "border": "1px solid #dfe4ea", "borderRadius": "6px",
-                       "padding": "4px"},
-            ))
-        return html.Div(cards, style={"display": "flex", "flexWrap": "wrap"})
-
     figs = {k: v for k, v in results_data.items() if not k.startswith("_")}
     prev = results_data.get("_previous") or {}
     prev_figs = {k: v for k, v in prev.items() if not k.startswith("_")}
+    # Colour limits FIRST, then axis extents: the limit pass appends its own "colour
+    # limits shared with arm ..." subline (and re-sizes the top margin for it), while
+    # `_share_y_ranges` only unions numbers -- running it second keeps its zmin/zmax
+    # union a no-op over the already-equal pair rather than a second, weaker rule.
+    share_heatmap_z_limits(figs, prev_figs)
     _share_y_ranges(figs, prev_figs)
     children = [html.H3("Results")]
-    banner = results_data.get("_banner")
-    if banner:
-        # An A/B run's banner already names its own arm in full ("A (as loaded): ..
-        # -- before" / "B: .. -- after", see `_ab_arm_line`); the generic "This run"/
-        # "Previous run" prefix stays for the single-run and manual before/after
-        # paths, where the banner does not name an arm.
-        prefix = "" if results_data.get("_ab") else "This run: "
-        children.append(html.Div(f"{prefix}{banner}",
-                                 style={"color": "#2d3a4a", "fontWeight": "bold",
-                                        "marginBottom": "4px"}))
-    notes_lines = results_data.get("_notes")
-    if notes_lines:
-        children.append(_notes_block(notes_lines))
     screen_note = results_data.get("_screen_note")
     if screen_note:
         # The preset's own caveat, for whoever photographs this tab rather than hears
         # the presenter (hostile-expert third read, 2026-09-23): one legible, muted
         # line shown ONCE, shared by both A/B panels below it.
-        children.append(html.Div(screen_note,
-                                 style={"color": "#576574", "fontSize": "16px",
-                                        "marginBottom": "8px"}))
-    children.append(_grid(figs))
-    if prev_figs:
-        # The before/after every card asks for: the previous run stays on screen
-        # under its own banner, so "turn one knob and run again" is a comparison
-        # the audience can see rather than remember.
-        children.append(html.Hr())
-        prev_prefix = "" if prev.get("_ab") else "Previous run (for before/after): "
-        children.append(html.Div(
-            f"{prev_prefix}{prev.get('_banner') or 'unlabelled'}",
-            style={"color": "#576574", "fontWeight": "bold", "marginTop": "6px",
-                   "marginBottom": "4px"}))
-        prev_notes_lines = prev.get("_notes")
-        if prev_notes_lines:
-            children.append(_notes_block(prev_notes_lines))
-        children.append(_grid(prev_figs))
+        screen_note_div = html.Div(screen_note,
+                                   style={"color": "#576574", "fontSize": "16px",
+                                          "marginBottom": "8px"})
+    else:
+        screen_note_div = None
+
+    def _arm_header(payload, *, prefix_when_not_ab: str):
+        """Banner + per-arm run notes for ONE arm, in the order the single-column
+        layout has always printed them."""
+        out = []
+        banner = payload.get("_banner")
+        if banner:
+            # An A/B run's banner already names its own arm in full ("A (as loaded):
+            # .. -- before" / "B: .. -- after", see `_ab_arm_line`); the generic
+            # "This run"/"Previous run" prefix stays for the single-run and manual
+            # before/after paths, where the banner does not name an arm.
+            prefix = "" if payload.get("_ab") else prefix_when_not_ab
+            out.append(html.Div(f"{prefix}{banner}",
+                                style={"color": "#2d3a4a", "fontWeight": "bold",
+                                       "marginBottom": "4px"}))
+        notes_lines = payload.get("_notes")
+        if notes_lines:
+            out.append(_notes_block(notes_lines))
+        return out
+
+    if not prev_figs:
+        children.extend(_arm_header(results_data, prefix_when_not_ab="This run: "))
+        if screen_note_div is not None:
+            children.append(screen_note_div)
+        children.append(_grid(figs))
+        return html.Div(children)
+
+    # SIDE BY SIDE (owner, live test 2026-09-24): "default should be side by side".
+    # A/B arms used to stack (A's whole grid, a rule, then B's whole grid), which
+    # put the two copies of the SAME product a full screen height apart -- a
+    # difference the audience had to remember rather than see. One row per product,
+    # arm A left, arm B right, banners above their own column.
+    if screen_note_div is not None:
+        children.append(screen_note_div)
+    children.append(_ab_columns(
+        _arm_header(results_data, prefix_when_not_ab="This run: "),
+        _arm_header(prev, prefix_when_not_ab="Previous run (for before/after): "),
+        figs, prev_figs))
     return html.Div(children)
 
 
