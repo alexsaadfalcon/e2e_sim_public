@@ -9,9 +9,16 @@ replayed ADC cube ran a different pipeline from a live frame.
 
 What replaces it, per notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2:
 
-* ONE stage list, in the contract's order --
-  `CircuitStage -> InterconnectStage -> DechirpBlock -> RangeTransformBlock ->
-  MeasurementStage` -- and ONE loop that walks it.
+* ONE stage list, in the contract's order, and ONE loop that walks it. The DEFAULT
+  order is the FULL contract's (owner 2026-09-24, ballot answer 1B):
+
+      [TxPowerStage] -> [InterconnectStage] -> DechirpBlock -> [FrontEndBlock]
+        -> [ThermalNoiseBlock(mode="once")] -> RangeTransformBlock -> [MeasurementStage]
+
+  i.e. the front end acts on the SAMPLED BEAT RECORD, after the dechirp, and thermal
+  noise is injected exactly once. `composition="legacy_impulse"` reaches the v1.0
+  order (front end on `ifft(CFR)`, before the dechirp, no link-budget stages) and
+  exists ONLY for the stored corpora's bit-parity gate -- see `COMPOSITIONS`.
 * Replay is a START INDEX into that same list: a source advertising
   `signal_domain == DOMAIN_RX_TIME` enters at the first stage that consumes RX time,
   and the stages it skipped are recorded BY NAME in `self.skipped_stages` /
@@ -29,7 +36,10 @@ from collections import defaultdict
 from e2e import frames
 from e2e.blocks import CircuitStage, InterconnectStage, MeasurementStage
 from e2e.chain.dechirp import ANTENNA_INDEX_REVERSED, DechirpBlock
+from e2e.chain.frontend import FrontEndBlock
+from e2e.chain.link_budget import ThermalNoiseBlock, TxPowerStage
 from e2e.chain.receive import RangeTransformBlock
+from e2e.chain.waveform import fmcw_plan_from_freq_plan
 
 
 # Relative threshold (fraction of the top singular value) below which a singular value
@@ -251,6 +261,9 @@ class Simulation:
         warm_start=True,
         radar_cfg=None,
         range_transform=None,
+        composition="full",
+        front_end=None,
+        link_budget="auto",
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -279,13 +292,21 @@ class Simulation:
         # its own. `serial_stages=` still replaces the whole list for callers that
         # compose their own chain (the ML generator, the webapp), but there is no
         # longer a branch that silently builds a DIFFERENT default.
+        if composition not in self.COMPOSITIONS:
+            raise ValueError(
+                f"unknown composition {composition!r}; expected one of "
+                f"{self.COMPOSITIONS}"
+            )
+        self.composition = composition
         self.radar_cfg = radar_cfg
+        self.link_budget = link_budget
+        self.link_budget_active = False
         if serial_stages is not None:
             self.serial_stages = list(serial_stages)
         else:
             self.serial_stages = self._build_spine(
                 circuit_block, interconnect_block, afe_block, subspace_block,
-                range_transform,
+                range_transform, front_end,
             )
         self._check_single_source()
         self.outputs = defaultdict(list)
@@ -308,15 +329,87 @@ class Simulation:
         mimo = "single"
         n_tx = 1
 
+    #: Which block ORDER the spine is built in.
+    #:   "full"  -- THE DEFAULT (owner 2026-09-24, ballot answer 1B). The front end
+    #:              acts on the SAMPLED BEAT RECORD, after the dechirp, and thermal
+    #:              noise is injected exactly once. This is the physics; see
+    #:              `e2e/chain/frontend.py` for the commutation argument that licenses
+    #:              it and for the drive level at which that licence stops holding.
+    #:   "legacy_impulse" -- the v1.0/v1.1 order: the front end on `ifft(CFR)`, BEFORE
+    #:              the dechirp, no `TxPowerStage`, no `ThermalNoiseBlock`. It exists
+    #:              for ONE reason -- the stored corpora were generated that way and
+    #:              the live-vs-stored gates read max |diff| = 0 CODES, which a
+    #:              differently-ordered RNG consumption fails at any floor. It is a
+    #:              recorded fact about files on disk, not an alternative physics, and
+    #:              nothing new should select it.
+    COMPOSITIONS = ("full", "legacy_impulse")
+
+    def _resolve_radar_cfg(self):
+        """The `RadarConfig` the spine's dechirp, front end and floor are built from.
+
+        Explicit `radar_cfg=` wins. Otherwise it is DERIVED from the source's own
+        `freq_plan`, because the stored grid is what decides the chirp that can
+        consume it (`fmcw_plan_from_freq_plan`: `S/fs` must equal the grid's own
+        endpoint-inclusive spacing). A source with no plan -- a legacy pkl, a
+        synthetic test fixture -- yields None, and the stages that genuinely need a
+        sample rate are then left off rather than built on an invented one.
+        """
+        if self.radar_cfg is not None:
+            return self.radar_cfg
+        plan = getattr(self.environment_block, "freq_plan", None)
+        if not plan:
+            return None
+        try:
+            return fmcw_plan_from_freq_plan(plan, n_rx=self.n_rx_x * self.n_rx_y)
+        except ValueError:
+            return None
+
+    def _resolve_link_budget(self, cfg):
+        """Whether the spine carries `TxPowerStage` + `ThermalNoiseBlock`.
+
+        `link_budget="auto"` (the default) enables them iff BOTH a `RadarConfig` is
+        available AND the source advertises an absolute amplitude scale
+        (`physical_scale`). That is not a hedge, it is F63 and contract section 1.2
+        row 7: the munich frames are normalised (`physical_scale=False`), so there is
+        no absolute reference for a `k*T*B*F` floor to sit beneath, and
+        `ThermalNoiseBlock` would refuse them BY NAME if it were built. Corpus sources
+        carry volts and get both stages.
+
+        True forces them on (and `ThermalNoiseBlock`'s own F63 guard will refuse a
+        normalised frame, loudly, which is the right failure); False forces them off.
+        """
+        if self.link_budget is not True and self.link_budget is not False:
+            return bool(cfg is not None
+                        and getattr(self.environment_block, "physical_scale", False))
+        return bool(self.link_budget)
+
     def _build_spine(self, circuit_block, interconnect_block, afe_block,
-                     subspace_block, range_transform):
+                     subspace_block, range_transform, front_end):
         """The contract's stage list (section 1.2), in order, for every source.
 
-        `CircuitStage` and `InterconnectStage` are present only when configured (they
-        are physical options, not structure); the dechirp and the range transform are
-        ALWAYS present, because they are what make the chain one chain -- deleting
-        them is what used to leave the imaging products computing their own range
-        FFTs off a second path.
+        `composition="full"` (the default) builds:
+
+            [TxPowerStage] -> [InterconnectStage] -> DechirpBlock -> [FrontEndBlock]
+              -> [ThermalNoiseBlock(mode="once")] -> RangeTransformBlock
+              -> [MeasurementStage]
+
+        `composition="legacy_impulse"` builds the v1.0 order instead, with
+        `CircuitStage` BEFORE the dechirp and no link-budget stages.
+
+        Square brackets are PHYSICAL OPTIONS, present only when configured; the
+        dechirp and the range transform are always present, because they are what make
+        the chain one chain -- deleting them is what used to leave the imaging products
+        computing their own range FFTs off a second path.
+
+        The interconnect stays in the CFR domain, before the dechirp, in BOTH
+        compositions: a linear RF filter is a per-sample gain after the dechirp and
+        commutes with the unit-modulus dechirp, so `interconnect -> dechirp -> LNA` is
+        `interconnect -> LNA -> mixer` (contract section 1.2 row 4).
+
+        A legacy `circuit_block` (an `RFFEBlock`) is TRANSLATED into a `FrontEndBlock`
+        under `composition="full"` via `FrontEndBlock.from_rffe`, so existing callers
+        move onto the new placement without restating their knobs. Pass `front_end=`
+        to supply one directly.
 
         The range transform is built at the IMAGING identity point -- `window="none"`,
         `dc_removal=False` -- not at `RangeTransformBlock`'s own (ML-protocol)
@@ -327,14 +420,44 @@ class Simulation:
         line-of-sight path AT bin 0, which the fast-time mean subtraction would zero.
         Pass `range_transform=` to override.
         """
+        cfg = self._resolve_radar_cfg()
+        self.radar_cfg = cfg
+        legacy = self.composition == "legacy_impulse"
+        use_link_budget = (not legacy) and self._resolve_link_budget(cfg)
+        self.link_budget_active = use_link_budget
+
         stages = []
-        if circuit_block is not None:
+        if use_link_budget:
+            # sqrt(P_tx) at the SOURCE, so receiver noise cannot scale with transmit
+            # power -- the coupling F81 is actually about (contract section 1.4).
+            stages.append(TxPowerStage(cfg))
+        if legacy and circuit_block is not None:
             stages.append(CircuitStage(circuit_block))
         if interconnect_block is not None:
             stages.append(InterconnectStage(interconnect_block))
-        stages.append(DechirpBlock(self.radar_cfg or self._SingleTxCfg()))
+        stages.append(DechirpBlock(cfg or self._SingleTxCfg()))
+        if not legacy:
+            fe = front_end
+            if fe is None and circuit_block is not None:
+                if cfg is None:
+                    raise ValueError(
+                        "the 'full' composition puts the front end on the beat record, "
+                        "which needs the beat SAMPLE RATE to reference its noise "
+                        "bandwidth to -- and this chain has no RadarConfig and no "
+                        "source freq_plan to derive one from. Pass radar_cfg=, or "
+                        "front_end=FrontEndBlock(..., fs_hz=...), or "
+                        "composition='legacy_impulse' if you are reproducing a stored "
+                        "corpus."
+                    )
+                fe = FrontEndBlock.from_rffe(circuit_block, cfg)
+            if fe is not None:
+                stages.append(fe)
+            if use_link_budget:
+                # mode="once": adds NOTHING when the front end already injected, and
+                # is the one injection when it did not. Never a second floor.
+                stages.append(ThermalNoiseBlock(cfg, mode="once"))
         stages.append(range_transform or RangeTransformBlock(
-            self.radar_cfg, window="none", dc_removal=False))
+            cfg, window="none", dc_removal=False))
         # No subspace block -> no measurement stage: the spine then ends at the range
         # transform, which is all the image/profile products need. (AFE without a
         # subspace block was already rejected above.)

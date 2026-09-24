@@ -164,6 +164,33 @@ class FrontEndBlock:
         if if_bw_mhz is not None and not if_bw_mhz > 0:
             raise ValueError(f"if_bw_mhz must be > 0, got {if_bw_mhz!r}")
 
+    # ------------------------------------------------------------------ translation
+    @classmethod
+    def from_rffe(cls, rffe, cfg=None, *, fs_hz=None, placement="beat"):
+        """Build the beat-placement front end that a legacy `RFFEBlock` DESCRIBES.
+
+        This is how `Simulation` moves an existing caller onto the new placement
+        without asking it to restate its knobs: every parameter is copied off the
+        block, and the per-element config TABLE is copied wholesale rather than
+        re-derived from `lna_bias_ma` / `if_bw_mhz`. That matters -- `RFFEBlock`
+        applies those overrides into `rx_config` at construction and does not keep
+        them as attributes, so re-deriving would silently drop any table a caller had
+        edited directly.
+
+        `fs_hz` falls back to `cfg.fs_hz`; NOT to `rffe.fs`, which is the CFR's
+        frequency SPAN (3 GHz) and is a different quantity from the beat sample rate.
+        Using it would over-reference the noise band by ~21 dB, so it is refused by
+        omission rather than by a plausible-looking default.
+        """
+        block = cls(cfg, n=rffe.n, signal_scaling=rffe.signal_scaling,
+                    if_filter=rffe.if_filter, physical_scale=rffe.physical_scale,
+                    seed=rffe.seed, fs_hz=fs_hz, placement=placement,
+                    inject_noise=getattr(rffe, "inject_noise", True))
+        table = getattr(rffe, "rx_config", None)
+        if table is not None:
+            block._rx_config = table.clone()
+        return block
+
     # ------------------------------------------------------------------ config table
     def rx_config(self, n, device):
         """The per-element `[n, 7]` config table, built once and cached.

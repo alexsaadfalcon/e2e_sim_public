@@ -450,8 +450,19 @@ def test_full_pipeline_physical_scale_and_if_filter(make_env_block):
     from e2e.simulation import Simulation
     from e2e.blocks import AFEBlock, AdaOjaBlock, FFTBlock, SubspaceErrorBlock
 
+    from e2e.radar_config import RadarConfig
+
     n_rx = 64
     env = make_env_block(n_frames=2, n_freqs=64, n_rx=n_rx, array_shape=(8, 8))
+    # `Simulation`'s default ("full") composition puts the front end on the BEAT
+    # record, whose noise band is min(if_bw, fs) -- so the chain must name a sample
+    # rate. The synthetic fixture carries no freq_plan to derive one from, hence the
+    # explicit cfg. (`RFFEBlock.freq_span_hz` is the CFR's frequency SPAN, a different
+    # quantity, and is deliberately NOT used as a fallback -- see
+    # `FrontEndBlock.from_rffe`.)
+    cfg = RadarConfig(name="rffe_physics_fixture", f0_hz=28.5e9, bandwidth_hz=3e9,
+                      n_tx=1, n_rx=n_rx, n_chirps=1, n_samples=64, fs_hz=25e6,
+                      chirp_period_s=10e-6, mimo="single")
     sim = Simulation(
         env, [FFTBlock(bins=16), SubspaceErrorBlock()], k=8,
         circuit_block=RFFEBlock(n=n_rx, physical_scale=True, if_filter=True,
@@ -459,6 +470,7 @@ def test_full_pipeline_physical_scale_and_if_filter(make_env_block):
         afe_block=AFEBlock(),
         subspace_block=AdaOjaBlock(n_rx, 8),
         array_shape=(8, 8),
+        radar_cfg=cfg,
     )
     out = sim.run(n_steps=2)
     assert len(out["subspace_err"]) == 2

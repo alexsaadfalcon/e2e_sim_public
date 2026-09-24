@@ -23,6 +23,15 @@ from e2e.blocks import (
 K = 16
 N_RX = 1024
 
+#: See tests/test_one_chain_spine.py::SYNTH_CFG -- the default ("full") composition
+#: puts the front end on the beat record, which must know its sample rate.
+from e2e.radar_config import RadarConfig  # noqa: E402
+
+SYNTH_CFG = RadarConfig(
+    name="synthetic_fixture", f0_hz=28.5e9, bandwidth_hz=3e9, n_tx=1, n_rx=N_RX,
+    n_chirps=1, n_samples=32, fs_hz=25e6, chirp_period_s=10e-6, mimo="single",
+)
+
 
 def _downstream():
     return [FFTBlock(bins=32), SubspaceErrorBlock()]
@@ -418,6 +427,7 @@ def test_legacy_args_build_expected_stage_sequence(make_env_block):
     """
     from e2e.blocks import CircuitStage, GridStage, InterconnectStage, MeasurementStage
     from e2e.chain.dechirp import DechirpBlock
+    from e2e.chain.frontend import FrontEndBlock
     from e2e.chain.receive import RangeTransformBlock
 
     env = make_env_block(n_frames=1, n_freqs=32)
@@ -426,18 +436,36 @@ def test_legacy_args_build_expected_stage_sequence(make_env_block):
     assert [type(s) for s in sim.serial_stages] == [
         DechirpBlock, RangeTransformBlock, MeasurementStage]
 
+    # DEFAULT composition ("full"): the front end sits AFTER the dechirp, and a
+    # legacy RFFEBlock is translated onto the beat placement by
+    # FrontEndBlock.from_rffe rather than the caller having to restate its knobs.
     sim2 = Simulation(
         env, _downstream(), K,
         circuit_block=RFFEBlock(n=N_RX),
         interconnect_block=InterconnectBlock(case="case3"),
         afe_block=AFEBlock(),
         subspace_block=AdaOjaBlock(N_RX, K),
+        radar_cfg=SYNTH_CFG,
     )
     assert [type(s) for s in sim2.serial_stages] == [
-        CircuitStage, InterconnectStage, DechirpBlock, RangeTransformBlock,
+        InterconnectStage, DechirpBlock, FrontEndBlock, RangeTransformBlock,
         MeasurementStage,
     ]
     assert GridStage not in [type(s) for s in sim2.serial_stages]
+
+    # The v1.0 order is still reachable BY NAME, for the stored corpora's bit gate.
+    sim3 = Simulation(
+        env, _downstream(), K,
+        circuit_block=RFFEBlock(n=N_RX),
+        interconnect_block=InterconnectBlock(case="case3"),
+        afe_block=AFEBlock(),
+        subspace_block=AdaOjaBlock(N_RX, K),
+        composition="legacy_impulse",
+    )
+    assert [type(s) for s in sim3.serial_stages] == [
+        CircuitStage, InterconnectStage, DechirpBlock, RangeTransformBlock,
+        MeasurementStage,
+    ]
 
 
 @pytest.mark.slow
@@ -478,6 +506,7 @@ def test_multichirp_frame_flows_through_the_elementwise_and_product_blocks(make_
         [FFTBlock(bins=bins)], K,
         circuit_block=RFFEBlock(n=N_RX),
         interconnect_block=InterconnectBlock(case='case3'),
+        radar_cfg=SYNTH_CFG,
     )
     sim.reset()
     sim.feed_forward()
@@ -502,6 +531,7 @@ def test_single_chirp_product_shape_is_unchanged_by_the_capability_contract(make
         _multichirp_env(make_env_block, 1),
         [FFTBlock(bins=bins), RangeAzBlock(bins=bins)], K,
         circuit_block=RFFEBlock(n=N_RX),
+        radar_cfg=SYNTH_CFG,
     )
     sim.reset()
     sim.feed_forward()

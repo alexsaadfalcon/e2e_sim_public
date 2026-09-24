@@ -41,7 +41,8 @@ from e2e.chain.receive import (RangeTransformBlock, delta_f_from_cfg,   # noqa: 
                                delta_f_from_freq_plan, range_axis_m)
 from e2e.chain.transforms import adc_to_rd                      # noqa: E402
 from e2e.chain.waveform import fmcw_plan_from_freq_plan         # noqa: E402
-from e2e.radar_config import BENCHMARK_V1_KA, C_MPS, MUNICH_KA_FMCW  # noqa: E402
+from e2e.radar_config import (BENCHMARK_V1_KA, C_MPS, MUNICH_KA_FMCW,  # noqa: E402
+                              RadarConfig)
 from e2e.simulation import Simulation, perturb_basis, to_beat_basis   # noqa: E402
 from e2e.subspace.subspace_utils import subspace_dist_frob      # noqa: E402
 
@@ -52,6 +53,18 @@ class _SingleTxCfg:
     """The minimal `cfg` `DechirpBlock` reads (only `.mimo`)."""
     mimo = "single"
     n_tx = 1
+
+
+#: A RadarConfig for the synthetic 1024-element fixtures. `Simulation`'s default
+#: ("full") composition puts the front end on the BEAT RECORD, whose noise band is
+#: `min(if_bw, fs)` -- so a chain with a front end must name a sample rate. The
+#: synthetic fixtures carry no `freq_plan` to derive one from, so these tests supply
+#: it explicitly; that refusal is itself pinned by
+#: `test_full_composition_refuses_to_invent_a_sample_rate`.
+SYNTH_CFG = RadarConfig(
+    name="synthetic_fixture", f0_hz=28.5e9, bandwidth_hz=3e9, n_tx=1, n_rx=1024,
+    n_chirps=1, n_samples=64, fs_hz=25e6, chirp_period_s=10e-6, mimo="single",
+)
 
 
 # ----------------------------------------------------------------- the v1.0 reference
@@ -581,11 +594,15 @@ def test_replay_enters_the_one_spine_at_a_start_index(make_env_block):
             pass
 
     sim = Simulation(StoredAdcSource(), [RangeProfileBlock(bins=8)], 2,
-                     circuit_block=RFFEBlock(n=1024), interconnect_block=None)
+                     circuit_block=RFFEBlock(n=1024), interconnect_block=None,
+                     radar_cfg=SYNTH_CFG)
     assert [type(s).__name__ for s in sim.serial_stages] == [
-        "CircuitStage", "DechirpBlock", "RangeTransformBlock"]
+        "DechirpBlock", "FrontEndBlock", "RangeTransformBlock"]
     sim.feed_forward()
-    assert sim.skipped_stages == ["CircuitStage[RFFEBlock]", "DechirpBlock"]
+    # The replayed record is already past the dechirp, so it enters at the front end
+    # -- which on the FULL composition is the first RX-time stage -- and the dechirp
+    # is reported skipped BY NAME.
+    assert sim.skipped_stages == ["DechirpBlock"]
     assert sim.outputs["skipped_stages"][-1] == sim.skipped_stages
     assert len(sim.outputs["range_profile"]) == 1
 
@@ -623,11 +640,41 @@ def test_default_spine_is_the_contracts_order(make_env_block):
                      circuit_block=RFFEBlock(n=1024),
                      interconnect_block=None,
                      afe_block=AFEBlock(),
-                     subspace_block=AdaOjaBlock(d=1024, k=2, m=32))
+                     subspace_block=AdaOjaBlock(d=1024, k=2, m=32),
+                     radar_cfg=SYNTH_CFG)
+    # The DEFAULT composition is "full": the front end sits AFTER the dechirp.
+    assert sim.composition == "full"
     assert [type(s).__name__ for s in sim.serial_stages] == [
-        "CircuitStage", "DechirpBlock", "RangeTransformBlock", "MeasurementStage"]
+        "DechirpBlock", "FrontEndBlock", "RangeTransformBlock", "MeasurementStage"]
     # No GridStage anywhere: the aperture view now happens inside the products.
     assert not any(type(s).__name__ == "GridStage" for s in sim.serial_stages)
+
+    # ... and the legacy order is reachable by name, for the corpus bit-parity gate.
+    legacy = Simulation(env, [], 2,
+                        circuit_block=RFFEBlock(n=1024),
+                        subspace_block=AdaOjaBlock(d=1024, k=2, m=32),
+                        composition="legacy_impulse")
+    assert [type(s).__name__ for s in legacy.serial_stages] == [
+        "CircuitStage", "DechirpBlock", "RangeTransformBlock", "MeasurementStage"]
+
+
+def test_full_composition_refuses_to_invent_a_sample_rate(make_env_block):
+    """The beat-placement front end references its noise band to `min(if_bw, fs)`.
+    A chain that supplies neither a RadarConfig nor a source `freq_plan` to derive one
+    from cannot have that number, and guessing it is a silent multi-dB error in the
+    floor -- so the build refuses and names all three ways out."""
+    env = make_env_block(n_frames=1, n_freqs=32)
+    with pytest.raises(ValueError, match="beat SAMPLE RATE"):
+        Simulation(env, [], 2, circuit_block=RFFEBlock(n=1024))
+    # No front end configured -> no sample rate needed -> builds fine.
+    ok = Simulation(env, [], 2)
+    assert [type(s).__name__ for s in ok.serial_stages] == [
+        "DechirpBlock", "RangeTransformBlock"]
+
+
+def test_unknown_composition_names_the_two_that_exist(make_env_block):
+    with pytest.raises(ValueError, match="unknown composition"):
+        Simulation(make_env_block(n_frames=1, n_freqs=16), [], 2, composition="v2")
 
 
 def test_spine_runs_end_to_end_with_every_product(make_env_block):
@@ -640,6 +687,7 @@ def test_spine_runs_end_to_end_with_every_product(make_env_block):
         circuit_block=RFFEBlock(n=1024),
         afe_block=AFEBlock(),
         subspace_block=AdaOjaBlock(d=1024, k=2, m=32),
+        radar_cfg=SYNTH_CFG,
     )
     out = sim.run(n_steps=2)
     for key in ("fft", "range_az", "range_el", "range_profile", "subspace_err"):
