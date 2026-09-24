@@ -121,6 +121,16 @@ _ARM_DISPLAY_NAMES = {
     "null (random-in-GT-box)": "null (chance floor)",
 }
 
+#: The null arm's REAL definition, which its legend entry is now too short to carry.
+#: Stated in `stored_pr_figure`'s Details instead -- the stored JSON name reads as
+#: "random INSIDE the ground-truth boxes" (i.e. the detector is handed the answer); it
+#: is actually uniform-random scores inside the BOUNDING BOX of every TRAIN-split label
+#: (never the eval labels), fit once and applied blind to the RF.
+NULL_ARM_DEFINITION = (
+    "null: random cells in train-label box (chance floor) -- uniform-random scores "
+    "inside the bounding box of every TRAIN-split label, never the eval labels, fit "
+    "once and applied blind to the RF"
+)
 
 def _display_arm_name(name: str) -> str:
     """`name` as it should read on screen -- see `_ARM_DISPLAY_NAMES`. Passthrough for
@@ -1219,7 +1229,12 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     )
 
     if highlight_arm is not None and highlight_disp_name is not None:
-        caption = [f"{highlight_disp_name} highlighted, AP {highlight_ap:.3f}"]
+        # SHORT by construction: the caption renders on ONE line in a 746 px column at
+        # 16 px (~86 characters). With the CI clause and arm B's "identical on both
+        # arms" clause appended, "<name> highlighted, AP x" was clipped (measured on
+        # the rendered page, 2026-09-24) -- the word "highlighted" is what the thick
+        # line already says.
+        caption = [f"{highlight_disp_name} AP {highlight_ap:.3f}"]
         if highlight_ci is not None:
             caption.append(f"{highlight_ci['delta_AP']:+.3f} vs CFAR "
                            f"[{highlight_ci['ci_low']:+.3f}, "
@@ -1238,6 +1253,10 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
     # a `layout.title` to append to and needs updating by that file's owner (not
     # this module) to stop relying on it.
     details = [
+        # The null arm's legend entry is a short "null (chance floor)" so it cannot be
+        # the entry that falls off the two-column strip; its real definition is here.
+        NULL_ARM_DEFINITION,
+
         f"scored offline: {n_frames} test frames, {corpus_name}",
         "beat_cfar.json; in-distribution: held-out scenes of the training corpus; "
         "one training seed per curve",

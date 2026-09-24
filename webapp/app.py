@@ -445,7 +445,7 @@ RUN_IDENTITY_MAX_CHARS = 100
 RUN_IDENTITY_CHIP_COST = 26
 
 
-def _clause_head(text: str, seps=(": ", " -- ", " vs ")) -> str:
+def _clause_head(text: str, seps=(": ", " -- ", " vs ", " (")) -> str:
     """`text` up to its first clause separator, or `text` unchanged. The result is a
     complete phrase, so nothing needs marking as elided."""
     cuts = [c for c in (text.find(sep) for sep in seps) if c > 0]
@@ -488,6 +488,10 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
         # stored channel): test split from ..."); the environment NAME is the identity.
         [thrust, _clause_head(label),
          _clause_head(source, (": ", " (")), frames, run],
+        # Keep the ENVIRONMENT before giving up on the label: a screen that says only
+        # "Thrust 5 . 5 frames . run #1" has lost the two facts a photograph needs
+        # (which preset, which corpus). Measured on thrust5_detector_ml, 2026-09-24.
+        [thrust, _clause_head(label), _clause_head(source, (": ", " (")), run],
         [thrust, _clause_head(label), frames, run],
         [thrust, frames, run],
     ]
@@ -730,7 +734,7 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
                 # BOTH arms (it is true of both). What arm B adds is the VISIBLE
                 # statement -- once per row, not once per panel.
                 _panel = panel_of(pr_fig)
-                _clause = "identical on both arms; the knob cannot move it"
+                _clause = "identical on both arms"
                 pr_fig.update_layout(meta=dict(
                     (pr_fig.layout.meta or {}),
                     panel=dict(_panel,
@@ -1361,10 +1365,17 @@ def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
     chip = payload.get("_arm_chip") or fallback_label
     caption = _arm_caption(payload)
     return html.Div([
-        html.Div([html.Span(className=f"arm-dot arm-dot-{arm}"),
-                  html.Span(chip, className="arm-chip-label")],
-                 className=f"arm-chip arm-chip-{arm}"),
-        html.Div(caption, className="arm-caption"),
+        # The height cap that enforces "at most 4 lines and 150 px above the first
+        # panel" belongs on the SUMMARY (chip + caption), never on the whole header:
+        # capping the header clipped the OPENED Details to a 4 px sliver, i.e. the
+        # honesty text was one click away and then invisible (found by reading
+        # `--expand-details` PNG, 2026-09-24 -- no figure-dict test can see this).
+        html.Div([
+            html.Div([html.Span(className=f"arm-dot arm-dot-{arm}"),
+                      html.Span(chip, className="arm-chip-label")],
+                     className=f"arm-chip arm-chip-{arm}"),
+            html.Div(caption, className="arm-caption"),
+        ], className="arm-summary"),
         _details_disclosure("▸ Details (provenance, band, clip)",
                             _details_lines(payload, figs, screen_note)),
     ], className="arm-header")

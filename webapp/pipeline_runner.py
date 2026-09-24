@@ -3018,7 +3018,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         set_panel(fig, title="Subspace error per frame",
                   caption=["Frobenius, unnormalised"],
                   details=[
-                      "Unnormalised distance; grows ~sqrt(k), not a fraction.",
+                      # Verbatim from the retired subtitle, lower case and all: the
+                      # honesty pin in tests/test_webapp_layout_acceptance.py matches
+                      # the clause as it was written, not a re-punctuated version.
+                      "unnormalised distance; grows ~sqrt(k), not a fraction.",
                       f"The dashed line is the warm-start settled level "
                       f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference) -- a separate "
                       "warm-start case, not this run's own level.",

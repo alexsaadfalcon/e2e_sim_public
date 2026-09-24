@@ -109,7 +109,7 @@ on the three Thrust-5 screens.
 | 2 | ≤ 4 lines and ≤ 150 px above the first panel | **PASS** ×8 | 149 px (was 396–512) |
 | 3 | First panel row inside the first 1000 px | **PASS** ×8 | bottom y 871 |
 | 4 | Equal row heights; arms' plot tops within 2 px | **PASS** ×8 | Δh 0, Δy 0.0 |
-| 5 | Plot ≥ 50 % of panel area, ≥ 40 % of height | **PASS** ×8 | 50.3 % / 63 % (was 12.4 %) |
+| 5 | Plot ≥ 50 % of panel area, ≥ 40 % of height | **PASS** ×8 | 50.3–55 % / 63 % (was 12.4 %) |
 | 6 | In-figure text band ≤ 20 % of panel height | **PASS** | 68 px of 540 = 12.6 % |
 | 7 | One-line titles, zero `<sup>` subtitles | **PASS** ×8 | 0 figure titles rendered |
 | 8 | Statistic never over the data | **PASS** | `y domain` y = 1.02/1.13, both > 1 |
@@ -118,7 +118,7 @@ on the three Thrust-5 screens.
 | 11 | Scoreboard ≤ 8 rows, ≤ 40 px rows, ≤ 40 px blank | **PASS** | 8 × 34 + 40 header = 312 |
 | 12 | No truncated visible text | **PASS** ×8 | 0 clipped, 0 ellipses |
 | 13 | Same plot background on every panel | **PASS** ×8 | one `#E5ECF6` |
-| 14 | Page height ≤ 2200 px | **PASS ×5 / FAIL ×3** | T1 1000, T2 2084, T3 1000, T4 1567, cancel 1000; **T5 ×3 = 2480** |
+| 14 | Page height ≤ 2200 px | **PASS ×5 / FAIL ×3** | T1 1000, T2 2084, T3 1000, T4 1548, cancel 1000; **T5 ×3 = 2480** |
 | 15 | Details closed by default; nothing lost when opened | **PASS** ×8 | 0 of 2 open; see §3 |
 | 16 | Diagram canvas **and** Run visible in the first 1000 px | **PASS** | Run at y ≈ 194, diagram y 300–930 |
 | 17 | Diagram node labels ≥ 12 px of rendered ink | **FAIL** | ~10 px — see §4 |
@@ -198,6 +198,20 @@ Each of these was found by **rendering and reading**, not by a dict test:
    now the authority (CLAUDE.md's provenance rule).
 7. `thrust4` could not run in the clone at all — the Tessera checkpoint lives in a
    gitignored `_models/` directory. Added a junction; no code change.
+
+8. **Opening `Details` showed nothing.** `.arm-header { max-height: 96px; overflow:
+   hidden }` enforced the 150 px budget by clipping the header — and the Details
+   disclosure is *inside* the header, so the expanded body was cut to a 4 px sliver.
+   The whole honesty mechanism was one click away and then invisible. The cap now sits
+   on a `.arm-summary` wrapper (chip + caption) instead. **Nothing but rendering the
+   page with `--expand-details` and looking at the PNG could have found this** — every
+   dict-level test still passed.
+9. **The PR caption was clipped** once it carried the AP, the CI and arm B's clause
+   (~110 chars against the ~86 a 746 px column fits at 16 px). Shortened; the long
+   forms stay in Details.
+10. **The run-identity ladder dropped too much** on the Thrust 5 ML screen, leaving
+    "Thrust 5 · 5 frames · run #1" — no preset, no corpus. It now gives up the frame
+    count before the environment.
 
 ---
 

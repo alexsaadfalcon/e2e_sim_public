@@ -603,8 +603,15 @@ def test_stored_pr_figure_states_in_distribution_qualifier():
     assert "one training seed per curve" in text
 
 
-def test_stored_pr_figure_highlighted_arm_legend_carries_the_ci(beat_cfar_data):
+def test_stored_pr_figure_highlighted_arm_carries_its_delta_and_ci(beat_cfar_data):
+    """Only the highlighted arm carries its delta-vs-CFAR, and its CONFIDENCE INTERVAL
+    is on the panel caption rather than the legend entry (2026-09-24): measured on the
+    rendered page, the full 51-character entry overran its half of the two-column
+    legend strip and drew straight through the entry beside it. Both numbers are still
+    on the panel, computed from raddetnet_ci.json; the caption is the more visible of
+    the two places."""
     import json
+    from webapp.pipeline_runner import panel_caption
     ci_data = json.loads(ds.DEFAULT_RADDETNET_CI_JSON.read_text())
     comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
     arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
@@ -612,7 +619,11 @@ def test_stored_pr_figure_highlighted_arm_legend_carries_the_ci(beat_cfar_data):
     trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
     assert f"AP {arm['AP']:.3f}" in trace.name
     assert f"{comp['delta_AP']:+.3f} vs CFAR" in trace.name
-    assert f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]" in trace.name
+    caption = panel_caption(fig)
+    assert f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]" in caption
+    # ONE line in a 746 px column at 16 px is ~86 characters; past that the browser
+    # clips it, and acceptance check 12 forbids a truncation mark in visible text.
+    assert len(caption) <= 86, caption
 
 
 def test_stored_pr_figure_non_highlighted_arm_never_gets_a_ci_legend(beat_cfar_data):
@@ -643,21 +654,43 @@ def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
 # `score_null`'s docstring). Display-only remap, checked against that exact text.
 # --------------------------------------------------------------------------------
 def test_display_arm_name_remaps_only_the_null_arm():
-    # Shortened (Change, 2026-09-23 coordinator re-check): this was the single
-    # longest PR-legend entry, and a right-hand legend sized to it squeezed the plot
-    # to a ~80 px sliver -- still states the real definition, just not the full
-    # sentence.
-    assert (ds._display_arm_name("null (random-in-GT-box)") ==
-           "null: random cells in train-label box (chance floor)")
+    """The stored JSON name ("null (random-in-GT-box)") reads as "random INSIDE the
+    ground-truth boxes", i.e. as if the detector were handed the answer, so it is
+    remapped for display. Shortened again 2026-09-24: in the two-column legend a
+    52-character entry overran its half of the strip and was CLIPPED at the column
+    edge -- and this is the one entry that must never be the one that gets cut,
+    because it is the panel's chance floor. The real definition did not go away; it
+    moved to Details (see the test below)."""
+    assert ds._display_arm_name("null (random-in-GT-box)") == "null (chance floor)"
     assert ds._display_arm_name("classical CFAR") == "classical CFAR"
     assert ds._display_arm_name("raddetnet") == "raddetnet"
 
 
+def test_stored_pr_details_state_the_identical_on_both_arms_sentence():
+    """A panel that is scored OFFLINE and therefore identical on both A/B arms reads as
+    a bug (two panels, same numbers) unless it says so. It is a standing Details line
+    on every call, because it is true of both arms; `webapp/app.py` additionally puts a
+    short "identical on both arms" clause on ARM B's visible caption, so the statement
+    is made once per row rather than twice."""
+    from webapp.pipeline_runner import panel_text
+    text = panel_text(ds.stored_pr_figure(highlight_arm="raddetnet"))
+    assert "scored offline; identical on both arms, the knob cannot move it" in text
+
+
 def test_stored_pr_figure_null_arm_shows_the_real_definition_not_the_stored_name():
+    """The misleading stored name never reaches the screen, and the REAL definition is
+    still on the panel -- in Details, because the legend entry had to shrink to fit the
+    two-column strip (2026-09-24). `panel_text` is title + caption + Details, i.e.
+    everything the presenter can reach in one click."""
+    from webapp.pipeline_runner import panel_text
     fig = ds.stored_pr_figure()
     names = [tr.name for tr in fig.data]
-    assert any(n.startswith("null: random cells in train-label box") for n in names)
+    assert any(n.startswith("null (chance floor)") for n in names)
     assert not any("random-in-GT-box" in n for n in names)
+    text = panel_text(fig)
+    assert "random cells in train-label box" in text
+    assert "never the eval labels" in text
+    assert "random-in-GT-box" not in text
 
 
 # --------------------------------------------------------------------------------

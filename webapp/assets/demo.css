@@ -96,8 +96,13 @@ button:disabled {
 /* Arm header: chip, one-line caption, collapsed Details. At most 4 lines and 150 px
    of this may sit above the first panel (acceptance check 2). */
 /* Hard cap: 4 text lines and 150 px above the first panel's top border
-   (acceptance check 2). Chip 27 + caption 22 + disclosure 24 + gaps = ~78. */
-.arm-header { max-height: 96px; overflow: hidden; }
+   (acceptance check 2). Chip 27 + caption 22 + disclosure 24 + gaps = ~78.
+   The cap is on the SUMMARY, not on the header: capping the header clipped the
+   OPENED Details disclosure to a 4 px sliver, so the honesty text was one click away
+   and then invisible (found on the `--expand-details` render, 2026-09-24). Opening
+   Details is meant to push the panels down. */
+.arm-header { }
+.arm-summary { max-height: 56px; overflow: hidden; }
 .arm-chip { display: flex; align-items: center; gap: var(--sp-2); }
 .arm-chip-label { font-size: 20px; font-weight: 700; }
 .arm-chip-a .arm-chip-label { color: var(--arm-a); }

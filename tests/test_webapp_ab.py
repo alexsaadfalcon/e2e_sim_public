@@ -909,7 +909,14 @@ def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
     caption_b = panel_caption(result_b["figs"]["detector_pr_stored"])
     assert "identical on both arms" not in caption_a
     assert "identical on both arms" in caption_b
-    assert "the knob cannot move it" in caption_b
+    # The VISIBLE clause was shortened to "identical on both arms" (2026-09-24): with
+    # the highlighted arm's AP and its CI already on this line, the longer form pushed
+    # the caption past the ~86 characters a 746 px column fits at 16 px and the browser
+    # clipped it. The full sentence ("scored offline; identical on both arms, the knob
+    # cannot move it") is a standing Details line on BOTH arms, because it is true of
+    # both -- pinned on the REAL figure in
+    # tests/test_detector_scoreboard.py::test_stored_pr_details_state_the_identical_on_both_arms_sentence
+    # (this test's `stored_pr_figure` is a mock and carries no Details of its own).
     # The default arm is "a" -- an ordinary single-run call must not pick up the
     # B-only clause by accident.
     result_default = appmod._arm_result(1, outputs, 5, {}, "", "")
