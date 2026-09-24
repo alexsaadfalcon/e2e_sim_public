@@ -107,14 +107,14 @@ on the three Thrust-5 screens.
 |---|---|---|---|
 | 1 | No text < 15 px on the page, < 17 px inside a figure | **PASS** ×8 | page 15–26, figure 17–26 |
 | 2 | ≤ 4 lines and ≤ 150 px above the first panel | **PASS** ×8 | 149 px (was 396–512) |
-| 3 | First panel row inside the first 1000 px | **PASS** ×8 | bottom y 871 |
+| 3 | First panel row inside the first 1000 px | **PASS** ×8 | bottom y 843–871 |
 | 4 | Equal row heights; arms' plot tops within 2 px | **PASS** ×8 | Δh 0, Δy 0.0 |
 | 5 | Plot ≥ 50 % of panel area, ≥ 40 % of height | **PASS** ×8 | 50.3–55 % / 63 % (was 12.4 %) |
 | 6 | In-figure text band ≤ 20 % of panel height | **PASS** | 68 px of 540 = 12.6 % |
 | 7 | One-line titles, zero `<sup>` subtitles | **PASS** ×8 | 0 figure titles rendered |
 | 8 | Statistic never over the data | **PASS** | `y domain` y = 1.02/1.13, both > 1 |
 | 9 | A/B gutter ≥ 24 px | **PASS** ×8 | 28 px + a rule |
-| 10 | Exactly one transport per screen | **PASS** ×8 | 1 button, 1 slider, 0 Plotly |
+| 10 | Exactly one transport per screen | **PASS** ×8 | 1 button, 1 slider, 0 Plotly; **0 / 0** on Thrust 3, which animates nothing |
 | 11 | Scoreboard ≤ 8 rows, ≤ 40 px rows, ≤ 40 px blank | **PASS** | 8 × 34 + 40 header = 312 |
 | 12 | No truncated visible text | **PASS** ×8 | 0 clipped, 0 ellipses |
 | 13 | Same plot background on every panel | **PASS** ×8 | one `#E5ECF6` |
@@ -212,6 +212,14 @@ Each of these was found by **rendering and reading**, not by a dict test:
 10. **The run-identity ladder dropped too much** on the Thrust 5 ML screen, leaving
     "Thrust 5 · 5 frames · run #1" — no preset, no corpus. It now gives up the frame
     count before the environment.
+11. **A dead transport on Thrust 3.** That screen's only product is a line plot with no
+    frames, so the play button and slider sat there doing nothing. The row now omits
+    the transport unless some figure on the page carries frames.
+12. **The Details body scrolled inside itself** (`max-height: 520px; overflow-y:
+    auto`), so the tail of the Thrust 5 disclosure was below its own inner fold and a
+    photograph of the *opened* screen — the thing the honesty text exists for — still
+    missed clauses. It expands now; the opened Thrust 5 CFAR page is 3630 px and every
+    line is in one capture.
 
 ---
 
@@ -225,3 +233,58 @@ Each of these was found by **rendering and reading**, not by a dict test:
   control in the run-identity row, the per-panel sliders are gone, "dragging a slider
   parks one arm" (§3.3) no longer applies, and the honesty text is behind `▸ Details`.
 - **Check 17 / check 14** as described above — both need a decision, not a patch.
+
+
+---
+
+## 6b. Test suite
+
+`python -m pytest tests/ -q -p no:randomly` in the clone:
+
+**2325 passed · 165 skipped · 2 xfailed · 1 FAILED.**
+
+The single failure is `tests/test_runbook.py::test_panel_titles_match_the_rendered_source`
+-- a file I was told not to edit, whose owner regenerates the runbook after this pass.
+It scrapes panel titles out of `webapp/pipeline_runner.py`'s SOURCE and asserts each
+appears verbatim; the titles are now `set_panel(..., title="Range profile")` rather
+than the old `"Range profile (non-coherent over channels)"` (the qualifier is a caption
+clause). The fix is one line in the runbook's extractor, or simply regenerating it.
+
+The skips are the usual hardware/human gates (`sionna`, `slow`, `gui`, `browser`), not
+anything this pass introduced.
+
+Test files rewritten rather than deleted: `test_webapp_figures_wave2/3/4/7/8/9/11`,
+`test_detector_scoreboard`, `test_webapp_ab`, `test_webapp_detector`, `test_webapp`,
+`test_webapp_rehearsal`, `test_webapp_run_notes` -- every assertion that pinned a
+figure title or subtitle string was repointed onto `panel_text()`, which returns title
++ caption + the whole Details body, so a test pins the CLAUSE rather than the place.
+New: `tests/test_webapp_layout_acceptance.py` (29 tests).
+
+### Commits (in the clone, never pushed)
+
+```
+256cb97 fix(webapp): the Details body expands instead of scrolling inside itself
+bc7e658 test(webapp): extend the check-15 honesty pin to the corpus-replay panels
+6024d2d fix(webapp): no transport on a screen with nothing to animate
+4f60ad3 fix(webapp): the Details disclosure was being clipped shut, and four smaller render-found defects
+2d78d4d fix(webapp): render-measured corrections to the fixed-geometry layout, and the tests repointed to where the words now live
+fdd1961 feat(webapp): fixed-geometry results layout -- figures carry no prose, panels carry no surprise
+fe7720d wip(webapp): layout redesign checkpoint (protects against a sub-agent stash)
+```
+
+`git diff --shortstat c33bb64..HEAD`: **22 files changed, 4054 insertions(+), 1903
+deletions(-)**.
+
+---
+
+## 7. Where things are
+
+- **Clone** (all work; the main tree was never touched):
+  `C:/Users/asf3/AppData/Local/Temp/claude/C--Users-asf3-workspace-e2e-sim-public/56ce5296-5481-4d28-af02-421b8a5acf69/scratchpad/beauty`
+- **Rendered screens** (8 `*_results.png`, 8 `*_results_details.png`, 7 `*_card.png`,
+  8 `*_geometry.json`, `summary.json`):
+  `.../scratchpad/render_all/`
+- **Pixel-check runner**: `.../scratchpad/measure.py` (`python measure.py render_all -v`)
+- **Unit acceptance checks**: `<clone>/tests/test_webapp_layout_acceptance.py`
+- **Extra junction needed in a clone**: `e2e/interconnect_surrogate/_models` (the
+  Tessera checkpoint), without which Thrust 4 cannot run at all.
