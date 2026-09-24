@@ -136,12 +136,18 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "text-valign": "center",
             "text-halign": "center",
             "color": "#fff",
-            "font-size": "12px",
+            # 20px CSS x ~0.6 fit zoom (width-bound -- see the minZoom-removal
+            # comment on block-cytoscape below) ~= 12px of rendered ink, the
+            # acceptance threshold. This arithmetic holds at the diagram panel's
+            # CURRENT column width (~1032px) and the CURRENT _POSITIONS pitches --
+            # widen the panel or retune positions and the fit zoom (and this sum)
+            # must be recomputed, not assumed.
+            "font-size": "20px",
             "font-weight": 600,
             "text-wrap": "wrap",
-            "text-max-width": "130px",
+            "text-max-width": "150px",
             "width": "160px",
-            "height": "60px",
+            "height": "76px",
             "shape": "round-rectangle",
             "background-color": CATEGORY_COLORS["stage"],
             "border-width": 2,
@@ -218,7 +224,8 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
     {"selector": "edge.alt-path", "style": {"line-color": "#e17055",
                                             "target-arrow-color": "#e17055",
                                             "line-style": "dotted",
-                                            "width": 2.5}},
+                                            "width": 1,
+                                            "opacity": 0.3}},
 ]
 
 
@@ -326,9 +333,8 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
         children.append(html.Label(ps.label, style={"fontWeight": "bold",
                                                      "display": "block",
                                                      "marginTop": "6px"}))
-        if ps.help:
-            children.append(html.Span(ps.help, style={"fontSize": "15px",
-                                                       "color": "#8395a7"}))
+        # Control first, help underneath (was help-then-control -- the thing the
+        # presenter must click was the least findable object in the column).
         cid = {"role": "block-param", "block": block_id, "param": ps.key}
         if ps.kind == "choice":
             children.append(dcc.Dropdown(
@@ -355,6 +361,24 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
                 debounce=True, style={"width": "100%", "marginBottom": "4px"},
                 **input_kwargs,
             ))
+        if ps.help:
+            # Capped at 2 lines by default (line-clamp) with a "more" disclosure
+            # that reveals the full, untruncated help string -- the 5-line grey
+            # paragraph used to push the control below the fold of the column.
+            children.append(html.Div([
+                html.P(ps.help, style={
+                    "fontSize": "15px", "color": "#8395a7", "margin": "2px 0 0",
+                    "display": "-webkit-box", "WebkitLineClamp": "2",
+                    "WebkitBoxOrient": "vertical", "overflow": "hidden",
+                }),
+                html.Details([
+                    html.Summary("▸ more", style={"fontSize": "15px",
+                                                        "color": "#8395a7",
+                                                        "cursor": "pointer"}),
+                    html.P(ps.help, style={"fontSize": "15px", "color": "#8395a7",
+                                           "marginTop": "2px"}),
+                ]),
+            ], style={"marginBottom": "2px"}))
     return children
 
 
@@ -378,14 +402,23 @@ def preset_notes(preset: DemoPreset) -> Any:
 
     knobs = [f"{BLOCKS_BY_ID[b].label} -> {_param_label(b, k)}: {how}"
              for b, k, how in preset.live_knobs]
-    return html.Div([
+    body = html.Div([
         html.Div(f"Loaded: {preset.label}  (Thrust {preset.thrust}, {preset.n_steps} frames)",
                  style={"fontWeight": "bold"}),
         html.P(preset.blurb, style={"marginTop": "4px", "marginBottom": "2px"}),
         _list("Turn live", knobs, "#3867d6"),
         _list("Say", preset.say, "#20bf6b"),
         _list("Do NOT say or show", preset.do_not_say, "#eb3b5a"),
-    ], style={"fontSize": "16px", "color": "#2d3a4a"})
+    ], style={"fontSize": "16px", "color": "#2d3a4a", "marginTop": "8px"})
+    # Collapsed by default (was a 750px wall of text between the tab strip and the
+    # diagram); the summary names the thrust so a collapsed card still orients.
+    return html.Details([
+        html.Summary(f"▸ Presenter notes (Thrust {preset.thrust})",
+                     style={"fontWeight": "bold", "cursor": "pointer",
+                            "fontSize": "16px", "color": "#2d3a4a"}),
+        body,
+    ], style={"padding": "12px", "border": "1px solid #dfe4ea",
+             "borderRadius": "6px", "backgroundColor": "#f7f9fb"})
 
 
 def _legend_swatch(color: str, label: str) -> Any:
@@ -417,7 +450,56 @@ def _legend_line(label: str, dashed: bool = False, style: str = None,
 
 
 def layout() -> Any:
-    """The Block Diagram tab layout."""
+    """The Block Diagram tab layout.
+
+    Structure, top to bottom: (1) a sticky one-line control bar -- preset picker,
+    Run pipeline, Cancel -- so the button the whole demo depends on never sits a
+    thousand px below the fold; (2) the diagram + parameter editor work row;
+    (3) the edge/color legend; (4) the operator card, collapsed by default (see
+    preset_notes). Every existing component id is unchanged -- app.py's callbacks
+    wire to these ids and are not part of this file.
+    """
+    control_bar = html.Div([
+        html.Label("Demo preset:", style={"fontWeight": "bold", "marginRight": "8px",
+                                          "whiteSpace": "nowrap"}),
+        dcc.Dropdown(
+            id="preset-select",
+            options=[{"label": p.label, "value": p.id} for p in PRESETS],
+            value=PRESETS[0].id if PRESETS else None, clearable=False,
+            style={"width": "520px", "flex": "0 0 520px"},
+        ),
+        html.Button("Load preset", id="preset-load", n_clicks=0,
+                    style={"marginLeft": "8px", "width": "110px", "padding": "6px 0",
+                           "fontWeight": "bold", "backgroundColor": "#3867d6",
+                           "color": "white", "border": "none",
+                           "borderRadius": "4px", "cursor": "pointer"}),
+        html.Div(className="control-divider", style={"margin": "0 16px"}),
+        html.Label("Frames to run:", style={"fontWeight": "bold", "marginRight": "8px",
+                                            "whiteSpace": "nowrap"}),
+        # Bounded to MAX_N_STEPS on both ends of the wire: here (advisory, a typed
+        # value can still exceed it) and in run_pipeline (enforced).
+        dcc.Input(id="run-nsteps", type="number", value=10, min=1, max=MAX_N_STEPS,
+                  step=1, style={"width": "90px"}),
+        html.Button("Run pipeline", id="run-button", n_clicks=0,
+                    style={"marginLeft": "12px", "width": "150px", "padding": "6px 0",
+                           "fontWeight": "bold", "backgroundColor": "#20bf6b",
+                           "color": "white", "border": "none",
+                           "borderRadius": "4px", "cursor": "pointer"}),
+        # Enabled only while a run is in progress (see app._run_pipeline's
+        # `running=`); sets a flag the simulation polls before each frame.
+        html.Button("Cancel", id="cancel-button", n_clicks=0, disabled=True,
+                    style={"marginLeft": "8px", "width": "100px", "padding": "6px 0",
+                           "backgroundColor": "#eb3b5a", "color": "white",
+                           "border": "none", "borderRadius": "4px",
+                           "cursor": "pointer"}),
+        html.Span(id="run-status", style={"marginLeft": "12px", "fontSize": "16px",
+                                          "color": "#576574", "overflow": "hidden",
+                                          "textOverflow": "ellipsis", "whiteSpace": "nowrap",
+                                          "minWidth": "0", "flex": "1 1 auto"}),
+    ], className="control-bar",
+       style={"display": "flex", "alignItems": "center",
+              "flexWrap": "nowrap", "padding": "0 12px", "overflowX": "auto"})
+
     legend = html.Div([
         _legend_swatch(CATEGORY_COLORS["source"], "source"),
         _legend_swatch(CATEGORY_COLORS["stage"], "stage"),
@@ -427,87 +509,56 @@ def layout() -> Any:
         _legend_line("inactive edge", dashed=True),
         _legend_line("alternative source path - only one used per run",
                      style="dotted", color="#e17055"),
-    ], style={"marginBottom": "8px", "fontSize": "12px", "display": "flex",
-              "flexWrap": "wrap", "alignItems": "center"})
+    ], style={"marginTop": "8px", "marginBottom": "8px", "fontSize": "15px",
+              "display": "flex", "flexWrap": "nowrap", "overflowX": "auto",
+              "alignItems": "center"})
+
+    work_row = html.Div([
+        html.Div(
+            cyto.Cytoscape(
+                id="block-cytoscape",
+                elements=[],            # populated by callback from store
+                stylesheet=CYTO_STYLESHEET,
+                # fit=True re-frames the viewport to the current extent on every
+                # (re)render. The full ~13-column pipeline is wide enough that a
+                # width-bound fit at this panel size lands well under 1.0 (~0.6) --
+                # an earlier revision floored zoom at 0.85 via minZoom, but that
+                # cropped the source node on the left and ran the whole ADC-cube
+                # tributary off the right edge of the canvas (confirmed in a real
+                # browser render at 1600x1000), which is a worse demo defect than
+                # smaller labels. No minZoom: the whole graph always fits: the
+                # readability loss from the resulting ~0.6 zoom is compensated by
+                # the larger font-size in CYTO_STYLESHEET instead (see its comment).
+                layout={"name": "preset", "fit": True, "padding": 20},
+                style={"width": "100%", "height": "620px"},
+                userZoomingEnabled=True,
+                userPanningEnabled=True,
+            ),
+            style={"flex": "1 1 1032px", "border": "1px solid #dfe4ea",
+                   "borderRadius": "6px", "padding": "4px"},
+        ),
+        html.Div(
+            id="block-param-editor",
+            children=param_editor(PRODUCT_IDS[0], {}),
+            style={"flex": "0 0 460px", "marginLeft": "28px", "padding": "12px",
+                   "border": "1px solid #dfe4ea", "borderRadius": "6px",
+                   "overflowY": "auto", "maxHeight": "640px"},
+        ),
+    ], style={"display": "flex", "marginTop": "12px"})
 
     return html.Div([
-        html.H3("Pipeline Block Diagram"),
+        control_bar,
+        html.H3("Pipeline Block Diagram", style={"marginTop": "12px", "marginBottom": "4px"}),
         html.P("Click a block to edit its parameters or toggle it on/off. "
-               "Dashed edges feed a disabled block. Then hit Run pipeline.",
-               style={"color": "#576574"}),
+               "Dashed edges feed a disabled block.",
+               style={"color": "#576574", "marginTop": "0"}),
+        work_row,
         legend,
         # Demo presets (notes/DEMO_DEFENSE.md): one click configures every block, the
         # frame count and the operator notes for one thrust. Loading a preset REPLACES
-        # the block state; edits made afterwards are the operator's own.
-        html.Div([
-            html.Label("Demo preset: ", style={"fontWeight": "bold", "marginRight": "6px"}),
-            dcc.Dropdown(
-                id="preset-select",
-                options=[{"label": p.label, "value": p.id} for p in PRESETS],
-                value=PRESETS[0].id if PRESETS else None, clearable=False,
-                style={"width": "620px", "display": "inline-block",
-                       "verticalAlign": "middle"},
-            ),
-            html.Button("Load preset", id="preset-load", n_clicks=0,
-                        style={"marginLeft": "12px", "padding": "6px 14px",
-                               "fontWeight": "bold", "backgroundColor": "#3867d6",
-                               "color": "white", "border": "none",
-                               "borderRadius": "4px", "cursor": "pointer",
-                               "verticalAlign": "middle"}),
-            html.Div(id="preset-notes", style={"marginTop": "8px"}),
-        ], style={"marginBottom": "10px", "padding": "10px",
-                  "border": "1px solid #dfe4ea", "borderRadius": "6px",
-                  "backgroundColor": "#f7f9fb"}),
-        html.Div([
-            html.Div(
-                cyto.Cytoscape(
-                    id="block-cytoscape",
-                    elements=[],            # populated by callback from store
-                    stylesheet=CYTO_STYLESHEET,
-                    # fit=True re-frames the viewport to the current extent on
-                    # every (re)render. Height is sized to the diagram's OWN
-                    # aspect (~1400x840 layout units): at typical panel widths
-                    # the fit zoom is width-bound (~0.7), so the fitted content
-                    # is ~600px tall -- an 820px canvas just added a dead-space
-                    # band below the diagram (flagged in the showcase capture).
-                    layout={"name": "preset", "fit": True, "padding": 20},
-                    style={"width": "100%", "height": "620px"},
-                    userZoomingEnabled=True,
-                    userPanningEnabled=True,
-                ),
-                style={"flex": "3", "border": "1px solid #dfe4ea",
-                       "borderRadius": "6px", "padding": "4px"},
-            ),
-            html.Div(
-                id="block-param-editor",
-                children=param_editor(PRODUCT_IDS[0], {}),
-                style={"flex": "1", "marginLeft": "12px", "padding": "10px",
-                       "border": "1px solid #dfe4ea", "borderRadius": "6px",
-                       "minWidth": "240px", "maxWidth": "320px",
-                       "overflowY": "auto", "maxHeight": "820px"},
-            ),
-        ], style={"display": "flex"}),
-        html.Div([
-            html.Label("Frames to run (n_steps): ",
-                       style={"fontWeight": "bold", "marginRight": "6px"}),
-            # Bounded to MAX_N_STEPS on both ends of the wire: here (advisory, a typed
-            # value can still exceed it) and in run_pipeline (enforced).
-            dcc.Input(id="run-nsteps", type="number", value=10, min=1, max=MAX_N_STEPS,
-                      step=1, style={"width": "80px"}),
-            html.Button("Run pipeline", id="run-button", n_clicks=0,
-                        style={"marginLeft": "12px", "padding": "6px 16px",
-                               "fontWeight": "bold", "backgroundColor": "#20bf6b",
-                               "color": "white", "border": "none",
-                               "borderRadius": "4px", "cursor": "pointer"}),
-            # Enabled only while a run is in progress (see app._run_pipeline's
-            # `running=`); sets a flag the simulation polls before each frame.
-            html.Button("Cancel", id="cancel-button", n_clicks=0, disabled=True,
-                        style={"marginLeft": "8px", "padding": "6px 12px",
-                               "backgroundColor": "#eb3b5a", "color": "white",
-                               "border": "none", "borderRadius": "4px",
-                               "cursor": "pointer"}),
-            html.Span(id="run-status", style={"marginLeft": "12px",
-                                              "color": "#576574"}),
-        ], style={"marginTop": "12px"}),
+        # the block state; edits made afterwards are the operator's own. The card
+        # itself (collapsed disclosure, summary names the thrust) is built by
+        # preset_notes() -- before any preset is loaded this div is empty.
+        html.Div(id="preset-notes", style={"marginTop": "16px"}),
         dcc.Loading(html.Div(id="run-sink", style={"display": "none"}), type="default"),
     ])

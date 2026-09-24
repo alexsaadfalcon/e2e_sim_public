@@ -17,6 +17,7 @@ figure meets the podium-distance font floor.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -213,10 +214,35 @@ def _all_text(component) -> str:
     return " ".join(parts)
 
 
+def _visible_text(component) -> str:
+    """Like `_all_text`, but skips the body of a (closed by default) `html.Details`
+    disclosure -- 2026-09-24 layout redesign: each arm's Details is collapsed unless
+    the presenter clicks it, so text found only inside one is not what "a photograph
+    of the screen" shows (see `_details_disclosure` in webapp/app.py)."""
+    if isinstance(component, str):
+        return component
+    if type(component).__name__ == "Details":
+        return ""
+    parts = []
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        parts.extend(_visible_text(c) for c in children if c is not None)
+    elif children is not None:
+        parts.append(_visible_text(children))
+    return " ".join(parts)
+
+
 def test_render_results_ab_run_has_no_generic_this_run_prefix(monkeypatch):
     """An A/B run's banners already name their own arm in full (see `_ab_arm_line`);
-    the generic 'This run:'/'Previous run (for before/after):' prefix -- kept for the
-    single-run and manual before/after paths -- must not also be prepended."""
+    the generic 'This run'/'Previous run (for before/after)' arm-chip fallback label
+    -- kept for the single-run and manual before/after paths -- must not also appear.
+
+    2026-09-24 layout redesign: the label is now an ARM CHIP (`_arm_header`'s
+    `fallback_label`, no trailing colon any more -- see `_ab_arm_chip`'s docstring
+    for why the old bold multi-line banner became a chip), not a colon-suffixed
+    prefix on a banner sentence; the substance pinned here (the generic label must
+    not leak into an A/B render, which instead gets "A (as loaded): .../ B: ...")
+    is unchanged."""
     import webapp.app as appmod
 
     preset = PRESETS_BY_ID["thrust1_circuit_knobs"]
@@ -227,13 +253,17 @@ def test_render_results_ab_run_has_no_generic_this_run_prefix(monkeypatch):
 
     tree = appmod._render_results(data, "tab-results")
     text = _all_text(tree)
-    assert "This run:" not in text
-    assert "Previous run (for before/after):" not in text
+    assert "This run" not in text
+    assert "Previous run (for before/after)" not in text
     assert "A (as loaded):" in text and "B:" in text
 
 
 def test_render_results_single_run_keeps_generic_prefix(monkeypatch):
-    """Non-AB single-run/manual before-after path keeps today's wording unchanged."""
+    """Non-AB single-run/manual before-after path keeps the generic arm-chip label.
+
+    2026-09-24 redesign: this is now `_arm_header`'s `fallback_label`, "This run"
+    with NO trailing colon (see the test above) -- the old "This run:" banner prefix
+    is gone along with the banner it prefixed."""
     import webapp.app as appmod
 
     preset = PRESETS_BY_ID["thrust5_detector_cfar"]
@@ -244,7 +274,7 @@ def test_render_results_single_run_keeps_generic_prefix(monkeypatch):
 
     tree = appmod._render_results(data, "tab-results")
     text = _all_text(tree)
-    assert "This run:" in text
+    assert "This run" in text
 
 
 # ------------------------------------------------------------------------------------
@@ -358,11 +388,15 @@ def test_peak_minus_median_matches_direct_computation_to_1e_minus_6():
 
 
 def test_range_az_panel_carries_the_peak_minus_median_statistic():
-    """The stat lives in the title (a "<br><sup>" subline, like the detector panel),
-    not a floating annotation -- an annotation collided with the title text at the
-    podium-distance font size (rehearsal, 2026-09-23)."""
+    """The exact "peak - median, dB: X" clause lives in the panel's Details now
+    (2026-09-24 redesign: the figure carries no title/subtitle at all any more --
+    see `webapp.pipeline_runner`'s "PANEL GEOMETRY AND THE PANEL-META CONTRACT"
+    section). The number itself is also STILL visible without opening anything, in
+    the reserved statistic strip above the plot (an annotation, "X dB peak-median"
+    with a unicode minus) -- `panel_text` reaches both, and this test pins the exact
+    Details sentence, which is where the number this test measures actually is."""
     torch = pytest.importorskip("torch")
-    from webapp.pipeline_runner import figures_from_outputs
+    from webapp.pipeline_runner import figures_from_outputs, panel_text
 
     rng = np.random.default_rng(6)
     power = rng.random((16, 16)).astype(np.float32)
@@ -370,14 +404,15 @@ def test_range_az_panel_carries_the_peak_minus_median_statistic():
     fig = figures_from_outputs({"range_az": [ra], "_axis_meta": {"range_az_bins": 16}})["range_az"]
 
     # Extracted by its own label, not by end-of-string anchoring (wave 7 appended the
-    # gate-calibration/adaptive-clip clauses after this statistic in the same subline).
-    title = fig.layout.title.text.replace("<br>", " ")
-    assert "peak - median" in title
-    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", title).group(1))
+    # gate-calibration/adaptive-clip clauses after this statistic). Details lines are
+    # unwrapped (no `<br>` to strip any more, unlike the old figure subtitle).
+    text = panel_text(fig)
+    assert "peak - median" in text
+    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", text).group(1))
     db = 10 * np.log10(np.maximum(power / power.max(), 1e-12))
     expected = round(float(db.max() - np.median(db)), 1)
     assert measured == pytest.approx(expected, abs=0.05)
-    assert "dB" in title
+    assert "dB" in text
 
 
 def test_range_el_panel_carries_the_peak_minus_median_statistic_too():
@@ -385,33 +420,39 @@ def test_range_el_panel_carries_the_peak_minus_median_statistic_too():
     worker, pipeline_runner.py line ~1308): range-elevation now prints the same
     peak-median statistic as range-azimuth, because the Thrust 2 screen note claims
     "statistics printed on each" for BOTH panels -- a screen note about the elevation
-    cut previously had no number beside it while range-azimuth's identical note did."""
+    cut previously had no number beside it while range-azimuth's identical note did.
+    See `test_range_az_panel_carries_the_peak_minus_median_statistic` for where the
+    2026-09-24 redesign moved this clause to (a Details line, not a figure title)."""
     torch = pytest.importorskip("torch")
-    from webapp.pipeline_runner import figures_from_outputs
+    from webapp.pipeline_runner import figures_from_outputs, panel_text
 
     rng = np.random.default_rng(9)
     power = rng.random((12, 12)).astype(np.float32)
     ra = torch.from_numpy(power).to(torch.complex64)
     fig = figures_from_outputs({"range_el": [ra], "_axis_meta": {"range_el_bins": 12}})["range_el"]
 
-    title = fig.layout.title.text.replace("<br>", " ")
-    assert "peak - median" in title
-    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", title).group(1))
+    text = panel_text(fig)
+    assert "peak - median" in text
+    measured = float(re.search(r"peak - median, dB:\s*(-?\d+\.\d+)", text).group(1))
     db = 10 * np.log10(np.maximum(power / power.max(), 1e-12))
     expected = round(float(db.max() - np.median(db)), 1)
     assert measured == pytest.approx(expected, abs=0.05)
 
 
 def test_range_profile_panel_carries_the_median_floor_statistic():
-    from webapp.pipeline_runner import figures_from_outputs
+    """Was a figure title subline; the exact sentence is now a Details line
+    (2026-09-24 redesign -- see the range_az test above for the same move); the
+    number is also visible without opening anything, in the reserved statistic
+    strip's "X dB median floor" annotation."""
+    from webapp.pipeline_runner import figures_from_outputs, panel_text
 
     rng = np.random.default_rng(5)
     prof = rng.random(16)
     fig = figures_from_outputs({"range_profile_agg": [prof],
                                 "_axis_meta": {"range_profile_bins": 16}})["range_profile"]
-    title = fig.layout.title.text
-    assert "median floor" in title
-    measured = float(re.search(r"(-?\d+\.\d+)\s*(?:</sup>)?\s*$", title).group(1))
+    text = panel_text(fig)
+    assert "median floor" in text
+    measured = float(re.search(r"median floor, dB rel\. peak:\s*(-?\d+\.\d+)", text).group(1))
     peak = max(float(prof.max()), 1e-12)
     prof_db = 10 * np.log10(prof / peak + 1e-12)
     expected = round(float(np.median(prof_db)), 1)
@@ -436,8 +477,12 @@ def test_radar_cube_clip_never_loosens_below_40_and_tightens_for_a_noisy_frame()
 
 
 def test_radar_cube_panel_clip_matches_its_own_colorbar_label():
+    """The clip used to be printed on the colour-bar's own title; 2026-09-24 redesign
+    retires colour-bar titles entirely (layout spec section 4 -- a 20 px colorbar
+    title bought its width by shrinking the plot) and states the same clip, still at
+    one decimal, in the panel's one-line CAPTION instead (`CLIP_CLAUSE_PREFIX`)."""
     torch = pytest.importorskip("torch")
-    from webapp.pipeline_runner import _radar_cube_clip_db, figures_from_outputs
+    from webapp.pipeline_runner import _radar_cube_clip_db, figures_from_outputs, panel_caption
 
     rng = np.random.default_rng(7)
     cube = (rng.random((4, 8, 6)) + 1j * rng.random((4, 8, 6))).astype(np.complex64)
@@ -450,20 +495,26 @@ def test_radar_cube_panel_clip_matches_its_own_colorbar_label():
     expected_clip = _radar_cube_clip_db(db)
 
     assert fig.data[0].zmin == pytest.approx(expected_clip)
-    assert f"{expected_clip:.1f}" in fig.data[0].colorbar.title.text  # wave 2: one decimal on screen
+    assert fig.data[0].colorbar.title.text is None  # no colour-bar title any more
+    assert f"{expected_clip:.1f}" in panel_caption(fig)  # wave 2: one decimal on screen
 
 
 # ------------------------------------------------------------------------------------
 # Change 3: subspace-error y-axis floor/bound + labelled settled-level reference line
 # ------------------------------------------------------------------------------------
 def test_subspace_err_has_a_minimum_upper_bound_and_settled_reference_line():
+    """"Frobenius" stays on the y-axis title (an axis title is not prose the
+    2026-09-24 redesign touches); "unnormalised" was on the figure's title/subtitle
+    and is now the panel's one-line CAPTION ("Frobenius, unnormalised distance") --
+    see `webapp.pipeline_runner`'s "PANEL GEOMETRY AND THE PANEL-META CONTRACT"."""
     from webapp.pipeline_runner import (_SUBSPACE_ERR_MIN_YMAX, _SUBSPACE_ERR_SETTLED_LEVEL,
-                                        figures_from_outputs)
+                                        figures_from_outputs, panel_caption)
 
     fig = figures_from_outputs({"subspace_err": [0.04, 0.05, 0.06]})["subspace_err"]
     assert fig.layout.yaxis.range[0] == 0.0
     assert fig.layout.yaxis.range[1] >= _SUBSPACE_ERR_MIN_YMAX
-    assert "Frobenius" in fig.layout.yaxis.title.text and "unnormalised" in fig.layout.title.text
+    assert "Frobenius" in fig.layout.yaxis.title.text
+    assert "unnormalised" in panel_caption(fig)
     shapes = fig.layout.shapes or ()
     assert any(abs(float(s.y0) - _SUBSPACE_ERR_SETTLED_LEVEL) < 1e-9 and s.line.dash == "dash"
               for s in shapes), "expected a dashed reference line at the settled level"
@@ -606,15 +657,31 @@ def test_app_layout_max_width_fits_the_conference_monitor():
     """Coordinator finding, 2026-09-23: 1280px wasted ~338px of margin per side on a
     1920x1080 conference monitor and bought the lone-figure Thrust 3 screen nothing
     from the bigger display. Figures scale with their container; only the wrapper's
-    own cap needed raising."""
+    own cap needed raising.
+
+    2026-09-24 layout redesign: the cap moved OFF the layout's own inline `style`
+    onto a CSS class (`.app-shell`, `webapp/assets/demo.css`) -- page geometry lives
+    in CSS now, alongside the rest of the layout spec's fixed constants. Pin both
+    ends of that move: the root `Div` wears the class, and the class's own
+    `max-width` rule is comfortably past the old 1280px cap."""
+    import re
+
     import webapp.app as appmod
 
-    style = appmod._app_layout().style or {}
-    width = float(str(style.get("maxWidth", "0")).rstrip("px"))
-    assert width >= 1600
+    layout = appmod._app_layout()
+    assert layout.className == "app-shell"
+    css_path = Path(appmod.__file__).resolve().parent / "assets" / "demo.css"
+    css = css_path.read_text()
+    m = re.search(r"\.app-shell\s*\{[^}]*max-width:\s*(\d+)px", css)
+    assert m, f"no .app-shell max-width rule in {css_path}"
+    assert int(m.group(1)) >= 1500
 
 
 def test_detection_markers_are_enlarged_for_podium_distance():
+    """Trace names now carry a leading marker GLYPH ("✕ detections (n=...)",
+    "● ground truth (n=...)") so the legend entry reads correctly on its own
+    (2026-09-24 redesign, see `pipeline_runner`'s detector-figure section) --
+    `.startswith` on the bare word no longer matches; `in` does."""
     from webapp.pipeline_runner import figures_from_outputs
 
     obj = np.zeros((2, 8, 16), dtype=np.float32)
@@ -626,8 +693,8 @@ def test_detection_markers_are_enlarged_for_podium_distance():
                        "detector": {"mode": "cfar", "threshold": 0.66, "label": "x"}},
     }
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    det_trace = next(t for t in fig.data if (t.name or "").startswith("detections"))
-    gt_trace = next(t for t in fig.data if (t.name or "").startswith("ground truth"))
+    det_trace = next(t for t in fig.data if "detections" in (t.name or ""))
+    gt_trace = next(t for t in fig.data if "ground truth" in (t.name or ""))
     assert det_trace.marker.size == 14
     # wave 2: ground truth is drawn as its match-tolerance box (a layout shape) with a small
     # centre dot, so the marker is deliberately small; the box carries the size.
@@ -684,16 +751,29 @@ def test_read_corpus_v_max_returns_none_without_a_manifest():
     assert appmod._read_corpus_v_max({"corpus_environment": {"params": {}}}) is None
 
 
-def test_render_results_shows_the_screen_note_once_directly_under_the_banner():
+def test_render_results_shows_the_screen_note_once_visibly_and_once_in_details():
+    """Was "...shows_the_screen_note_once_directly_under_the_banner", pinning the OLD
+    defect (a before/after pair's two arm BANNERS each printing the note, which no
+    longer exist as banners at all). 2026-09-24 layout redesign places the screen
+    note in TWO places ON PURPOSE (`_render_results`'s docstring): once at the
+    page-foot (`page-foot-note`, always visible -- "a photograph of the screen still
+    catches it") and once inside the (closed by default) arm Details disclosure
+    ("never more than one click away"). `_all_text` cannot tell those apart, so this
+    also uses `_visible_text`, which skips the collapsed Details body."""
     import webapp.app as appmod
 
     data = {"range_az": go.Figure().to_dict(), "_banner": "run #1",
            "_screen_note": "a caveat the audience must see"}
     tree = appmod._render_results(data, "tab-results")
     text = _all_text(tree)
+    visible = _visible_text(tree)
     assert "a caveat the audience must see" in text
-    # Appears exactly once even though a before/after pair would render two banners.
-    assert text.count("a caveat the audience must see") == 1
+    # Exactly one VISIBLE copy (the page-foot note) -- nothing repeats what is already
+    # on screen without a click.
+    assert visible.count("a caveat the audience must see") == 1
+    # And it is still reachable a second time, inside this (single) arm's Details --
+    # acceptance check 15's "nothing dropped, only moved" for the whole-page note.
+    assert text.count("a caveat the audience must see") == 2
 
 
 def test_render_results_omits_screen_note_when_absent():
@@ -796,30 +876,49 @@ def test_share_axes_keeps_a_deliberate_heatmap_crop():
 # arm B's own copy says so.
 # ------------------------------------------------------------------------------------
 def test_arm_result_marks_the_stored_pr_panel_identical_on_arm_b(monkeypatch):
+    """The "identical on both arms" clause used to be appended to the mocked figure's
+    TITLE text; 2026-09-24 redesign retires figure titles entirely, so `_arm_result`
+    now appends it to the panel's CAPTION instead (via `panel_of`/`set_panel` --
+    `webapp.app._arm_result`'s own docstring). The mock below therefore has to be a
+    figure that carries panel meta in the first place (`pipeline_runner.set_panel`),
+    not a bare `layout.title` -- a figure with no panel meta at all is not what
+    `stored_pr_figure` actually returns any more."""
     import plotly.graph_objects as go
 
     import webapp.app as appmod
     from webapp import detector_scoreboard
+    from webapp.pipeline_runner import PANEL_ROW_PR, panel_caption, set_panel
+
+    def _mock_pr_figure(highlight_arm=None):
+        fig = go.Figure()
+        set_panel(fig, title="Precision-recall, offline test split",
+                 caption=["scored offline: x"], details=[], row=PANEL_ROW_PR)
+        return fig
 
     monkeypatch.setattr(appmod, "figures_from_outputs", lambda outputs: {})
     monkeypatch.setattr(detector_scoreboard, "arm_name_for_detector",
                         lambda det_meta: "classical CFAR")
-    monkeypatch.setattr(
-        detector_scoreboard, "stored_pr_figure",
-        lambda highlight_arm=None: go.Figure(layout=dict(title=dict(text="scored offline: x"))))
+    monkeypatch.setattr(detector_scoreboard, "stored_pr_figure", _mock_pr_figure)
 
     outputs = {"_axis_meta": {"detector": {"mode": "cfar", "threshold": 0.66, "label": "x"}}}
 
     result_a = appmod._arm_result(1, outputs, 5, {}, "", "", arm="a")
     result_b = appmod._arm_result(1, outputs, 5, {}, "", "", arm="b")
 
-    title_a = result_a["figs"]["detector_pr_stored"].layout.title.text
-    title_b = result_b["figs"]["detector_pr_stored"].layout.title.text
-    assert "identical on both arms" not in title_a
-    assert "identical on both arms" in title_b
-    assert "the knob cannot move it" in title_b
+    caption_a = panel_caption(result_a["figs"]["detector_pr_stored"])
+    caption_b = panel_caption(result_b["figs"]["detector_pr_stored"])
+    assert "identical on both arms" not in caption_a
+    assert "identical on both arms" in caption_b
+    # The VISIBLE clause was shortened to "identical on both arms" (2026-09-24): with
+    # the highlighted arm's AP and its CI already on this line, the longer form pushed
+    # the caption past the ~86 characters a 746 px column fits at 16 px and the browser
+    # clipped it. The full sentence ("scored offline; identical on both arms, the knob
+    # cannot move it") is a standing Details line on BOTH arms, because it is true of
+    # both -- pinned on the REAL figure in
+    # tests/test_detector_scoreboard.py::test_stored_pr_details_state_the_identical_on_both_arms_sentence
+    # (this test's `stored_pr_figure` is a mock and carries no Details of its own).
     # The default arm is "a" -- an ordinary single-run call must not pick up the
-    # B-only subtitle by accident.
+    # B-only clause by accident.
     result_default = appmod._arm_result(1, outputs, 5, {}, "", "")
     assert "identical on both arms" not in (
-        result_default["figs"]["detector_pr_stored"].layout.title.text)
+        panel_caption(result_default["figs"]["detector_pr_stored"]))

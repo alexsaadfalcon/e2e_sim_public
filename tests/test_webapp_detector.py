@@ -168,7 +168,10 @@ def test_run_pipeline_replays_corpus_into_cube_and_cfar(tmp_path):
     assert "radar_cube" in figs and "cfar_detection" in figs
     det_fig = figs["cfar_detection"]
     names = [t.name for t in det_fig.data]
-    assert any(n.startswith("ground truth") for n in names)
+    # Trace names carry a leading marker glyph now ("● ground truth (n=...)",
+    # 2026-09-24 layout redesign -- see webapp.pipeline_runner's detector-figure
+    # section), so a bare `.startswith("ground truth")` no longer matches.
+    assert any("ground truth" in (n or "") for n in names)
     # Physical axes: the objectness heatmap spans the label grid's range and sin(az).
     hm = det_fig.data[0]
     assert float(np.max(hm.y)) < _GRID.max_range_m and float(np.min(hm.x)) > -1.0

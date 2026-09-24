@@ -92,17 +92,37 @@ above):
     corpus AND the live Thrust 5 demo corpus). Now prints "{dataset root}/{tier}"
     (e.g. "b1_bench_v3/benchmark_v1_D2"), read from the same `manifest` path every
     other field on this title already reads.
+
+LAYOUT SPEC, 2026-09-24 (retires most of the geometry machinery items 1/1S/2S/3S/5S
+tuned above): a figure carries no title, no subtitle and no colour-bar title any
+more, and per-figure sliders/updatemenus (item -- the slider-geometry constants
+below) are gone -- ONE HTML transport drives every animated figure from the
+run-identity row now (`webapp/app.py::_transport_bar` + `assets/results_clock.js`).
+Every clause a title/subtitle/annotation used to carry lives in `layout.meta.panel`
+instead, reached through `panel_of`/`panel_text` (see
+`webapp/pipeline_runner.py`'s "PANEL GEOMETRY AND THE PANEL-META CONTRACT" section).
+Consequences for the tests below, spelled out per-test rather than here: some are
+repointed onto `panel_text`/the new fixed-geometry constants; some protect a defect
+class (a title's line count driving margin/height) that is now structurally
+impossible and are deleted with a comment naming what covers the same risk instead
+(mostly `tests/test_webapp_layout_acceptance.py`'s checks 4/6/7/10/20, which apply
+across every product `figures_from_outputs` builds, including these).
+
+Separately, `webapp/app.py`'s run-notes rendering changed shape (2026-09-24, same
+day as the layout spec): `_truncate_note`/`_notes_block`/`_NOTE_TRUNCATE_CHARS` are
+gone. Notes render UNTRUNCATED inside each arm's `html.Details` disclosure
+(`_details_lines`); the one-line, possibly-shortened text that used to be
+`_truncate_note`'s job is now `_note_headline`'s, used ONLY for the arm's one-line
+caption (`_arm_caption`), not for what actually reaches the Details body.
 """
 from __future__ import annotations
-
-import re
 
 import pytest
 
 from webapp import detector_scoreboard as ds
 from webapp.pipeline_runner import (
     _DIRECT_PATH_EXCLUSION_M, _SUBSPACE_ERR_SETTLED_LEVEL,
-    figures_from_outputs,
+    figures_from_outputs, panel_caption, panel_text,
 )
 
 
@@ -122,22 +142,39 @@ def _all_text(component) -> str:
 
 
 # --------------------------------------------------------------------------------
-# Item 1: stored_pr_figure margin sized from (a floor on) the title's line count
+# Item 1/1S: stored_pr_figure margin -- RETIRED as "sized from (a floor on) the
+# title's line count": the figure carries no title at all now (layout spec,
+# 2026-09-24), so `_PR_MARGIN_T_BASE`/`_PR_MARGIN_T_PER_LINE`/`_PR_MIN_TITLE_LINES`
+# are gone with it -- there is no line count left to floor. What replaces the
+# defect these protected (a margin computed from text that can grow) is a FIXED
+# margin, same convention as every other panel under the panel-meta contract; the
+# generic version of this invariant, for the OTHER figure family
+# (`figures_from_outputs`), is `test_webapp_layout_acceptance.py`'s checks 4/20.
+# This module builds a DIFFERENT figure (`detector_scoreboard.stored_pr_figure`,
+# not covered by that file), so the fixed-geometry check is kept here instead of
+# being dropped as a pure duplicate.
 # --------------------------------------------------------------------------------
-def test_stored_pr_figure_margin_reserves_the_floor_line_count():
-    fig = ds.stored_pr_figure()
-    # The base figure's OWN title is 3 lines (main + 2 sup lines) -- fewer than the
-    # floor -- so the margin must come from the floor, not the actual count.
-    assert fig.layout.title.text.count("<br>") + 1 == 3
-    expected = (ds._PR_MARGIN_T_BASE
-               + ds._PR_MARGIN_T_PER_LINE * (ds._PR_MIN_TITLE_LINES - 2))
-    assert fig.layout.margin.t == expected
+def test_stored_pr_figure_geometry_is_a_fixed_constant_not_derived_from_a_caption():
+    """The margin is now `_PR_MARGIN_T`, a plain constant, and `height` is the
+    row's own fixed `FIGURE_HEIGHT[PANEL_ROW_PR]` -- neither derives from text any
+    more (item 1S's "height must grow with the margin" no longer applies: nothing
+    grows). Identical whether the panel's caption (the only text left whose length
+    varies by call) is the short "{n} test frames" line or a highlighted arm's
+    longer one."""
+    from webapp.pipeline_runner import FIGURE_HEIGHT, PANEL_ROW_PR
+
+    short = ds.stored_pr_figure()
+    long_ = ds.stored_pr_figure(highlight_arm="raddetnet")
+    assert short.layout.margin.t == long_.layout.margin.t == ds._PR_MARGIN_T
+    assert short.layout.height == long_.layout.height == FIGURE_HEIGHT[PANEL_ROW_PR]
+    assert not (short.layout.title and short.layout.title.text)
 
 
-def test_pr_figure_margin_is_identical_between_arm_a_and_b(monkeypatch):
-    """`webapp.app._arm_result` appends a 4th title line for arm B only; both arms'
-    copies of this figure must still share one margin, or their plot axes do not
-    line up (item 1's own defect)."""
+def test_pr_figure_geometry_is_identical_between_arm_a_and_b(monkeypatch):
+    """`webapp.app._arm_result` appends the "identical on both arms" clause to arm
+    B's panel CAPTION only now (there is no title left to append a 4th line to);
+    both arms' copies of this figure must still share one geometry, or their plot
+    axes do not line up (item 1's own defect, in its new home)."""
     import webapp.app as appmod
 
     def _outputs():
@@ -149,8 +186,10 @@ def test_pr_figure_margin_is_identical_between_arm_a_and_b(monkeypatch):
     result_b = appmod._arm_result(1, _outputs(), 1, {}, "", "", arm="b")
     pr_a = result_a["figs"]["detector_pr_stored"]
     pr_b = result_b["figs"]["detector_pr_stored"]
-    assert pr_b.layout.title.text.count("<br>") == pr_a.layout.title.text.count("<br>") + 1
+    assert "identical on both arms" in panel_caption(pr_b)
+    assert "identical on both arms" not in panel_caption(pr_a)
     assert pr_a.layout.margin.t == pr_b.layout.margin.t
+    assert pr_a.layout.height == pr_b.layout.height
 
 
 # --------------------------------------------------------------------------------
@@ -223,6 +262,11 @@ def test_settled_level_annotation_is_padded_off_the_edge_when_it_moves_right():
 
 
 def test_detector_map_range_line_annotation_is_padded_off_the_right_edge():
+    """The IN-PLOT tag's wording shortened to " scoring <= N m " (layout spec
+    section 4, "stated once per row" -- a short tag at the line's end, not a
+    centred sentence) when the six-line subtitle this once lived in was retired;
+    the full "labels & scoring stop at N m." sentence survives verbatim in Details
+    (acceptance check 15) -- checked here via `panel_text` rather than only assumed."""
     torch = pytest.importorskip("torch")
 
     det = torch.rand((1, 4, 4))
@@ -231,60 +275,60 @@ def test_detector_map_range_line_annotation_is_padded_off_the_right_edge():
         "_axis_meta": {"detector": {"mode": "cfar", "threshold": 0.5, "label": "CFAR"}},
     }
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    ann = next(a for a in fig.layout.annotations if "labels & scoring stop" in a.text)
+    ann = next(a for a in fig.layout.annotations if "scoring" in (a.text or ""))
     assert (ann.xshift or 0) < 0
+    assert "labels & scoring stop at" in panel_text(fig)
 
 
 # --------------------------------------------------------------------------------
-# Item 5: the large corner statistic repeats the subtitle's own peak-median number
+# Item 5: the large corner statistic repeated the subtitle's own peak-median number,
+# top-left, over the plot, with a translucent background so it would not obscure
+# whatever real data sat under it.
+#
+# RETIRED (layout spec, 2026-09-24, check 8 -- the layout redesign's own headline
+# defect): drawing a statistic OVER the data at all, translucent background or not,
+# is exactly what check 8 exists to forbid -- item 5's "protect whatever sits under
+# it either way" was a mitigation for a placement the new spec removes outright. The
+# statistic now lives in the reserved strip ABOVE the axes (`_stat_annotations`,
+# `name="stat_strip"`), which structurally cannot cover a return; there is also only
+# ONE computation of the number now (the strip's own), not a separate subtitle
+# figure and a corner figure that could drift apart, so
+# `test_range_az_corner_annotation_matches_the_subtitle_stat` /
+# `..._range_el_...` protected a consistency bug that is no longer possible to
+# create and are deleted rather than repointed. What covers the remaining, still-
+# live part of item 5 (>=26 px, axis-domain-anchored, no background pill, never
+# over the data) is `test_webapp_layout_acceptance.py`'s
+# `test_the_statistic_strip_sits_entirely_above_the_axes` and
+# `test_the_statistic_strip_fits_inside_the_reserved_margin`, for every product,
+# not just range_az/range_el.
+#
+# `test_corner_annotation_tracks_the_slider_per_frame` protects a DIFFERENT,
+# still-real risk (the headline number must reflect the frame it is shown on, not a
+# stale first-frame value) and is repointed onto the strip below rather than deleted.
 # --------------------------------------------------------------------------------
-def test_range_az_corner_annotation_matches_the_subtitle_stat():
-    torch = pytest.importorskip("torch")
-
-    ra = torch.rand((8, 8)).to(torch.complex64)
-    fig = figures_from_outputs({"range_az": [ra]})["range_az"]
-    subtitle = fig.layout.title.text.replace("<br>", " ")
-    m = re.search(r"peak - median, dB: (-?\d+\.\d)", subtitle)
-    assert m is not None, subtitle
-    stat = m.group(1)
-
-    corner = next(a for a in fig.layout.annotations if a.text.startswith("peak-median"))
-    assert corner.text == f"peak-median {stat} dB"
-    assert corner.font.size >= 26
-    # Anchored to the heatmap's OWN domain, not the whole figure's paper coordinates
-    # -- a paper-anchored corner sat under the colorbar (item 5's own defect).
-    assert corner.xref == "x domain" and corner.yref == "y domain"
-    # TOP-LEFT, not top-right (coordinator re-check, 2026-09-24): top-right covered
-    # thrust1's real ~115 m streak (range ~93-108 m, sin(azimuth) 0.5-1.0). A
-    # translucent background protects whatever sits under the corner either way.
-    assert corner.xanchor == "left" and corner.x < 0.5
-    assert corner.bgcolor is not None and "rgba" in corner.bgcolor
-
-
-def test_range_el_corner_annotation_matches_the_subtitle_stat():
-    torch = pytest.importorskip("torch")
-
-    re_ = torch.rand((8, 8)).to(torch.complex64)
-    fig = figures_from_outputs({"range_el": [re_]})["range_el"]
-    subtitle = fig.layout.title.text.replace("<br>", " ")
-    m = re.search(r"peak - median, dB: (-?\d+\.\d)", subtitle)
-    assert m is not None, subtitle
-    corner = next(a for a in fig.layout.annotations if a.text.startswith("peak-median"))
-    assert corner.text == f"peak-median {m.group(1)} dB"
-
-
-def test_corner_annotation_tracks_the_slider_per_frame():
-    """Two frames with visibly different peak-median stats -- the corner text in the
-    LAST frame's own layout (what `_heatmap` builds the base figure from) must match
-    that frame's own number, not the first frame's."""
+def test_stat_strip_tracks_the_frame_it_is_shown_on():
+    """Item 5's per-frame half, repointed onto the reserved strip: the BASE figure's
+    `stat_strip` annotation must carry the LAST frame's own number, and each
+    animation frame's own layout override must carry THAT frame's number -- never a
+    value copied from frame 0."""
     torch = pytest.importorskip("torch")
 
     flat = torch.ones((8, 8), dtype=torch.complex64)          # peak == median -> 0 dB
     spiky = torch.ones((8, 8), dtype=torch.complex64)
     spiky[0, 0] = 100.0                                        # one hot cell
     fig = figures_from_outputs({"range_az": [flat, spiky]})["range_az"]
-    corner = next(a for a in fig.layout.annotations if a.text.startswith("peak-median"))
-    assert corner.text != "peak-median 0.0 dB"
+
+    def _stat_text(layout):
+        for ann in (layout.annotations or ()):
+            if ann.name == "stat_strip":
+                return ann.text
+        raise AssertionError("no stat_strip annotation")
+
+    # Base figure is built from the LAST (spiky) frame -- must not read as flat.
+    assert _stat_text(fig.layout) != "0.0 dB peak−median"
+    # Frame 0's own override must carry frame 0's (flat) number, not the base
+    # figure's.
+    assert _stat_text(fig.frames[0].layout) == "0.0 dB peak−median"
 
 
 # --------------------------------------------------------------------------------
@@ -314,9 +358,11 @@ def test_render_results_shows_each_arms_own_run_notes(monkeypatch):
 
     data, *_ = appmod._run_pipeline(1, state_a, preset.n_steps, "", None)
 
-    # Each arm carries its OWN note (arms can differ -- item 6's own requirement),
-    # ONE (short, unwrapped) note per arm -> unchanged by `_truncate_note` (no " -- "
-    # and well under 160 chars).
+    # Each arm carries its OWN note (arms can differ -- item 6's own requirement).
+    # `data["_notes"]` is untruncated verbatim (`_truncate_note` is retired,
+    # 2026-09-24 -- see the module docstring); this note is short enough that the
+    # distinction is not exercised here, but the stored value itself must still be
+    # exactly what the pipeline reported.
     assert data["_notes"] == ["arm-0 note: evaluated at 14.25-15.75 GHz"]
     assert data["_previous"]["_notes"] == ["arm-1 note: evaluated at 14.25-15.75 GHz"]
 
@@ -375,78 +421,92 @@ def test_render_results_no_notes_key_when_axis_meta_has_none(monkeypatch):
 
 
 # --------------------------------------------------------------------------------
-# Item 6 follow-up (2026-09-24): each note truncated at its first " -- " or 160
-# chars, one line per note -- the live-chain gate's note otherwise ran 3-5 lines of
-# 11 px text on every Thrust 5 arm.
+# Item 6 follow-up -- RETRACTED (layout spec section 2.3, 2026-09-24): truncating
+# notes for the Results tab is exactly what made the smallest type on the page the
+# only text that lost information, and mid-word truncation read as a crash to a
+# non-expert (hostile round 10, defect 2.3; acceptance check 12). `_truncate_note`/
+# `_notes_block`/`_NOTE_TRUNCATE_CHARS` are gone. The full note now reaches the
+# Results tab UNTRUNCATED, inside the arm's `Details` disclosure
+# (`_details_lines`); `_note_headline` (up to the first " -- " or
+# `_NOTE_HEADLINE_CHARS`=110 chars) survives, but only feeds the arm's one-line
+# CAPTION (`_arm_caption`) now, never what actually reaches Details. The four tests
+# below repoint onto `_note_headline`'s own contract, same clauses pinned, and a
+# fifth checks the untruncated Details rendering directly.
 # --------------------------------------------------------------------------------
-def test_truncate_note_cuts_at_the_first_double_dash_separator():
+def test_note_headline_cuts_at_the_first_double_dash_separator():
     import webapp.app as appmod
 
     # The real shape of the live-chain gate's own note (pipeline_runner.
     # _StoredADCGateBlock.note): headline number, then " -- ", then an attribution
-    # clause long enough on its own to run past 160 chars.
+    # clause.
     note = ("live chain vs stored ADC over 5 frame(s): max |diff| = 1 of 8 LSB "
            "(3-bit) (6.994e-05 absolute) -- DIFFERS -- this run's cube is not the "
            "stored one (this run: ADC 3-bit, IF corner 1 m, front end on)")
-    truncated = appmod._truncate_note(note)
-    assert truncated == (
+    headline = appmod._note_headline(note)
+    # A cut at " -- " is a complete sentence -- nothing elided, so no truncation
+    # mark (acceptance check 12).
+    assert headline == (
         "live chain vs stored ADC over 5 frame(s): max |diff| = 1 of 8 LSB "
-        "(3-bit) (6.994e-05 absolute) ...")
-    assert "the usual answer" not in truncated
-    assert len(truncated) < len(note)
+        "(3-bit) (6.994e-05 absolute)")
+    assert "the usual answer" not in headline
+    assert "…" not in headline
+    assert len(headline) < len(note)
 
 
-def test_truncate_note_cuts_at_160_chars_when_no_separator_is_that_close():
+def test_note_headline_cuts_at_a_word_boundary_and_marks_it_when_no_close_separator():
     import webapp.app as appmod
 
     note = "x" * 200
-    truncated = appmod._truncate_note(note)
-    assert truncated == "x" * 160 + " ..."
+    headline = appmod._note_headline(note)
+    # No spaces to break on -> the plain char-budget cut, marked (it IS elided).
+    assert headline == "x" * appmod._NOTE_HEADLINE_CHARS + "…"
 
 
-def test_truncate_note_leaves_a_short_note_with_no_separator_unchanged():
+def test_note_headline_leaves_a_short_note_with_no_separator_unchanged():
     import webapp.app as appmod
 
     note = "a short note with no separator at all"
-    assert appmod._truncate_note(note) == note
+    assert appmod._note_headline(note) == note
+    assert "…" not in appmod._note_headline(note)
 
 
-def test_truncate_note_preserves_the_thrust4_frequency_disclosure():
+def test_note_headline_preserves_the_thrust4_frequency_disclosure():
     """The exact regression this follow-up must not cause: Thrust 4's interconnect
     note (`InterconnectBlock.describe()`, e2e/blocks.py -- not owned, read only) has
-    no " -- " and is a little over 160 chars, but the required clause sits at the
-    FRONT of it and must survive whichever cut applies."""
+    no " -- " and runs past the headline char budget, but the required clause sits
+    at the FRONT of it and must survive the cut."""
     import webapp.app as appmod
 
     note = ("Tessera TSV surrogate, scale model x2 (2x geometry, evaluated at "
            "14.25-15.75 GHz): radius 2.5 um, pitch 30 um, height 50 um, liner "
            "0.25 um, 300 K, ring3x3 arrangement")
     assert " -- " not in note
-    assert len(note) > appmod._NOTE_TRUNCATE_CHARS
-    truncated = appmod._truncate_note(note)
-    assert "scale model x2 (2x geometry, evaluated at 14.25-15.75 GHz)" in truncated
+    assert len(note) > appmod._NOTE_HEADLINE_CHARS
+    headline = appmod._note_headline(note)
+    assert "scale model x2 (2x geometry, evaluated at 14.25-15.75 GHz)" in headline
 
 
-def test_notes_line_truncates_every_note_in_the_list():
+def test_notes_line_returns_every_note_untruncated():
+    """`_notes_line` (feeds the Details body, NOT the caption) no longer shortens
+    anything -- repoints the retired "truncates every note" premise onto the new,
+    opposite contract."""
     import webapp.app as appmod
 
     axis_meta = {"notes": ["short one", "long " + "x" * 200 + " -- attribution"]}
     lines = appmod._notes_line(axis_meta)
-    assert lines[0] == "short one"
-    assert lines[1] == appmod._truncate_note(axis_meta["notes"][1])
-    assert lines[1].endswith(" ...")
+    assert lines == axis_meta["notes"]
 
 
-def test_render_results_renders_one_line_per_note_not_one_joined_paragraph():
-    """The Results tab used to join every note into one "|"-separated paragraph;
-    each note now gets its own line (checked via the rendered tree shape, not just
-    substring presence -- a joined paragraph would also contain both substrings)."""
+def test_details_lines_render_one_line_per_note_not_one_joined_paragraph():
+    """`_notes_block` is gone; notes now render inside the arm's Details disclosure
+    via `_details_lines`, one `details-line` Div per note (checked via the rendered
+    tree shape, not just substring presence -- a joined paragraph would also
+    contain both substrings)."""
     import webapp.app as appmod
 
-    data = {"_notes": ["note one", "note two"]}
-    block = appmod._notes_block(data["_notes"])
-    line_texts = [_all_text(child) for child in block.children]
-    assert line_texts == ["note one", "note two"]
+    payload = {"_notes": ["note one", "note two"]}
+    lines = appmod._details_lines(payload, {}, "")
+    assert [_all_text(l) for l in lines] == ["note one", "note two"]
 
 
 # --------------------------------------------------------------------------------
@@ -484,7 +544,7 @@ def test_range_az_states_direct_path_is_invisible_and_the_brightest_visible_retu
         "_axis_meta": {"n_freqs": n_freqs, "freq_span_hz": freq_span_hz,
                        "range_az_bins": bins},
     })["range_az"]
-    text = fig.layout.title.text.replace("<br>", " ")
+    text = panel_text(fig)
     # Physical gate size, never a pixel count (RETRACTED, coordinator re-check,
     # 2026-09-24: a first version divided this module's own declared plot-domain
     # constant by the bin count, which is not the browser's actual rendered pixel
@@ -511,7 +571,7 @@ def test_direct_path_note_absent_without_axis_metadata():
 
     ra = torch.rand((8, 8)).to(torch.complex64)
     fig = figures_from_outputs({"range_az": [ra]})["range_az"]
-    assert "brightest visible return" not in fig.layout.title.text
+    assert "brightest visible return" not in panel_text(fig)
 
 
 def test_direct_path_exclusion_constant_is_used_not_hardcoded_elsewhere():
@@ -524,116 +584,63 @@ def test_direct_path_exclusion_constant_is_used_not_hardcoded_elsewhere():
 # Second hostile-expert read (2026-09-24, same day): items 1S-7S, see module
 # docstring. Re-checks/extends the first-read tests above; does not replace them.
 # --------------------------------------------------------------------------------
-def test_stored_pr_figure_title_includes_the_dataset_root_not_just_the_tier(beat_cfar_data):
-    """Item 7S: "benchmark_v1_D2" alone is shared by more than one dataset root."""
-    import json
+def test_stored_pr_figure_details_includes_the_dataset_root_not_just_the_tier(beat_cfar_data):
+    """Item 7S: "benchmark_v1_D2" alone is shared by more than one dataset root.
+    The figure carries no title any more; the same clause moved into
+    `pipeline_runner.set_panel`'s Details (`stored_pr_figure`'s own docstring),
+    reached through `panel_text`."""
     from pathlib import Path
 
     manifest = beat_cfar_data["manifest"]
     root, tier = Path(manifest).parent.parent.name, Path(manifest).parent.name
     fig = ds.stored_pr_figure()
-    assert f"{root}/{tier}" in fig.layout.title.text
+    text = panel_text(fig)
+    assert f"{root}/{tier}" in text
     # Guards against a regression back to the bare, ambiguous tier name: the tier
     # alone must not appear WITHOUT its root immediately before it.
-    assert f", {tier}" not in fig.layout.title.text.replace(f"{root}/{tier}", "")
+    assert f", {tier}" not in text.replace(f"{root}/{tier}", "")
 
 
-def test_pr_margin_gives_a_positive_measured_gap_not_just_a_formula(beat_cfar_data):
-    """Item 1S: the margin must be large enough in absolute terms, not merely
-    "computed from the line count" (the BLOCKER regression: the code path was
-    already line-count-driven and still overlapped). Pins the RE-CALIBRATED
-    constants directly, so a future edit that quietly shrinks them again is
-    caught here even without re-running Playwright."""
-    assert ds._PR_MARGIN_T_BASE >= 65
-    assert ds._PR_MARGIN_T_PER_LINE >= 50
-    fig = ds.stored_pr_figure()
-    # n_lines is floored at 4 (`_PR_MIN_TITLE_LINES`); this is the exact value a
-    # real headless-browser measurement (this session, not committed) found gives
-    # a ~20 px clear gap between the title's rendered bottom and the plot's top.
-    assert fig.layout.margin.t == pytest.approx(
-        ds._PR_MARGIN_T_BASE + ds._PR_MARGIN_T_PER_LINE * (ds._PR_MIN_TITLE_LINES - 2))
-    assert fig.layout.margin.t >= 170
+# Item 1S ("the margin must be large enough in absolute terms, not merely computed
+# from the line count") and its height-scaling follow-through are RETIRED
+# (2026-09-24): the BLOCKER they protected -- a title overlapping the plot -- is
+# now structurally impossible, because the figure carries no title at all to
+# overlap anything (layout spec). `_PR_MARGIN_T_BASE`/`_PR_MARGIN_T_PER_LINE`/
+# `_PR_MIN_TITLE_LINES`/`_PR_PLOT_DOMAIN_HEIGHT` are gone with the mechanism they
+# tuned. What survives of "large enough, not just computed" is
+# `test_stored_pr_figure_margin_is_a_fixed_constant_not_derived_from_a_caption`
+# above (item 1's own repoint) -- not duplicated here.
+
+# Item 2S ("range_profile's t=40 was never wired to `_heatmap_margin_t`") is
+# RETIRED the same way: `_heatmap_margin_t` is now a constant function for every
+# product (`test_webapp_layout_acceptance.py::test_heatmap_margin_t_ignores_its_argument`),
+# so "is `range_profile` wired to it" is no longer a question with an interesting
+# answer -- every product shares the one fixed `_FIG_MARGIN_T`
+# (`test_webapp_layout_acceptance.py::test_every_figure_has_the_same_top_margin`,
+# which iterates every key `figures_from_outputs` returns, `range_profile`
+# included).
 
 
-def test_pr_figure_height_grows_with_margin_so_the_plot_does_not_shrink():
-    """Item 1S: `height` must scale with the re-calibrated (taller) margin, or the
-    fix for the overlap would come at the cost of squeezing the PR curves down to
-    a sliver."""
-    fig = ds.stored_pr_figure()
-    assert fig.layout.height == (ds._PR_PLOT_DOMAIN_HEIGHT + fig.layout.margin.t
-                                 + ds._PR_MARGIN_B)
-
-
-def test_range_profile_title_margin_scales_with_its_own_line_count():
-    """Item 2S: `range_profile`'s panel used to hardcode `t=40` regardless of its
-    title's line count."""
-    torch = pytest.importorskip("torch")
-    from webapp.pipeline_runner import _heatmap_margin_t
-
-    prof = torch.rand(8, dtype=torch.float32)
-    fig = figures_from_outputs({
-        "range_profile_agg": [prof],
-        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_profile_bins": 8},
-    })["range_profile"]
-    assert fig.layout.title.text.count("<br>") + 1 == 2   # main + one median/direct-path line
-    assert fig.layout.margin.t == _heatmap_margin_t(fig.layout.title.text)
-    assert fig.layout.margin.t > 40, "must have grown past the old flat default"
-
-
-def test_heatmap_title_is_pinned_to_the_cards_own_top_not_floating():
-    """Item 3S: `_heatmap`'s title must be explicitly anchored to the card's own
-    top (container-relative), not left at Plotly's default floating position --
-    that default is what produced ~145 px of blank space above a 6-line title."""
-    torch = pytest.importorskip("torch")
-
-    ra = torch.rand((8, 8)).to(torch.complex64)
-    fig = figures_from_outputs({
-        "range_az": [ra],
-        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_az_bins": 8},
-    })["range_az"]
-    assert fig.layout.title.yref == "container"
-    assert fig.layout.title.yanchor == "top"
-    assert fig.layout.title.y >= 0.9
-
-
-def test_heatmap_margin_t_per_line_is_smaller_than_the_pre_pin_value():
-    """Item 3S: re-calibrated against the PINNED title (see the test above) --
-    the old 60 px/line, measured against the unpinned default, would now leave
-    the plot needlessly short since the title no longer eats into the margin
-    the same way."""
-    from webapp.pipeline_runner import _HEATMAP_MARGIN_T_PER_LINE
-    assert _HEATMAP_MARGIN_T_PER_LINE < 60
-    assert _HEATMAP_MARGIN_T_PER_LINE >= 30   # still enough to clear a real sup line
-
-
-def test_frame_layout_title_override_keeps_the_same_pin():
-    """Item 3S follow-through: a `go.Frame(layout=dict(title=...))` REPLACES the
-    whole title object, so the per-frame override used for the slider must repeat
-    the pin, or the title would jump to the floating default the moment the
-    slider moves off its initial frame."""
-    torch = pytest.importorskip("torch")
-
-    ra1 = torch.rand((8, 8)).to(torch.complex64)
-    ra2 = torch.rand((8, 8)).to(torch.complex64)
-    fig = figures_from_outputs({
-        "range_az": [ra1, ra2],
-        "_axis_meta": {"n_freqs": 64, "freq_span_hz": 3e9, "range_az_bins": 8},
-    })["range_az"]
-    assert len(fig.frames) == 2
-    for frame in fig.frames:
-        ft = frame.layout.title
-        assert ft.yref == "container" and ft.yanchor == "top"
-
-
-def test_heatmap_colorbar_title_is_one_line():
-    """Item 5S: a two-line colorbar title collided with the colorbar's own "0"
-    tick on every heat map."""
-    torch = pytest.importorskip("torch")
-
-    ra = torch.rand((8, 8)).to(torch.complex64)
-    fig = figures_from_outputs({"range_az": [ra]})["range_az"]
-    assert "<br>" not in fig.data[0].colorbar.title.text
-    assert "clipped at" in fig.data[0].colorbar.title.text
+# Items 3S and 5S are RETIRED wholesale (2026-09-24): both protected the interaction
+# between a per-figure TITLE and the top margin it grew -- `_heatmap`'s title
+# pin (`test_heatmap_title_is_pinned_to_the_cards_own_top_not_floating`), the
+# per-line margin constant (`test_heatmap_margin_t_per_line_is_smaller_than_the_pre_pin_value`,
+# `_HEATMAP_MARGIN_T_PER_LINE`), the per-frame title override needing to repeat that
+# pin (`test_frame_layout_title_override_keeps_the_same_pin`), and the colour-bar
+# title's own line count (`test_heatmap_colorbar_title_is_one_line`). Figures carry
+# no title, no per-frame title override and no colour-bar title at all under the
+# layout spec, so none of these properties exist to test any more. What covers the
+# same class of risk now, generically, for every product:
+#   - no title anywhere, ever, including per-frame --
+#     test_webapp_layout_acceptance.py::test_no_figure_carries_a_title_or_a_subtitle
+#   - no colour-bar title --
+#     test_webapp_layout_acceptance.py::test_no_colorbar_carries_a_title
+#   - the margin is one fixed constant, not derived from anything --
+#     test_webapp_layout_acceptance.py::test_every_figure_has_the_same_top_margin,
+#     ::test_heatmap_margin_t_ignores_its_argument
+#   - frames still animate (just via `annotations`, not `title`) --
+#     test_webapp_layout_acceptance.py::test_animated_figures_still_carry_their_frames,
+#     and this file's own test_stat_strip_tracks_the_frame_it_is_shown_on above.
 
 
 def test_settled_level_annotation_clears_the_right_axis_on_both_flagged_screens():
@@ -658,17 +665,19 @@ def test_settled_level_annotation_clears_the_right_axis_on_both_flagged_screens(
 # in Plotly's slider schema), so the fraction has to clear the worst-case (narrowest
 # real) card width, not just the wide single-card layouts this was first tuned
 # against.
-# --------------------------------------------------------------------------------
-def test_slider_buttons_x_extent_was_widened_not_silently_shrunk():
-    from webapp.pipeline_runner import _SLIDER_BUTTONS_X_EXTENT, _SLIDER_LEN, _SLIDER_X
-
-    # 0.34 is the value a standalone Playwright measurement (this session, not
-    # committed) found clears the ~139 px fixed-width button group on Thrust 5's
-    # own ~600-700 px card widths; a regression back toward the old 0.16 would
-    # silently reopen the "rame N" defect without any figure-dict test catching it
-    # (no unit test here renders in a real browser), so this guards the constant
-    # directly rather than only the derived, relative wave-2 check.
-    assert _SLIDER_BUTTONS_X_EXTENT >= 0.30
-    assert _SLIDER_X == pytest.approx(_SLIDER_BUTTONS_X_EXTENT + 0.08)
-    assert _SLIDER_LEN == pytest.approx(0.98 - _SLIDER_X)
-    assert _SLIDER_LEN > 0.4, "the slider track itself must stay usably long"
+#
+# RETIRED (layout spec section 4, "Slider / play controls"; wave 11): per-figure
+# sliders and play/pause buttons are gone outright -- `webapp/assets/results_clock.js`
+# drives every animated figure from ONE HTML transport in the run-identity row
+# (`webapp/app.py::_transport_bar`) instead. `_SLIDER_X`/`_SLIDER_LEN`/
+# `_SLIDER_ROW_Y` no longer exist; `_SLIDER_BUTTONS_X_EXTENT`/`_SLIDER_MARGIN_B`
+# survive in `pipeline_runner.py` ONLY as unused, documentary constants (their own
+# comment there says so), so pinning their value no longer guards any live
+# behaviour -- there is nothing left in this module for a "0.16 regression" to
+# silently reopen. What replaced the defect (a clipped "frame N" label) is CSS/JS
+# pixel geometry in `webapp/assets/`, outside what a figure-dict test can see at
+# all -- `test_webapp_layout_acceptance.py`'s own module docstring names
+# `python -m webapp.rehearse` as the one tool that can check it, for exactly this
+# reason. What IS still this module's job and stays covered:
+# `test_webapp_layout_acceptance.py::test_no_figure_carries_its_own_slider_or_play_buttons`
+# guards that no per-figure transport (this test's real subject) ever comes back.

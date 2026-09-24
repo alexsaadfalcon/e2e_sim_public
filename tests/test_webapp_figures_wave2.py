@@ -11,6 +11,14 @@
 
 Items 4/5 (the scoreboard table itself) are covered in tests/test_detector_scoreboard.py,
 which owns that module.
+
+REPOINTED for the 2026-09-24 panel-meta layout (see webapp/pipeline_runner.py's "PANEL
+GEOMETRY AND THE PANEL-META CONTRACT" section). A figure carries no title/subtitle any
+more; the panel's title + one-line caption + full Details body live in
+``fig.layout.meta["panel"]`` (accessors ``panel_of``/``panel_caption``/``panel_text``).
+Per-figure sliders/play buttons are gone -- one clock now drives every animated figure
+(``webapp/assets/results_clock.js``). Every clause below was re-pointed to wherever it
+now lives, never dropped; see each test's docstring for exactly where.
 """
 
 from __future__ import annotations
@@ -19,21 +27,25 @@ import numpy as np
 import plotly.graph_objects as go
 import pytest
 
-from webapp.pipeline_runner import (_SLIDER_BUTTONS_X_EXTENT, _SLIDER_X,
-                                    _add_frame_animation, _radar_cube_clip_db,
-                                    figures_from_outputs)
+from webapp.pipeline_runner import (_add_frame_animation, _radar_cube_clip_db,
+                                    figures_from_outputs, panel_caption, panel_of,
+                                    panel_text)
 
 
 # --------------------------------------------------------------------------------
 # Item 1a: range-azimuth / range-elevation titles fit the two-card width
 # --------------------------------------------------------------------------------
-#: Rough character budget for a single-line title at the podium-distance font size on
-#: a two-card (~600 px) panel -- the old single-line "Range-Azimuth power (non-coherent
-#: over elevation)" (51 chars) ran off the right edge there (rehearsal screenshot).
-_TITLE_MAIN_LINE_MAX_CHARS = 30
-
-
-def test_range_az_main_title_is_short_the_qualifier_is_a_subline():
+# The character-budget mechanism this used to pin (a plotly title's first `<br>` line
+# overflowing a ~600 px panel) cannot recur: a figure carries no title at all now, and
+# the panel's HTML title is a short, FIXED string built once (never grown by a wording
+# change) -- see set_panel's callers below. That "fits the width" half is now the
+# generic job of tests/test_webapp_layout_acceptance.py::test_every_title_is_one_line
+# (<=60 chars, no wrap). What's still specific to THIS regression -- not covered
+# there -- is that the qualifier ("non-coherent over ...") that used to be baked into
+# the overflowing title stays OUT of the short title (it moved to Details), while
+# remaining reachable; reachability itself is CHECK 15
+# (OLD_SUBTITLE_CLAUSES["range_az"/"range_el"]) in that same module.
+def test_range_az_title_is_short_the_qualifier_moved_to_details():
     torch = pytest.importorskip("torch")
 
     rng = np.random.default_rng(1)
@@ -41,24 +53,26 @@ def test_range_az_main_title_is_short_the_qualifier_is_a_subline():
     ra = torch.from_numpy(power).to(torch.complex64)
     fig = figures_from_outputs({"range_az": [ra], "_axis_meta": {"range_az_bins": 8}})["range_az"]
 
-    title = fig.layout.title.text
-    main_line = title.split("<br>")[0]
-    assert len(main_line) <= _TITLE_MAIN_LINE_MAX_CHARS, main_line
-    assert "non-coherent over elevation" in title
-    assert "peak - median" in title  # the stat still lives alongside the qualifier
+    panel = panel_of(fig)
+    assert "non-coherent" not in panel["title"]
+    assert len(panel["title"]) <= 30
+    text = panel_text(fig)
+    assert "non-coherent over elevation" in text
+    assert "peak - median" in text  # the stat still lives alongside the qualifier
 
 
-def test_range_el_main_title_is_short_and_carries_its_qualifier():
+def test_range_el_title_is_short_and_still_carries_its_qualifier():
     torch = pytest.importorskip("torch")
 
     ra = torch.rand((8, 8)).to(torch.complex64)
     fig = figures_from_outputs({"range_el": [ra], "_axis_meta": {"range_el_bins": 8}})["range_el"]
 
-    title = fig.layout.title.text
-    main_line = title.split("<br>")[0]
-    assert len(main_line) <= _TITLE_MAIN_LINE_MAX_CHARS, main_line
-    assert "non-coherent over azimuth" in title
-    assert "peak - median" in title.replace("<br>", " ")  # wave 5: range_el prints the statistic too
+    panel = panel_of(fig)
+    assert "non-coherent" not in panel["title"]
+    assert len(panel["title"]) <= 30
+    text = panel_text(fig)
+    assert "non-coherent over azimuth" in text
+    assert "peak - median" in text  # wave 5: range_el prints the statistic too
 
 
 # --------------------------------------------------------------------------------
@@ -69,31 +83,40 @@ def _animated_heatmap_figure():
     return _add_frame_animation(base, [np.zeros((2, 2)), np.ones((2, 2))])
 
 
-def test_slider_x_clears_the_play_pause_buttons():
+def test_no_per_figure_transport_controls():
+    """Repointed (layout spec section 4, "Slider / play controls", retired wave 11):
+    the geometry this test used to pin -- the slider's `x` clearing the play/pause
+    buttons' fixed pixel width, via `_SLIDER_BUTTONS_X_EXTENT` -- no longer applies
+    because the per-figure transport itself was removed; one clock now drives every
+    animated figure (`webapp/assets/results_clock.js`, wired in
+    `webapp/app.py::_transport_bar`). `_SLIDER_BUTTONS_X_EXTENT` is kept in
+    pipeline_runner.py only as a comment anchor recording why -- not imported here any
+    more, since there is no geometry left to compute from it. What's left to protect:
+    `_add_frame_animation` must never grow a slider or play/pause buttons back."""
     fig = _animated_heatmap_figure()
-    slider = fig.layout.sliders[0]
-    menu = fig.layout.updatemenus[0]
-    # The label is explicitly left-anchored -- it extends RIGHT from the slider's own
-    # x, away from the buttons, rather than growing left into them as the font widens
-    # (the regression: right/center-implied growth ate into the button region once the
-    # currentvalue font went from 12 -> 16 px).
-    assert slider.currentvalue.xanchor == "left"
-    assert slider.x >= menu.x + _SLIDER_BUTTONS_X_EXTENT
-    # Documents the actual regression this test pins: the old fixed x=0.2 must not
-    # silently come back.
-    assert slider.x > 0.2
+    assert not (fig.layout.sliders or ())
+    assert not (fig.layout.updatemenus or ())
 
 
-def test_slider_noop_below_two_frames():
+def test_animation_is_a_noop_below_two_frames():
+    """Repointed: the old assertion was "no slider grows for a single frame"; with no
+    slider left to grow at all, the behaviour this protects is `_add_frame_animation`'s
+    own documented single-frame no-op -- `fig.frames` stays untouched rather than
+    becoming a one-element animation."""
     base = go.Figure(data=go.Heatmap(z=[[0, 1], [1, 0]]))
     fig = _add_frame_animation(base, [np.zeros((2, 2))])
-    assert not fig.layout.sliders
+    assert not fig.frames
 
 
 # --------------------------------------------------------------------------------
 # Item 2: range-Doppler adaptive clip label -- rounded, and says what it is
 # --------------------------------------------------------------------------------
 def test_radar_cube_clip_label_rounds_and_explains_the_adaptive_case():
+    """Repointed: the colour bar carries no title any more (layout spec section 4 --
+    at 20 px a colour-bar title squeezed the plot to a sliver, defect 5); the rounded
+    clip value is now the panel's one-line CAPTION and the "why" sentence is in
+    Details. Substance unchanged: rounded, not raw-float precision; provenance
+    reachable but not crammed into the narrow caption."""
     torch = pytest.importorskip("torch")
 
     rng = np.random.default_rng(7)
@@ -107,13 +130,13 @@ def test_radar_cube_clip_label_rounds_and_explains_the_adaptive_case():
     clip = _radar_cube_clip_db(db)
     assert clip > -40.0, "fixture must exercise the adaptive (median-derived) branch"
 
-    label = fig.data[0].colorbar.title.text
+    caption = panel_caption(fig)
     # Rounded to one decimal -- not the raw float's full precision.
-    assert f"{clip:.1f}" in label
-    assert f"{clip:.6f}" not in label
-    # provenance lives in the panel subline, so the colorbar stays narrow
-    assert "median floor" not in label
-    assert "median floor + 3 dB" in fig.layout.title.text
+    assert f"{clip:.1f}" in caption
+    assert f"{clip:.6f}" not in panel_text(fig)
+    # provenance lives in Details, so the one-line caption stays narrow
+    assert "median floor" not in caption
+    assert "median floor + 3 dB" in panel_text(fig)
 
 
 def test_radar_cube_clip_label_plain_when_the_shared_floor_is_used():
@@ -127,10 +150,10 @@ def test_radar_cube_clip_label_plain_when_the_shared_floor_is_used():
     cube_t = torch.from_numpy(quiet)
     fig = figures_from_outputs({"radar_cube": [cube_t], "_axis_meta": {}})["radar_cube"]
 
-    label = fig.data[0].colorbar.title.text
-    assert "clipped at -40.0" in label
-    assert "median floor" not in label
-    assert "shared floor" in fig.layout.title.text
+    caption = panel_caption(fig)
+    assert "clipped at -40.0" in caption
+    assert "median floor" not in caption
+    assert "shared floor" in panel_text(fig)
 
 
 # --------------------------------------------------------------------------------
@@ -165,13 +188,18 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
     assert s.fillcolor in ("rgba(0,0,0,0)", None)
 
     # Crosses (detections) are untouched.
-    det_trace = next(t for t in fig.data if (t.name or "").startswith("detections"))
+    det_trace = next(t for t in fig.data if "detections" in (t.name or ""))
     assert det_trace.marker.symbol == "x"
 
     gt_trace = next(t for t in fig.data if "ground truth" in (t.name or ""))
-    assert "hit = cross inside the box" in gt_trace.name
-    assert f"{crit.max_range_err_m:g}" in gt_trace.name
-    assert f"{crit.max_sin_az_err:g}" in gt_trace.name
+    # Repointed: the hit-RULE sentence used to be part of the ground-truth trace's own
+    # legend name; it now lives in the panel's one-line CAPTION instead (layout spec
+    # section 4, "Detector map" -- as a legend entry it was a ~100-char sentence inside
+    # a dark 72 px block). The legend entry itself is back to a plain "n=" count.
+    caption = panel_caption(fig)
+    assert "hit = cross inside the box" in caption
+    assert f"{crit.max_range_err_m:g}" in caption
+    assert f"{crit.max_sin_az_err:g}" in caption
     # No longer an oversized fixed-pixel circle standing in for the tolerance.
     assert gt_trace.marker.size < 18
 

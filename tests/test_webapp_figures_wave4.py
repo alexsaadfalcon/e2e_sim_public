@@ -20,12 +20,17 @@ A 4th hostile-expert read (2026-09-23) added two more, both in `webapp/pipeline_
   range-azimuth panel already prints (previously range_az only -- see
   `tests/test_webapp_ab.py::test_range_el_panel_carries_no_peak_minus_median_statistic`
   and `tests/test_webapp_figures_wave2.py::
-  test_range_el_main_title_is_short_and_carries_its_qualifier`, both of which pinned
+  test_range_el_title_is_short_and_still_carries_its_qualifier`, both of which pinned
   the OLD "range_el gets none" behaviour and now need updating by whoever owns those
   files -- this module does not touch them);
 * the subspace-error plot's dashed reference line is now labelled "warm-start settled
   level (0.06, reference)" so it does not read as THIS run's own level on a curve that
   sits well above it.
+
+REPOINTED for the 2026-09-24 panel-meta layout (see webapp/pipeline_runner.py's "PANEL
+GEOMETRY AND THE PANEL-META CONTRACT" section): a figure carries no title/subtitle any
+more. `panel_text(fig)` = title + caption + the whole Details body, imported from
+`webapp.pipeline_runner`.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ import numpy as np
 import pytest
 
 from webapp import detector_scoreboard
-from webapp.pipeline_runner import figures_from_outputs
+from webapp.pipeline_runner import figures_from_outputs, panel_text
 
 
 def _detector_outputs(**axis_meta_extra):
@@ -60,8 +65,11 @@ def test_detector_panel_y_axis_cropped_to_50m_with_real_beat_cfar_json():
     lines = [s for s in fig.layout.shapes if s.type == "line"]
     assert len(lines) == 1
     assert lines[0].y0 == pytest.approx(expected) and lines[0].y1 == pytest.approx(expected)
-    ann_texts = " ".join(a.text or "" for a in fig.layout.annotations)
-    assert f"labels & scoring stop at {expected:g} m" in ann_texts
+    # Repointed: "labels & scoring stop at ... m" moved from an in-plot annotation
+    # into the panel's Details body (layout spec section 4, "Detector map") -- the
+    # in-plot tag riding the dashed line itself is now a short "scoring <= N m" label,
+    # not a full sentence (see the fig.add_hline call in pipeline_runner.py).
+    assert f"labels & scoring stop at {expected:g} m" in panel_text(fig)
 
 
 def test_detector_panel_y_axis_uncropped_when_beat_cfar_json_missing(monkeypatch):
@@ -80,9 +88,9 @@ def test_detector_panel_crop_line_uses_the_stored_value_not_forty_literal(monkey
     fig = figures_from_outputs(_detector_outputs())["cfar_detection"]
     lines = [s for s in fig.layout.shapes if s.type == "line"]
     assert lines[0].y0 == pytest.approx(17.0)
-    ann_texts = " ".join(a.text or "" for a in fig.layout.annotations)
-    assert "labels & scoring stop at 17 m" in ann_texts
-    assert "40" not in ann_texts
+    text = panel_text(fig)
+    assert "labels & scoring stop at 17 m" in text
+    assert "40" not in text
 
 
 # --------------------------------------------------------------------------------
@@ -107,6 +115,10 @@ def test_radar_cube_panel_is_not_cropped_by_the_detector_scoring_range():
 # computed on the unclipped map exactly as range-azimuth's already is.
 # --------------------------------------------------------------------------------
 def test_range_az_and_range_el_both_carry_the_peak_minus_median_statistic():
+    """Repointed: the statistic used to be read off the plotly title
+    (`fig.layout.title.text`); it now lives in the panel's Details body (see
+    pipeline_runner's panel-meta contract) -- `panel_text` reads it back the same way
+    regardless of which of title/caption/Details it ended up in."""
     torch = pytest.importorskip("torch")
     from webapp.pipeline_runner import _peak_minus_median_db, _to_numpy_abs_db
 
@@ -126,10 +138,10 @@ def test_range_az_and_range_el_both_carry_the_peak_minus_median_statistic():
 
     expected_az = _peak_minus_median_db(_to_numpy_abs_db(az))
     expected_el = _peak_minus_median_db(_to_numpy_abs_db(el))
-    az_title = figs["range_az"].layout.title.text.replace("<br>", " ")
-    el_title = figs["range_el"].layout.title.text.replace("<br>", " ")
-    assert "peak - median" in az_title and f"{expected_az:.1f}" in az_title
-    assert "peak - median" in el_title and f"{expected_el:.1f}" in el_title
+    az_text = panel_text(figs["range_az"])
+    el_text = panel_text(figs["range_el"])
+    assert "peak - median" in az_text and f"{expected_az:.1f}" in az_text
+    assert "peak - median" in el_text and f"{expected_el:.1f}" in el_text
 
 
 # --------------------------------------------------------------------------------
@@ -137,6 +149,10 @@ def test_range_az_and_range_el_both_carry_the_peak_minus_median_statistic():
 # read as THIS run's own settled level even on a curve sitting well above it (e.g. a
 # cold-start/rank-collapse run reaching ~0.62) -- relabelled to say it is a separate
 # warm-start reference case.
+#
+# Unaffected by the 2026-09-24 panel-meta layout: this is a short in-plot TAG riding
+# the dashed reference line itself (an `add_hline` annotation), not a panel
+# title/subtitle -- unchanged, so this test is left as-is.
 # --------------------------------------------------------------------------------
 def test_subspace_err_dashed_line_labelled_as_a_reference_not_this_runs_level():
     from webapp.pipeline_runner import _SUBSPACE_ERR_SETTLED_LEVEL, figures_from_outputs as ffo

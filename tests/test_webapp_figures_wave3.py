@@ -18,6 +18,21 @@ tests/test_webapp_figures_wave2.py and tests/test_detector_scoreboard.py:
 Plus a pixel-measured legibility re-check (coordinator, 2026-09-23): the podium-
 distance floor's tick/colorbar sizes rendered smaller in actual ink height than the
 Detector scoreboard's table beside them on the same screen; the floor is raised here.
+
+REPOINTED for the 2026-09-24 panel-meta layout (see webapp/pipeline_runner.py's "PANEL
+GEOMETRY AND THE PANEL-META CONTRACT" section):
+
+* a figure carries no title/subtitle any more, so the `<sup>...</sup>` subline this
+  module used to slice out of `fig.layout.title.text` (`_rd_subline`, below) no longer
+  exists at all -- every place that read it now reads `panel_caption(fig)` /
+  `panel_text(fig)` instead (accessors on `webapp.pipeline_runner`, imported as `pr`);
+* `_heatmap()` no longer takes a positional `title` or a `colorbar_title` kwarg, and the
+  colour bar itself carries no title to legibility-check;
+* the podium-distance floor dropped from >=20 px to >=17 px (layout spec section 3;
+  `_make_legible`'s own docstring, and `test_webapp_layout_acceptance.py`'s
+  `MIN_FIGURE_FONT_PX`) now that the reserved statistic strip's own two sizes (26/17 px)
+  are what has to read at demo distance, not a bare tick label -- `_LEGIBLE_TICK_SIZE`
+  etc. are 18, one px of margin above that floor.
 """
 
 from __future__ import annotations
@@ -25,27 +40,25 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from webapp import pipeline_runner as pr
 from webapp.pipeline_runner import (_LEGIBLE_COLORBAR_TICK_SIZE, _LEGIBLE_COLORBAR_TITLE_SIZE,
                                     _LEGIBLE_FONT_SIZE, _LEGIBLE_TICK_SIZE,
                                     _cropped_nonneg_range_axis, _heatmap, _make_legible,
                                     figures_from_outputs)
 
 # --------------------------------------------------------------------------------
-# Item 3: range-Doppler adaptive-clip subline fits a two-card panel
+# Item 3: range-Doppler adaptive-clip provenance survives, unclipped, off the title
 # --------------------------------------------------------------------------------
-#: The subline ran off a ~600 px card mid-sentence at its old, longer wording
-#: ("(non-coherent over channels); clip -36.2 dB = this frame's median floor + 3
-#: dB"); the owner's shortened replacement must fit comfortably under that budget.
-_RD_SUBLINE_MAX_CHARS = 60
+# The character-budget mechanism this used to pin (a `<sup>` subline overflowing a
+# ~600 px card mid-sentence) is now structurally impossible: the rounded clip value is
+# the whole (short, generically length-bounded -- see
+# test_webapp_layout_acceptance.py's caption-length check) CAPTION, and the full "why"
+# sentence lives in the Details body, which wraps rather than clips. What's still
+# specific to this regression -- not covered generically -- is that the full sentence
+# survives intact (no truncation mark, no mid-word cut) once moved there.
 
 
-def _rd_subline(fig) -> str:
-    title = fig.layout.title.text
-    assert "<sup>" in title and "</sup>" in title, title
-    return title.split("<sup>")[1].split("</sup>")[0]
-
-
-def test_radar_cube_clip_subline_fits_when_adaptive():
+def test_radar_cube_clip_provenance_survives_untruncated_when_adaptive():
     torch = pytest.importorskip("torch")
 
     rng = np.random.default_rng(7)
@@ -54,13 +67,14 @@ def test_radar_cube_clip_subline_fits_when_adaptive():
     cube_t = torch.from_numpy(cube)
     fig = figures_from_outputs({"radar_cube": [cube_t], "_axis_meta": {}})["radar_cube"]
 
-    subline = _rd_subline(fig)
-    assert len(subline) <= _RD_SUBLINE_MAX_CHARS, subline
-    assert "median floor + 3 dB" in subline
-    assert "clip" in subline
+    caption = pr.panel_caption(fig)
+    assert "clip" in caption
+    text = pr.panel_text(fig)
+    assert "median floor + 3 dB" in text
+    assert "..." not in text and "…" not in text
 
 
-def test_radar_cube_clip_subline_fits_when_shared_floor():
+def test_radar_cube_clip_provenance_survives_untruncated_when_shared_floor():
     torch = pytest.importorskip("torch")
 
     quiet = np.full((4, 8, 6), 1e-6, dtype=np.complex64)
@@ -68,9 +82,9 @@ def test_radar_cube_clip_subline_fits_when_shared_floor():
     cube_t = torch.from_numpy(quiet)
     fig = figures_from_outputs({"radar_cube": [cube_t], "_axis_meta": {}})["radar_cube"]
 
-    subline = _rd_subline(fig)
-    assert len(subline) <= _RD_SUBLINE_MAX_CHARS, subline
-    assert "shared floor" in subline
+    text = pr.panel_text(fig)
+    assert "shared floor" in text
+    assert "..." not in text and "…" not in text
 
 
 # --------------------------------------------------------------------------------
@@ -83,11 +97,13 @@ def _munich_axis_meta(**bins):
     return {"n_freqs": 64, "freq_span_hz": 3e9, **bins}
 
 
-def test_range_az_subline_states_earliest_arrival_not_bare_range():
-    """The claim lives in the SUBLINE, not the (rotated) y-axis title: a rotated
-    "range (m; 0 = earliest arrival)" axis title ran into the heatmap's own title
-    text at podium font size (fresh-context re-check, 2026-09-23) -- the axis title
-    itself stays the short "range (m)"."""
+def test_range_az_details_states_earliest_arrival_not_bare_range():
+    """Repointed: the claim used to live in the plotly title's own subline; it now
+    lives in the panel's Details body (`pr.panel_text`). The y-axis title itself is
+    unaffected either way and stays the short "range (m)" -- a rotated axis title
+    carrying the full caveat ran into the heatmap's own title text at podium font size
+    (fresh-context re-check, 2026-09-23), which is why the claim was never on the axis
+    title to begin with."""
     torch = pytest.importorskip("torch")
 
     rng = np.random.default_rng(1)
@@ -97,15 +113,10 @@ def test_range_az_subline_states_earliest_arrival_not_bare_range():
         "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
     assert fig.layout.yaxis.title.text == "range (m)"
-    # The subline is long enough here (qualifier + peak-median stat + this note)
-    # that `_wrap_text` line-breaks it -- reassemble before substring-checking.
-    # Wording shortened (pipeline_runner shard, wave 8): "range 0 = ..." -> "0 = ...",
-    # to keep the common (shared-floor) case to 3 total title lines -- see that
-    # module's `_heatmap_margin_t`.
-    assert "0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
+    assert "0 = earliest arrival" in pr.panel_text(fig)
 
 
-def test_range_el_subline_states_earliest_arrival_too():
+def test_range_el_details_states_earliest_arrival_too():
     """range_el shares the exact same delay-normalised axis (see the loop in
     figures_from_outputs building both from one `_range_axis` call per key) -- the
     caveat is not range-azimuth-specific."""
@@ -117,7 +128,7 @@ def test_range_el_subline_states_earliest_arrival_too():
         "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
     assert fig.layout.yaxis.title.text == "range (m)"
-    assert "0 = earliest arrival" in fig.layout.title.text.replace("<br>", " ")
+    assert "0 = earliest arrival" in pr.panel_text(fig)
 
 
 def test_range_az_ylabel_falls_back_to_bins_without_axis_metadata():
@@ -129,7 +140,7 @@ def test_range_az_ylabel_falls_back_to_bins_without_axis_metadata():
     fig = figures_from_outputs({"range_az": [ra],
                                 "_axis_meta": {"range_az_bins": 8}})["range_az"]
     assert fig.layout.yaxis.title.text == "range (bins)"
-    assert "earliest arrival" not in fig.layout.title.text
+    assert "earliest arrival" not in pr.panel_text(fig)
 
 
 def test_range_profile_xlabel_states_earliest_arrival_not_bare_range():
@@ -200,23 +211,30 @@ def test_range_az_keeps_its_own_autorange_when_no_profile_panel_present():
 # --------------------------------------------------------------------------------
 # Pixel-measured legibility re-check (coordinator, 2026-09-23): the first
 # podium-distance pass's 14-15 px tick/colorbar sizes measured 8-13 px of actual ink
-# height against the SAME 20 px standing threshold, and sat visibly smaller than the
+# height against the then-20 px standing threshold, and sat visibly smaller than the
 # Detector scoreboard's table (webapp/detector_scoreboard.py, already 18-20 px) on
-# the same Thrust 5 screen.
+# the same Thrust 5 screen. Re-pointed for the layout spec's 2026-09-24 floor of
+# >=17 px (section 3) -- see this module's docstring.
 # --------------------------------------------------------------------------------
-def test_legible_floor_matches_the_scoreboards_20px_scale():
-    assert _LEGIBLE_TICK_SIZE >= 20
-    assert _LEGIBLE_COLORBAR_TICK_SIZE >= 20
-    assert _LEGIBLE_COLORBAR_TITLE_SIZE >= 20
-    assert _LEGIBLE_FONT_SIZE >= 18
+def test_legible_floor_meets_the_layout_specs_17px_podium_distance_floor():
+    assert _LEGIBLE_TICK_SIZE >= 17
+    assert _LEGIBLE_COLORBAR_TICK_SIZE >= 17
+    assert _LEGIBLE_COLORBAR_TITLE_SIZE >= 17
+    assert _LEGIBLE_FONT_SIZE >= 17
 
 
-def test_make_legible_applies_the_raised_floor_to_ticks_and_colorbar():
-    fig = _heatmap(np.zeros((4, 4)), "t", colorbar_title="cbar")
+def test_make_legible_applies_the_floor_to_ticks_and_colorbar():
+    """Repointed: `_heatmap()` no longer takes a positional `title` or a
+    `colorbar_title` kwarg (see pipeline_runner's panel-meta contract), and its colour
+    bar carries no title at all any more -- so the `cbar.title.font` assertion this
+    test used to make has no counterpart: an untitled colour bar cannot render an
+    illegible title. What's left to protect (ticks, the figure's base font) is
+    unchanged in substance."""
+    fig = _heatmap(np.zeros((4, 4)))
     _make_legible(fig)
-    assert fig.layout.xaxis.tickfont.size >= 20
-    assert fig.layout.yaxis.tickfont.size >= 20
-    assert fig.layout.font.size >= 18
+    assert fig.layout.xaxis.tickfont.size >= 17
+    assert fig.layout.yaxis.tickfont.size >= 17
+    assert fig.layout.font.size >= 17
     cbar = fig.data[0].colorbar
-    assert cbar.tickfont.size >= 20
-    assert cbar.title.font.size >= 20
+    assert cbar.tickfont.size >= 17
+    assert not (cbar.title and cbar.title.text)

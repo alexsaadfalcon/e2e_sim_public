@@ -22,6 +22,41 @@ Three separate defects, pinned here:
    panel together and loops (`webapp/assets/results_clock.js`).
 
 ...plus the runbook rule ("step the slider, never press Play") that item 3 retires.
+
+LAYOUT SPEC UPDATE, 2026-09-24 (landed after this wave, requires rebuilding this
+file's own low-level fixtures, not just repointing assertions):
+
+- `pipeline_runner._heatmap` no longer takes a `title` argument (positional or
+  keyword) and has no `colorbar_title` kwarg -- a figure carries no title and no
+  colour-bar title at all now (see `webapp/pipeline_runner.py`'s "PANEL GEOMETRY
+  AND THE PANEL-META CONTRACT" section). Every helper below that used to build a
+  figure with `pr._heatmap(data, title, ...)` now builds it with `pr._heatmap(data,
+  ...)` and attaches its words with `pr.set_panel(fig, title=..., caption=[...],
+  details=[...], row=...)` instead, mirroring exactly what `figures_from_outputs`
+  itself does for `range_az`/`radar_cube`. `_apply_shared_z` (the function items 1
+  and 5S/7S exercise) now rewrites a CAPTION clause and appends a DETAILS line, not
+  a substring of one subtitle blob -- so a defect this file used to probe by
+  embedding text INSIDE a hand-typed title string (a "<br>"-wrapped clip clause, an
+  orphan "<sup></sup>") is either rebuilt against the caption/details lists, or
+  retired outright where the redesign makes the failure mode structurally
+  impossible (a caption is one line, enforced elsewhere, so it cannot wrap; there
+  is no `<sup>` tag left to leave an orphan of).
+- Per-figure titles never overriding per FRAME either (frames now carry only
+  `annotations`) retires the one test that checked a clause survived a per-frame
+  title override -- the panel's words are HTML above the plot, computed once from
+  the base figure's `layout.meta`, never duplicated per animation frame.
+- `webapp/app.py`'s A/B row markup moved from inline `style` dicts to CSS classes
+  (`ab-row`/`ab-cell`/`ab-cell-single`, `webapp/assets/demo.css`) as part of the
+  same redesign; `_AB_COLUMN_FLEX` is gone. `_panel_block` also grew an HTML header
+  (`_panel_header`: title + caption) as a SIBLING of the `dcc.Graph`, where before
+  the graph was the cell's only child -- tests that walk into a specific graph now
+  need to skip past that new sibling.
+- `webapp/assets/results_clock.js` no longer listens for Plotly's own per-panel
+  `updatemenu-button`/`slider-container` DOM classes at all -- those elements
+  don't exist any more (no per-figure transport, see above). It drives the ONE
+  HTML transport (`webapp.app.TRANSPORT_TOGGLE_ID`/`TRANSPORT_SLIDER_ID`) instead;
+  there is nothing native left to `stopPropagation()` against, so that call is
+  gone too.
 """
 
 from __future__ import annotations
@@ -64,28 +99,29 @@ def _db_map(floor_db: float, *, peak_at=(10, 20), n=24, seed=0) -> np.ndarray:
 
 
 def _range_az_pair(floor_a: float, floor_b: float, n_frames: int = 3):
-    """Two arms' `range_az` figure DICTS, built the way the app stores them (through
-    `_heatmap`/`_add_frame_animation`/`to_dict`), with the given median floors."""
+    """Two arms' `range_az` figure DICTS, built the way `figures_from_outputs` itself
+    builds this product (`_heatmap` + `set_panel` + `_add_frame_animation` +
+    `to_dict()`), with the given median floors. The panel's words go through
+    `set_panel` now (no more `title` argument on `_heatmap`) -- same caption/details
+    shape as the real `range_az` branch, so `_apply_shared_z`'s caption-replace and
+    details-append logic is exercised the same way it is in production."""
     figs = []
     for floor in (floor_a, floor_b):
         frames = [_db_map(floor, seed=i) for i in range(n_frames)]
-        title = ("Range-azimuth power<br><sup>(non-coherent over elevation); "
-                 f"peak - median, dB: {-floor:.1f}</sup>")
-        fig = pr._heatmap(frames[-1], title, x=np.linspace(-1, 1, frames[-1].shape[1]),
+        fig = pr._heatmap(frames[-1], x=np.linspace(-1, 1, frames[-1].shape[1]),
                           y=np.arange(frames[-1].shape[0], dtype=float),
                           zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR)
-        frame_layouts = [dict(title=dict(text=title)) for _ in frames]
-        figs.append(pr._add_frame_animation(fig, frames,
-                                            frame_layouts=frame_layouts).to_dict())
+        pr.set_panel(fig, title="Range-azimuth power",
+                    caption=[pr._DB_COLORBAR_PREFIX, f"{pr.CLIP_CLAUSE_PREFIX}-40.0 dB"],
+                    details=["Integration: (non-coherent over elevation).",
+                             f"peak - median, dB: {-floor:.1f} (last frame)."],
+                    row=pr.PANEL_ROW_MAP)
+        figs.append(pr._add_frame_animation(fig, frames).to_dict())
     return figs
 
 
 def _heatmap_trace(fig_dict):
     return next(t for t in fig_dict["data"] if t.get("type") == "heatmap")
-
-
-def _title_text(fig_dict) -> str:
-    return fig_dict["layout"]["title"]["text"]
 
 
 # ------------------------------------------------------------------------------------
@@ -137,131 +173,103 @@ def test_old_fixed_clip_would_have_put_both_floors_at_the_same_colour():
     assert clamp(-65.9) == clamp(-54.3) == 0.0
 
 
-def test_subtitle_states_the_sharing_and_the_chosen_zmin_on_both_arms():
+def test_caption_and_details_state_the_sharing_and_the_chosen_zmin_on_both_arms():
     a, b = _range_az_pair(-65.9, -54.3)
     pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
     zmin = _heatmap_trace(a)["zmin"]
-    assert "colour limits shared with arm B" in _title_text(a)
-    assert "colour limits shared with arm A" in _title_text(b)
-    for t in (_title_text(a), _title_text(b)):
-        assert f"zmin {zmin:.1f} dB" in t
-        assert "zmax 0 dB" in t
-        # The per-arm clip clause built before sharing ("clip -40.0 dB (shared
-        # floor)") is REPLACED (see `test_shared_clause_replaces_the_per_arm_clip_
-        # clause_not_beside_it` below): the value it was superseded BY has to be
-        # named, or the panel prints two different clips and reads as a bug -- named
-        # here in the shared clause's own "(was X)".
-        assert "(was -40.0)" in t
+    # "colour limits shared with arm X: zmin ..." is a DETAILS line
+    # (`_SHARED_LIMITS_MARKER`), not a caption clause -- `panel_text` reaches both.
+    assert "colour limits shared with arm B" in pr.panel_text(a)
+    assert "colour limits shared with arm A" in pr.panel_text(b)
+    for fig in (a, b):
+        text = pr.panel_text(fig)
+        assert f"zmin {zmin:.1f} dB" in text
+        assert "zmax 0 dB" in text
+        # The per-arm clip clause built before sharing ("clipped at -40.0 dB", the
+        # CAPTION clause) is REPLACED (see
+        # test_shared_caption_replaces_the_per_arm_clip_clause_not_beside_it below):
+        # the value it was superseded BY has to be named, or the panel prints two
+        # different clips and reads as a bug -- named here in the shared Details
+        # line's own "(was X)".
+        assert "(was -40.0)" in text
 
 
-def test_shared_clause_replaces_the_per_arm_clip_clause_not_beside_it():
-    """The real subtitle (`figures_from_outputs`) embeds a "; clip -40.0 dB (shared
-    floor)" clause mid-line before sharing exists. Printing that clause AND the
-    "colour limits shared ..." clause side by side reads as two different clips on
-    one panel (rendered check, thrust1_circuit_knobs wave 11 PNG, 2026-09-24). The
-    superseded value is not lost -- it is named once, in the shared clause's own
-    "(was X)" -- so the clip clause is removed rather than left standing."""
+def test_shared_caption_replaces_the_per_arm_clip_clause_not_beside_it():
+    """The real CAPTION (`figures_from_outputs`) carries one `CLIP_CLAUSE_PREFIX`
+    clause before sharing exists ("clipped at -40.0 dB"). Leaving it standing next
+    to the new "same colour scale on both arms" clause would print two different
+    clips on one line and read as a bug (wave 11's own original finding, now pinned
+    at the caption-list level rather than a string-surgery level). The superseded
+    value is not lost -- it is named once, in the shared Details line's own
+    "(was X)" -- so the caption's clip clause is REPLACED rather than left
+    standing."""
     def _fig(floor, peak_median):
-        title = ("Range-azimuth power<br><sup>(non-coherent over elevation); "
-                 f"peak - median, dB: {peak_median:.1f}; unambig 125 m; "
-                 "clip -40.0 dB (shared floor); 0 dB cell at range 0</sup>")
         frames = [_db_map(floor, seed=i) for i in range(3)]
-        heat = pr._heatmap(frames[-1], title, zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR)
-        return pr._add_frame_animation(
-            heat, frames, frame_layouts=[dict(title=dict(text=title)) for _ in frames]).to_dict()
+        heat = pr._heatmap(frames[-1], zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR)
+        pr.set_panel(heat, title="Range-azimuth power",
+                    caption=[pr._DB_COLORBAR_PREFIX, f"{pr.CLIP_CLAUSE_PREFIX}-40.0 dB"],
+                    details=[f"peak - median, dB: {peak_median:.1f} (last frame).",
+                             "display 0-125 m of 250 m unambig (neg.-delay half "
+                             "cropped).",
+                             "0 dB cell at range 0 is one 1 m gate."],
+                    row=pr.PANEL_ROW_MAP)
+        return pr._add_frame_animation(heat, frames).to_dict()
 
     a, b = _fig(-65.9, 66.0), _fig(-54.3, 54.3)
     pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    text = _title_text(a)
-    assert "clip -40.0 dB (shared floor)" not in text
+    caption = pr.panel_caption(a)
+    assert caption.count(pr.CLIP_CLAUSE_PREFIX) == 1
+    assert pr.SHARED_SCALE_CLAUSE in caption
+    text = pr.panel_text(a)
     assert "colour limits shared with arm B" in text
     assert "(was -40.0)" in text
-    # The rest of the subline (unrelated content either side of the clip clause)
-    # survives untouched.
-    assert "unambig 125 m" in text
-    assert "0 dB cell at range 0" in text
-    for frame in a["frames"]:
-        assert "clip -40.0 dB (shared floor)" not in frame["layout"]["title"]["text"]
+    # The rest of Details (unrelated to the sharing pass) survives untouched.
+    assert "display 0-125 m of 250 m unambig" in text
+    assert "0 dB cell at range 0 is one 1 m gate" in text
 
 
-def test_shared_clause_replaces_the_clip_clause_even_when_word_wrapped():
-    """`_wrap_text` may have inserted a "<br>" in place of one of the clip clause's
-    own spaces before sharing ever runs; the removal must not depend on the clause
-    surviving as one unbroken run of literal spaces."""
-    title = ("Range-azimuth power<br><sup>peak - median, dB: 66.0; clip -40.0<br>dB "
-             "(shared floor); 0 dB cell at range 0</sup>")
-    frames_a = [_db_map(-65.9, seed=i) for i in range(3)]
-    heat = pr._heatmap(frames_a[-1], title, zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR)
-    a = pr._add_frame_animation(
-        heat, frames_a, frame_layouts=[dict(title=dict(text=title)) for _ in frames_a]).to_dict()
-    b_title = title.replace("66.0", "54.3")
-    frames_b = [_db_map(-54.3, seed=i) for i in range(3)]
-    heat_b = pr._heatmap(frames_b[-1], b_title, zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR)
-    b = pr._add_frame_animation(
-        heat_b, frames_b, frame_layouts=[dict(title=dict(text=b_title)) for _ in frames_b]).to_dict()
-    pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    text = _title_text(a)
-    assert "clip -40.0" not in text
-    assert "shared floor" not in text
-    assert "colour limits shared with arm B" in text
-    assert "0 dB cell at range 0" in text
+# `test_shared_clause_replaces_the_clip_clause_even_when_word_wrapped` is RETIRED
+# (2026-09-24): it probed `_apply_shared_z`'s removal surviving a "<br>" inserted
+# mid-clause by word-wrap. The caption is no longer a wrapped string at all -- it
+# is a LIST of clauses, filtered by `startswith`/`==` (`_apply_shared_z`, see
+# `webapp/pipeline_runner.py`), so there is no wrapping step left to insert a
+# "<br>" in the middle of a clause to survive. Captions are also asserted single-
+# line, always, by
+# test_webapp_layout_acceptance.py::test_every_caption_is_one_line_and_at_most_110_characters.
 
+# `test_colorbar_label_follows_the_shared_limit` is RETIRED: colour bars carry no
+# title at all now (layout spec section 4) -- there is no colorbar label left for
+# the shared limit to "follow". Covered generically by
+# test_webapp_layout_acceptance.py::test_no_colorbar_carries_a_title; the shared
+# limit itself reaching the caption/Details is
+# test_caption_and_details_state_the_sharing_and_the_chosen_zmin_on_both_arms above.
 
-def test_colorbar_label_follows_the_shared_limit():
-    """The colorbar says what the map is clipped at; leaving the per-arm value there
-    after re-clipping would make the panel contradict itself."""
-    a, b = _range_az_pair(-65.9, -54.3)
-    pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    zmin = _heatmap_trace(a)["zmin"]
-    for fig in (a, b):
-        text = _heatmap_trace(fig)["colorbar"]["title"]["text"]
-        assert text == f"dB rel. peak (clipped at {zmin:.1f})"
+# `test_every_animation_frame_title_carries_the_shared_limits_clause` is RETIRED:
+# frames carry only `annotations` now, never a `title` override (see this file's
+# own module docstring) -- the panel's words are HTML above the plot, rendered ONCE
+# from the base figure's `layout.meta.panel`, so there is no per-frame copy for a
+# clause to "vanish" from when the clock steps. Nothing replaces this test because
+# the risk it guarded no longer exists.
 
-
-def test_every_animation_frame_title_carries_the_shared_limits_clause():
-    """A per-frame title override REPLACES the whole title object when the clock
-    steps (see `figures_from_outputs`' `frame_layouts`), so a clause only on the base
-    title vanishes the moment the panel animates -- which, since wave 11, it does by
-    itself."""
-    a, b = _range_az_pair(-65.9, -54.3)
-    pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    assert a["frames"], "test assumption: the pair is animated"
-    for frame in a["frames"]:
-        assert "colour limits shared with arm B" in frame["layout"]["title"]["text"]
-
-
-def test_the_top_margin_grows_with_the_added_subtitle_line():
-    """`_heatmap_margin_t` sizes the top margin from the title's own line count; a
-    clause appended without re-sizing it overflows DOWN into the plot (the exact
-    failure that constant exists for). The figure height moves by the same delta so
-    the plot domain is not squeezed instead."""
-    a, b = _range_az_pair(-65.9, -54.3)
-    t_before, h_before = a["layout"]["margin"]["t"], a["layout"]["height"]
-    pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    t_after, h_after = a["layout"]["margin"]["t"], a["layout"]["height"]
-    assert t_after == pr._heatmap_margin_t(_title_text(a))
-    assert t_after > t_before
-    assert h_after - h_before == t_after - t_before
-
-
-def test_the_clause_is_one_line_so_it_costs_one_margin_step():
-    """It is appended to titles that already wrap to six lines on the Thrust 1
-    screen, and every line is 45 px of plot height."""
-    a, b = _range_az_pair(-65.9, -54.3)
-    before = _title_text(a).count("<br>")
-    pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    assert _title_text(a).count("<br>") == before + 1
-    # ...including the "(was ...)" form, which is the longest one this can produce.
-    assert "(was -40.0)" in _title_text(a)
+# `test_the_top_margin_grows_with_the_added_subtitle_line` and
+# `test_the_clause_is_one_line_so_it_costs_one_margin_step` are RETIRED: the top
+# margin is a plain constant now (`_heatmap_margin_t` takes and ignores its
+# argument), so nothing the sharing pass appends can move it any more --
+# test_webapp_layout_acceptance.py::test_heatmap_margin_t_ignores_its_argument and
+# ::test_every_figure_height_is_its_rows_fixed_height cover the "geometry does not
+# depend on appended text" invariant generically, for every product including this
+# one's own sharing pass (see that file's
+# test_the_same_product_has_the_same_geometry_on_two_different_runs, which already
+# varies the DATA, and therefore every derived caption/details string, between two
+# calls and still requires byte-identical geometry).
 
 
 def test_sharing_twice_does_not_append_the_clause_twice():
     a, b = _range_az_pair(-65.9, -54.3)
     pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
     pr.share_heatmap_z_limits({"range_az": a}, {"range_az": b})
-    assert _title_text(a).count("colour limits shared with arm") == 1
-    for frame in a["frames"]:
-        assert frame["layout"]["title"]["text"].count("colour limits shared") == 1
+    assert pr.panel_text(a).count("colour limits shared with arm") == 1
+    assert pr.panel_caption(a).count(pr.SHARED_SCALE_CLAUSE) == 1
 
 
 def test_an_untagged_heatmap_keeps_its_own_limits():
@@ -273,7 +281,7 @@ def test_an_untagged_heatmap_keeps_its_own_limits():
     a, b = obj(), obj()
     pr.share_heatmap_z_limits({"cfar_detection": a}, {"cfar_detection": b})
     assert _heatmap_trace(a)["zmin"] == 0.0 and _heatmap_trace(a)["zmax"] == 1.0
-    assert "colour limits shared" not in str(a["layout"].get("title") or "")
+    assert "colour limits shared" not in pr.panel_text(a)
 
 
 def test_a_keep_clip_pair_shares_the_tighter_clip_not_the_floor():
@@ -282,45 +290,52 @@ def test_a_keep_clip_pair_shares_the_tighter_clip_not_the_floor():
     when it crosses the clip). Sharing must unify the two arms without undoing that
     -- the higher (tighter) clip keeps each arm's floor >= 3 dB below it."""
     def cube(clip):
-        return pr._heatmap(_db_map(-50.0), "Range-Doppler power<br><sup>x</sup>",
-                           zmin=clip, colorbar_title=f"dB rel. peak (clipped at {clip:.1f})",
-                           z_share=pr.Z_SHARE_KEEP_CLIP).to_dict()
+        fig = pr._heatmap(_db_map(-50.0), zmin=clip, z_share=pr.Z_SHARE_KEEP_CLIP)
+        pr.set_panel(fig, title="Range-Doppler power",
+                    caption=[pr._DB_COLORBAR_PREFIX, f"{pr.CLIP_CLAUSE_PREFIX}{clip:.1f} dB"],
+                    details=[], row=pr.PANEL_ROW_MAP)
+        return fig.to_dict()
     a, b = cube(-40.0), cube(-36.2)
     pr.share_heatmap_z_limits({"radar_cube": a}, {"radar_cube": b})
     assert _heatmap_trace(a)["zmin"] == _heatmap_trace(b)["zmin"] == -36.2
     assert _heatmap_trace(a)["zmin"] > min(-40.0, -36.2)
 
 
-def test_radar_cube_shared_clause_replaces_its_own_clip_clause_not_beside_it():
-    """radar_cube's clip clause has a DIFFERENT shape from range_az/range_el's --
-    it is the WHOLE subline (`figures_from_outputs`' `radar_cube` branch drops the
-    qualifier), not one clause among several. Sharing must still print the shared
-    clause ONCE, and must not leave an orphan empty "<sup></sup>" behind where the
-    old clause used to be (handoff item, coordinator, 2026-09-24)."""
+def test_radar_cube_shared_caption_replaces_its_own_clip_clause_not_beside_it():
+    """radar_cube uses `Z_SHARE_KEEP_CLIP` (the tighter of the two clips, not the
+    floor) -- a different SHARING POLICY from range_az/range_el's, but the SAME
+    caption shape now (`figures_from_outputs`' `radar_cube` branch puts its clip in
+    a `CLIP_CLAUSE_PREFIX` caption clause too -- the "different shape, orphan
+    <sup></sup>" premise this test protected described the old single-subline
+    title and is retired with it). Checks the caption is replaced, not duplicated,
+    and this panel's own clip-provenance Details line (built differently from
+    range_az's, and untouched by the sharing pass) survives."""
     def cube(clip, label):
-        title = (f"Range-Doppler power<br><sup>clip {clip:.1f} dB "
-                 f"({label})</sup>")
-        return pr._heatmap(_db_map(-50.0), title, zmin=clip,
-                           colorbar_title=f"dB rel. peak (clipped at {clip:.1f})",
-                           z_share=pr.Z_SHARE_KEEP_CLIP).to_dict()
+        fig = pr._heatmap(_db_map(-50.0), zmin=clip, z_share=pr.Z_SHARE_KEEP_CLIP)
+        pr.set_panel(fig, title="Range-Doppler power",
+                    caption=[pr._DB_COLORBAR_PREFIX, f"{pr.CLIP_CLAUSE_PREFIX}{clip:.1f} dB"],
+                    details=[f"clip {clip:.1f} dB ({label}): this panel's display "
+                             "clip is a deliberate decision about what to hide."],
+                    row=pr.PANEL_ROW_MAP)
+        return fig.to_dict()
     a = cube(-40.0, "shared floor")
     b = cube(-36.2, "median floor + 3 dB")
     pr.share_heatmap_z_limits({"radar_cube": a}, {"radar_cube": b})
-    text = _title_text(a)
-    assert "clip -40.0 dB (shared floor)" not in text
-    assert "<sup></sup>" not in text
-    assert text.count("<sup>") == 1
+    caption = pr.panel_caption(a)
+    assert caption.count(pr.CLIP_CLAUSE_PREFIX) == 1
+    assert pr.SHARED_SCALE_CLAUSE in caption
+    text = pr.panel_text(a)
     assert "colour limits shared with arm B" in text
     assert "(was -40.0)" in text
+    assert ("clip -40.0 dB (shared floor): this panel's display clip is a "
+            "deliberate decision") in text
 
 
 def test_mismatched_policies_are_left_alone():
     """Two panels that disagree about what their colour limits MEAN must not be
     forced onto one scale by key name alone."""
-    a = pr._heatmap(_db_map(-50.0), "t<br><sup>s</sup>", zmin=-40.0,
-                    z_share=pr.Z_SHARE_REACH_FLOOR).to_dict()
-    b = pr._heatmap(_db_map(-50.0), "t<br><sup>s</sup>", zmin=-36.0,
-                    z_share=pr.Z_SHARE_KEEP_CLIP).to_dict()
+    a = pr._heatmap(_db_map(-50.0), zmin=-40.0, z_share=pr.Z_SHARE_REACH_FLOOR).to_dict()
+    b = pr._heatmap(_db_map(-50.0), zmin=-36.0, z_share=pr.Z_SHARE_KEEP_CLIP).to_dict()
     pr.share_heatmap_z_limits({"k": a}, {"k": b})
     assert _heatmap_trace(a)["zmin"] == -40.0 and _heatmap_trace(b)["zmin"] == -36.0
 
@@ -363,11 +378,25 @@ def _ab_results_data():
 
 
 def _rows(tree):
-    """The row Divs of the side-by-side block (the last child of the Results tree)."""
-    return tree.children[-1].children
+    """The PRODUCT-ROW Divs of the side-by-side block. The `results-grid` Div is
+    no longer reliably `tree.children[-1]` -- a `_screen_note` appends a trailing
+    `page-foot-note` Div after it now (layout spec section 2.3) -- so it is found
+    by its own `className` instead. `_ab_columns` (webapp/app.py) also interleaves
+    a bare `className="section-rule"` divider Div right after the header row,
+    which carries no row content of its own -- filtered out here by its `ab-row`
+    className marker, the same one `_row()` gives every real row."""
+    grid = next(c for c in tree.children if getattr(c, "className", None) == "results-grid")
+    return [r for r in grid.children
+           if getattr(r, "className", None) == "ab-row"]
 
 
 def test_ab_results_render_one_row_per_product_two_columns_wide():
+    """`_row`'s cells are CSS classes now (`webapp/assets/demo.css`'s `.ab-row`/
+    `.ab-cell`), not inline `style` dicts -- `_AB_COLUMN_FLEX` is gone with them.
+    The actual `display: flex`/`flex` VALUES are pure CSS now, unreachable from a
+    figure-dict-level test (see this module's own docstring); what stays checkable
+    here is the STRUCTURE the CSS selectors depend on: one row per product, two
+    cells per row, both classed `ab-cell`."""
     import webapp.app as appmod
 
     tree = appmod._render_results(_ab_results_data(), "tab-results")
@@ -375,10 +404,10 @@ def test_ab_results_render_one_row_per_product_two_columns_wide():
     # 1 header row + 1 row per product (range_az, fft).
     assert len(rows) == 3
     for row in rows:
-        assert row.style["display"] == "flex"
+        assert row.className == "ab-row"
         assert len(row.children) == 2
         for col in row.children:
-            assert col.style["flex"] == appmod._AB_COLUMN_FLEX
+            assert col.className == "ab-cell"
 
 
 def test_each_arms_banner_sits_above_its_own_column():
@@ -394,7 +423,12 @@ def test_each_arms_banner_sits_above_its_own_column():
 
 def test_the_same_product_lands_in_the_same_row_on_both_arms():
     """The defect: A's whole grid then B's whole grid put the two copies of one
-    product a screen height apart, so the comparison had to be remembered."""
+    product a screen height apart, so the comparison had to be remembered.
+
+    `_panel_block` (webapp/app.py) now wraps the plot in an HTML header (title +
+    caption) as a SIBLING of the `dcc.Graph`, where before the graph was the
+    cell's only child -- the path into the actual figure grew one more `[1]` (the
+    Graph is the second of the two children, after `_panel_header`)."""
     import webapp.app as appmod
 
     data = _ab_results_data()
@@ -402,13 +436,19 @@ def test_the_same_product_lands_in_the_same_row_on_both_arms():
     data["_previous"]["range_az"]["layout"]["title"] = {"text": "ARM-B-RANGE-AZ"}
     tree = appmod._render_results(data, "tab-results")
     row = _rows(tree)[1]
-    left_fig = row.children[0].children.children.figure
-    right_fig = row.children[1].children.children.figure
-    assert left_fig["layout"]["title"]["text"] == "ARM-A-RANGE-AZ"
-    assert right_fig["layout"]["title"]["text"] == "ARM-B-RANGE-AZ"
+    left_graph = row.children[0].children.children[1]
+    right_graph = row.children[1].children.children[1]
+    assert left_graph.figure["layout"]["title"]["text"] == "ARM-A-RANGE-AZ"
+    assert right_graph.figure["layout"]["title"]["text"] == "ARM-B-RANGE-AZ"
 
 
 def test_a_product_only_one_arm_produced_keeps_an_empty_cell_opposite_it():
+    """The opposite cell is a real `_empty_panel` placeholder Div now (className
+    `result-panel-empty`, height matched to the row kind -- `_row`'s own docstring:
+    "the same height whether or not either is empty", acceptance check 4) -- not a
+    bare `None`, which is what the old assertion checked FOR (repoints onto the
+    opposite of the old expectation, on purpose: a `None` cell there today would be
+    the regression, not the invariant)."""
     import webapp.app as appmod
 
     data = _ab_results_data()
@@ -416,29 +456,51 @@ def test_a_product_only_one_arm_produced_keeps_an_empty_cell_opposite_it():
     tree = appmod._render_results(data, "tab-results")
     rows = _rows(tree)
     assert len(rows) == 3          # header + range_az + fft
-    assert rows[2].children[1].children is None
+    empty_cell = rows[2].children[1].children
+    assert empty_cell is not None
+    assert "result-panel-empty" in empty_cell.className
+    assert empty_cell.style["height"] == f"{appmod.PANEL_HEIGHT[appmod.PANEL_ROW_MAP]}px"
 
 
 def test_single_arm_results_keep_the_wrapping_grid():
-    """Only the A/B path changed; a hand-edited single run still wraps its products
-    across the full stage width (and a lone figure still takes the whole row)."""
+    """Only the A/B path changed row markup; a hand-edited single run still renders
+    through `_grid`. `grid`/`_row`'s inline `style` dicts are gone (CSS classes
+    now, see the module docstring) -- and a LONE product no longer stretches to
+    "1 1 100%" of the row at all: that WAS hostile round 10's own defect 10 (a
+    1080x230, 4.7:1 strip) that `SINGLE_PANEL_WIDTH` exists to fix, so a lone
+    product gets one fixed-width panel instead."""
     import webapp.app as appmod
 
     data = {"range_az": go.Figure().to_dict(), "_banner": "run #1"}
     tree = appmod._render_results(data, "tab-results")
     grid = tree.children[-1]
-    assert grid.style == {"display": "flex", "flexWrap": "wrap"}
-    assert grid.children[0].style["flex"] == "1 1 100%"
-    assert "This run:" in _all_text(tree)
+    row = grid.children[0]
+    assert row.className == "ab-row"
+    cell = row.children[0]
+    assert cell.className == "ab-cell ab-cell-single"
+    panel = cell.children
+    assert panel.style["width"] == f"{appmod.SINGLE_PANEL_WIDTH}px"
+    assert "This run" in _all_text(tree)
 
 
-def test_the_screen_note_is_still_printed_once_above_both_columns():
+def test_the_screen_note_is_reachable_in_each_arms_details_and_printed_once_at_the_page_foot():
+    """RETIRED premise: "printed once above both columns" -- the screen note is now
+    ALSO inside each arm's Details disclosure (`_details_lines`; acceptance check
+    15: every honesty clause reachable without leaving the panel/screen it belongs
+    to), on top of the standing page-foot copy, so the total on-page count is no
+    longer 1. What survives unchanged: exactly one page-foot copy, and it is still
+    reachable from each arm's own header block."""
     import webapp.app as appmod
 
     data = _ab_results_data()
     data["_screen_note"] = "a caveat the audience must see"
-    text = _all_text(appmod._render_results(data, "tab-results"))
-    assert text.count("a caveat the audience must see") == 1
+    tree = appmod._render_results(data, "tab-results")
+    foot = tree.children[-1]
+    assert foot.className == "page-foot-note"
+    assert _all_text(foot) == "a caveat the audience must see"
+    header_row = _rows(tree)[0]
+    for cell in header_row.children:
+        assert "a caveat the audience must see" in _all_text(cell)
 
 
 def test_render_results_shares_colour_limits_between_the_two_arms():
@@ -452,7 +514,7 @@ def test_render_results_shares_colour_limits_between_the_two_arms():
     appmod._render_results(data, "tab-results")
     assert _heatmap_trace(a)["zmin"] == _heatmap_trace(b)["zmin"]
     assert _heatmap_trace(a)["zmin"] == pytest.approx(-68.9, abs=1e-6)
-    assert "colour limits shared with arm B" in _title_text(a)
+    assert "colour limits shared with arm B" in pr.panel_text(a)
 
 
 # ------------------------------------------------------------------------------------
@@ -533,17 +595,30 @@ def test_the_asset_leaves_a_single_frame_panel_alone():
     assert "frames.length > 1" in js
 
 
-def test_the_asset_pauses_on_plotlys_own_pause_button_and_resumes_on_play():
-    """One clock means one pause: pressing pause on any panel stops every panel.
-    The listener is capture-phase and stops propagation so plotly's own one-shot
-    animation never also runs (two drivers = the drift this replaced)."""
+def test_the_asset_drives_pause_and_scrub_from_the_one_transports_own_ids():
+    """RETIRED premise: "pressing pause on any PANEL... Plotly's own
+    updatemenu-button... slider-container" described the (already-superseded)
+    world where per-figure play/pause buttons and sliders still existed alongside
+    the one clock, and this listener had to intercept THEIR native DOM classes and
+    `stopPropagation()` against their own one-shot animation. Per-figure
+    updatemenus/sliders are fully retired now (layout spec section 4) -- there is
+    nothing native left to listen to or suppress, so `updatemenu-button`/
+    `slider-container`/`stopPropagation` are all gone from this file. The one
+    transport this asset drives instead has its own fixed HTML ids
+    (`webapp.app.TRANSPORT_TOGGLE_ID`/`TRANSPORT_SLIDER_ID`); repoints onto those,
+    keeping the still-real invariants (pausing on scrub parks every panel at once;
+    every listener is capture-phase, delegated from `document` since the transport
+    is rebuilt by Dash on every render)."""
+    import webapp.app as appmod
+
     js = _CLOCK_JS.read_text(encoding="utf-8")
-    assert "updatemenu-button" in js
-    assert "stopPropagation" in js
+    assert appmod.TRANSPORT_TOGGLE_ID in js
+    assert appmod.TRANSPORT_SLIDER_ID in js
     assert "S.paused" in js
-    assert "slider-container" in js, "dragging the slider parks the panel"
-    # capture-phase registration (the third argument of addEventListener)
-    assert js.count("}, true);") >= 2
+    assert "S.paused = true" in js, "dragging the slider parks the panel"
+    # capture-phase registration (the third argument of addEventListener) on all
+    # three listeners (toggle click, slider input, slider change).
+    assert js.count(", true);") == 3
 
 
 def test_the_clock_asset_is_served_from_the_dash_assets_folder():

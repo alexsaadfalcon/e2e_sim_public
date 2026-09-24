@@ -119,7 +119,14 @@ def test_render_results_carries_the_notes_too():
     import inspect
     import webapp.app as appmod
     assert 'axis_meta.get("notes")' in inspect.getsource(appmod._notes_line)
-    assert '"_notes"' in inspect.getsource(appmod._render_results)
+    # `_render_results` no longer reads "_notes" itself: with the 2026-09-24 layout the
+    # notes reach the screen through the arm header, which puts the FIRST note's
+    # headline in the arm's one-line caption (`_arm_caption`) and every note, now
+    # UNTRUNCATED, in that arm's Details disclosure (`_details_lines`). Pinning the two
+    # functions that actually read the key is what keeps this anchored to the fix
+    # rather than to whichever function happened to hold it in 2026-09-23.
+    assert '"_notes"' in inspect.getsource(appmod._details_lines)
+    assert '"_notes"' in inspect.getsource(appmod._arm_caption)
 
 
 # ------------------------------------------------------------------------------------

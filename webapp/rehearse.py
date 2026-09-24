@@ -93,9 +93,111 @@ def _run_and_wait(page) -> float:
 
 
 def _figure_titles(page) -> List[str]:
+    """The panel titles as the AUDIENCE sees them.
+
+    Reads `.panel-title`, not Plotly's `.gtitle` (layout spec section 3, 2026-09-24):
+    figures carry no title any more -- the title and a one-line caption are HTML above
+    the plot -- so a `.gtitle` query would report zero figures on a page full of them.
+    """
     return page.evaluate(
         """() => Array.from(document.querySelectorAll(
-            '#results-tab-content .js-plotly-plot .gtitle')).map(e => e.textContent)""")
+            '#results-tab-content .panel-title')).map(e => e.textContent)""")
+
+
+def _expand_details(page) -> int:
+    """Open every `Details` disclosure on the Results tab and return how many were
+    opened -- so `--expand-details` can capture a SECOND screenshot proving that the
+    honesty text the default render hides is one click away and photographable
+    (acceptance check 15)."""
+    return page.evaluate(
+        """() => { const d = Array.from(document.querySelectorAll(
+            '#results-tab-content details')); d.forEach(e => e.open = true);
+            return d.length; }""")
+
+
+def _details_text(page) -> List[str]:
+    """The text of every expanded `Details` body, for the honesty diff."""
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll(
+            '#results-tab-content .details-body')).map(e => e.innerText)""")
+
+
+#: What `_geometry` measures, in the browser, on the real page. A figure-dict test
+#: cannot see any of it (memory: "RENDER THE PAGE ... figure-dict tests and code
+#: reviews cannot see the screen"), and a pixel-hunt on the PNG has to guess where a
+#: panel ends. The DOM knows exactly.
+_GEOMETRY_JS = """() => {
+  const root = document.getElementById('results-tab-content');
+  if (!root) return null;
+  const R = e => { const b = e.getBoundingClientRect();
+    return {x: b.x + window.scrollX, y: b.y + window.scrollY,
+            w: b.width, h: b.height}; };
+  const panels = Array.from(root.querySelectorAll('.result-panel')).map(p => {
+    const plot = p.querySelector('.js-plotly-plot .nsewdrag');
+    const title = p.querySelector('.panel-title');
+    const cap = p.querySelector('.panel-caption');
+    return {rect: R(p), plot: plot ? R(plot) : null,
+            title: title ? title.textContent : '',
+            caption: cap ? cap.textContent : '',
+            titleClipped: title ? title.scrollWidth > title.clientWidth + 1 : false,
+            captionClipped: cap ? cap.scrollWidth > cap.clientWidth + 1 : false};
+  });
+  // Every text node's rendered font size, so "no text under 15 px" is measured on
+  // what the browser actually drew (HTML and SVG both).
+  const sizes = {};
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walk.nextNode())) {
+    const t = (n.textContent || '').trim();
+    if (!t) continue;
+    const el = n.parentElement;
+    if (!el) continue;
+    const st = window.getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') continue;
+    // Inside a <details> that is closed: not visible text.
+    let d = el.closest('details');
+    if (d && !d.open) continue;
+    const px = Math.round(parseFloat(st.fontSize) * 10) / 10;
+    const inFigure = !!el.closest('.js-plotly-plot');
+    const key = px + (inFigure ? '|figure' : '|page');
+    (sizes[key] = sizes[key] || []).push(t.slice(0, 60));
+  }
+  const firstPanel = panels.length ? panels[0].rect.y : null;
+  return {
+    page: {w: document.documentElement.scrollWidth,
+           h: document.documentElement.scrollHeight},
+    rootTop: R(root).y,
+    firstPanelTop: firstPanel,
+    // CSS `text-overflow: ellipsis` draws a mark that is NOT in innerText, so a
+    // clipped run-identity line passed an ellipsis-count check while visibly ending
+    // in "..." on screen (found on the Thrust 5 render, 2026-09-24). Measure the
+    // overflow instead.
+    clippedChrome: Array.from(root.querySelectorAll(
+        '.run-identity, .arm-chip-label, .arm-caption'))
+      .filter(e => e.scrollWidth > e.clientWidth + 1)
+      .map(e => e.textContent.slice(0, 60)),
+    panels: panels,
+    fontSizes: sizes,
+    nDetails: root.querySelectorAll('details').length,
+    nDetailsOpen: root.querySelectorAll('details[open]').length,
+    nTransportButtons: root.querySelectorAll('button').length,
+    nTransportSliders: root.querySelectorAll('input[type=range]').length,
+    nPlotlySliders: root.querySelectorAll('.slider-container').length,
+    nPlotlyButtons: root.querySelectorAll('.updatemenu-button').length,
+    nFigureTitles: root.querySelectorAll('.js-plotly-plot .gtitle').length,
+    // `.cartesianlayer .bg` -- the PLOT-AREA rect only. A bare `.bg` also matches
+    // annotation pills and Plotly Table cell fills, which made a one-background
+    // screen look like a five-background one (measured, 2026-09-24).
+    plotBg: Array.from(root.querySelectorAll('.js-plotly-plot .cartesianlayer .bg'))
+              .map(e => e.getAttribute('style') || ''),
+    visibleText: (root.innerText || '')
+  };
+}"""
+
+
+def _geometry(page):
+    """Measured page geometry (see `_GEOMETRY_JS`)."""
+    return page.evaluate(_GEOMETRY_JS)
 
 
 def _status_after(page) -> str:
@@ -107,9 +209,15 @@ def _status_after(page) -> str:
 
 
 def rehearse(out: pathlib.Path, only: List[str] | None = None,
-             cancel_journey: bool = True, viewport=(1600, 1000)) -> Dict[str, Any]:
+             cancel_journey: bool = True, viewport=(1600, 1000),
+             expand_details: bool = False) -> Dict[str, Any]:
     """Load, run and screenshot every preset (or those in ``only``); optionally end
-    with a 20-frame run cancelled after a few seconds. Returns the summary dict."""
+    with a 20-frame run cancelled after a few seconds. Returns the summary dict.
+
+    ``expand_details`` additionally opens every ``Details`` disclosure and writes a
+    second ``<id>_results_details.png`` plus the disclosure text into the summary --
+    the capture the layout spec's acceptance check 15 ("opening all of them loses no
+    string that is present in today's screens") is run against."""
     from playwright.sync_api import sync_playwright
 
     from webapp.demo_presets import PRESETS
@@ -136,10 +244,23 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             page.wait_for_timeout(1500)  # let Plotly finish drawing every card
             titles = _figure_titles(page)
             page.screenshot(path=str(out / f"{p.id}_results.png"), full_page=True)
+            geometry = _geometry(page)
+            (out / f"{p.id}_geometry.json").write_text(
+                json.dumps(geometry, indent=1), encoding="utf-8")
+            details_text: List[str] = []
+            if expand_details:
+                n_open = _expand_details(page)
+                page.wait_for_timeout(400)
+                details_text = _details_text(page)
+                page.screenshot(path=str(out / f"{p.id}_results_details.png"),
+                                full_page=True)
+                print(f"{p.id}: expanded {n_open} Details disclosure(s)", flush=True)
             status = _status_after(page)
             summary[p.id] = {"label": p.label, "n_steps": n_steps,
                              "wall_s": round(wall, 2), "figures": titles,
                              "status": status, "rendered_at": _now_iso()}
+            if expand_details:
+                summary[p.id]["details_text"] = details_text
             print(f"{p.id}: n={n_steps} {wall:.1f}s figs={len(titles)} "
                   f"status={status[:100]}", flush=True)
             ctx.close()
@@ -172,6 +293,8 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             wall = time.time() - t0
             page.wait_for_timeout(1000)
             page.screenshot(path=str(out / "cancel_results.png"), full_page=True)
+            (out / "cancel_geometry.json").write_text(
+                json.dumps(_geometry(page), indent=1), encoding="utf-8")
             status = _status_after(page)
             summary["cancel_journey"] = {"preset": p.id, "wall_s": round(wall, 2),
                                          "status": status, "rendered_at": _now_iso()}
@@ -198,10 +321,14 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--only", nargs="*", default=None, help="preset ids to rehearse")
     ap.add_argument("--no-cancel", action="store_true",
                     help="skip the 20-frame run-then-Cancel journey at the end")
+    ap.add_argument("--expand-details", action="store_true",
+                    help="also open every Details disclosure and write "
+                         "<id>_results_details.png + its text into summary.json")
     args = ap.parse_args(argv)
     os.environ.setdefault("MPLBACKEND", "Agg")
     summary = rehearse(pathlib.Path(args.out), only=args.only,
-                       cancel_journey=not args.no_cancel)
+                       cancel_journey=not args.no_cancel,
+                       expand_details=args.expand_details)
     print(f"\n{len(summary)} entries -> {args.out}/summary.json. Now READ the PNGs.")
     return 0
 

@@ -24,6 +24,7 @@ Then open http://127.0.0.1:8050
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -48,9 +49,14 @@ from webapp import block_diagram, scenario_editor
 from webapp.demo_presets import PRESETS, PRESETS_BY_ID, DemoPreset, PresetError, apply_preset
 from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
+    CAPTION_SEP,
+    PANEL_HEIGHT,
+    PANEL_ROW_MAP,
     PipelineError,
+    apply_arm_style,
     decode_plotly_array,
     figures_from_outputs,
+    panel_of,
     placeholder_figure,
     prewarm_tessera_interconnect,
     run_pipeline,
@@ -121,10 +127,9 @@ def _run_lock(session_id) -> "threading.Lock":
 
 def _app_layout() -> Any:
     return html.Div([
-        html.H2("Array Processing End-to-End Simulator",
-                style={"marginBottom": "0"}),
+        html.H2("Array Processing End-to-End Simulator", className="page-title"),
         html.P("Block-diagram pipeline control and scenario scheduling.",
-               style={"color": "#576574", "marginTop": "2px"}),
+               className="page-subtitle"),
 
         # Client-side state stores.
         dcc.Store(id="block-state-store", data=default_block_state()),
@@ -160,15 +165,18 @@ def _app_layout() -> Any:
             dcc.Tab(label="Scenario", value="tab-scenario",
                     children=html.Div(scenario_editor.layout(), style={"padding": "12px"})),
             dcc.Tab(label="Results", value="tab-results",
-                    children=html.Div(id="results-tab-content", style={"padding": "12px"})),
+                    # 8 px, not 12: the budget above the first panel is 150 px
+                    # (acceptance check 2) and this padding is inside it.
+                    children=html.Div(id="results-tab-content", style={"padding": "8px"})),
         ]),
     # 1600px, not the original 1280px: on the 1920x1080 conference monitor the narrower
     # cap wasted ~338px of margin per side and bought the lone-figure Thrust 3 screen
     # nothing from the bigger display (coordinator finding, 2026-09-23). Figures scale
     # with their container; the podium-distance font floor (pipeline_runner._make_legible)
     # is independent of this and unaffected.
-    ], style={"maxWidth": "1600px", "margin": "0 auto", "fontFamily": "Segoe UI, Arial, sans-serif",
-              "padding": "12px"})
+    # 1560 px, centred, 20 px side padding -> 1520 px of content, which is what the
+    # two-column A/B geometry (746 + 28 + 746) is built from (layout spec section 2.1).
+    ], className="app-shell")
 
 
 app.layout = _app_layout
@@ -389,120 +397,285 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     return f"B: {label} {preset.ab_label_b or '?'} -- after"
 
 
-#: Results-tab-only truncation limit for one run note (wave 9 follow-up,
-#: 2026-09-24): the Block Diagram status line (`_note_for` below) still carries the
-#: full, untruncated text -- this is purely a Results-tab display shortening, so it
-#: lives next to `_notes_line`, the function it gates, not next to `run_pipeline`
-#: (which builds the notes themselves and knows nothing about either screen).
-_NOTE_TRUNCATE_CHARS = 160
+#: Longest chip that fits ONE line at 20/700 in a 746 px column (measured on the
+#: rendered page, 2026-09-24). Past it the VALUE moves to the caption -- see
+#: `_ab_arm_chip` and `_ab_arm_chip_overflow`.
+ARM_CHIP_MAX_CHARS = 58
 
 
-def _truncate_note(note: str) -> str:
-    """One run note, cut at its first `" -- "` separator or `_NOTE_TRUNCATE_CHARS`
-    characters, whichever comes first (with an ellipsis) -- the Results-tab-only
-    shortening item 6's follow-up fixes (wave 9, 2026-09-24): the live-chain
-    correctness gate's own note runs its headline number, then a `" -- "`, then an
-    attribution clause that can run another 2-3 lines ("...the usual answer: it is
-    the knob the A/B turns...") -- illegible at 11 px and pushing the figures down
-    on every Thrust 5 arm, when the banner above already carries the gate's verdict.
-    A note with neither (short, no `" -- "`, e.g. the interconnect Tessera
-    surrogate's own note) is returned unchanged -- checked against both arms'
-    "evaluated at 14.25-15.75 GHz" text, which sits at the FRONT of that note and
-    survives either cut."""
-    cut = len(note)
+def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
+    """The ARM CHIP (layout spec section 2.3): just the knob and its value, e.g.
+    "A -- ADC 12 bit (as built)". The full banner line above is not deleted -- it is
+    the first line of this arm's Details disclosure -- but at podium distance a 2-4
+    line bold banner per column wrapped across the 13 px gutter and read as one
+    garbled paragraph (hostile round 10, defect 2.6)."""
+    bid, key, _value_b = preset.ab
+    label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
+    value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
+    chip = f"{arm.upper()} — {label} {value}"
+    if len(chip) > ARM_CHIP_MAX_CHARS:
+        # Thrust 4's knob value is prose ("canonical Tessera geometry (50 um
+        # presented)") and at 20/700 the whole chip wrapped to two lines, which put
+        # that screen 18 px over the 150 px budget above the first panel (measured,
+        # 2026-09-24). The value is neither dropped nor truncated: it moves to the
+        # FRONT of this arm's one-line caption (`_arm_caption`), still on screen at
+        # 16 px. Nothing here ever ends in an ellipsis.
+        return f"{arm.upper()} — {label}"
+    return chip
+
+
+def _ab_arm_chip_overflow(preset: "DemoPreset", arm: str) -> str:
+    """The knob VALUE `_ab_arm_chip` had to leave off, or "" when it fitted on the
+    chip. Rendered at the front of that arm's one-line caption, so a value too long for
+    a chip is MOVED, never lost -- on Thrust 4 it is the only thing on screen that
+    shows arm B ran a different geometry at all (hostile round 10, section 1.7)."""
+    value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
+    return "" if _ab_arm_chip(preset, arm).endswith(value) else value
+
+
+#: Longest run-identity line that fits ONE line at 18/600 across 1520 px of content
+#: minus the transport and (on the cancel path) the CANCELLED chip -- measured on the
+#: rendered page, 2026-09-24. Past it the line is SHORTENED AT A CLAUSE BOUNDARY, never
+#: cut mid-phrase: acceptance check 12 forbids a truncation mark in visible text, and
+#: CSS `text-overflow: ellipsis` draws one that does not even appear in `innerText`, so
+#: a clipped line passed an ellipsis-count check while visibly ending in "..." on
+#: screen (found on the Thrust 5 render, 2026-09-24).
+RUN_IDENTITY_MAX_CHARS = 100
+#: Characters the CANCELLED chip costs this line on the cancel path.
+RUN_IDENTITY_CHIP_COST = 26
+
+
+def _clause_head(text: str, seps=(": ", " -- ", " vs ", " (")) -> str:
+    """`text` up to its first clause separator, or `text` unchanged. The result is a
+    complete phrase, so nothing needs marking as elided."""
+    cuts = [c for c in (text.find(sep) for sep in seps) if c > 0]
+    return text[:min(cuts)].rstrip() if cuts else text
+
+
+def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int) -> str:
+    """The ONE full-width line that replaces the `Results` H3 and the run half of the
+    banner (layout spec section 2.3):
+
+        Thrust 5 - classical CFAR - munich (Ka-band, 30 GHz) - 5 frames - run #1 14:29:06
+
+    Every part is read from the run itself; nothing is typed. When the preset's own
+    label is long prose it is shortened at a clause boundary rather than clipped -- the
+    full label, the full source string and the frame count all remain in the banner,
+    which is the first line of each arm's Details disclosure.
+    """
+    import time as _time
+    n_run = axis_meta.get("n_steps_run", n_steps)
+    frames = (f"{n_run} of {n_steps} frames" if n_run != n_steps
+              else f"{n_steps} frames")
+    run = f"run #{n_clicks} {_time.strftime('%H:%M:%S')}"
+    thrust = f"Thrust {preset.thrust}" if preset is not None else ""
+    label = ""
+    if preset is not None:
+        # The label already starts "Thrust N - ..." (or "Thrust N (LEAD) - ...");
+        # printing the thrust twice on one line is part of what pushed this past the
+        # page width.
+        label = re.sub(rf"^Thrust {preset.thrust}(?![0-9])[^-]*-\s*", "", preset.label)
+    # "Sionna frames: munich (Ka-band, 30 GHz)" -> the environment IS the identity,
+    # the loader is not.
+    source = (axis_meta.get("source") or "").replace("Sionna frames: ", "")
+
+    # A ladder of progressively shorter forms, each made of WHOLE clauses. The first
+    # that fits wins; the last rung always fits.
+    candidates = [
+        [thrust, label, source, frames, run],
+        [thrust, _clause_head(label), source, frames, run],
+        # The source's parenthetical is a mouthful ("Corpus Replay (live chain from
+        # stored channel): test split from ..."); the environment NAME is the identity.
+        [thrust, _clause_head(label),
+         _clause_head(source, (": ", " (")), frames, run],
+        # Keep the ENVIRONMENT before giving up on the label: a screen that says only
+        # "Thrust 5 . 5 frames . run #1" has lost the two facts a photograph needs
+        # (which preset, which corpus). Measured on thrust5_detector_ml, 2026-09-24.
+        [thrust, _clause_head(label), _clause_head(source, (": ", " (")), run],
+        [thrust, _clause_head(label), frames, run],
+        [thrust, frames, run],
+    ]
+    # A cancelled run also draws an amber `CANCELLED -- N of M frames` chip in this
+    # same row, which takes ~230 px out of the line's own width (measured on
+    # cancel_results.png, 2026-09-24) -- so the budget is smaller on that path.
+    budget = (RUN_IDENTITY_MAX_CHARS - RUN_IDENTITY_CHIP_COST
+              if axis_meta.get("cancelled") else RUN_IDENTITY_MAX_CHARS)
+    for parts in candidates:
+        line = CAPTION_SEP.join(x for x in parts if x)
+        if len(line) <= budget:
+            return line
+    return CAPTION_SEP.join(x for x in candidates[-1] if x)
+
+
+#: RETRACTED (layout spec section 2.3, 2026-09-24). Run notes used to be truncated at
+#: their first `" -- "` or 160 characters for the Results tab, which is how "the ADC
+#: bits, full scale, IF high-p ...", "...ring3x3 arran ..." and "...trained on
+#: b1_bench_v3/benchmark_v1_D2 and these f ..." reached the screen -- the SMALLEST type
+#: on the page was the only text that lost information, and mid-word truncation reads
+#: as a crash to a non-expert (hostile round 10, defect 2.3; acceptance check 12).
+#: The full note now lives in the per-arm Details disclosure, and the same first
+#: clause -- the headline the presenter actually reads -- is the arm's one-line
+#: CAPTION, which is why this function survives as `_arm_caption`'s helper rather
+#: than as a display shortener.
+_NOTE_HEADLINE_CHARS = 110
+
+
+def _note_headline(note: str) -> str:
+    """The first clause of one run note: up to its first `" -- "` or
+    `_NOTE_HEADLINE_CHARS` characters. Used ONLY for the arm's one-line caption -- the
+    full note is never shortened anywhere any more (see the comment above).
+
+    The live-chain correctness gate's own note runs its headline number, then a
+    `" -- "`, then an attribution clause that can run another 2-3 lines; the headline
+    IS the number the presenter reads ("live vs stored ADC: max |diff| 0 of 4096 LSB"),
+    so it is what the caption carries."""
     sep = note.find(" -- ")
-    if 0 <= sep < cut:
-        cut = sep
-    if _NOTE_TRUNCATE_CHARS < cut:
-        cut = _NOTE_TRUNCATE_CHARS
-    if cut >= len(note):
-        return note
-    return note[:cut].rstrip() + " ..."
+    head = note[:sep].rstrip() if sep >= 0 else note
+    if len(head) <= _NOTE_HEADLINE_CHARS:
+        # A clean clause boundary: nothing is elided, so nothing is marked. Acceptance
+        # check 12 forbids truncation marks in visible text, and a note cut at " -- "
+        # is a complete sentence, not a cut-off one.
+        return head
+    # Still too long: cut at the last WORD boundary and mark it. Mid-word truncation
+    # ("...ring3x3 arran ...") is what made the smallest type on the screen the only
+    # text that lost information (hostile round 10, defect 2.3).
+    clipped = head[:_NOTE_HEADLINE_CHARS]
+    space = clipped.rfind(" ")
+    if space > 40:
+        clipped = clipped[:space]
+    return clipped.rstrip(" ,;") + "…"
 
 
 def _notes_line(axis_meta: Dict[str, Any]) -> List[str]:
     """`axis_meta['notes']` (`pipeline_runner.run_pipeline`'s `run_notes` -- e.g. the
     interconnect Tessera surrogate's scale-model/frequency disclosure,
-    `InterconnectBlock.describe()`), one TRUNCATED (`_truncate_note`) entry per note,
-    for the Results tab (item 6, wave 9 hostile-expert read, 2026-09-23 + follow-up,
-    2026-09-24): these reached only the Block Diagram tab's status line (via
-    `_note_for` below, which keeps every note's FULL text), so a Thrust 4 Results
-    screen carried no on-screen record of the frequency it was actually evaluated
-    at -- a visitor reading only that tab, or a photograph of it, never saw the
-    disclosure at all. `[]` when there are none."""
-    return [_truncate_note(n) for n in (axis_meta.get("notes") or [])]
+    `InterconnectBlock.describe()`), one entry per note, UNTRUNCATED. These reached
+    only the Block Diagram tab's status line before 2026-09-23, so a Thrust 4 Results
+    screen carried no on-screen record of the frequency it was actually evaluated at --
+    a visitor reading only that tab, or a photograph of it, never saw the disclosure at
+    all. `[]` when there are none."""
+    return list(axis_meta.get("notes") or [])
 
 
-def _notes_block(notes_lines: List[str]):
-    """The Results-tab rendering of `_notes_line`'s return: ONE small, muted line
-    PER note, not one paragraph joined by "|" (item 6 follow-up, 2026-09-24): the
-    live-chain gate's own multi-clause note otherwise ran 3-5 lines of 11 px text on
-    every Thrust 5 arm, pushing the figures down and illegible on stage, when the
-    banner above it already carries the gate's headline verdict. Same muted style
-    as `screen_note` in `_render_results`; module-level (not nested in that
-    callback) so it is directly testable and reusable for both the current and the
-    `_previous` (arm B / before-after) block."""
-    return html.Div(
-        [html.Div(n, style={"color": "#576574", "fontSize": "14px"}) for n in notes_lines],
-        style={"marginBottom": "6px"},
-    )
+def _arm_caption(payload: Dict[str, Any]) -> str:
+    """ONE line, <= 110 characters: the single fact this arm adds (layout spec
+    section 2.3). The headline of this arm's first run note -- which on every Thrust 5
+    screen is the live-vs-stored ADC gate's own number, the statistic the presenter
+    must be able to read without opening anything."""
+    parts = []
+    overflow = payload.get("_arm_chip_value")
+    if overflow:
+        parts.append(overflow)
+    notes = payload.get("_notes") or []
+    if notes:
+        parts.append(_note_headline(notes[0]))
+    line = CAPTION_SEP.join(parts)
+    # ONE line, and the column clips at ~86 characters at 16 px -- if both facts do not
+    # fit, the knob value wins: the run note is in Details in full either way.
+    return line if len(line) <= 86 else (parts[0] if parts else "")
 
 
-def _graph_card(fig_dict, *, flex: str):
-    """One bordered result card. No modebar: the zoom/export toolbar overlaps each
-    card's title at this card width, and none of its tools matter for read-only
-    results."""
-    return html.Div(
-        dcc.Graph(figure=fig_dict, config={"displayModeBar": False}),
-        style={"flex": flex, "minWidth": "0", "margin": "6px",
-               "border": "1px solid #dfe4ea", "borderRadius": "6px",
-               "padding": "4px"},
-    )
+# =================================================================================
+# Results page: the fixed-geometry layout (spec 2026-09-24, sections 2.1-2.3)
+# =================================================================================
+
+#: Content width inside the 1560 px page container, and the two-column A/B geometry.
+#: The gutter went from 13 px to 28 (hostile round 10, defect 4: at 13 px and with no
+#: rule between them, arm A's bold banner ran straight into arm B's and the two arms
+#: did not read as separate objects at podium distance). The extra width is bought back
+#: from the panel padding, not from the plot.
+RESULTS_CONTENT_WIDTH = 1520
+AB_COLUMN_WIDTH = 746
+AB_GUTTER = 28
+#: A lone product is never stretched across the full width: at 1523 px the thrust-1 map
+#: rendered 1080x230, a 4.7:1 strip (hostile round 10, defect 10). One product -> one
+#: 1008 px panel; two or more -> the same two-up grid as the A/B case.
+SINGLE_PANEL_WIDTH = 1008
+ROW_GAP = 16
+
+
+def _panel_header(panel: Dict[str, Any]):
+    """The HTML band above one plot: panel title (22/600, ONE line) and caption
+    (16/400, ONE line). Both are `text-overflow: ellipsis`-free by construction -- the
+    caption is built <= 110 characters where the figure is built, precisely so nothing
+    has to be clipped here (acceptance check 12)."""
+    caption = CAPTION_SEP.join(panel.get("caption") or [])
+    return html.Div([
+        html.Div(panel.get("title") or "", className="panel-title"),
+        html.Div(caption, className="panel-caption"),
+    ], className="panel-header")
+
+
+def _panel_block(fig_dict, *, width: str = "100%"):
+    """One bordered product panel: fixed height for its row kind, HTML header, plot.
+
+    No modebar: the zoom/export toolbar overlaps the header at this width and none of
+    its tools matter for read-only results."""
+    panel = panel_of(fig_dict)
+    row = panel.get("row") or PANEL_ROW_MAP
+    height = PANEL_HEIGHT.get(row, PANEL_HEIGHT[PANEL_ROW_MAP])
+    return html.Div([
+        _panel_header(panel),
+        dcc.Graph(figure=fig_dict, config={"displayModeBar": False},
+                  className="panel-graph"),
+    ], className="result-panel", style={"height": f"{height}px", "width": width})
+
+
+def _empty_panel(row: str):
+    """The opposite cell when only one arm produced a product: a panel-shaped hole, so
+    the other arm's panels do not silently shift up a row."""
+    height = PANEL_HEIGHT.get(row, PANEL_HEIGHT[PANEL_ROW_MAP])
+    return html.Div(className="result-panel result-panel-empty",
+                    style={"height": f"{height}px"})
+
+
+def _row(left, right=None):
+    """One product row. Arm A's cell left, arm B's right, both the same width and the
+    same height whether or not either is empty (acceptance check 4)."""
+    if right is None:
+        return html.Div([html.Div(left, className="ab-cell ab-cell-single")],
+                        className="ab-row")
+    return html.Div([html.Div(left, className="ab-cell"),
+                     html.Div(right, className="ab-cell")], className="ab-row")
 
 
 def _grid(figs: Dict[str, Any]):
-    """The SINGLE-arm layout, unchanged: products wrap across the stage width, and a
-    lone figure takes the whole row instead of half a screen."""
-    basis = "1 1 100%" if len(figs) == 1 else "1 1 45%"
-    return html.Div([_graph_card(f, flex=basis) for f in figs.values()],
-                    style={"display": "flex", "flexWrap": "wrap"})
-
-
-#: Flex basis of ONE A/B column. Two columns at the 1600 px stage width
-#: (`_app_layout`'s maxWidth) leave ~780 px each, which is the card width
-#: `pipeline_runner`'s slider/title geometry was last re-measured against
-#: (`_SLIDER_BUTTONS_X_EXTENT`, calibrated over 600-1560 px).
-_AB_COLUMN_FLEX = "1 1 50%"
-
-
-def _ab_column_pair(left, right):
-    """One row of the side-by-side layout: arm A's cell on the left, arm B's on the
-    right, both the same width whether or not either is empty."""
-    return html.Div(
-        [html.Div(left, style={"flex": _AB_COLUMN_FLEX, "minWidth": "0"}),
-         html.Div(right, style={"flex": _AB_COLUMN_FLEX, "minWidth": "0"})],
-        style={"display": "flex", "alignItems": "flex-start"},
-    )
+    """The SINGLE-arm layout. One product gets ONE 1008 px panel (never the full
+    width); two or more wrap into the same two-up grid the A/B case uses, so the same
+    product has the same panel geometry on every screen (acceptance check 20)."""
+    items = list(figs.values())
+    if len(items) == 1:
+        return html.Div([_row(_panel_block(items[0],
+                                           width=f"{SINGLE_PANEL_WIDTH}px"))],
+                        className="results-grid")
+    rows = []
+    for i in range(0, len(items), 2):
+        pair = items[i:i + 2]
+        if len(pair) == 2:
+            rows.append(_row(_panel_block(pair[0]), _panel_block(pair[1])))
+        else:
+            rows.append(_row(_panel_block(pair[0], width=f"{AB_COLUMN_WIDTH}px")))
+    return html.Div(rows, className="results-grid")
 
 
 def _ab_columns(header_a, header_b, figs_a: Dict[str, Any], figs_b: Dict[str, Any]):
-    """Arm A left, arm B right: a header row (each arm's own banner + run notes above
-    its own column) then ONE ROW PER PRODUCT, so the two copies of the same panel sit
-    at the same height, at the same width, next to each other.
+    """Arm A left, arm B right: a header row (each arm's chip, caption and Details
+    disclosure above its own column) then ONE ROW PER PRODUCT, so the two copies of the
+    same panel sit at the same height, at the same width, next to each other.
 
     Product order follows arm A's insertion order (which mirrors
     `figures_from_outputs`' build order); a product only one arm produced still gets
-    its own row, with an empty cell opposite it, rather than silently shifting the
-    other arm's panels up a row."""
+    its own row, with a panel-shaped hole opposite it."""
     keys = list(figs_a) + [k for k in figs_b if k not in figs_a]
-    rows = [_ab_column_pair(header_a, header_b)]
+    rows = [_row(header_a, header_b), html.Div(className="section-rule")]
     for key in keys:
-        rows.append(_ab_column_pair(
-            _graph_card(figs_a[key], flex="1 1 100%") if key in figs_a else None,
-            _graph_card(figs_b[key], flex="1 1 100%") if key in figs_b else None,
+        row_kind = (panel_of(figs_a.get(key) or figs_b.get(key)).get("row")
+                    or PANEL_ROW_MAP)
+        rows.append(_row(
+            _panel_block(figs_a[key]) if key in figs_a else _empty_panel(row_kind),
+            _panel_block(figs_b[key]) if key in figs_b else _empty_panel(row_kind),
         ))
-    return html.Div(rows)
-
+    return html.Div(rows, className="results-grid")
 
 def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: str,
                 arm: str = "a"):
@@ -551,19 +724,21 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
         if arm_name is not None:
             pr_fig = detector_scoreboard.stored_pr_figure(highlight_arm=arm_name)
             if arm == "b":
-                # `stored_pr_figure` already reserves top margin for
-                # `detector_scoreboard._PR_MIN_TITLE_LINES` (4) lines on EVERY call, so
-                # appending this 4th line to arm B's title needs no further margin bump
-                # here (item 1, wave 9 hostile-expert read, 2026-09-23: a flat "+25"
-                # bump here undercounted the true per-line cost and this line's own
-                # closing tick overprinted the plot's y-axis; worse, arm A never got
-                # the bump at all, so the two arms' plots did not share an axis
-                # height). Margin now comes from `stored_pr_figure` alone, identical on
-                # both arms regardless of which one appends this sentence.
-                pr_fig.update_layout(title=dict(
-                    text=pr_fig.layout.title.text
-                        + "<br><sup>scored offline; identical on both arms, the "
-                          "knob cannot move it</sup>"))
+                # This panel is scored offline on the fixed beat_cfar.json split and
+                # is IDENTICAL on both arms by design -- an A/B knob never touches it
+                # -- which read as a bug (two panels, same numbers) until one arm's
+                # copy said so. Said ONCE (arm B only): saying it twice invites "why
+                # does it need saying twice?" (hostile round 10, section 5.8). It is
+                # a caption clause now, not a fourth wrapped title line.
+                # `stored_pr_figure` already carries this sentence in its Details on
+                # BOTH arms (it is true of both). What arm B adds is the VISIBLE
+                # statement -- once per row, not once per panel.
+                _panel = panel_of(pr_fig)
+                _clause = "identical on both arms"
+                pr_fig.update_layout(meta=dict(
+                    (pr_fig.layout.meta or {}),
+                    panel=dict(_panel,
+                               caption=list(_panel.get("caption") or []) + [_clause])))
             figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
@@ -756,6 +931,14 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 data_a = {k: f.to_dict() for k, f in result_a["figs"].items()}
                 data_a["_banner"] = f"{line_a} -- B did not run (cancelled)  ||  {result_a['banner']}"
                 data_a["_ab"] = True
+                data_a["_arm_chip"] = _ab_arm_chip(ab_preset, "a")
+                data_a["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "a")
+                _meta_a = outputs_a.get("_axis_meta") or {}
+                data_a["_run_identity"] = _run_identity_line(
+                    ab_preset, _meta_a, n_clicks, n_steps)
+                data_a["_cancelled_chip"] = (
+                    f"CANCELLED -- {_meta_a.get('n_steps_run', '?')} of {n_steps} "
+                    "frames; arm B did not run")
                 notes_a = _notes_line(outputs_a.get("_axis_meta") or {})
                 if notes_a:
                     data_a["_notes"] = notes_a
@@ -776,8 +959,20 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             data_b = {k: f.to_dict() for k, f in result_b["figs"].items()}
             data_a["_banner"] = f"{line_a}  ||  {result_a['banner']}"
             data_a["_ab"] = True
+            data_a["_arm_chip"] = _ab_arm_chip(ab_preset, "a")
+            data_a["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "a")
             data_b["_banner"] = f"{line_b}  ||  {result_b['banner']}"
             data_b["_ab"] = True
+            data_b["_arm_chip"] = _ab_arm_chip(ab_preset, "b")
+            data_b["_arm_chip_value"] = _ab_arm_chip_overflow(ab_preset, "b")
+            _meta_a = outputs_a.get("_axis_meta") or {}
+            data_a["_run_identity"] = _run_identity_line(ab_preset, _meta_a,
+                                                         n_clicks, n_steps)
+            if result_b["cancelled"] or _meta_a.get("cancelled"):
+                data_a["_cancelled_chip"] = (
+                    f"CANCELLED -- arm B ran "
+                    f"{(outputs_b.get('_axis_meta') or {}).get('n_steps_run', '?')} "
+                    f"of {n_steps} frames")
             # Item 6 (wave 9 hostile-expert read, 2026-09-23): run notes belong on the
             # Results tab, per arm (they can differ, e.g. arm B turning the interconnect
             # to a different scale/frequency) -- see `_notes_line` and `_render_results`.
@@ -815,6 +1010,12 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
         # Ordinary single-run path: unchanged behaviour.
         data = {k: f.to_dict() for k, f in result_a["figs"].items()}
         data["_banner"] = result_a["banner"]
+        _meta = outputs_a.get("_axis_meta") or {}
+        data["_run_identity"] = _run_identity_line(matched_preset, _meta,
+                                                   n_clicks, n_steps)
+        if _meta.get("cancelled"):
+            data["_cancelled_chip"] = (
+                f"CANCELLED -- {_meta.get('n_steps_run', '?')} of {n_steps} frames")
         notes = _notes_line(outputs_a.get("_axis_meta") or {})
         if notes:
             data["_notes"] = notes
@@ -1072,88 +1273,199 @@ app.clientside_callback(
 )
 
 
+#: Ids the ONE transport control uses. `webapp/assets/results_clock.js` binds to these
+#: three; they are named constants so the asset, the app and the test that pins the
+#: wiring read the same strings.
+TRANSPORT_TOGGLE_ID = "results-transport-toggle"
+TRANSPORT_SLIDER_ID = "results-transport-slider"
+TRANSPORT_LABEL_ID = "results-transport-label"
+
+
+def _transport_bar():
+    """ONE transport per screen, right-aligned in the run-identity row (layout spec
+    section 4).
+
+    Every animated figure on the page has been stepped by a single clock
+    (`assets/results_clock.js`) since wave 11, so the per-figure `updatemenus`/`sliders`
+    Plotly drew -- up to EIGHT copies on one screen, 130 px of bottom margin each --
+    were decoration the presenter never touched (hostile round 10, defect 8;
+    acceptance check 10). They are gone from the figures; this is the only one left.
+
+    It also fixes the "dragging a slider parks ONE arm" defect (hostile round 10,
+    section 3.3): there is one frame index now, so parking it parks both arms.
+
+    Plain HTML rather than `dcc.Slider`: no Dash callback reads these, the clock
+    asset drives them directly in the browser, and a server round-trip per frame over
+    the link the owner presents across is exactly what the clientside clock exists to
+    avoid."""
+    return html.Div([
+        html.Button("❚❚", id=TRANSPORT_TOGGLE_ID, n_clicks=0,
+                    className="transport-btn", title="pause / play"),
+        html.Span("frame 1", id=TRANSPORT_LABEL_ID, className="transport-label"),
+        # `dcc.Input(type="range")`, not `dcc.Slider`: dash 4.x has no `html.Input`,
+        # and a native range input is a DOM node `results_clock.js` can read and write
+        # directly. `dcc.Slider` renders rc-slider, whose value lives in React state
+        # the asset would have to reach through.
+        dcc.Input(type="range", id=TRANSPORT_SLIDER_ID, min=1, max=1, step=1,
+                  value=1, className="transport-slider"),
+    ], className="transport")
+
+
+def _cancelled_chip(axis_meta_like: str):
+    """The amber `CANCELLED -- N of M frames` chip in the run-identity line."""
+    return html.Span(axis_meta_like, className="chip chip-warn")
+
+
+def _details_disclosure(label: str, lines: List[Any]):
+    """The per-arm `Details` disclosure: closed by default, and labelled so a hostile
+    reader knows the honesty text exists without opening it (layout spec section 2.3).
+
+    Opening it pushes the panels down. That is correct: it is a deliberate act by the
+    presenter, not the default state."""
+    return html.Details([
+        html.Summary(label, className="details-summary"),
+        html.Div(lines, className="details-body"),
+    ], open=False, className="details")
+
+
+def _details_lines(payload: Dict[str, Any], figs: Dict[str, Any],
+                   screen_note: str) -> List[Any]:
+    """EVERYTHING this arm has to say, in one place: the full banner, every run note
+    untruncated, the preset's screen note, and each panel's own provenance/band/clip
+    clauses grouped under that panel's title.
+
+    Nothing here is new text and nothing that used to be on screen is missing -- the
+    disclosure is where the six-line panel subtitles, the arm banner, the run-notes
+    lines and the screen note went (acceptance check 15)."""
+    out: List[Any] = []
+    banner = payload.get("_banner")
+    if banner:
+        out.append(html.Div(banner, className="details-line details-banner"))
+    for note in (payload.get("_notes") or []):
+        out.append(html.Div(note, className="details-line"))
+    if screen_note:
+        out.append(html.Div(screen_note, className="details-line"))
+    for fig in figs.values():
+        panel = panel_of(fig)
+        details = panel.get("details") or []
+        if not details:
+            continue
+        out.append(html.Div(panel.get("title") or "", className="details-heading"))
+        for line in details:
+            out.append(html.Div(line, className="details-line"))
+    return out
+
+
+def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
+                screen_note: str, fallback_label: str):
+    """One arm's whole header block: the arm chip, its one-line caption, and its
+    Details disclosure (layout spec section 2.3). Replaces the old bold, 2-4 line
+    banner that wrapped across the A/B gutter and read as one garbled paragraph
+    (hostile round 10, defect 2.6)."""
+    chip = payload.get("_arm_chip") or fallback_label
+    caption = _arm_caption(payload)
+    return html.Div([
+        # The height cap that enforces "at most 4 lines and 150 px above the first
+        # panel" belongs on the SUMMARY (chip + caption), never on the whole header:
+        # capping the header clipped the OPENED Details to a 4 px sliver, i.e. the
+        # honesty text was one click away and then invisible (found by reading
+        # `--expand-details` PNG, 2026-09-24 -- no figure-dict test can see this).
+        html.Div([
+            html.Div([html.Span(className=f"arm-dot arm-dot-{arm}"),
+                      html.Span(chip, className="arm-chip-label")],
+                     className=f"arm-chip arm-chip-{arm}"),
+            html.Div(caption, className="arm-caption"),
+        ], className="arm-summary"),
+        _details_disclosure("▸ Details (provenance, band, clip)",
+                            _details_lines(payload, figs, screen_note)),
+    ], className="arm-header")
+
+
 @app.callback(
     Output("results-tab-content", "children"),
     Input("results-store", "data"),
     Input("tabs", "value"),
 )
 def _render_results(results_data, active_tab):
-    """Render stored result figures as a grid of graphs."""
+    """Render stored result figures at the fixed page geometry (layout spec sections
+    2.1-2.3): a one-line run-identity row with the screen's ONE transport, a per-arm
+    header (chip + one-line caption + collapsed Details), then one row per product with
+    the panel's title and caption as HTML above the plot.
+
+    The hard cap this enforces is "4 text lines and 150 px above the first panel". What
+    used to sit there -- a 3-line screen note, a 2-4 line bold banner and 1-4 lines of
+    run notes, 40-51 % of the first screen -- is all still reachable, in Details and in
+    the page-foot note."""
     if active_tab != "tab-results":
         return no_update
     if not results_data:
         return html.Div([
-            html.H3("Results"),
+            html.Div("Results", className="page-heading"),
             html.P("No results yet. Configure the pipeline on the Block Diagram "
                    "tab and click Run pipeline.", style={"color": "#576574"}),
-        ])
+        ], className="results-page")
 
     # Card order follows results_data's insertion order, which mirrors
     # figures_from_outputs' build order (webapp/pipeline_runner.py): fft ->
     # range_az -> range_el -> range_profile -> subspace_err -> comms products.
-    # That already keeps Range Profile grouped with its FFT/range siblings, so no
-    # re-sort is needed here; each figure carries its own title (set where it is
-    # built) rather than a second, easily-stale title map duplicated in this tab.
     figs = {k: v for k, v in results_data.items() if not k.startswith("_")}
     prev = results_data.get("_previous") or {}
     prev_figs = {k: v for k, v in prev.items() if not k.startswith("_")}
-    # Colour limits FIRST, then axis extents: the limit pass appends its own "colour
-    # limits shared with arm ..." subline (and re-sizes the top margin for it), while
+    # Colour limits FIRST, then axis extents: the limit pass rewrites each panel's clip
+    # CAPTION clause (and appends the exact shared limits to its Details), while
     # `_share_y_ranges` only unions numbers -- running it second keeps its zmin/zmax
     # union a no-op over the already-equal pair rather than a second, weaker rule.
     share_heatmap_z_limits(figs, prev_figs)
     _share_y_ranges(figs, prev_figs)
-    children = [html.H3("Results")]
-    screen_note = results_data.get("_screen_note")
-    if screen_note:
-        # The preset's own caveat, for whoever photographs this tab rather than hears
-        # the presenter (hostile-expert third read, 2026-09-23): one legible, muted
-        # line shown ONCE, shared by both A/B panels below it.
-        screen_note_div = html.Div(screen_note,
-                                   style={"color": "#576574", "fontSize": "16px",
-                                          "marginBottom": "8px"})
-    else:
-        screen_note_div = None
+    # The arm's colour on its own statistic strip -- `figures_from_outputs` builds one
+    # run's figures and has no idea which arm it will be shown as.
+    apply_arm_style(figs, "a")
+    if prev_figs:
+        apply_arm_style(prev_figs, "b")
 
-    def _arm_header(payload, *, prefix_when_not_ab: str):
-        """Banner + per-arm run notes for ONE arm, in the order the single-column
-        layout has always printed them."""
-        out = []
-        banner = payload.get("_banner")
-        if banner:
-            # An A/B run's banner already names its own arm in full ("A (as loaded):
-            # .. -- before" / "B: .. -- after", see `_ab_arm_line`); the generic
-            # "This run"/"Previous run" prefix stays for the single-run and manual
-            # before/after paths, where the banner does not name an arm.
-            prefix = "" if payload.get("_ab") else prefix_when_not_ab
-            out.append(html.Div(f"{prefix}{banner}",
-                                style={"color": "#2d3a4a", "fontWeight": "bold",
-                                       "marginBottom": "4px"}))
-        notes_lines = payload.get("_notes")
-        if notes_lines:
-            out.append(_notes_block(notes_lines))
-        return out
+    screen_note = results_data.get("_screen_note") or ""
+    identity = results_data.get("_run_identity") or results_data.get("_banner") or ""
+    cancelled = results_data.get("_cancelled_chip")
+
+    identity_children = [html.Span(identity, className="run-identity")]
+    if cancelled:
+        identity_children.append(_cancelled_chip(cancelled))
+    # A screen whose products carry no animation frames (Thrust 3: one line plot) gets
+    # NO transport: a play button and a slider that do nothing are a control the
+    # presenter can press and be ignored by, which is worse than their absence.
+    animated = any((fig.get("frames") or []) for fig in list(figs.values())
+                   + list(prev_figs.values()) if isinstance(fig, dict))
+    header_row = html.Div(
+        [html.Div(identity_children, className="run-identity-cell")]
+        + ([_transport_bar()] if animated else []),
+        className="run-identity-row")
+
+    children = [header_row, html.Div(className="section-rule")]
 
     if not prev_figs:
-        children.extend(_arm_header(results_data, prefix_when_not_ab="This run: "))
-        if screen_note_div is not None:
-            children.append(screen_note_div)
+        children.append(_row(_arm_header(results_data, figs, arm="a",
+                                         screen_note=screen_note,
+                                         fallback_label="This run")))
+        children.append(html.Div(className="section-rule"))
         children.append(_grid(figs))
-        return html.Div(children)
+    else:
+        # SIDE BY SIDE (owner, live test 2026-09-24): "default should be side by side".
+        # One row per product, arm A left, arm B right, headers above their own column.
+        children.append(_ab_columns(
+            _arm_header(results_data, figs, arm="a", screen_note=screen_note,
+                        fallback_label="This run"),
+            _arm_header(prev, prev_figs, arm="b", screen_note=screen_note,
+                        fallback_label="Previous run (for before/after)"),
+            figs, prev_figs))
 
-    # SIDE BY SIDE (owner, live test 2026-09-24): "default should be side by side".
-    # A/B arms used to stack (A's whole grid, a rule, then B's whole grid), which
-    # put the two copies of the SAME product a full screen height apart -- a
-    # difference the audience had to remember rather than see. One row per product,
-    # arm A left, arm B right, banners above their own column.
-    if screen_note_div is not None:
-        children.append(screen_note_div)
-    children.append(_ab_columns(
-        _arm_header(results_data, prefix_when_not_ab="This run: "),
-        _arm_header(prev, prefix_when_not_ab="Previous run (for before/after): "),
-        figs, prev_figs))
-    return html.Div(children)
+    if screen_note:
+        # The preset's own caveat, at the BOTTOM of the page (layout spec section 2.3):
+        # a photograph of the screen still catches it; a viewer of the screen is no
+        # longer made to read three lines of it before any data appears. It is also
+        # inside both arms' Details, so it is never more than one click away.
+        children.append(html.Div(screen_note, className="page-foot-note"))
 
+    return html.Div(children, className="results-page")
 
 # =================================================================================
 # Scenario tab callbacks
