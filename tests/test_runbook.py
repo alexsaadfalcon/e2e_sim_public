@@ -231,6 +231,123 @@ def test_render_tells_thrust_1_and_4_to_scroll_the_param_pane():
             assert "Scroll the param pane" not in _flat(section), p.id
 
 
+def test_render_names_the_block_to_click_when_second_knob_differs_from_opening_block():
+    """Cold-read item 1 (2026-09-24): a "Second knob (optional)" step that names a
+    knob on a block OTHER than the one Load preset auto-opened (e.g. Thrust 5's
+    "Detector (CFAR | ML)" -> "Decode threshold" while the open panel is "ADC
+    Quantizer" or "IF High-Pass") must tell the operator to click that block
+    first -- the value step is otherwise unreachable. A second knob on the SAME
+    block as the opening one (e.g. Thrust 1's two `rffe` knobs) must not."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import (
+        _block_label, _opening_block, _second_knobs, render,
+    )
+
+    doc = render(PRESETS)
+    for i, p in enumerate(PRESETS, 1):
+        start = doc.index(f"## {i}. {p.label}")
+        knob_start = doc.index("### Second knob", start)
+        section = doc[knob_start:doc.index("\n\n", knob_start)]
+        open_block, _ = _opening_block(p)
+        for bid, key, _how in _second_knobs(p):
+            knob_block = _block_label(bid)
+            instruction = f"Click the **{knob_block}** node in the block diagram to"
+            if knob_block != open_block:
+                assert instruction in section, (p.id, knob_block, open_block)
+            else:
+                assert instruction not in section, (p.id, knob_block, open_block)
+
+
+def test_render_adds_a_step_back_to_the_block_diagram_tab():
+    """Cold-read item 2 (2026-09-24): the app auto-switches to Results after a
+    run, but the **Demo preset:** dropdown lives on the **Block Diagram** tab --
+    every preset's click sequence must tell the operator to switch back before
+    loading the next one."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    expected = ("click the **Block Diagram** tab to return to the preset picker")
+    assert _flat(doc).count(expected) == len(PRESETS)
+
+
+def test_render_quotes_the_click_affordance_text_once():
+    """Cold-read item 1 (2026-09-24): the general mechanics section should quote
+    `webapp.block_diagram`'s own click-affordance text once, verbatim, rather
+    than the runbook inventing its own paraphrase of what a block click does."""
+    pytest.importorskip("dash")
+    pytest.importorskip("dash_cytoscape")
+    from dash import html
+
+    from webapp import block_diagram
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    def _find_p(node):
+        if isinstance(node, html.P):
+            return node
+        children = getattr(node, "children", None)
+        if children is None:
+            return None
+        if not isinstance(children, list):
+            children = [children]
+        for c in children:
+            found = _find_p(c)
+            if found is not None:
+                return found
+        return None
+
+    p = _find_p(block_diagram.layout())
+    assert p is not None, "no html.P found in block_diagram.layout()"
+    affordance_text = p.children
+
+    doc = render(PRESETS)
+    # `_flat`, not raw `doc`: `_wrap` breaks this long sentence across lines in
+    # the rendered source.
+    assert _flat(doc).count(affordance_text) == 1
+
+
+def test_render_puts_while_it_runs_between_run_click_and_results_switch():
+    """Cold-read item 4 (2026-09-24): "While it runs, say:" must sit between the
+    numbered "Click Run pipeline" step and the numbered "app switches to
+    Results" step, not after both."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    for i, p in enumerate(PRESETS, 1):
+        if not p.say:
+            continue
+        start = doc.index(f"## {i}. {p.label}")
+        section = doc[start:doc.index("### What you are looking at", start)]
+        run_idx = section.index("2. Click **Run pipeline**")
+        say_idx = section.index("**While it runs, say:**")
+        results_idx = section.index("3. The app switches to the **Results** tab")
+        assert run_idx < say_idx < results_idx, p.id
+
+
+def test_trouble_section_covers_the_generic_error_message():
+    """Cold-read item 3 (2026-09-24): a `PipelineError` or bare `Exception` from
+    the Run callback (webapp/app.py, the two `except` clauses ~line 643) paints
+    the run-status text red instead of switching to Results. The runbook must
+    say what that looks like and the recovery path: `preflight --quick` in a
+    second terminal, reload the preset, run again, and the fallback-deck escape
+    hatch if it persists."""
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    doc = render(PRESETS)
+    flat = _flat(doc)
+    assert "Unexpected error: " in flat
+    assert "python -m webapp.preflight --quick" in flat
+    assert "fallback_deck.pdf" in flat
+    assert "python -m webapp.fallback_deck" in flat
+    # It must live in the trouble section, not be a stray mention elsewhere.
+    trouble = doc[doc.index("## If something goes wrong"):]
+    assert "Unexpected error: " in trouble
+    assert "preflight --quick" in trouble
+
+
 def test_render_drops_element_id_parentheticals():
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render

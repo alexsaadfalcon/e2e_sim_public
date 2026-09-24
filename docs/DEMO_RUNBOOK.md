@@ -41,6 +41,9 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 
 - The preset picker is the **Demo preset:** dropdown on the **Block Diagram**
   tab; **Load preset** applies it.
+- Every block in the diagram is clickable: "Click a block to edit its
+  parameters or toggle it on/off. Dashed edges feed a disabled block. Then hit
+  Run pipeline."
 - Loading a preset REPLACES the whole block state (edits made afterwards are
   the operator's own), fills **Frames to run (n_steps)** with the preset's
   frame count, prints an operator card under the dropdown ("Loaded: `<label>`
@@ -71,9 +74,12 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** LNA bias 0.5->8 mA is worth about twelve dB
   (+-0.6-0.9 dB).
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**.
@@ -148,9 +154,12 @@ knob: IF bandwidth 15 -> 50 MHz (see live_knobs).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** As loaded the curve starts near 0, settles at about
   0.06 by frame 2; the knob compares SETTLED levels, 0.06 vs 0.32.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**,
@@ -221,10 +230,13 @@ the story; the tracker curve is. Manual: AFE mantissa 6 -> 1 bit, run again.
    baseline)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** Cold start, k=2 (largest spike-free rank, F94),
   measured over 8 frames. Quote 'about' -- nondeterministic at ~5e-3, never the
   third decimal.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Subspace error (Frobenius) per
@@ -297,10 +309,13 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
    skirt mover)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** This is the LIVE public Tessera/UIC surrogate
   (checkpoint, not a CSV) -- the run-notes line under the banner names the
   scale factor and frequency.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
@@ -376,11 +391,14 @@ group-delay/|S21| overlay would show it.
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** SAY FIRST: the frames change here. Thrusts 1-4 ran
   munich frames (125 m, range-azimuth); this is the benchmark corpus (100 m,
   range-Doppler). STORED is the ray-traced channel -- everything after runs
   live, so the ADC knob reaches the detector.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
@@ -391,6 +409,8 @@ group-delay/|S21| overlay would show it.
   before" / "B: ADC bits 3-bit ADC (same frames) -- after".
 
 ### Second knob (optional)
+- Click the **Detector (CFAR | ML)** node in the block diagram to open its
+  panel.
 - **Detector (CFAR | ML)** -> **Decode threshold** (min 0, max 1, default 0.5):
   0.66 -> 0.8 (fewer detections)
 
@@ -455,9 +475,12 @@ crosses.
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** The learned detector LOSES to CFAR: 0.127 vs 0.301,
   chance floor 0.081. Say it first.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
@@ -469,6 +492,8 @@ crosses.
   (attenuates ~4.3 dB at 22 m) -- after".
 
 ### Second knob (optional)
+- Click the **Detector (CFAR | ML)** node in the block diagram to open its
+  panel.
 - **Detector (CFAR | ML)** -> **Decode threshold** (min 0, max 1, default 0.5):
   0.22 -> 0.5 (the figure goes blank)
 
@@ -534,10 +559,13 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-3. The app switches to the **Results** tab automatically.
 - **While it runs, say:** The defensible sentence: a learned head on the
   classical front end beats a CFAR threshold on the same cube, in-distribution
   -- say that, not 'beats CFAR' (F85 addendum).
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
 - Four panels render: **"Range-Doppler power"** (Range-Doppler, has its own
@@ -548,6 +576,8 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   before" / "B: ADC bits 3-bit ADC (same frames) -- after".
 
 ### Second knob (optional)
+- Click the **Detector (CFAR | ML)** node in the block diagram to open its
+  panel.
 - **Detector (CFAR | ML)** -> **Decode threshold** (min 0, max 1, default 0.5):
   0.44 -> 0.2 (more, weaker detections)
 
@@ -622,3 +652,13 @@ the result is seed-dependent (F86); say so unprompted.
 - **PDF/PNG fallback (LAST RESORT ONLY):** `e2e/main/figures/rehearsal/`,
   generated by `python -m webapp.rehearse`. Preflight passing on every check is
   what is supposed to make this unnecessary.
+- **A red error message after clicking Run pipeline:** the run-status text
+  (same place as the frame-ceiling message above) turns red instead of the app
+  switching to Results. A named failure prints its own reason with no fixed
+  prefix (e.g. "Corpus manifest not found: ...", "Unknown detector mode ...");
+  anything unanticipated prints "Unexpected error: `<exception>`". Either way:
+  in a second terminal run `python -m webapp.preflight --quick`, then reload
+  the preset (**Load preset** again) and click **Run pipeline** again. If it
+  still fails, present the fallback deck for this preset instead
+  (`e2e/main/figures/rehearsal/fallback_deck.pdf`, built by `python -m
+  webapp.fallback_deck`).
