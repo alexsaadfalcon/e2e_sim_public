@@ -240,11 +240,14 @@ PRESETS: List[DemoPreset] = [
                "the model's input-referred noise (1e-7 vs 1.36e-7 V) -- a real "
                "1024-element radar's per-element SNR, recovered by coherent gain. Manual "
                "path: LNA bias is the A/B above; second knob: IF bandwidth 15 -> 50 MHz "
-               "(about -5 dB; 1 -> 50 MHz is -16 dB)."),
+               "(about -5 dB; 1 -> 50 MHz is -13.5 dB here, not the block panel's "
+               "17 dB noise-power figure)."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
-                                          "(about -5 dB; 1 -> 50 MHz is -16 dB, measured "
-                                          "2026-09-21)")],
+                                          "(about -5 dB; 1 -> 50 MHz is -13.5 dB here, "
+                                          "re-measured 2026-09-23 -- the block panel's "
+                                          "17 dB is the front end's own noise-power "
+                                          "scaling, a different quantity)")],
         # A/B (Change 1, 2026-09-22 hostile-expert read): as-loaded IS the 8 mA arm;
         # run B drops to 0.5 mA, the direction the card's headline (+12 dB) quotes.
         ab=("rffe", "lna_bias_ma", 0.5),
@@ -266,35 +269,32 @@ PRESETS: List[DemoPreset] = [
             "At default signal level (1e-5) these knobs do nothing (0.5 dB, under the "
             "40 dB floor); show it if asked.",
             "Below ~4 mA the LNA is a LOSS stage (-8.5 dB at 0.5 mA); most of the 12 dB "
-            "is leaving the attenuator regime. Sub-claim: 4->8 mA = +1.6 dB (measured "
-            "2026-09-22).",
+            "leaves the attenuator regime (4->8 mA alone is +1.6 dB, 2026-09-22).",
             "There is no trade-off today: nothing clips; the IF filter only sets noise "
-            "variance. Missing half: 1 MHz IF is a 1 ms sweep vs 20 us at 50 MHz; a "
-            "20 m/s car moves two wavelengths in that time.",
+            "variance. A 1 MHz IF is a 1 ms sweep vs 20 us at 50 MHz -- a 20 m/s car "
+            "moves two wavelengths meanwhile.",
             "The brightest band at range 0-2 m is not a target: real multipath sits "
-            "near 37 m and 68 m, drifting frame to frame (F93/F94: an earlier axis "
-            "was aliased).",
-            "Noise figure IS quotable: Friis gives 11.97 dB, the measured end-to-end "
-            "floor is 11.80 dB -- a 0.17 dB agreement through 1024 elements, the FFT "
-            "chain, the AFE and the tracker (2026-09-21). Absolute sensitivity in dBm "
-            "is NOT: the input level is a free parameter, so quote noise figure and "
-            "relative dB only.",
+            "near 37 m and 68 m, drifting frame to frame (F93/F94).",
+            "Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB -- 0.17 dB "
+            "agreement (2026-09-21). Absolute dBm is NOT: input level is a free "
+            "parameter, so quote noise figure and relative dB only.",
             "Channel mismatch: all 1024 elements share one config (get_RX_config "
-            "broadcasts one value), so element-to-element gain/phase mismatch is "
-            "structurally zero here; rx_config is already per-element, so adding a "
-            "spread is a small change and is on the list.",
-            "What the end-to-end run buys over Friis: the 0.17 dB agreement validates "
-            "the noise mechanism; what Friis cannot give is the coupling downstream -- "
-            "the same knob's effect on the AFE, the tracker (Thrust 2/3) and the "
-            "detector.",
+            "broadcasts one value), so gain/phase mismatch is structurally zero here; "
+            "adding a per-element spread is a small change, on the list.",
+            "What end-to-end buys over Friis: the 0.17 dB agreement validates the "
+            "noise mechanism; Friis cannot give the downstream coupling -- this "
+            "knob's effect on the AFE, the tracker (Thrust 2/3) and the detector.",
+            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
+            "appear beyond |sin theta| ~0.90 (the ~115 m streak may alias); native "
+            "range resolution 5 cm, binned 20:1 to 1 m gates.",
         ],
         do_not_say=[
-            "Any DC power readout: PRX is U-shaped, MINIMUM at best quality, implying an "
+            "Any DC power readout: PRX is U-shaped, MINIMUM at best quality -- an "
             "8.45 V rail in a 100-200 mV chain.",
             "The compression regime (scaling 1e-1..1e-3): worse live than silence.",
             "That gm scales linearly with bias -- true only at 8 mA (a weak-inversion "
             "law); say 'constant-overdrive power scaling'.",
-            "Anything about IIP3: constant to five decimals across 0.5-10 mA here, unlike "
+            "Anything about IIP3: constant to five decimals across 0.5-10 mA, unlike "
             "a real LNA whose IIP3 improves with bias.",
             "Any gain knob: peak normalization removes it.",
             "Any absolute dBm sensitivity: the input scale is arbitrary.",
@@ -326,17 +326,16 @@ PRESETS: List[DemoPreset] = [
         # is back on; the card now tells the three-number version below.
         blurb=("Press Run once: both arms run and appear as before (A, top, mantissa 6 "
                "bit) / after (B, bottom, mantissa 1 bit), each panel printing its "
-               "subspace-error statistic (about 0.06 for A vs about 0.32 for B, at k=2 "
-               "-- k=8 is degenerate on the Ka retrace, F94). Three numbers carry the "
+               "subspace-error statistic (about 0.06 for A vs about 0.32 for B, at "
+               "k=2). Three numbers carry the "
                "story: the range-azimuth image barely moves (peak-median about 0.3 dB, "
                "76.7 -> "
-               "76.4), the range-elevation panel moves about 0.5 dB (peak-median "
-               "76.85 -> 76.57, on screen), and the tracker error moves about 5x "
+               "76.4), the range-elevation panel moves the same ~0.3 dB (peak-median "
+               "76.9 -> 76.6, on screen), and the tracker error moves about 5x "
                "(0.06 -> 0.32). The "
-               "tracker is far more sensitive to weight precision than either picture "
-               "is; the elevation cut is on screen precisely because it is the one that "
-               "moves. The manual path still works: lower the AFE weight mantissa 6 -> "
-               "1 bit and run again."),
+               "tracker is far more sensitive to weight precision than either picture. "
+               "The manual path still works: lower the AFE "
+               "weight mantissa 6 -> 1 bit and run again."),
         live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.32 at k=2)")],
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
         # to 1 bit, the 0.32 arm the card's headline quotes.
@@ -357,39 +356,40 @@ PRESETS: List[DemoPreset] = [
                      "for k = 2. " + _ARRAY_DISCLOSURE),
         say=[
             "As loaded the curve starts near 0 and settles at about 0.06 by frame 1: "
-            "the tracker is warm-started from a perturbed copy of the true subspace and "
-            "relaxes to its steady tracking error. The knob compares the SETTLED level, "
-            "0.06 against 0.32.",
+            "the tracker is warm-started from a perturbed true subspace and relaxes "
+            "to its steady error. The knob compares SETTLED levels, 0.06 vs 0.32.",
             "Say the headline in ANGLES: subspace error 0.32 -> 0.06 is an unnormalized "
             "distance bounded by sqrt(k); converted, the average principal angle goes "
             "13.1 deg -> 2.6 deg.",
-            "The three numbers together: range-azimuth barely moves (~0.3 dB), the "
-            "range-elevation panel moves ~0.5 dB (peak-median 76.85 -> 76.57, on "
-            "screen), and the tracker error moves ~5x -- the AFE does something real; "
-            "the picture just barely shows it.",
+            "The three numbers together: range-azimuth barely moves (~0.3 dB), "
+            "range-elevation moves the same ~0.3 dB (76.9 -> 76.6), and tracker "
+            "error moves ~5x -- the AFE does something real; the picture barely "
+            "shows it.",
             "No detection metric is wired to this view. Say so before being asked what it "
             "means for P_d or false alarms.",
             "The brightest band at range 0-2 m is not a target: real multipath returns "
-            "sit near 37 m and 68 m, drifting frame to frame (F93/F94 corrected an "
-            "earlier aliased-axis quote).",
+            "sit near 37 m and 68 m, drifting frame to frame (F93/F94).",
             "Tracker dimension k was re-picked: k=8 (old default) and k=4 both spike "
             "mid-run on the Ka retrace (effective rank 3-4, F94); k=2 is the largest k "
             "stable on both arms.",
+            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
+            "appear beyond |sin theta| ~0.90 (the ~115 m streak may alias); native "
+            "range resolution 5 cm, binned 20:1 to 1 m gates.",
         ],
         do_not_say=[
             "That the mantissa sweep models analog hardware error: AFEBlock uses "
             "WEIGHT_FLOAT, which compress.py's own docstring calls 'right for a compute "
             "datapath and wrong for an analog control'.",
             "That the picture does not respond: the range-elevation panel does, by "
-            "about 0.5 dB (peak-median 76.85 -> 76.57, on screen) for the same 6 -> 1 "
-            "bit sweep.",
+            "about 0.3 dB (peak-median 76.9 -> 76.6, on screen) for the same 6 -> 1 "
+            "bit sweep -- the same move range-azimuth shows.",
             "That a higher compression ratio would look better: 512 of 1024 was chosen so "
             "the tracker can observe drift; observability drops from 0.50 to 0.055 at 16x, "
             "unmeasured.",
             "Peak-to-median dynamic range as evidence compression is good: it improves as "
             "compression worsens.",
-            "That k=8 still applies: it is degenerate here (F94); this preset runs at "
-            "k=2, not comparable to Thrust 3's k=8 numbers.",
+            "That k=8 still applies: it is degenerate here (F94); this preset and "
+            "Thrust 3 both run at k=2, so the two ARE comparable now.",
         ],
     ),
     DemoPreset(
@@ -456,20 +456,21 @@ PRESETS: List[DemoPreset] = [
             "The A/B statistic is frames-to-acquire vs passes-per-frame, both on "
             "screen: B pays 2x the compute for a lower floor and one frame sooner.",
             "This is 2:1 compression (m=512 of 1024). At 16:1 or 64:1 neither arm "
-            "converges in this many frames, which is why m is not a live knob here.",
-            "There is deliberately no image on this screen: the picture does not change "
-            "visibly during acquisition (same panel as Thrusts 1-2), because the point of "
-            "the error curve is showing what the picture cannot: what the tracker has not "
-            "yet learned. Without the AFE it would look 'the same at this compression' -- "
-            "do not toggle it.",
+            "converges in this many frames -- why m is not a live knob here.",
+            "There is deliberately no image here: the picture doesn't change during "
+            "acquisition (same panel as Thrusts 1-2) -- the error curve shows what "
+            "the tracker hasn't yet learned. Without the AFE it looks 'the same at "
+            "this compression' -- do not toggle it.",
             "Prepared answer -- 'does your gap diagnostic work at Ka?': at k=2 the gap "
-            "sits far above 0.01 every frame, so the gate never escalates past its "
-            "baseline -- the 2x on screen is that baseline, not a reaction. At k=4 (not "
-            "shipped) the gap does collapse and the gate spends 6x more, but the "
-            "cluster still spikes and does not settle in 8 frames -- 'mitigated' is not "
-            "'fixed'; backup slide.",
+            "sits far above 0.01 every frame, so the gate never escalates -- the 2x "
+            "on screen IS baseline, not reaction. At k=4 (not shipped) the gap "
+            "collapses, the gate spends 6x more, but the cluster still spikes and "
+            "doesn't settle in 8 frames -- 'mitigated', not 'fixed'.",
             "The run is not faster than a full SVD: scoring runs the full SVD every frame "
             "for ground truth. The 45x microbenchmark is real, the run time is not.",
+            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
+            "appear beyond |sin theta| ~0.90 (the ~115 m streak may alias); native "
+            "range resolution 5 cm, binned 20:1 to 1 m gates.",
         ],
         do_not_say=[
             "Anything with an interferer: three confounders, and the sign of the response "
@@ -481,9 +482,9 @@ PRESETS: List[DemoPreset] = [
             "subspace_err beside an m=16 run: the warm tracker's error GROWS with frames "
             "there (0.125 -> 0.807 over six).",
             "That the gate 'always fires' or 'escalates' at Ka: measured false here "
-            "(n_refine_used stays flat, 5 on A / 10 on B, 8/8 frames). F94's addendum "
-            "measured escalation at k=8 on an earlier file, before the geometry fix "
-            "(8d1e251) -- retracted at k=2.",
+            "(n_refine_used flat, 5 on A / 10 on B, 8/8 frames). F94's addendum "
+            "measured escalation at k=8 earlier, pre-fix (8d1e251) -- retracted at "
+            "k=2.",
         ],
     ),
     DemoPreset(
@@ -503,21 +504,19 @@ PRESETS: List[DemoPreset] = [
         # geometry convention: Arm A used to be "h 100 um" (model geometry) while
         # every other reference on this card used 50 um presented -- one convention
         # now (presented), with the model-geometry equivalence stated once below.
-        blurb=("The LIVE public Tessera/UIC TSV surrogate, not a synthetic placeholder: "
-               "InterconnectBlock(source='tessera'), scale model x2 geometry / half "
-               f"frequency at our Ka band (banner describe() says so every run). Arm A "
-               f"(top) is the canonical geometry, {_TESSERA_CANONICAL_HEIGHT_UM:g} um "
-               f"presented (= {_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry "
-               "at scale x2), upstream's own demo point. Arm B (bottom) drops TSV "
-               "height to its presented low end -- OFFLINE, the biggest single-knob "
-               "mover of the range-profile skirt of the five (notes/"
-               "TESSERA_KNOB_MEASUREMENT_2026-09-23.md: a 3.53 dB native flat-frame "
-               "move). Neither panel PRINTS that number: both print the range "
-               "profile's own median floor instead, and the offline skirt move sits "
-               "below it -- quote the on-screen median-floor statistic, not the "
-               "offline skirt figure, if asked what the panel shows. That move is "
-               "bulk DELAY, not a shape change: |S21| itself only moves hundredths of "
-               "a dB."),
+        blurb=("The LIVE public Tessera/UIC TSV surrogate, not synthetic: "
+               "InterconnectBlock(source='tessera'), scale model x2 / half frequency "
+               f"at Ka band (the run note says so). Arm A (top): canonical geometry, "
+               f"{_TESSERA_CANONICAL_HEIGHT_UM:g} um presented (= "
+               f"{_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry at scale "
+               "x2), upstream's demo point. Arm B (bottom) drops TSV height to its "
+               "presented low end -- OFFLINE the biggest single-knob mover of the "
+               "skirt (TESSERA_KNOB_MEASUREMENT note: 3.53 dB native flat-frame move). "
+               "Neither panel prints that number: both print their own median floor "
+               "instead, and the offline skirt move sits below it -- quote the "
+               "on-screen median-floor statistic if asked what the panel shows. That "
+               "move is bulk DELAY, not a shape change: |S21| itself only moves "
+               "hundredths of a dB."),
         live_knobs=[("interconnect", "tessera_height_um",
                      f"{_TESSERA_CANONICAL_HEIGHT_UM:g} -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um "
                      "(the A/B above)"),
@@ -527,49 +526,53 @@ PRESETS: List[DemoPreset] = [
         ab=("interconnect", "tessera_height_um", _TESSERA_ARM_B_HEIGHT_UM),
         ab_label_a=f"canonical Tessera geometry ({_TESSERA_CANONICAL_HEIGHT_UM:g} um presented)",
         ab_label_b=f"TSV height -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um presented (largest skirt mover)",
-        screen_note=("LIVE Tessera surrogate, scale model x2 (see banner); in-band |S21| "
-                     "moves <0.03 dB across every knob -- invisible on a peak-normalized "
-                     "display. The 3.5 dB skirt move above is bulk delay, not distortion, "
-                     "and sits ~50 dB below this display's real noise floor: read both "
-                     "panels and say so if they look identical. Crosstalk (NEXT/FEXT) is "
-                     "modelled for a multi-via arrangement, not this default single-via "
-                     "one: worst-pair band mean, checker3x3, 28.5-31.5 GHz, pitch 40 um "
-                     "(in training box) NEXT -31.5 / FEXT -39.2 dB; pitch 60 um (our "
-                     "shipped geometry) NEXT -30.3 / FEXT -34.5 dB -- the pitch trend "
-                     "itself inverts above ~23 GHz on this public checkpoint (F89), so "
-                     "these are fixed reference numbers, not a live pitch sweep."),
+        screen_note=("LIVE Tessera surrogate, scale model x2 (see the run note); in-band "
+                     "|S21| moves <0.03 dB across every knob -- invisible on a "
+                     "peak-normalized display. The 3.5 dB skirt move above is bulk "
+                     "delay, not distortion, and sits ~50 dB below this display's real "
+                     "noise floor: read both panels and say so if they look identical. "
+                     "Crosstalk (NEXT/FEXT) is modelled for a multi-via arrangement, not "
+                     "this default single-via one: worst-pair band mean, checker3x3, "
+                     "28.5-31.5 GHz, pitch 40 um (in training box) NEXT -31.5 / "
+                     "FEXT -39.2 dB; pitch 60 um (our shipped geometry) NEXT -30.3 / "
+                     "FEXT -34.5 dB -- the pitch trend itself inverts above ~23 GHz on "
+                     "this public checkpoint (F89), so these are fixed reference values "
+                     "for checker3x3, not numbers from this run."),
         say=[
             "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV) -- "
-            "banner describe() names the scale factor and the frequency it ran at.",
+            "the run note names the scale factor and the frequency it ran at.",
             "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
-            "doi 10.1109/TCAD.2026.3718807): the interconnect thrust, the block, the "
-            "surrogate wrapper and the six Tessera S21 CSVs are theirs.",
-            "In-band |S21| is invisible on this display for every knob (<0.03 dB span); "
-            "the A/B moves TSV height because it is the one that measurably moves the "
-            "skirt, and even that is bulk delay, not a shape change.",
-            "Crosstalk is now modelled -- NEXT/FEXT between vias, multi-signal "
-            "arrangement -- with F89's numbers and caveat on the screen note; the "
-            "per-ELEMENT broadcast across all 1024 array elements is still unmodelled, "
-            "a separate limitation.",
-            "The 77 GHz shipped CSVs are still not reconciled with the 30 GHz frames; "
+            "doi 10.1109/TCAD.2026.3718807): the block, surrogate wrapper and six "
+            "Tessera S21 CSVs are theirs.",
+            "In-band |S21| is invisible on this display for every knob (<0.03 dB "
+            "span); A/B moves TSV height because it measurably moves the skirt -- "
+            "bulk delay, not shape.",
+            "Crosstalk is now modelled -- NEXT/FEXT between vias -- with F89's "
+            "numbers and caveat on the screen note; per-ELEMENT broadcast across all "
+            "1024 elements is still unmodelled, a separate limitation.",
+            "The 77 GHz shipped CSVs are not reconciled with the 30 GHz frames; "
             "caption real-CSV results as shape-only.",
             "Range 0-2 m is not a target: normalize_delays=True makes range 0 the "
-            "earliest arrival. On the range profile, multipath sits near 37 m and "
-            "68 m, not 20-22 m (F94: uncalibrated).",
+            "earliest arrival. Peaks near 37, 46, 68, 79 and 113 m are multipath from "
+            "the scene, not targets; the 120-125 m rise is the range-0 skirt "
+            "wrapping at the unambiguous limit (125 m).",
             "Skin depth goes as f^-1/2, not f^-1: under this x2 scale model, conductor "
-            "loss is under-estimated by about sqrt(2) -- about 0.2 dB on the 0.5 dB "
-            "in-band loss -- and substrate conductance coupling by up to 2x; trends "
-            "and shape are exact (F91).",
+            "loss is under-estimated by sqrt(2) -- ~0.2 dB of the 0.5 dB in-band "
+            "loss -- and substrate coupling by up to 2x; trends and shape are exact "
+            "(F91).",
+            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
+            "appear beyond |sin theta| ~0.90 (the ~115 m streak may alias); native "
+            "range resolution 5 cm, binned 20:1 to 1 m gates.",
         ],
         do_not_say=[
             "That crosstalk is structurally absent -- RETRACTED: the surrogate models "
-            "NEXT/FEXT for a multi-via arrangement (F89); one S21 broadcast to all "
-            "1024 elements is still true and separate.",
+            "NEXT/FEXT for multi-via arrangements (F89); one S21 broadcast to all "
+            "1024 elements remains true.",
             "'Drag pitch, watch crosstalk change' at our band: the public checkpoint's "
-            "pitch trend is physical only below ~23 GHz (F89) and runs backwards here.",
+            "pitch trend is physical only below ~23 GHz (F89) and runs backwards.",
             "That the A/B skirt movement is the surrogate finding a worse shape: the "
-            "measurement note attributes nearly all of it to a delay artifact.",
-            "'Case3' from the dropdown as the UIC Case3: a legacy alias for "
+            "measurement note attributes most of it to a delay artifact.",
+            "'Case3' from the dropdown as UIC Case3: a legacy alias for "
             "passthrough, not reachable from this screen.",
         ],
     ),
@@ -610,9 +613,10 @@ PRESETS: List[DemoPreset] = [
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "SAY FIRST: the frames change here. Thrusts 1-4 ran ray-traced munich "
-            "frames (25 m, range-azimuth); this is the benchmark corpus (100 m, "
-            "range-Doppler). What is STORED is the ray-traced channel -- everything "
-            "after it runs live, so the ADC knob below reaches the detector.",
+            "frames (125 m, 5000-point sweep, range-azimuth); this is the benchmark "
+            "corpus (100 m, range-Doppler). What is STORED is the ray-traced channel "
+            "-- everything after it runs live, so the ADC knob below reaches the "
+            "detector.",
             "The gate that makes this honest: at the settings each frame was generated "
             "with, the live cube is BIT-IDENTICAL to the stored one -- the run note "
             "prints max |diff| = 0 ADC codes. Move a knob and that number leaves zero; "
@@ -675,9 +679,10 @@ PRESETS: List[DemoPreset] = [
                "never learns azimuth (F83). A/B moves the IF high-pass corner from the "
                "1 m a real receiver uses to a deliberately broken 25 m, which attenuates "
                "(not discards) returns inside 25 m -- about 4.3 dB at the targets' ~22 m "
-               "range -- before digitisation: 148 crosses over the 5 frames fall to 65, "
-               "and hits 15 -> 4. The decode threshold is pinned at its recall-0.5 point "
-               "(0.22); at the default 0.5 this checkpoint draws nothing."),
+               "range -- before digitisation: unmatched/frame falls 26.60 -> 12.20, and "
+               "cumulative hits 15 -> 4 (both printed on the scoreboard). The decode "
+               "threshold is pinned at its recall-0.5 point (0.22); at the default 0.5 "
+               "this checkpoint draws nothing."),
         live_knobs=[("if_hpf", "corner_range_m",
                      "1 m (as built) -> 25 m (attenuates returns inside 25 m; about "
                      "4.3 dB at the targets' 22 m range)"),
@@ -695,10 +700,11 @@ PRESETS: List[DemoPreset] = [
             "Say it first; the diagnosis is the result.",
             "B is not a plausible receiver -- it is a 25 m high-pass corner, twenty-five "
             "times the real one, and the point is that a front-end setting now reaches "
-            "the detector at all: 148 crosses become 65, hits 15 become 4.",
+            "the detector at all: unmatched/frame 26.60 -> 12.20, cumulative hits "
+            "15 -> 4 (scoreboard).",
             "At the A operating point expect ~29 crosses per frame on the offline split "
             "= 26.4 false alarms + 3.0 hits (beat_cfar.json); these 5 live frames give "
-            "26.6 unmatched per frame, which is the same regime, not the same number.",
+            "26.60 unmatched per frame, which is the same regime, not the same number.",
             "Both ported networks emit a near-separable f(range) * g(azimuth) map: "
             "rank-1 energy fraction 0.89 / 0.76 against 0.31 for ground truth. Under "
             "azimuth-only matching they score no better than a constant map.",
@@ -748,14 +754,15 @@ PRESETS: List[DemoPreset] = [
         # way (`webapp/detector_scoreboard.py`).
         blurb=("THE REAL CLAIM, first: at matched recall (0.5) on the 172-frame split, "
                "RADDetNet racks up fewer false alarms than CFAR -- 2.99 vs 6.24 "
-               "FA/frame (AP 0.476 vs 0.301, controls pass). On the 5 live frames "
-               "below, fewer crosses can mean fewer hits, since these frames are not "
-               "recall-matched -- read the scoreboard's FA rows, not the crosses. The "
-               "same live chain runs RADDetNet (Doppler as channels, range x azimuth "
-               "as the spatial plane) on CFAR's own beamformed cube. A/B re-digitises "
-               "the stored channel at 3 bits: hits go 10 -> 5, five frames, so read it "
-               "as 'the knob reaches the detector', not a ranking. Out of distribution "
-               "the result is seed-dependent (F86); volunteer it before being asked."),
+               "FA/frame (6.24 on the CFAR screen; AP 0.476 vs 0.301, controls pass). "
+               "On the 5 live frames below, fewer crosses can mean fewer hits, since "
+               "these frames aren't recall-matched -- read the scoreboard's FA rows, "
+               "not the crosses. The same live chain runs RADDetNet (Doppler as "
+               "channels, range x azimuth as the spatial plane) on CFAR's cube. A/B "
+               "re-digitises the stored channel at 3 bits: hits go 10 -> 5, five "
+               "frames -- read it as 'the knob reaches the detector', not a ranking. "
+               "Out of distribution the result is seed-dependent (F86); say so "
+               "unprompted."),
         live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         ab=("quantizer", "bits", 3),
@@ -768,14 +775,16 @@ PRESETS: List[DemoPreset] = [
             "CFAR' (F85 addendum).",
             "Every offline number comes from e2e/ml/runs/beat_cfar.json (seed 42, "
             "b1_bench_v3, 12-bit default impairments); re-scored bit-identically. "
-            "Paired scene bootstrap: +0.175 AP, 95% CI [+0.145, +0.208].",
-            "The counts on screen are 5 live frames of a different corpus at whatever "
-            "the knobs say -- a demonstration that the front end reaches the detector, "
-            "never a re-measurement of AP. The network also leaves its training "
+            "Paired scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI "
+            "[+0.145, +0.208]; +0.148 vs the best of nine classical baselines (0.328).",
+            "The counts on screen are 5 live frames of a different corpus -- a "
+            "demonstration the front end reaches the detector, never a "
+            "re-measurement of AP; the network also leaves its training "
             "distribution the moment a knob moves.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
-            "were scored too, best 0.328, and shipped CFAR beats every alternative.",
+            "were scored too, best 0.328 -- above shipped CFAR (0.301), but the best "
+            "classical still loses to RADDetNet (0.476).",
             "Four learned arms were screened on this test split: three ported "
             "architectures and this one designed to the F83 diagnosis; all four are in "
             "beat_cfar.json, none dropped.",

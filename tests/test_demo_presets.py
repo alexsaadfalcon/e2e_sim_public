@@ -263,7 +263,7 @@ def test_thrust2_shows_the_range_el_panel_it_used_to_hide():
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert not any("deliberately off" in d.lower() and "range_el" in d.lower()
                   for d in p.do_not_say)
-    assert any("0.5 db" in s.lower() for s in p.say)
+    assert any("0.3 db" in s.lower() for s in p.say)
 
 
 def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
@@ -271,15 +271,18 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     cut moves ~2.7 dB, a number no panel on this screen shows (that figure was a
     cross-arm mean |dB| difference on the off-screen FFT az-el product). Re-measured
     on the final file (2026-09-23): the range-elevation panel actually shown moves
-    ~0.5 dB (peak-median 76.85 -> 76.57), so the card now quotes that on-screen
-    number instead -- the retracted 2.7 dB figure is gone, not just relocated."""
+    ~0.5 dB (peak-median 76.85 -> 76.57); wave 8 (2026-09-23, W4) found the rendered
+    panel actually prints 76.9 -> 76.6 (0.3 dB) -- the same move range-azimuth shows,
+    refuting the old "elevation is the one that moves" framing -- so the card now
+    quotes THAT on-screen number instead."""
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]
     assert "2.7" not in p.screen_note
     assert "2.7" not in p.blurb
     assert not any("2.7" in s for s in p.say + p.do_not_say)
     assert "range-elevation" in p.screen_note and "range-azimuth" in p.screen_note
     assert "barely move" in p.screen_note
-    assert "76.85" in p.blurb and "on screen" in p.blurb
+    assert "76.9" in p.blurb and "76.6" in p.blurb and "on screen" in p.blurb
+    assert "76.85" not in p.blurb and "76.57" not in p.blurb
     # Wave 7 (2026-09-23, F94): the old cross-reference to Thrust 3's cold-start first
     # frame ("about 0.6") compared error values at k=8; this preset now runs at k=2
     # (k=8/k=4 are both degenerate on the Ka retrace -- see the `overrides` comment),
@@ -288,7 +291,10 @@ def test_thrust2_screen_note_claims_only_what_the_two_panels_show():
     # says so explicitly instead.
     assert not any("0.58" in s for s in p.say)
     assert not any("about 0.6" in s and "thrust 3" in s.lower() for s in p.say)
-    assert any("not comparable" in s.lower() for s in p.do_not_say)
+    # Wave 8 (W7): Thrust 3 also runs at k=2 (not k=8), so the two ARE comparable --
+    # the stale "not comparable" claim is retracted, not just reworded.
+    assert any("both run at k=2" in s.lower() for s in p.do_not_say)
+    assert not any("not comparable" in s.lower() for s in p.say + p.do_not_say)
 
 
 def test_thrust3_is_a_cold_start_at_2_to_1():

@@ -747,11 +747,15 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     if threshold is not None and target_recall is not None and n_frames_split is not None:
         # Exact wording from the hostile-expert finding this fixes (2026-09-23): says
         # WHERE the threshold came from and what IS comparable across arms at a
-        # threshold each one picked independently.
+        # threshold each one picked independently. Wave 8 (W6): the MATCHED-recall
+        # claim holds only on the fixed 172-frame split -- the recall row below, on
+        # THIS run's own live frames, moves with the knob, and a viewer must not read
+        # that movement as breaking the calibration.
         subline = (
             f"threshold {thr_txt} = this detector's recall-{target_recall:g} operating "
             f"point on the {n_frames_split}-frame test split (beat_cfar.json); "
-            "detectors are compared at MATCHED recall, so compare false alarms, not hits"
+            "detectors are compared at MATCHED recall, so compare false alarms, not "
+            "hits; recall moves live"
         )
     else:
         subline = f"threshold {thr_txt}"
@@ -886,6 +890,11 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # margin below cover both -- `_TABLE_ANNOTATION_LINE_PX` replaces the OLD fixed
     # `_TABLE_MARGIN_B=120`, which silently assumed the match-rule sentence's own
     # (then only) wrapped line count.
+    # Wave 8 (W5): this ceiling binds at FULL recall (every real object fired on),
+    # not at every point on the PR curve beside this table -- the clarification
+    # ("ceiling at full recall") lives on that curve's own title (`stored_pr_figure`)
+    # rather than here, to avoid a 4th wrapped annotation line pushing this table
+    # over its height budget (`test_scoreboard_figure_height_fits_a_screen_for_every_arm`).
     ceiling_caveat = (
         "labels omit ~3 real scatterers per frame inside 40 m (precision ceiling "
         f"{PRECISION_CEILING_F83:.2f}); unmatched is an upper bound on "
@@ -1097,7 +1106,8 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         title=dict(
             text=f"scored offline: {n_frames} test frames, {corpus_name}"
                  "<br><sup>beat_cfar.json; in-distribution: held-out scenes of the "
-                 "training corpus; one training seed per curve</sup>",
+                 "training corpus; one training seed per curve<br>the scoreboard's "
+                 "precision ceiling binds at full recall, not near recall 0</sup>",
             font=dict(size=18),
         ),
         # Moved BELOW the plot, horizontal (Change, 2026-09-23 coordinator re-check):
@@ -1115,7 +1125,10 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # re-check): the wrapped 2-row case must not overlap the x-axis title below
         # it, which `automargin=True` below cannot solve for a LEGEND (that flag only
         # covers axis titles/ticks).
-        margin=dict(l=50, r=20, t=60, b=110),
+        # t raised 60 -> 84 (wave 8, W5): the ceiling-vs-recall clarification added a
+        # 2nd wrapped `<sup>` line above; unraised, that line rendered UNDER the
+        # plot's own top axis, clipped mid-word on the rehearsal PNG.
+        margin=dict(l=50, r=20, t=84, b=110),
         height=480,
     )
     if fallback_arms:
