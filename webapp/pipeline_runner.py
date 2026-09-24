@@ -1710,6 +1710,10 @@ PANEL_ROW_PR = "pr"
 #: px -- see the layout spec's section 2.2 table.
 PANEL_HEADER_HEIGHT = 60
 PANEL_PADDING = 16
+#: The panel's own CSS padding, px per side. 8, not 12: acceptance check 5 wants the
+#: plot at >= 50 % of the panel's AREA, and at 12 px this measured 47.3 % (rendered,
+#: 2026-09-24) -- every px of chrome here is bought straight out of the picture.
+PANEL_CSS_PADDING = 8
 
 #: Total panel heights, px. No other heights exist: "if a product does not fit one of
 #: these, it is the product that changes."
@@ -1728,10 +1732,18 @@ FIGURE_HEIGHT = {k: v - PANEL_HEADER_HEIGHT - PANEL_PADDING
 #: every map -- hostile round 10, defect 6); `b` holds the axis title and ticks at the
 #: 18 px podium floor; `l` holds the rotated y-axis title; `r` is a small pad, with the
 #: colour bar living in the width Plotly reserves beyond it.
-_FIG_MARGIN_T = 52
-_FIG_MARGIN_B = 60
-_FIG_MARGIN_L = 64
-_FIG_MARGIN_R = 16
+#: 72, not the spec table's 52: the strip carries TWO lines -- the headline statistic
+#: (26 px) and, above it, the per-frame readouts that must stay visible without
+#: expanding anything (the brightest visible return, and which frame the clock is
+#: parked on). At one line the two collided on a 545 px plot (measured on the first
+#: render, 2026-09-24: 215 px + 356 px of text in 545 px).
+_FIG_MARGIN_T = 68
+_FIG_MARGIN_B = 46
+#: 56/8, not 64/16: every px here is bought from the plot, and acceptance check 5
+#: wants the plot area at >= 50 % of the panel. 56 still clears the rotated y-axis
+#: title plus three-digit ticks at the 18 px podium floor (measured).
+_FIG_MARGIN_L = 44
+_FIG_MARGIN_R = 4
 
 #: Backwards-compatible aliases (several callers and tests still name these).
 _HEATMAP_MARGIN_L = _FIG_MARGIN_L
@@ -1863,14 +1875,18 @@ def _stat_annotations(stat: str, sub: str = "", *, arm: str = "a") -> List[Dict[
     entirely in the figure's top margin and can never cover a return (hostile round 10,
     defect 6 / acceptance check 8). No background pill: there is nothing underneath it
     to hide any more."""
-    out = [dict(text=stat, xref="x domain", yref="y domain", x=0.0, y=1.06,
+    out = [dict(text=stat, xref="x domain", yref="y domain", x=0.0, y=1.02,
                 showarrow=False, xanchor="left", yanchor="bottom", align="left",
                 name=_STAT_ANNOTATION_FLAG,
                 font=dict(size=_STAT_FONT_SIZE,
                           color=ARM_COLORS.get(arm, ARM_COLORS["a"])))]
     if sub:
-        out.append(dict(text=sub, xref="x domain", yref="y domain", x=1.0, y=1.06,
-                        showarrow=False, xanchor="right", yanchor="bottom", align="right",
+        # ABOVE the headline number, not beside it: side by side, a 26 px statistic
+        # and a 17 px readout do not both fit across one plot width, and they
+        # overlapped on the first render (2026-09-24). Both left-aligned, so the strip
+        # reads as one block: small context line, then the number, then the picture.
+        out.append(dict(text=sub, xref="x domain", yref="y domain", x=0.0, y=1.13,
+                        showarrow=False, xanchor="left", yanchor="bottom", align="left",
                         name=_STAT_ANNOTATION_FLAG + "_sub",
                         font=dict(size=_STAT_SUB_FONT_SIZE, color="#576574")))
     return out
@@ -1967,7 +1983,9 @@ def _radar_cube_clip_db(db: np.ndarray) -> float:
 _DB_COLORBAR_PREFIX = "dB rel. peak"
 
 #: Colour-bar geometry: thin, tall, tick-labels only.
-_COLORBAR = dict(thickness=14, len=0.90)
+#: `xpad=2`: Plotly's default 10 px pad on each side of the bar is pure reserved
+#: width, and the bar is only 14 px wide.
+_COLORBAR = dict(thickness=14, len=0.90, xpad=0)
 
 Z_SHARE_REACH_FLOOR = "reach_floor"
 Z_SHARE_KEEP_CLIP = "keep_clip"
@@ -2107,6 +2125,11 @@ def scenario_topdown_figure(scenario) -> "go.Figure":
     # Equal aspect: a plan view with distorted axes misleads about angle, which is the
     # one thing this figure exists to make readable.
     fig.update_yaxes(scaleanchor="x", scaleratio=1)
+    set_panel(fig, title="Scenario, plan view",
+              caption=["x-y plane", "radar ▲, boresight dashed"],
+              details=["Plan view (x-y) of the scenario the Scenario tab holds. "
+                       "Radar drawn as a triangle, boresight as a dashed line."],
+              row=PANEL_ROW_MAP)
     return _make_legible(fig)
 
 
@@ -2271,15 +2294,23 @@ def _apply_shared_z(fig: Dict[str, Any], zmin: float, zmax: float,
     meaning, so the caller states one of `SHARED_SCALE_CLAUSE` /
     `INDEPENDENT_SCALE_CLAUSE` explicitly.
     """
-    own_zmin = None
+    panel = _panel_dict(fig)
+    # The arm's OWN clip, before any sharing -- remembered on the panel the first time,
+    # because this pass runs again on every Dash render (a tab switch re-fires
+    # `_render_results`) and by then the trace already holds the SHARED value. Without
+    # this, the second pass silently dropped the "(was X)" provenance the layout spec
+    # and hostile round 10 (section 5.3) both say to keep; caught by
+    # `test_sharing_is_idempotent`, 2026-09-24.
+    own_zmin = panel.get("own_zmin")
     for trace in (fig.get("data") or []):
         if trace.get("type") != "heatmap":
             continue
         if own_zmin is None and trace.get("zmin") is not None:
             own_zmin = float(trace["zmin"])
         trace["zmin"], trace["zmax"] = zmin, zmax
+    if own_zmin is not None:
+        panel["own_zmin"] = own_zmin
 
-    panel = _panel_dict(fig)
     caption = [c for c in panel["caption"]
                if not (isinstance(c, str)
                        and (c.startswith(CLIP_CLAUSE_PREFIX)
@@ -2380,7 +2411,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(annotations=_stat_annotations(fft_stats[-1], fft_subs[-1]))
         set_panel(fig, title="Azimuth-elevation power",
                   caption=[_DB_COLORBAR_PREFIX, f"{CLIP_CLAUSE_PREFIX}-40.0 dB"],
-                  details=["Non-coherent (power) integration over range, so a target "
+                  details=["Integration: (non-coherent over range).",
+                           "Non-coherent (power) integration over range, so a target "
                            "shows up regardless of its range, not just one at range 0."],
                   row=PANEL_ROW_MAP)
         figs["fft"] = _make_legible(_add_frame_animation(
@@ -2578,8 +2610,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             for i, dp in enumerate(direct_path_notes):
                 bright = ""
                 if "brightest visible return: " in dp:
+                    # SHORT (measured on the first render, 2026-09-24): at 17 px the
+                    # full phrase plus the frame counter was ~370 px and collided with
+                    # the 26 px headline statistic at the other end of the same 52 px
+                    # strip on a 604 px plot. The word "visible" and the full phrasing
+                    # are in Details; what has to be READABLE here is the number.
                     bright = dp.split("brightest visible return: ", 1)[1].strip()
-                    bright = f"brightest visible return {bright} · "
+                    bright = f"brightest {bright.replace(' at ', ' @ ')} · "
                 sub_texts.append(f"{bright}frame {i + 1} of {n_frames_key}")
             fig.update_layout(annotations=_stat_annotations(stat_texts[-1],
                                                             sub_texts[-1]))
@@ -2660,7 +2697,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                           yaxis_title="power (dB rel. peak)",
                           **_base_layout())
         set_panel(fig, title="Range profile",
-                  caption=[_DB_COLORBAR_PREFIX, "non-coherent over channels"],
+                  caption=["power, dB rel. peak", "non-coherent over channels"],
                   details=[
                       "Non-coherent (power) integration over channels.",
                       f"median floor, dB rel. peak: {floor_db:.1f}.",

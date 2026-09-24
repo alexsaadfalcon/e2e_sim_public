@@ -122,6 +122,73 @@ def _details_text(page) -> List[str]:
             '#results-tab-content .details-body')).map(e => e.innerText)""")
 
 
+#: What `_geometry` measures, in the browser, on the real page. A figure-dict test
+#: cannot see any of it (memory: "RENDER THE PAGE ... figure-dict tests and code
+#: reviews cannot see the screen"), and a pixel-hunt on the PNG has to guess where a
+#: panel ends. The DOM knows exactly.
+_GEOMETRY_JS = """() => {
+  const root = document.getElementById('results-tab-content');
+  if (!root) return null;
+  const R = e => { const b = e.getBoundingClientRect();
+    return {x: b.x + window.scrollX, y: b.y + window.scrollY,
+            w: b.width, h: b.height}; };
+  const panels = Array.from(root.querySelectorAll('.result-panel')).map(p => {
+    const plot = p.querySelector('.js-plotly-plot .nsewdrag');
+    const title = p.querySelector('.panel-title');
+    const cap = p.querySelector('.panel-caption');
+    return {rect: R(p), plot: plot ? R(plot) : null,
+            title: title ? title.textContent : '',
+            caption: cap ? cap.textContent : '',
+            titleClipped: title ? title.scrollWidth > title.clientWidth + 1 : false,
+            captionClipped: cap ? cap.scrollWidth > cap.clientWidth + 1 : false};
+  });
+  // Every text node's rendered font size, so "no text under 15 px" is measured on
+  // what the browser actually drew (HTML and SVG both).
+  const sizes = {};
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walk.nextNode())) {
+    const t = (n.textContent || '').trim();
+    if (!t) continue;
+    const el = n.parentElement;
+    if (!el) continue;
+    const st = window.getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') continue;
+    // Inside a <details> that is closed: not visible text.
+    let d = el.closest('details');
+    if (d && !d.open) continue;
+    const px = Math.round(parseFloat(st.fontSize) * 10) / 10;
+    const inFigure = !!el.closest('.js-plotly-plot');
+    const key = px + (inFigure ? '|figure' : '|page');
+    (sizes[key] = sizes[key] || []).push(t.slice(0, 60));
+  }
+  const firstPanel = panels.length ? panels[0].rect.y : null;
+  return {
+    page: {w: document.documentElement.scrollWidth,
+           h: document.documentElement.scrollHeight},
+    rootTop: R(root).y,
+    firstPanelTop: firstPanel,
+    panels: panels,
+    fontSizes: sizes,
+    nDetails: root.querySelectorAll('details').length,
+    nDetailsOpen: root.querySelectorAll('details[open]').length,
+    nTransportButtons: root.querySelectorAll('button').length,
+    nTransportSliders: root.querySelectorAll('input[type=range]').length,
+    nPlotlySliders: root.querySelectorAll('.slider-container').length,
+    nPlotlyButtons: root.querySelectorAll('.updatemenu-button').length,
+    nFigureTitles: root.querySelectorAll('.js-plotly-plot .gtitle').length,
+    plotBg: Array.from(root.querySelectorAll('.js-plotly-plot .bg'))
+              .map(e => e.getAttribute('style') || ''),
+    visibleText: (root.innerText || '')
+  };
+}"""
+
+
+def _geometry(page):
+    """Measured page geometry (see `_GEOMETRY_JS`)."""
+    return page.evaluate(_GEOMETRY_JS)
+
+
 def _status_after(page) -> str:
     # A finished run lands on Results, unmounting the diagram tab; re-mounting it
     # restores the last callback outputs, the status line included.
@@ -166,6 +233,9 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             page.wait_for_timeout(1500)  # let Plotly finish drawing every card
             titles = _figure_titles(page)
             page.screenshot(path=str(out / f"{p.id}_results.png"), full_page=True)
+            geometry = _geometry(page)
+            (out / f"{p.id}_geometry.json").write_text(
+                json.dumps(geometry, indent=1), encoding="utf-8")
             details_text: List[str] = []
             if expand_details:
                 n_open = _expand_details(page)
@@ -212,6 +282,8 @@ def rehearse(out: pathlib.Path, only: List[str] | None = None,
             wall = time.time() - t0
             page.wait_for_timeout(1000)
             page.screenshot(path=str(out / "cancel_results.png"), full_page=True)
+            (out / "cancel_geometry.json").write_text(
+                json.dumps(_geometry(page), indent=1), encoding="utf-8")
             status = _status_after(page)
             summary["cancel_journey"] = {"preset": p.id, "wall_s": round(wall, 2),
                                          "status": status, "rendered_at": _now_iso()}

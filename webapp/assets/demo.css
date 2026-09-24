@@ -62,7 +62,7 @@ button:disabled {
 /* Run-identity row: ONE line, the screen's only transport right-aligned in it. */
 .run-identity-row {
   display: flex; align-items: center; justify-content: space-between;
-  gap: var(--sp-5); min-height: 34px;
+  gap: var(--sp-5); min-height: 32px;
 }
 .run-identity-cell { display: flex; align-items: center; gap: var(--sp-3);
                      min-width: 0; }
@@ -85,14 +85,19 @@ button:disabled {
 .transport-label { font-size: 16px; color: var(--muted); min-width: 110px; }
 .transport-slider { width: 300px; accent-color: var(--arm-b); }
 
+/* 10 px, not 16: the hard cap is 4 lines AND 150 px above the first panel's top
+   border (acceptance check 2), and two full-width rules at 16 px of margin each spent
+   26 px of that budget on white space (measured on the first render, 2026-09-24). */
 .section-rule {
   height: 1px; background: var(--border);
-  margin: var(--sp-4) 0; width: 100%;
+  margin: 4px 0; width: 100%;
 }
 
 /* Arm header: chip, one-line caption, collapsed Details. At most 4 lines and 150 px
    of this may sit above the first panel (acceptance check 2). */
-.arm-header { max-height: 150px; overflow: hidden; }
+/* Hard cap: 4 text lines and 150 px above the first panel's top border
+   (acceptance check 2). Chip 27 + caption 22 + disclosure 24 + gaps = ~78. */
+.arm-header { max-height: 96px; overflow: hidden; }
 .arm-chip { display: flex; align-items: center; gap: var(--sp-2); }
 .arm-chip-label { font-size: 20px; font-weight: 700; }
 .arm-chip-a .arm-chip-label { color: var(--arm-a); }
@@ -102,13 +107,13 @@ button:disabled {
 .arm-dot-b { background: var(--arm-b); }
 .arm-caption {
   font-size: 16px; font-weight: 400; color: var(--muted);
-  margin-top: var(--sp-1);
+  margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* The Details disclosure. Closed by default; opening it pushes the panels down, which
    is correct -- it is a deliberate act by the presenter, not the default state. */
-.details { margin-top: var(--sp-2); }
+.details { margin-top: var(--sp-1); }
 .details-summary {
   font-size: 16px; color: var(--arm-b); cursor: pointer;
   list-style: none; user-select: none;
@@ -137,7 +142,7 @@ button:disabled {
 
 .result-panel {
   border: 1px solid var(--border); border-radius: 6px;
-  padding: var(--sp-3); background: var(--surface);
+  padding: 8px; background: var(--surface);
   box-sizing: border-box; overflow: hidden;
 }
 .result-panel-empty { background: #fbfcfd; border-style: dashed; }

@@ -136,12 +136,18 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "text-valign": "center",
             "text-halign": "center",
             "color": "#fff",
-            "font-size": "16px",
+            # 20px CSS x ~0.6 fit zoom (width-bound -- see the minZoom-removal
+            # comment on block-cytoscape below) ~= 12px of rendered ink, the
+            # acceptance threshold. This arithmetic holds at the diagram panel's
+            # CURRENT column width (~1032px) and the CURRENT _POSITIONS pitches --
+            # widen the panel or retune positions and the fit zoom (and this sum)
+            # must be recomputed, not assumed.
+            "font-size": "20px",
             "font-weight": 600,
             "text-wrap": "wrap",
-            "text-max-width": "140px",
+            "text-max-width": "150px",
             "width": "160px",
-            "height": "60px",
+            "height": "76px",
             "shape": "round-rectangle",
             "background-color": CATEGORY_COLORS["stage"],
             "border-width": 2,
@@ -467,8 +473,7 @@ def layout() -> Any:
                            "fontWeight": "bold", "backgroundColor": "#3867d6",
                            "color": "white", "border": "none",
                            "borderRadius": "4px", "cursor": "pointer"}),
-        html.Div(style={"width": "1px", "alignSelf": "stretch",
-                        "backgroundColor": "#dfe4ea", "margin": "0 16px"}),
+        html.Div(className="control-divider", style={"margin": "0 16px"}),
         html.Label("Frames to run:", style={"fontWeight": "bold", "marginRight": "8px",
                                             "whiteSpace": "nowrap"}),
         # Bounded to MAX_N_STEPS on both ends of the wire: here (advisory, a typed
@@ -489,10 +494,10 @@ def layout() -> Any:
                            "cursor": "pointer"}),
         html.Span(id="run-status", style={"marginLeft": "12px", "fontSize": "16px",
                                           "color": "#576574", "overflow": "hidden",
-                                          "textOverflow": "ellipsis"}),
-    ], style={"position": "sticky", "top": "0", "zIndex": 5,
-              "backgroundColor": "#ffffff", "borderBottom": "1px solid #dfe4ea",
-              "height": "56px", "display": "flex", "alignItems": "center",
+                                          "textOverflow": "ellipsis", "whiteSpace": "nowrap",
+                                          "minWidth": "0", "flex": "1 1 auto"}),
+    ], className="control-bar",
+       style={"display": "flex", "alignItems": "center",
               "flexWrap": "nowrap", "padding": "0 12px", "overflowX": "auto"})
 
     legend = html.Div([
@@ -516,16 +521,16 @@ def layout() -> Any:
                 stylesheet=CYTO_STYLESHEET,
                 # fit=True re-frames the viewport to the current extent on every
                 # (re)render. The full ~13-column pipeline is wide enough that a
-                # width-bound fit at this panel size lands under 0.85; minZoom
-                # floors it there so label ink stays >= 12px (16px font x 0.85),
-                # at the cost of the diagram no longer fitting entirely in view --
-                # panning (enabled below) reaches the cropped columns. Shrinking
-                # the node boxes was considered instead but the graph's span is
-                # dominated by the manually-tuned _POSITIONS pitches, not the box
-                # CSS size, so it would not move the fitted zoom meaningfully.
+                # width-bound fit at this panel size lands well under 1.0 (~0.6) --
+                # an earlier revision floored zoom at 0.85 via minZoom, but that
+                # cropped the source node on the left and ran the whole ADC-cube
+                # tributary off the right edge of the canvas (confirmed in a real
+                # browser render at 1600x1000), which is a worse demo defect than
+                # smaller labels. No minZoom: the whole graph always fits: the
+                # readability loss from the resulting ~0.6 zoom is compensated by
+                # the larger font-size in CYTO_STYLESHEET instead (see its comment).
                 layout={"name": "preset", "fit": True, "padding": 20},
                 style={"width": "100%", "height": "620px"},
-                minZoom=0.85,
                 userZoomingEnabled=True,
                 userPanningEnabled=True,
             ),

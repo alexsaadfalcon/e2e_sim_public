@@ -697,13 +697,32 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                       ood_json_path=DEFAULT_OOD_JSON,
                       third_corpus_json_path=DEFAULT_THIRD_CORPUS_JSON) -> go.Figure:
     """A compact table: this frame's TP/FP/FN, cumulative hits/false alarms/FA-per-frame/
-    hit-rate, and the match rule stated in words -- the numbers the hostile-expert read
-    (see the module docstring) said were missing from the objectness panel entirely.
+    hit-rate, and (when `beat_cfar_arm_name` names a scored arm) the two headline
+    offline-scoring rows the demo's numeric claims are actually about -- the numbers
+    the hostile-expert read (see the module docstring) said were missing from the
+    objectness panel entirely.
 
-    `scores` is `score_frames`'s return value. Legible at ~2 m: >=18px table font.
+    `scores` is `score_frames`'s return value. Legible at ~2 m: >=17px table font.
+
+    LAYOUT (2026-09-24 redesign, panel-meta contract -- see `webapp.pipeline_runner`'s
+    "PANEL GEOMETRY AND THE PANEL-META CONTRACT" section): the figure itself carries
+    ONLY the table, at a FIXED height (`FIGURE_HEIGHT[PANEL_ROW_TABLE]`) that no
+    longer depends on row count, wrapped-line count or arm-name length. Everything
+    that used to be a figure title, subtitle or below-table annotation -- the
+    threshold subline, the match-rule/ceiling/grouping/hit-gate-scale caveats -- is
+    attached instead via `pipeline_runner.set_panel` as the panel's HTML title,
+    one-line caption and Details disclosure; nothing is dropped, only moved
+    (`panel_text()` is the accessor that returns all of it as one string).
+
+    The table itself now shows AT MOST 8 rows: the 2 highest-value offline rows
+    (`_offline_arm_rows`'s "FA/frame ..." and "AP, offline test split" rows, when
+    `beat_cfar_arm_name` names a scored arm) plus the 6 live-run rows below. Every
+    OTHER offline row (CI, seed-spread caveat, OOD, 3rd-corpus) and the connector row
+    move into Details as `"<label>: <value>"` lines -- nothing invented, nothing
+    dropped, same convention as the caveat sentences below.
 
     `beat_cfar_arm_name` (typically `arm_name_for_detector(det_meta)`'s return) adds
-    an offline-scored block for that beat_cfar.json arm -- see `_offline_arm_rows`.
+    the offline-scored rows for that beat_cfar.json arm -- see `_offline_arm_rows`.
     `None` (the default) leaves the table at its base 6 rows: a caller with no mapped
     arm (e.g. a checkpoint outside the scored comparison) gets no offline block rather
     than a table of blanks.
@@ -713,10 +732,13 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     is ITS OWN recall-0.5 operating point from beat_cfar.json, so hit rate reads
     ~0.5 for every arm by construction -- a viewer comparing 0.56 (a weak detector) >
     0.50 (CFAR) > 0.47 (the strongest detector) is reading threshold-matching noise,
-    not detector quality. The subline below states the calibration explicitly and
-    says what IS comparable at matched recall (false alarms); the row label repeats
-    the caveat so it survives being read in isolation.
+    not detector quality. The subline (now in Details) states the calibration
+    explicitly and says what IS comparable at matched recall (false alarms); the row
+    label repeats the caveat so it survives being read in isolation.
     """
+    from webapp import pipeline_runner as _pr  # lazy: pipeline_runner imports this
+                                                # module at load time (circular import)
+
     frames = scores.get("frames") or []
     last = frames[-1] if frames else None
     cum = scores["cumulative"]
@@ -745,9 +767,11 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
         # Exact wording from the hostile-expert finding this fixes (2026-09-23): says
         # WHERE the threshold came from and what IS comparable across arms at a
         # threshold each one picked independently. Wave 8 (W6): the MATCHED-recall
-        # claim holds only on the fixed 172-frame split -- the recall row below, on
-        # THIS run's own live frames, moves with the knob, and a viewer must not read
-        # that movement as breaking the calibration.
+        # claim holds only on the fixed n_frames_split-frame split -- the live
+        # "recall (hits / GT), this run" row moves with the knob, and a viewer must
+        # not read that movement as breaking the calibration. Now a Details line
+        # (2026-09-24 redesign), not a figure subtitle -- see this function's
+        # docstring.
         subline = (
             f"threshold {thr_txt} = this detector's recall-{target_recall:g} operating "
             f"point on the {n_frames_split}-frame test split (beat_cfar.json); "
@@ -762,39 +786,32 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # truth misses ~3.25 real strongly-scattering objects per frame inside 40 m
     # (F83), so a detector that correctly fires on every real object still racks up
     # "false alarms" here. The row is no longer read as a true false-alarm count on
-    # its own; "(FA)" is dropped from the label (the annotation below the table still
-    # states the upper-bound caveat) to make room for stating THIS RUN'S OWN frame
-    # count instead -- a 4th hostile-expert read (2026-09-23) found this row sitting
-    # directly above the offline "FA/frame at recall ..." row with no indication the
-    # two are different sample sizes (a live run is capped at MAX_N_STEPS frames;
-    # beat_cfar.json's split is fixed and far larger), which reads as unexplained
-    # disagreement between two numbers that simply differ in N.
+    # its own; "(FA)" is dropped from the label (Details still states the
+    # upper-bound caveat, see `ceiling_caveat` below) to make room for stating THIS
+    # RUN'S OWN frame count instead -- a 4th hostile-expert read (2026-09-23) found
+    # this row sitting directly above the offline "FA/frame at recall ..." row with
+    # no indication the two are different sample sizes (a live run is capped at
+    # MAX_N_STEPS frames; beat_cfar.json's split is fixed and far larger), which
+    # reads as unexplained disagreement between two numbers that simply differ in N.
     #
     # "cumulative hits"/"hit rate" split their qualifier into the VALUE column
-    # (Change, 2026-09-23 coordinator re-check) instead of a long label -- a single
-    # row that needed 2 wrapped lines inflated the WHOLE table to that height
-    # (Plotly's Table `cells.height` is one scalar for every row, not per-row; see
-    # `_TABLE_COL_CHARS`), which is what pushed a 15-row Thrust 5 card past 1500 px.
-    # Quotes THIS RUN'S OWN frame count (never the offline split size) -- the finding
-    # this fixes is a *5-frame* hit rate of 0.50/0.47/0.56 being read against each
-    # other as if they were a stable per-arm quality number.
+    # (Change, 2026-09-23 coordinator re-check) instead of a long label -- a row
+    # that needs 2 lines is no longer just costly, it is NOT ALLOWED (no row may
+    # wrap, see `_TABLE_COL_CHARS`'s comment).
     cum_hits_str, cum_unmatched_str, fa_per_frame_str, hit_rate_str = cum_values
     # Relabelled (hostile-expert read, 2026-09-23, item 5): "hit rate (design, not
     # quality) 0.53 (5fr; R0.5/172fr split)" was ambiguous -- reading it as "16 hits
     # / 5 frames / an assumed 5 GT-per-frame" gives 0.64, not the tp/(tp+fn) this row
     # actually shows. The label now says exactly what the value is (a recall over
     # THIS run's own ground truth, whose per-frame count varies); the recall-target/
-    # split-size context already lives in the subline above and the connector row
-    # below, so it is not repeated here.
+    # split-size context lives in the `subline` Details line instead, so it is not
+    # repeated here.
     hit_rate_value = f"{hit_rate_str} ({n_scored}fr; GT varies/frame)"
     # "cumulative unmatched detections" (the bare running total, dropped 2026-09-23
-    # 4th hostile-expert read) is the row this pass drops to hold the table's <=800 px
-    # budget while adding the connector row below and the OOD FA row (which required
-    # `_ood_rows_for_arm` to merge two of its own rows into one for the same reason):
-    # the bare total carried no denominator of its own -- the rate right
-    # below it, now also naming this run's own frame count in its label, already says
-    # more. "cumulative hits" stays: its "(N/N scored)" value is the denominator the
-    # false-alarm rate needs, not a number this pass could drop for free.
+    # 4th hostile-expert read) stays dropped: the rate right below it, naming this
+    # run's own frame count in its label, already says more, and the table's <=8-row
+    # budget (2026-09-24 redesign) has even less room to spare now than the old
+    # <=800 px budget did.
     base_labels = ["this frame: TP", "this frame: unmatched (FP)", "this frame: FN",
                   "cumulative hits",
                   f"unmatched / frame, these {n_scored} frames",
@@ -807,91 +824,99 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
                                       raddetnet_ci_json_path, ood_json_path,
                                       third_corpus_json_path)
                     if beat_cfar_arm_name else [])
-    # Bridges the offline block above (the large, fixed test split the demo's
-    # numeric CLAIMS are actually about) and the live block below (this run's own,
-    # tiny, <=MAX_N_STEPS-frame counts, which swing frame to frame) -- without this,
-    # a viewer reads the two blocks' visibly different counts (e.g. 2.99 vs 4.00) as
+    # Bridges the offline block (the large, fixed test split the demo's numeric
+    # CLAIMS are actually about) and the live block (this run's own, tiny,
+    # <=MAX_N_STEPS-frame counts, which swing frame to frame) -- without this, a
+    # viewer reads the two blocks' visibly different counts (e.g. 2.99 vs 4.00) as
     # disagreement rather than different sample sizes (hostile-expert 4th read,
-    # 2026-09-23, finding 1). Only shown when there IS an offline block to point at.
+    # 2026-09-23, finding 1). Only present when there IS an offline block to point
+    # at. Moves to Details now (2026-09-24 redesign) rather than the visible table --
+    # see the row-budget comment below.
     connector_rows = (
         [(f"{n_scored}-frame live counts vary",
           f"{n_frames_split}-frame numbers are the claim")]
         if offline_rows and n_frames_split is not None else []
     )
-    # EVERY label AND value is pre-wrapped at the same budget (`_TABLE_COL_CHARS`),
-    # not just the rows this module knows are long (Change, 2026-09-23 coordinator
-    # re-check). The bug this originally fixed (rehearsal, 2026-09-23): Plotly's
-    # Table cells word-wrap automatically to fit the column's PIXEL width regardless
-    # of whether this module inserted a "<br>", so an un-budgeted label silently
-    # auto-wrapped to a line count this function's own math never knew about,
-    # under-sizing the table and clipping its last row -- exactly the failure mode
-    # `_TABLE_HEADER_HEIGHT`'s comment already describes for the header. Pre-wrapping
-    # everything at a budget well under the column's real auto-wrap threshold means
-    # Plotly never NEEDS to auto-wrap, so this module's own "<br>" count is always
-    # the true rendered line count.
-    #
-    # OFFLINE BLOCK FIRST, then the connector, then the live block (Change, wave 7
-    # X2, 2026-09-23): a hostile-expert read of the KA-BAND screens found the live
-    # per-frame TP/FP/FN rows -- raw cross counts, not recall-matched -- were the
-    # first thing read on every Thrust 5 screen, ahead of the one comparison the
-    # table can actually defend (false alarms at MATCHED recall, from
-    # `_offline_arm_rows`, itself now FA-row-first for the same reason). No content
-    # or number changed here, only the row ORDER.
-    raw_labels = [r[0] for r in offline_rows + connector_rows] + base_labels
-    raw_values = [r[1] for r in offline_rows + connector_rows] + base_values
-    labels = [_wrap_text(l, max_chars=_TABLE_COL_CHARS) for l in raw_labels]
-    values = [_wrap_text(v, max_chars=_TABLE_COL_CHARS) for v in raw_values]
-    n_rows = len(labels)
-    # Plotly's Table `cells.height` is a single scalar, not one-per-row, so a
-    # multi-line row forces EVERY row to the tallest row's height rather than
-    # clipping it (see the geometry comment above `_TABLE_HEADER_HEIGHT`) -- this is
-    # why every row above is kept to one line by construction. `_TABLE_CELL_MAX_LINES`
-    # is a hard cap (asserted, not just hoped for -- see the test of the same name)
-    # in case a future arm/corpus name is long enough to still need a second line;
-    # it does NOT rescue the table from a THIRD line, which would silently clip again.
-    max_row_lines = max((max(lbl.count("<br>"), val.count("<br>")) + 1
-                        for lbl, val in zip(labels, values)), default=1)
-    assert max_row_lines <= _TABLE_CELL_MAX_LINES, (
-        f"a scoreboard row wrapped to {max_row_lines} lines (label/value budget "
-        f"{_TABLE_COL_CHARS} chars) -- shorten it or raise _TABLE_CELL_MAX_LINES "
-        "deliberately, don't let this silently inflate the whole table"
+
+    # The table shows AT MOST 8 VISIBLE rows (layout spec, PANEL_ROW_TABLE's fixed
+    # 312 px -- see the geometry comment above `_TABLE_HEADER_HEIGHT`): the FA/frame
+    # and AP/offline-test-split rows (`_offline_arm_rows` always produces them
+    # first, in that order -- see its docstring) stay on the table; every other
+    # offline row (CI, seed-spread caveat, OOD, 3rd-corpus) and the connector row
+    # move to Details instead. Matched by CONTENT rather than position, so this
+    # still finds the right two rows even if a future arm has no FA/frame row
+    # (`_offline_arm_rows` omits it when `fp_per_frame` is absent).
+    visible_offline: List[Tuple[str, str]] = []
+    offline_detail_rows: List[Tuple[str, str]] = []
+    got_fa = got_ap = False
+    for row in offline_rows:
+        label = row[0]
+        if not got_fa and label.startswith("FA/frame"):
+            visible_offline.append(row)
+            got_fa = True
+        elif not got_ap and label in ("AP, offline test split", "offline test split"):
+            visible_offline.append(row)
+            got_ap = True
+        else:
+            offline_detail_rows.append(row)
+
+    raw_labels = [r[0] for r in visible_offline] + base_labels
+    raw_values = [r[1] for r in visible_offline] + base_values
+    n_rows = len(raw_labels)
+    assert n_rows <= 8, (
+        f"scoreboard table grew to {n_rows} visible rows -- the panel's fixed "
+        f"height ({_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_TABLE]} px) is budgeted for <=8; "
+        "move the new row into Details instead of the visible table"
     )
-    row_height = _TABLE_ROW_HEIGHT * max_row_lines
+
+    # No row may wrap: Plotly's Table `cells.height` is a single scalar for the
+    # WHOLE table, not one-per-row, so a multi-line row would force EVERY row past
+    # its fixed `_TABLE_MAX_ROW_HEIGHT` cap rather than just itself. `_wrap_text` is
+    # kept ONLY to detect that a row would need a second line -- never to actually
+    # insert one -- so this fails loudly (an assert) instead of silently blowing the
+    # table past its fixed height.
+    for lbl, val in zip(raw_labels, raw_values):
+        assert "<br>" not in _wrap_text(lbl, max_chars=_TABLE_COL_CHARS), (
+            f"scoreboard row label {lbl!r} needs >1 line at {_TABLE_COL_CHARS} chars "
+            "-- shorten the VALUE text (not this label, not the font) so the row "
+            "still fits the fixed row height"
+        )
+        assert "<br>" not in _wrap_text(val, max_chars=_TABLE_COL_CHARS), (
+            f"scoreboard row value {val!r} (label {lbl!r}) needs >1 line at "
+            f"{_TABLE_COL_CHARS} chars -- shorten it, don't let this row wrap"
+        )
+
+    row_height = min(_TABLE_MAX_ROW_HEIGHT,
+                     (_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_TABLE] - _TABLE_HEADER_HEIGHT)
+                     // n_rows)
 
     fig = go.Figure(data=[go.Table(
-        # See `_TABLE_COL_WIDTHS`: roughly 50:50 -- the value column now carries
-        # short sentences too (the OOD/CI-caveat rows), not just numbers.
         columnwidth=_TABLE_COL_WIDTHS,
         # Second column used to be an empty dark cell -- it labels the counts below it.
         header=dict(values=[arm_name, "count"],
-                   fill_color="#2d3436", font=dict(color="white", size=18),
+                   fill_color="#2d3436", font=dict(color="white", size=17),
                    height=_TABLE_HEADER_HEIGHT, align="left"),
         cells=dict(
-            values=[labels, values],
+            values=[raw_labels, raw_values],
             fill_color=[["#f5f6fa"] * n_rows, ["#ffffff"] * n_rows],
-            font=dict(size=18), height=row_height, align="left",
+            font=dict(size=17), height=row_height, align="left",
         ),
     )])
-    # Wrapped like the match-rule annotation below (same `_wrap_text`, same 70-char
-    # budget): this sentence is far wider than a two-card panel. The wrap's line
-    # COUNT then drives the top margin below -- an insufficient one does not clip
-    # the title, it overflows it down into the table (see `_TABLE_SUBLINE_LINE_PX`).
-    subline_wrapped = _wrap_text(subline)
-    n_subline_lines = subline_wrapped.count("<br>") + 1
-    margin_t = _TABLE_MARGIN_T + max(0, n_subline_lines - 1) * _TABLE_SUBLINE_LINE_PX
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_TABLE],
+        paper_bgcolor=_pr.PAPER_BGCOLOR, plot_bgcolor=_pr.PLOT_BGCOLOR,
+    )
+
     # The match rule, in words with its numbers (see match_rule_text()), plus one more
     # sentence (finding 1) saying the precision ceiling those "unmatched" rows above
-    # cannot exceed and what that means for reading them -- both wrapped the same way
-    # (same `_wrap_text`, same 70-char budget: this text is far wider than a two-card
-    # panel). One annotation, not two, so a single y-position and a single dynamic
-    # margin below cover both -- `_TABLE_ANNOTATION_LINE_PX` replaces the OLD fixed
-    # `_TABLE_MARGIN_B=120`, which silently assumed the match-rule sentence's own
-    # (then only) wrapped line count.
+    # cannot exceed and what that means for reading them. Moved into Details verbatim,
+    # UNWRAPPED (2026-09-24 redesign): Details is HTML and wraps itself, so the old
+    # `_wrap_text`-at-70-chars pass (needed only to keep a figure annotation inside a
+    # panel's pixel width) is no longer applied to these sentences at all.
     # Wave 8 (W5): this ceiling binds at FULL recall (every real object fired on),
     # not at every point on the PR curve beside this table -- the clarification
-    # ("ceiling at full recall") lives on that curve's own title (`stored_pr_figure`)
-    # rather than here, to avoid a 4th wrapped annotation line pushing this table
-    # over its height budget (`test_scoreboard_figure_height_fits_a_screen_for_every_arm`).
+    # ("ceiling at full recall") lives in `stored_pr_figure`'s own Details.
     ceiling_caveat = (
         "labels omit ~3 real scatterers per frame inside 40 m (precision ceiling "
         f"{PRECISION_CEILING_F83:.2f}); unmatched is an upper bound on "
@@ -910,31 +935,25 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     )
     # Wave 7 X7: neither hit-gate tolerance had a physical-scale reading anywhere on
     # screen (a viewer sees "0.06" and "2 m" with no sense of whether that is loose
-    # or tight against this array/corpus) -- one more wrapped sentence, computed by
-    # `hit_gate_scale_note` rather than typed here so it cannot drift.
+    # or tight against this array/corpus) -- computed by `hit_gate_scale_note` rather
+    # than typed here so it cannot drift.
     scale_caveat = hit_gate_scale_note()
-    annotation_text = (f"{_wrap_text(match_rule_text)}<br>{_wrap_text(ceiling_caveat)}"
-                       f"<br>{_wrap_text(grouping_caveat)}<br>{_wrap_text(scale_caveat)}")
-    n_annotation_lines = annotation_text.count("<br>") + 1
-    margin_b = _TABLE_ANNOTATION_LINE_PX * n_annotation_lines
-    # Height computed from the ACTUAL row count and the ACTUAL (possibly multi-line)
-    # row height above (base 7 rows, or 7 + a variable offline block) -- see the
-    # geometry comment above `_TABLE_HEADER_HEIGHT` for why this must never go back to
-    # a hardcoded row count or an assumed single-line row height.
-    table_height = (margin_t + _TABLE_HEADER_HEIGHT + n_rows * row_height + margin_b
-                    + _TABLE_RENDER_SAFETY_PX)
-    fig.update_layout(
-        # Threshold moved here (out of the header -- see `_TABLE_HEADER_HEIGHT`'s
-        # comment) as a "<br><sup>" subline, the same pattern pipeline_runner.py uses
-        # for every other panel's headline statistic.
-        title=dict(text=f"Detector scoreboard<br><sup>{subline_wrapped}</sup>",
-                  font=dict(size=20)),
-        margin=dict(l=10, r=10, t=margin_t, b=margin_b),
-        height=table_height,
-    )
-    fig.add_annotation(
-        text=annotation_text, xref="paper", yref="paper", x=0.0, y=-0.14,
-        showarrow=False, align="left", font=dict(size=15), xanchor="left", yanchor="top",
+
+    # Everything that isn't one of the table's 8 visible rows, in the same content --
+    # nothing dropped, only moved (layout spec's Details contract): the offline rows
+    # the table had no room for, the live/offline connector, then the 4 caveat
+    # sentences and the threshold subline that used to be the figure's annotation
+    # and title/subtitle.
+    details = ([f"{lbl}: {val}" for lbl, val in offline_detail_rows]
+              + [f"{lbl}: {val}" for lbl, val in connector_rows]
+              + [match_rule_text, ceiling_caveat, grouping_caveat, scale_caveat,
+                 subline])
+
+    _pr.set_panel(
+        fig, title="Detector scoreboard",
+        caption=[f"threshold {thr_txt}",
+                "compared at matched recall — compare false alarms, not hits"],
+        details=details, row=_pr.PANEL_ROW_TABLE,
     )
     return fig
 
@@ -1179,24 +1198,26 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         caption = [f"{n_frames} test frames, {corpus_name}"]
 
     # Every clause the old figure title/subtitle and in-plot fallback banner carried,
-    # verbatim (2026-09-24 redesign) -- see this function's docstring. The
-    # "identical on both arms" sentence used to be appended only to arm B's copy of
-    # the OLD title text by `webapp.app._arm_result`; it is a fact about this
-    # figure, true on every call, so it is a standing Details line here instead --
-    # app.py's title-mutating append is stale against a figure that no longer has a
-    # `layout.title` to append to and needs updating by that file's owner (not this
-    # module) to stop relying on it.
+    # VERBATIM (2026-09-24 redesign) -- same convention as `scoreboard_figure`'s 4
+    # caveat sentences: unmodified substrings of the old `title_text`, split at the
+    # same "<br>" boundaries that used to separate its lines, not re-punctuated or
+    # merged. The "identical on both arms" sentence used to be appended only to arm
+    # B's copy of the OLD title text by `webapp.app._arm_result`; it is a fact about
+    # this figure, true on every call, so it is a standing Details line here instead
+    # -- app.py's title-mutating append is stale against a figure that no longer has
+    # a `layout.title` to append to and needs updating by that file's owner (not
+    # this module) to stop relying on it.
     details = [
-        f"scored offline: {n_frames} test frames, {corpus_name} (beat_cfar.json).",
-        "In-distribution: held-out scenes of the training corpus; one training seed "
-        "per curve.",
-        "The precision ceiling binds at full recall, not near recall 0.",
-        "Scored offline; identical on both arms, the knob cannot move it.",
+        f"scored offline: {n_frames} test frames, {corpus_name}",
+        "beat_cfar.json; in-distribution: held-out scenes of the training corpus; "
+        "one training seed per curve",
+        "the scoreboard's precision ceiling binds at full recall, not near recall 0",
+        "scored offline; identical on both arms, the knob cannot move it",
     ]
     if fallback_arms:
         details.append(
-            "No stored PR curve for: " + ", ".join(fallback_arms) +
-            " -- showing their recall-0.5 operating point only."
+            "no stored PR curve for: " + ", ".join(fallback_arms) +
+            " -- showing their recall-0.5 operating point only"
         )
 
     _pr.set_panel(fig, title="Precision-recall, offline test split",

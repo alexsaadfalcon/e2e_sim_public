@@ -164,7 +164,9 @@ def _app_layout() -> Any:
             dcc.Tab(label="Scenario", value="tab-scenario",
                     children=html.Div(scenario_editor.layout(), style={"padding": "12px"})),
             dcc.Tab(label="Results", value="tab-results",
-                    children=html.Div(id="results-tab-content", style={"padding": "12px"})),
+                    # 8 px, not 12: the budget above the first panel is 150 px
+                    # (acceptance check 2) and this padding is inside it.
+                    children=html.Div(id="results-tab-content", style={"padding": "8px"})),
         ]),
     # 1600px, not the original 1280px: on the 1920x1080 conference monitor the narrower
     # cap wasted ~338px of margin per side and bought the lone-figure Thrust 3 screen
@@ -418,10 +420,19 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
     parts = []
     if preset is not None:
         parts.append(f"Thrust {preset.thrust}")
-        parts.append(preset.label)
+        # The preset's own label already starts "Thrust N - ..."; printing the thrust
+        # twice on one line is what pushed this line past the page width and made CSS
+        # clip it with an ellipsis on the first render (2026-09-24). Same for the
+        # source's "Sionna frames: " prefix: the environment name is the identity, the
+        # loader is not.
+        label = preset.label
+        prefix = f"Thrust {preset.thrust} - "
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+        parts.append(label)
     source = axis_meta.get("source")
     if source:
-        parts.append(source)
+        parts.append(source.replace("Sionna frames: ", ""))
     parts.append(f"{n_run} of {n_steps} frames" if n_run != n_steps
                  else f"{n_steps} frames")
     parts.append(f"run #{n_clicks} {_time.strftime('%H:%M:%S')}")
@@ -450,15 +461,21 @@ def _note_headline(note: str) -> str:
     `" -- "`, then an attribution clause that can run another 2-3 lines; the headline
     IS the number the presenter reads ("live vs stored ADC: max |diff| 0 of 4096 LSB"),
     so it is what the caption carries."""
-    cut = len(note)
     sep = note.find(" -- ")
-    if 0 <= sep < cut:
-        cut = sep
-    if _NOTE_HEADLINE_CHARS < cut:
-        cut = _NOTE_HEADLINE_CHARS
-    if cut >= len(note):
-        return note
-    return note[:cut].rstrip() + "…"
+    head = note[:sep].rstrip() if sep >= 0 else note
+    if len(head) <= _NOTE_HEADLINE_CHARS:
+        # A clean clause boundary: nothing is elided, so nothing is marked. Acceptance
+        # check 12 forbids truncation marks in visible text, and a note cut at " -- "
+        # is a complete sentence, not a cut-off one.
+        return head
+    # Still too long: cut at the last WORD boundary and mark it. Mid-word truncation
+    # ("...ring3x3 arran ...") is what made the smallest type on the screen the only
+    # text that lost information (hostile round 10, defect 2.3).
+    clipped = head[:_NOTE_HEADLINE_CHARS]
+    space = clipped.rfind(" ")
+    if space > 40:
+        clipped = clipped[:space]
+    return clipped.rstrip(" ,;") + "…"
 
 
 def _notes_line(axis_meta: Dict[str, Any]) -> List[str]:
@@ -636,14 +653,15 @@ def _arm_result(n_clicks, outputs, n_steps, block_state, scenario_json, note: st
                 # copy said so. Said ONCE (arm B only): saying it twice invites "why
                 # does it need saying twice?" (hostile round 10, section 5.8). It is
                 # a caption clause now, not a fourth wrapped title line.
+                # `stored_pr_figure` already carries this sentence in its Details on
+                # BOTH arms (it is true of both). What arm B adds is the VISIBLE
+                # statement -- once per row, not once per panel.
                 _panel = panel_of(pr_fig)
-                _clause = ("scored offline; identical on both arms, the knob cannot "
-                           "move it")
+                _clause = "identical on both arms; the knob cannot move it"
                 pr_fig.update_layout(meta=dict(
                     (pr_fig.layout.meta or {}),
                     panel=dict(_panel,
-                               caption=list(_panel.get("caption") or []) + [_clause],
-                               details=list(_panel.get("details") or []) + [_clause])))
+                               caption=list(_panel.get("caption") or []) + [_clause])))
             figs = {**figs, "detector_pr_stored": pr_fig}
     n_products = len(figs)
     banner = _run_banner(n_clicks, axis_meta, int(n_steps or 10))
