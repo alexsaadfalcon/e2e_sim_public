@@ -715,7 +715,15 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
             # copy of them.
             ap_split_value = f"{ap:.3f} (CFAR {cfar_ap:.3f})"
         elif n_frames is not None:
-            ap_split_value = f"{ap:.3f}, {n_frames}fr (beat_cfar.json)"
+            # NO FILE NAME IN THIS CELL. `fold_offline_rows_onto_arm_a` appends
+            # ", both arms" to this value AFTER `scoreboard_figure`'s no-wrap assert has
+            # run, so a value sized to the budget here still wrapped on screen -- and a
+            # wrapped row is not one row taller, it inflates EVERY row (Plotly's table
+            # height is a single scalar), which is what pushed arm A's eighth row off
+            # the bottom of the panel on `thrust5_detector_cfar_results.png`. The file
+            # is named in the Details subline two lines down, which is where provenance
+            # belongs; "0.218, 172fr" + the fold suffix fits one line with room.
+            ap_split_value = f"{ap:.3f}, {n_frames}fr"
         else:
             ap_split_value = f"{ap:.3f} (beat_cfar.json)"
         rows.append(("AP, offline test split", ap_split_value))

@@ -516,8 +516,14 @@ def test_scoreboard_offline_block_cfar_arm_has_no_self_reference(beat_cfar_data)
     labels, values = _table(fig).cells.values
     row = dict(zip(labels, values))
     arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "classical CFAR")
+    # The file name left this CELL on 2026-09-24 (seat's read of the renders): the
+    # A/B fold appends ", both arms" to this value after the no-wrap assert has run, and
+    # the combined string wrapped -- which in a Plotly table inflates EVERY row, and
+    # pushed the eighth row off the bottom of the panel. Provenance moved to the
+    # Details subline, which names the file (asserted below), so nothing is lost.
     assert row["AP, offline test split"] == (
-        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr (beat_cfar.json)")
+        f"{arm['AP']:.3f}, {arm['operating_point']['n_frames']}fr")
+    assert "beat_cfar.json" in panel_text(fig)
     fa_label = next(k for k in row if k.startswith("FA/frame at recall"))
     assert row[fa_label] == f"{arm['operating_point']['fp_per_frame']:.2f}"
 
