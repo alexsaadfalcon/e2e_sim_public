@@ -47,6 +47,10 @@ def test_check_assets_all_present(tmp_path):
     sims_dir.mkdir(parents=True)
     (sims_dir / "munich_ka.pkl").write_bytes(b"x")  # garbage bytes: _munich_ka_label's
     (sims_dir / "munich.pkl").write_bytes(b"x")     # pickle.load fails closed to a
+    # Thrust 3's swept-line-of-sight scene (2026-09-25): checked by name, because a
+    # missing file makes that preset fall back to the static scene and draw a screen its
+    # card no longer describes.
+    (sims_dir / "munich_ka_losweep.pkl").write_bytes(b"x")
                                                      # metadata-free label, never raises
     tessera_csv = tmp_path / "e2e" / "data" / "interconnect" / "tessera_tsv_s21_public.csv"
     tessera_csv.parent.mkdir(parents=True)
@@ -71,6 +75,7 @@ def test_check_assets_all_present(tmp_path):
                            registry_choices=scanned)
     by_name = {r.name: r for r in results}
     assert by_name["assets.munich_ka_pkl"].status == "PASS"
+    assert by_name["assets.munich_ka_losweep_pkl"].status == "PASS"
     assert by_name["assets.munich_legacy_pkl"].status == "PASS"
     assert by_name["assets.tessera_public_csv"].status == "PASS"
     assert by_name["assets.tessera_checkpoint"].status == "PASS"

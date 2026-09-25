@@ -18,10 +18,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Torch-free (os/pickle/numpy only, see that module) -- gives us MUNICH_LEGACY_LINK
+# Torch-free (os/pickle/numpy only, see that module) -- gives us the FILE-selector
+# link tokens (MUNICH_LEGACY_LINK, MUNICH_LOSWEEP_LINK)
 # and a cheap way to read a v2 pkl's `meta` without duplicating the pickle-format
 # knowledge here.
-from e2e.environment.sionna_iterator import MUNICH_LEGACY_LINK, SionnaIterator
+from e2e.environment.sionna_iterator import (MUNICH_LEGACY_LINK,
+                                            MUNICH_LOSWEEP_LINK, SionnaIterator)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASETS_DIR = REPO_ROOT / "e2e" / "ml" / "datasets"
@@ -85,6 +87,44 @@ def _munich_ka_label(path: Path) -> str:
     return "munich (Ka-band)"
 
 
+def _munich_losweep_label(path: Path) -> str:
+    """'munich (Ka-band, 30 GHz, LoS sweep -28.4 to +28.9 deg)' -- the sweep read from
+    the file's OWN per-frame receipts, never typed.
+
+    `meta["boresight_offset_deg"]` is 0.0 on this file and would be a trap: it is the
+    parsed `--boresight-offset-deg`, which the sweep overrides. What was actually flown
+    is `meta["los_az_deg_first"/"los_az_deg_last"]` (or the per-frame `meta["frames"]`
+    entries), recorded by the generator for exactly this reason
+    (notes/LOSWEEP_REPORT_2026-09-25.md section 4, item 4).
+    """
+    try:
+        it = SionnaIterator(str(path))
+        meta = getattr(it, "meta", None) or {}
+        ghz = None
+        plan = it.freq_plan
+        if plan and plan.get("carrier_hz") is not None:
+            ghz = float(plan["carrier_hz"]) / 1e9
+        band = f"Ka-band, {ghz:g} GHz" if ghz else "Ka-band"
+        first, last = meta.get("los_az_deg_first"), meta.get("los_az_deg_last")
+        if first is None or last is None:
+            frames = meta.get("frames") or []
+            az = [f.get("los_az_deg") for f in frames if f.get("los_az_deg") is not None]
+            if az:
+                first, last = az[0], az[-1]
+        if first is not None and last is not None:
+            # The SPAN, not both endpoints: this label has to survive the
+            # run-identity line's 100-character budget whole (webapp/app.py
+            # `_run_identity_line`), and at "-28.4 to +28.9 deg" it did not -- the
+            # ladder fell through to a bare "munich" on the one screen whose subject
+            # is the sweep. The carrier is not dropped with it: the environment run
+            # note states it ("frames carry a 30 GHz carrier"), and the endpoints are
+            # in the file's own meta.
+            return f"munich (Ka, LoS sweep {abs(float(last) - float(first)):.0f} deg)"
+        return "munich (Ka, LoS sweep)"
+    except Exception:
+        return "munich (Ka, LoS sweep)"
+
+
 def _discover_sionna_scenario_specs(
     sims_dir: Path,
 ) -> Tuple[List[str], Dict[str, Tuple[str, Optional[str]]]]:
@@ -103,6 +143,14 @@ def _discover_sionna_scenario_specs(
         label = _munich_ka_label(ka_path)
         labels.append(label)
         index[label] = ("munich", None)
+    losweep_path = sims_dir / "munich_ka_losweep.pkl"
+    if losweep_path.is_file():
+        # The swept-line-of-sight Ka trace (Thrust 3). Listed right after the static Ka
+        # file and BEFORE the legacy one, because it is a current-band scenario a preset
+        # actually selects; the legacy 3.5 GHz trace is a comparison artifact.
+        label = _munich_losweep_label(losweep_path)
+        labels.append(label)
+        index[label] = ("munich", MUNICH_LOSWEEP_LINK)
     if legacy_path.is_file():
         labels.append(MUNICH_LEGACY_LABEL)
         index[MUNICH_LEGACY_LABEL] = ("munich", MUNICH_LEGACY_LINK)
@@ -113,6 +161,24 @@ def _discover_sionna_scenario_specs(
             labels.append(name)
             index[name] = (name, None)
     return labels, index
+
+
+def sionna_label_for_link(link: str,
+                          sims_dir: Path = SIONNA_SIMS_DIR):
+    """The dropdown LABEL that resolves to `("munich", link)`, or None when this
+    machine has no file for it.
+
+    A preset cannot hardcode one of these labels: they are built from the pkl's own
+    metadata (carrier, sweep endpoints), so the string changes when the file does. It
+    also cannot hardcode the raw link token -- the param is a `choice` and the value
+    has to be one the dropdown offers. So a preset asks for the FILE, by its stable
+    link token, and gets back whatever label this machine's scan produced for it.
+    """
+    _labels, index = _discover_sionna_scenario_specs(sims_dir)
+    for label, (name, lnk) in index.items():
+        if lnk == link:
+            return label
+    return None
 
 
 def discover_sionna_scenarios(sims_dir: Path = SIONNA_SIMS_DIR) -> List[str]:

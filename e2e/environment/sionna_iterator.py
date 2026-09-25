@@ -99,6 +99,13 @@ SIONNA_MUNICH_LEGACY_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich.pkl')
 # 2026-09-23) written by `e2e.environment.sionna_simple_channel`. This is what plain
 # 'munich' now resolves to, when present.
 SIONNA_MUNICH_KA_PATH = os.path.join(_this_dir, 'sionna_sims', 'munich_ka.pkl')
+# Ka re-trace in which the LINE OF SIGHT SWEEPS: the array pans frame by frame so the
+# arrival azimuth walks -28.40 -> +28.89 deg over 30 frames while the path set, and so
+# the frame's rank, stay put (owner directive 2026-09-24; generated and measured in
+# notes/LOSWEEP_REPORT_2026-09-25.md). Selected explicitly through MUNICH_LOSWEEP_LINK;
+# plain 'munich' NEVER resolves to it, so every other thrust keeps the static file.
+SIONNA_MUNICH_LOSWEEP_PATH = os.path.join(_this_dir, 'sionna_sims',
+                                          'munich_ka_losweep.pkl')
 
 
 def _resolve_munich_default_path(ka_path=None, legacy_path=None):
@@ -123,6 +130,9 @@ SIONNA_MUNICH_PATH = _resolve_munich_default_path()
 # `SionnaMunichIterator(link=...)`/`SionnaEnvironmentBlock('munich', link=...)` call site
 # -- lets a caller pick the legacy artifact without a second scenario name.
 MUNICH_LEGACY_LINK = 'munich_legacy_3p5ghz'
+# ...and the same mechanism for the swept file. A FILE selector, exactly like
+# MUNICH_LEGACY_LINK: `SionnaEnvironmentBlock('munich', link=MUNICH_LOSWEEP_LINK)`.
+MUNICH_LOSWEEP_LINK = 'munich_ka_losweep'
 
 
 # Factories forward an optional `link` selector to SionnaIterator so a multi-link pkl can
@@ -141,5 +151,10 @@ def SionnaMunichIterator(link=None):
     # ka-vs-legacy existence check (see that attribute's docstring above).
     if link == MUNICH_LEGACY_LINK:
         return SionnaIterator(SIONNA_MUNICH_LEGACY_PATH, link=None)
+    if link == MUNICH_LOSWEEP_LINK:
+        # Same FILE-selector branch as the legacy one above, for the swept-line-of-sight
+        # Ka trace (Thrust 3). `link=None` inside it: that file is written by the same
+        # generator as munich_ka.pkl and carries one link, whose name is not this token.
+        return SionnaIterator(SIONNA_MUNICH_LOSWEEP_PATH, link=None)
     return SionnaIterator(SIONNA_MUNICH_PATH, link=link)
 

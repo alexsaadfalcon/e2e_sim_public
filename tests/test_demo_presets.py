@@ -545,12 +545,18 @@ def test_thrust3_say_list_warns_the_numbers_drift_run_to_run():
     value) named two different values for arm A's own settled level on the same
     card -- unified to the screen's actual settled range, stated once."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert "about 0.6" in p.blurb and "about 0.30" in p.blurb
-    assert "settles about 0.16-0.17 from frame 5" in p.blurb
-    assert "settling near 0.16" not in p.blurb and "about 0.2" not in p.blurb
-    assert "0.57" not in p.blurb and "0.595" not in p.blurb and "0.19" not in p.blurb
-    assert any("nondeterministic" in s.lower() and "third decimal" in s.lower()
-              for s in p.say)
+    # RE-MEASURED ON THE SWEPT SCENE, 2026-09-25 (the preset moved to
+    # munich_ka_losweep.pkl): 8 frames, 3 repeats per arm, through the webapp runner --
+    # A settles 0.533-0.557 and B 0.244-0.270 from frame 3, worst run-to-run spread
+    # 0.0145. The static-file trajectory this test used to pin (0.6 -> 0.31 -> 0.16 /
+    # 0.30 -> 0.09) is not what this screen draws any more.
+    assert "about 0.55" in p.blurb and "about 0.26" in p.blurb
+    assert "from frame 3" in p.blurb
+    for stale in ("0.16-0.17", "settling near 0.16", "about 0.2 ", "0.57", "0.595"):
+        assert stale not in p.blurb, stale
+    # The spread is quoted where the numbers are, so "about" is a stated tolerance
+    # rather than a hedge.
+    assert any("spread 0.015" in s for s in p.say)
 
 
 def test_thrust3_gate_measured_as_a_no_op_at_the_shipped_k():
@@ -577,21 +583,31 @@ def test_thrust3_settled_floor_vs_passes_statistic_is_on_the_card():
     FLOOR at two fixed pass counts (5 vs 10), not a race with an undefined winner."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
     assert any("frame 3" in s for s in [p.blurb] + p.say)
-    assert any("frame 2" in s for s in [p.blurb] + p.say)
     assert any("passes-per-frame" in s.lower() or "passes/frame" in s.lower()
               for s in p.say)
-    assert any("settled floor" in s.lower() and "5 vs 10 passes" in s.lower()
-              for s in p.say)
+    # On the swept scene neither arm settles at all, so the statistic is no longer "the
+    # settled floor": it is the LEVEL each arm holds while re-acquiring, at two FIXED
+    # pass counts, and the card has to say the count is fixed -- the gate does not fire
+    # on this file either (gap ~0.09 against a 0.01 threshold, measured 2026-09-25).
+    assert any("5 vs 10 fixed passes" in s.lower() for s in p.say + [p.blurb])
+    assert any("re-acquir" in s.lower() for s in p.say + [p.blurb])
     assert not any("frames-to-acquire" in s.lower() for s in p.say + p.do_not_say + [p.blurb])
     assert not any("one frame sooner" in s.lower() for s in p.say + p.do_not_say + [p.blurb])
 
 
-def test_thrust3_explains_the_warm_start_reference_line():
-    """Wave 10 (2026-09-24, item 4.3, hostile round 9): prepared answer for "why does
-    one cold run hit the warm floor and the other never does?" -- both arms are cold
-    starts; the dashed line is a WARM-started level."""
+def test_thrust3_explains_the_reference_line_and_never_calls_it_warm_start():
+    """The dashed line is a level from ANOTHER SCENE, and the card says which.
+
+    Wave 10 asked this card to explain the line as a WARM-started level. Two things
+    retired that wording on 2026-09-25: the level itself (0.08) was re-measured from two
+    arms that are COLD (`pipeline_runner._SUBSPACE_ERR_SETTLED_LEVEL`'s own provenance),
+    and this preset moved to the swept scene, where neither arm comes near it. What a
+    reader of THIS screen needs is the scope -- static scene -- not a start condition
+    that was never what the number measured."""
     p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
-    assert any("cold start" in s.lower() and "warm" in s.lower() for s in p.say)
+    assert any("static scene" in s.lower() and "0.08" in s for s in p.say)
+    assert not any("warm-started" in s.lower() or "warm start" in s.lower()
+                   for s in p.say), "the level was measured on cold runs"
 
 
 def test_thrust4_runs_the_live_tessera_surrogate_ab_on_height():
@@ -1107,3 +1123,40 @@ def test_run_pipeline_builds_only_enabled_classic_products(monkeypatch, make_env
     assert out.get("range_az") and out.get("subspace_err")
     figs = figures_from_outputs(out)
     assert "fft" not in figs and "range_az" in figs
+
+
+def test_thrust3_runs_the_swept_scene_and_nothing_else_does():
+    """Thrust 3 is the ONLY preset on `munich_ka_losweep.pkl` -- the trace whose array
+    pans frame by frame, so the line of sight sweeps while the ray-traced path set (and
+    the rank) stay put. Every other thrust stays on the static `munich_ka.pkl`, because
+    a sweeping scene would change what THEIR screens are about.
+
+    Skipped on a machine without the file: it is 1.2 GB and not tracked. The demo
+    machine is covered by `webapp/preflight.py`'s own named check, which FAILS rather
+    than letting this preset fall back to the static scene silently."""
+    from e2e.environment.sionna_iterator import MUNICH_LOSWEEP_LINK
+    from webapp.corpus_catalog import resolve_sionna_scenario, sionna_label_for_link
+
+    if sionna_label_for_link(MUNICH_LOSWEEP_LINK) is None:
+        pytest.skip("munich_ka_losweep.pkl is not on this machine")
+    for p in PRESETS:
+        name = apply_preset(p)["environment"]["params"]["scenario_name"]
+        _resolved, link = resolve_sionna_scenario(name)
+        if p.id == "thrust3_cold_start_acquisition":
+            assert link == MUNICH_LOSWEEP_LINK, (p.id, name)
+        else:
+            assert link != MUNICH_LOSWEEP_LINK, (p.id, name)
+
+
+def test_thrust3_card_says_the_scene_sweeps_and_never_says_rank_one():
+    """The measured facts of that file, and the one it is easy to get wrong: its
+    effective rank at the 1 % threshold is 14-41 (static file 17-40), NOT 1-2. F94's
+    "Ka frames are rank-1 BY GEOMETRY" holds in ENERGY and not in that count, and the
+    brief that ordered this file expected rank 1-2. Nothing on the card may say it."""
+    p = PRESETS_BY_ID["thrust3_cold_start_acquisition"]
+    text = " ".join([p.blurb, p.screen_note, p.label] + p.say + p.do_not_say)
+    assert "sweep" in text.lower() and "rank" in text.lower()
+    for stale in ("rank-1", "rank 1", "rank one", "cold-start acquisition"):
+        assert stale not in text.lower(), stale
+    # ...and the label the room reads is not the retired story either.
+    assert "cold start" not in p.label.lower()

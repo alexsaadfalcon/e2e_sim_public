@@ -551,6 +551,17 @@ def _chip_value_forms(text: str) -> List[str]:
     return [text, keep_digit_parens, tightened, from_number, no_parens, bare]
 
 
+#: Display names for A/B knobs that have no registry ParamSpec -- `_INTERNAL_PARAMS`
+#: in webapp/demo_presets.py, knobs deliberately kept off the parameter editor so no
+#: operator types a refinement-pass count mid-demo. The chip's label lookup falls back
+#: to the raw key for these, and Thrust 3's chip read "A -- gap_response fixed effort
+#: (5 passes/frame)" on the 2026-09-25 render: a Python identifier, in 20 px, as the
+#: one line identifying the arm.
+_INTERNAL_PARAM_CHIP_LABELS = {
+    ("subspace", "gap_response"): "Refinement effort",
+}
+
+
 def _chip_label_without_a_duplicated_unit(label: str, *values: str) -> str:
     """`label` with its trailing unit parenthetical dropped when the arm VALUES already
     carry that unit.
@@ -587,7 +598,8 @@ def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     of that arm's one-line caption (`_ab_arm_chip_overflow` -> `_arm_caption`), and in
     full in Details."""
     bid, key, _value_b = preset.ab
-    label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
+    label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key),
+                 _INTERNAL_PARAM_CHIP_LABELS.get((bid, key), key))
     label = _chip_label_without_a_duplicated_unit(label, preset.ab_label_a or "",
                                                   preset.ab_label_b or "")
     forms_a = _chip_value_forms(preset.ab_label_a or "?")

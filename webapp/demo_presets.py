@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from e2e.environment.sionna_iterator import MUNICH_LOSWEEP_LINK
+from webapp.corpus_catalog import sionna_label_for_link
 from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
 
 #: wave 10 (2026-09-24, item 1.3): the Ka scale factor Tessera geometry is presented
@@ -81,6 +83,19 @@ ML_THRESHOLD = 0.220
 DEMO_CFR_CORPUS = ("e2e/ml/datasets/b1_demo_cfr_ka/benchmark_v1_ka_D2/"
                    "benchmark_v1_ka_D2/manifest.json")
 
+
+#: Thrust 3's scene: the Ka trace whose LINE OF SIGHT SWEEPS (the array pans frame by
+#: frame, so the arrival azimuth walks -28.4 -> +28.9 deg over 30 frames while the path
+#: set -- and so the rank -- stays put). Owner directive 2026-09-24, generated and
+#: measured in notes/LOSWEEP_REPORT_2026-09-25.md. Every other thrust stays on the
+#: static `munich_ka.pkl`.
+#:
+#: Resolved through the catalog rather than typed: the dropdown label is built from the
+#: file's own metadata, so it changes when the file does. `None` on a machine without
+#: the file, and then this preset keeps the default scenario -- which is a REAL
+#: difference in what the screen shows, so `webapp/preflight.py` checks for the file by
+#: name rather than letting a fallback pass silently.
+T3_SWEEP_SCENARIO = sionna_label_for_link(MUNICH_LOSWEEP_LINK)
 
 #: The token a `say` bullet writes instead of typing the corpus's unambiguous velocity,
 #: filled in by `resolved_say` from the manifest itself. Same rule as the screen note's
@@ -823,10 +838,50 @@ PRESETS: List[DemoPreset] = [
         ],
     ),
     DemoPreset(
+        # THE ID IS UNCHANGED ON PURPOSE. It is a token, not text: the rehearsal names
+        # its PNGs by it, the runbook and the tests address the preset by it, and it
+        # appears nowhere on screen. The WORDING, which does appear, no longer says
+        # "cold start" -- see the label and the blurb below, and the measurement that
+        # retired it.
         id="thrust3_cold_start_acquisition",
-        label="Thrust 3 - adaptive feature extraction: cold-start acquisition",
+        label="Thrust 3 - adaptive feature extraction: a direction that moves",
         thrust=3,
         n_steps=8,
+        # THE SCENE CHANGED ON 2026-09-25 AND SO DID THE STORY. This preset now runs
+        # `munich_ka_losweep.pkl` (see `T3_SWEEP_SCENARIO`), in which the array pans
+        # frame by frame so the LINE OF SIGHT SWEEPS -28.40 -> +28.89 deg across the
+        # file's 30 frames (1.975 deg/frame, span 57.29) while the ray-traced path set
+        # -- and so the frame's RANK -- stays put: effective rank at the 1 % threshold
+        # 14-41 (mean 26.8) against the static file's 17-40 (mean 28.0), sv2/sv1
+        # 0.188-0.269 against 0.186-0.265 (notes/LOSWEEP_REPORT_2026-09-25.md section
+        # 3.1). What DOES move is the direction: the principal angle between consecutive
+        # frames' rank-1 subspaces is 48.79-55.51 deg (mean 53.30) against 11.87-15.17
+        # (mean 13.66) on the static file, about 4x per frame.
+        #
+        # NOT RANK-1. The brief that ordered the file expected "rank@1 % ~1-2"; measured,
+        # it is 14-41 here and 17-40 on the shipped static file. F94's "rank@1 % 10-14"
+        # was measured on the earlier 1000-point Ka file and its "Ka frames are rank-1 BY
+        # GEOMETRY" claim holds in ENERGY (E1 0.85-0.93) and not in that count. Nothing
+        # on this card says rank-1.
+        #
+        # RE-MEASURED ON THIS FILE, through this webapp's own runner, 8 frames, THREE
+        # REPEATS per arm (2026-09-25, GPU 1):
+        #   A (5 fixed passes):  0.611 0.546 0.539 0.543 0.546 0.553 0.551 0.553
+        #   B (10 passes):       0.291 0.258 0.252 0.259 0.264 0.267 0.259 0.262
+        #   settled, frames 3-8: A 0.533-0.557 (mean 0.548), B 0.244-0.270 (mean 0.260)
+        #   worst run-to-run spread: 0.0145 (A), 0.0142 (B)
+        # Neither arm settles to anything like the static file's floor (the same two arms
+        # there: A 0.163-0.170, B 0.0785-0.0806) -- the tracker is re-acquiring every
+        # frame, which is the whole point of the scene. Arm B's 0.26 reproduces the
+        # block-level cold-start figure in the LoS-sweep report (0.2580, 3 repeats), so
+        # the screen and the report are measuring the same thing.
+        #
+        # THE GATE STILL DOES NOT FIRE, and the card says so rather than implying an
+        # adaptive story the run does not have: `sv_gap_norm` is 0.0913-0.0992 on EVERY
+        # frame of both arms -- about 9x the gate's 0.01 threshold -- and
+        # `n_refine_used` is flat 5 (A) and flat 10 (B). The A/B is therefore 5 vs 10
+        # FIXED passes per frame on a moving direction, measured at 2.1x.
+        #
         # Owner decision (option A, 2026-09-23), round 2: an identical-arms screen is a
         # null demo (round-6 review). Arm A is now the FIXED-effort arm at the largest
         # n_refine of {1, 2, 3, 5} that still took >=3 frames to reach within 1.5x of
@@ -850,6 +905,10 @@ PRESETS: List[DemoPreset] = [
         # changed the spectrum; it does not hold at k=2 on the current file (flagged in
         # notes/STATE.md for re-verification/retraction).
         overrides=_merge(
+            # THE SWEEPING SCENE (see `T3_SWEEP_SCENARIO`). Only this thrust moves off
+            # the static file, and only when the file is on this machine.
+            ({"environment": {"params": {"scenario_name": T3_SWEEP_SCENARIO}}}
+             if T3_SWEEP_SCENARIO else {}),
             {"afe": {"enabled": True}},
             {"subspace": {"params": {"k": 2, "warm_start": "cold",
                                      "gap_response": "none"}}},
@@ -866,14 +925,14 @@ PRESETS: List[DemoPreset] = [
         # closing "about 0.2" named two different values for arm A's settled
         # level on the same card; the screen settles at 0.16-0.17 from frame 5 --
         # one number now, stated once.
-        blurb=("Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: "
-               "FIXED 5 passes/frame, never reaching B's ~0.08 "
-               "floor in 8 frames -- about 2x higher. Arm B: the shipped "
-               "adaptive gate, 10 passes/frame baseline (right axis 0-12; a "
-               "small-gap file would climb to 60, not this one). Over 8 frames: A "
-               "about 0.6 -> 0.31 -> settles about 0.16-0.17 from frame 5; B about "
-               "0.30 -> 0.09 by frame 2, settled from frame 3. It never escalates "
-               "here: k=2's gap stays well clear of 0.01."),
+        blurb=("The LINE OF SIGHT SWEEPS here: the array pans each frame, so the "
+               "arrival azimuth walks 57 deg over the file's 30 frames while the "
+               "ray-traced paths -- and the rank -- stay put. The direction the tracker "
+               "chases rotates about 53 deg per frame, four times the static scene, and "
+               "neither arm converges: it re-acquires every frame. Both arms cold, k=2, "
+               "8 frames (azimuth -28 -> -15 deg). A: 5 passes/frame, about 0.55 from "
+               "frame 3; B: 10, about 0.26 -- 2.1x apart, both far above the 0.08 this "
+               "tracker reaches when the direction holds still."),
         # gap_response has no registry ParamSpec (no UI slider -- see
         # demo_presets._INTERNAL_PARAMS); it is the `ab` knob below, not listed here as
         # a manually-turned live_knob. warm_start does have a slider and stays
@@ -883,46 +942,52 @@ PRESETS: List[DemoPreset] = [
         ab=("subspace", "gap_response", "refine"),
         ab_label_a="fixed effort (5 passes/frame)",
         ab_label_b="adaptive gate (shipped default, 10 passes/frame baseline)",
-        screen_note=("Frames are 1 m of platform travel each (no time base); the "
-                     "right-axis trace is AdaOjaBlock's own refinement-passes-per-frame "
-                     "(n_refine_used) -- flat at 5 (A) vs flat at 10 (B), because this "
-                     "run's spectral gap (about 0.09) never drops below the gate's 0.01 "
-                     "threshold, so B never escalates past its baseline. "
-                     + _ARRAY_DISCLOSURE),
+        screen_note=("Swept scene: the array pans each frame, so the line of sight "
+                     "walks about 2 deg/frame (57 deg over the file's 30 frames) while "
+                     "the ray-traced paths stay put -- the direction moves, the rank "
+                     "does not. Frames are 1 m of platform travel each (no time base). "
+                     "The right-axis trace is AdaOjaBlock's own "
+                     "refinement-passes-per-frame (n_refine_used) -- flat at 5 (A) vs "
+                     "flat at 10 (B), because this run's spectral gap (about 0.09) "
+                     "never drops below the gate's 0.01 threshold, so B never escalates "
+                     "past its baseline. The dashed reference line is this tracker's "
+                     "settled level on the STATIC scene, not a level either arm reaches "
+                     "here. " + _ARRAY_DISCLOSURE),
         say=[
-            "Cold start, k=2 (largest spike-free rank, F94), measured over 8 frames. "
-            "Quote 'about' -- nondeterministic at ~5e-3, never the third decimal.",
+            "The scene sweeps: the line of sight moves about 2 deg/frame, the tracked "
+            "direction about 53 deg/frame. The rank does NOT change; the direction "
+            "does.",
             # wave 10 (2026-09-24, item 1.4, hostile round 9): RETRACTED
             # "frames-to-acquire ... one frame sooner" -- arm A never reaches B's
             # floor in 8 frames (the blurb's own honest claim), so
             # frames-to-acquire has no value for A and the old bullet contradicted
             # the blurb on the same card. The A/B statistic is the settled FLOOR at
             # two fixed pass counts, not a race.
-            "The A/B statistic is the settled floor at 5 vs 10 passes/frame -- A "
-            "never reaches B's: 0.164 vs 0.079, about 2x.",
-            "This is 2:1 compression (m=512 of 1024). At 16:1/64:1 neither arm "
-            "converges in this many frames -- why m is not a live knob here.",
-            "There is deliberately no image here: the picture doesn't change during "
-            "acquisition -- the error curve shows what the tracker hasn't learned "
-            "yet. Without the AFE it looks identical -- do not toggle it.",
-            "Prepared answer -- 'does your gap diagnostic work at Ka?': at k=2 the "
-            "gap sits far above 0.01, so it never escalates -- the 2x on screen IS "
-            "baseline. At k=4 (not shipped) the gap collapses, the gate spends 6x "
-            "more, but the cluster still spikes -- 'mitigated'.",
-            "The run is not faster than a full SVD: scoring runs the full SVD every "
-            "frame. The 45x microbenchmark is real, the run time is not.",
-            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; 9.99 cm excess-path bins (F97d), 10:1 to "
-            "1.00 m gates.",
+            "Neither arm converges: A about 0.55, B about 0.26 from frame 3 (3 "
+            "repeats, spread 0.015), against 0.16 and 0.08 on the static scene -- "
+            "re-acquiring every frame.",
+            "The A/B is 5 vs 10 FIXED passes/frame on a moving direction, 2.1x: the "
+            "gap diagnostic never escalates here, the gap sits about 0.09 against its "
+            "0.01 threshold -- say so before someone asks what 'adaptive' did.",
+            "2:1 compression (m=512 of 1024); at 16:1/64:1 neither arm converges in "
+            "this many frames, which is why m is not a live knob.",
+            "No image here on purpose: the error curve is what shows the tracker "
+            "losing and re-finding the direction. Without the AFE it looks identical "
+            "-- do not toggle it.",
+            "At k=4 (not shipped) the gap collapses, the gate spends 6x more, and the "
+            "cluster still spikes -- 'mitigated', not fixed.",
+            "Not faster than a full SVD: scoring runs one every frame. The 45x "
+            "microbenchmark is real, the run time is not.",
+            "Spacing: lambda/2 at 30 GHz (0.525 at 31.5) -- grating lobes beyond "
+            "|sin theta| ~0.90.",
             # wave 9 (2026-09-24, item 3.12): see the same note on Thrust 2's card.
-            "All 1024 elements share one front-end config (Thrust 1); a spread would "
-            "show up in the tracker's acquisition curve here, not Thrust 1's "
-            "picture.",
+            "All 1024 elements share one front-end config; a spread would show up in "
+            "this curve, not in Thrust 1's picture.",
             # wave 10 (2026-09-24, item 4.3, hostile round 9): prepared answer for
             # "why does one cold run hit the warm floor and the other never does?"
-            "Prepared answer -- both arms are cold starts; the dashed line is a "
-            "WARM-started settled level. Arm B (10 passes) reaches it from cold; "
-            "arm A (5 passes) does not.",
+            "Prepared answer -- the dashed line is this tracker's settled level on "
+            "the STATIC scene (0.08), from two other arms. Neither arm reaches it "
+            "here; that is the finding.",
         ],
         do_not_say=[
             "Anything with an interferer: three confounders, and the sign of the "

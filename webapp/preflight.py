@@ -107,7 +107,13 @@ def check_assets(repo_root: Optional[Path] = None, presets=None,
     # notes/ESTABLISHED_FACTS.md); munich.pkl is the legacy 3.5 GHz trace, still shipped
     # and selectable via the 'munich_legacy_3p5ghz' link -- both must be present or the
     # GUI offers a Scenario entry it cannot load.
-    for name, fname in (("munich_ka_pkl", "munich_ka.pkl"), ("munich_legacy_pkl", "munich.pkl")):
+    # ...and munich_ka_losweep.pkl is what THRUST 3 loads (the swept line of sight,
+    # 2026-09-25). Without it that preset silently falls back to the static scene and
+    # draws a screen whose card describes a sweep that did not happen -- so it is a
+    # FAIL here, by name, not a quiet default.
+    for name, fname in (("munich_ka_pkl", "munich_ka.pkl"),
+                        ("munich_ka_losweep_pkl", "munich_ka_losweep.pkl"),
+                        ("munich_legacy_pkl", "munich.pkl")):
         path = sims_dir / fname
         if path.is_file():
             results.append(CheckResult(f"assets.{name}", "PASS", f"{path} present"))

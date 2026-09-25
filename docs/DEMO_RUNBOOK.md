@@ -59,7 +59,7 @@ Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
 1. Thrust 1 - RF circuit knobs vs the image's noise floor
 2. Thrust 2 - feature-reduction (AFE) error vs end result
-3. Thrust 3 - adaptive feature extraction: cold-start acquisition
+3. Thrust 3 - adaptive feature extraction: a direction that moves
 4. Thrust 4 - a worse interconnect, on the range profile
 5. Thrust 5 - live chain from the stored channel: classical CFAR
 6. Thrust 5 - live chain, ported network (the arm that LOSES, shown on purpose)
@@ -267,14 +267,14 @@ mantissa 6 -> 1 bit.
 
 ---
 
-## 3. Thrust 3 - adaptive feature extraction: cold-start acquisition
+## 3. Thrust 3 - adaptive feature extraction: a direction that moves
 
 ### Click sequence
-1. Open **Demo preset:**, select "Thrust 3 - adaptive feature extraction:
-   cold-start acquisition", click **Load preset**. The param editor opens on
+1. Open **Demo preset:**, select "Thrust 3 - adaptive feature extraction: a
+   direction that moves", click **Load preset**. The param editor opens on
    **AdaOja Subspace** (first knob: **Tracker initialisation**). The knob for
    this screen carries a green "this screen's knob" badge. The "Loaded: Thrust
-   3 - adaptive feature extraction: cold-start acquisition (Thrust 3, 8
+   3 - adaptive feature extraction: a direction that moves (Thrust 3, 8
    frames)" line is inside **▸ Presenter notes (Thrust 3)**, which is collapsed
    by default -- open it only if you want the card.
 2. Click **Run pipeline**. Both arms run in one click (A = fixed effort (5
@@ -282,9 +282,9 @@ mantissa 6 -> 1 bit.
    baseline)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-- **While it runs, say:** Cold start, k=2 (largest spike-free rank, F94),
-  measured over 8 frames. Quote 'about' -- nondeterministic at ~5e-3, never the
-  third decimal.
+- **While it runs, say:** The scene sweeps: the line of sight moves about 2
+  deg/frame, the tracked direction about 53 deg/frame. The rank does NOT
+  change; the direction does.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -292,48 +292,51 @@ mantissa 6 -> 1 bit.
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Subspace error per frame"**.
-- Arm chips on screen: "A — gap_response fixed effort (5 passes/frame)" (LEFT
-  column, colour dot) / "B — gap_response adaptive gate (10 passes/frame
-  baseline)" (RIGHT column) -- each product renders once per column, on the
-  same row (no heat map here, so no shared colour scale). The full before/after
-  sentence, plus provenance, band and clip, is one click away behind that arm's
-  own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — Refinement effort 5 passes/frame" (LEFT column,
+  colour dot) / "B — Refinement effort 10 passes/frame baseline" (RIGHT column)
+  -- each product renders once per column, on the same row (no heat map here,
+  so no shared colour scale). The full before/after sentence, plus provenance,
+  band and clip, is one click away behind that arm's own **▸ Details
+  (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
   default 'warm'): manual: cold -> warm (perturbed truth; not part of this A/B)
 
-Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: FIXED 5
-passes/frame, never reaching B's ~0.08 floor in 8 frames -- about 2x higher.
-Arm B: the shipped adaptive gate, 10 passes/frame baseline (right axis 0-12; a
-small-gap file would climb to 60, not this one). Over 8 frames: A about 0.6 ->
-0.31 -> settles about 0.16-0.17 from frame 5; B about 0.30 -> 0.09 by frame 2,
-settled from frame 3. It never escalates here: k=2's gap stays well clear of
-0.01.
+The LINE OF SIGHT SWEEPS here: the array pans each frame, so the arrival
+azimuth walks 57 deg over the file's 30 frames while the ray-traced paths --
+and the rank -- stay put. The direction the tracker chases rotates about 53 deg
+per frame, four times the static scene, and neither arm converges: it
+re-acquires every frame. Both arms cold, k=2, 8 frames (azimuth -28 -> -15
+deg). A: 5 passes/frame, about 0.55 from frame 3; B: 10, about 0.26 -- 2.1x
+apart, both far above the 0.08 this tracker reaches when the direction holds
+still.
 
 ### Say
-- Cold start, k=2 (largest spike-free rank, F94), measured over 8 frames. Quote
-  'about' -- nondeterministic at ~5e-3, never the third decimal.
-- The A/B statistic is the settled floor at 5 vs 10 passes/frame -- A never
-  reaches B's: 0.164 vs 0.079, about 2x.
-- This is 2:1 compression (m=512 of 1024). At 16:1/64:1 neither arm converges
-  in this many frames -- why m is not a live knob here.
-- There is deliberately no image here: the picture doesn't change during
-  acquisition -- the error curve shows what the tracker hasn't learned yet.
-  Without the AFE it looks identical -- do not toggle it.
-- Prepared answer -- 'does your gap diagnostic work at Ka?': at k=2 the gap
-  sits far above 0.01, so it never escalates -- the 2x on screen IS baseline.
-  At k=4 (not shipped) the gap collapses, the gate spends 6x more, but the
-  cluster still spikes -- 'mitigated'.
-- The run is not faster than a full SVD: scoring runs the full SVD every frame.
-  The 45x microbenchmark is real, the run time is not.
-- Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; 9.99 cm excess-path bins (F97d), 10:1 to 1.00 m gates.
-- All 1024 elements share one front-end config (Thrust 1); a spread would show
-  up in the tracker's acquisition curve here, not Thrust 1's picture.
-- Prepared answer -- both arms are cold starts; the dashed line is a
-  WARM-started settled level. Arm B (10 passes) reaches it from cold; arm A (5
-  passes) does not.
+- The scene sweeps: the line of sight moves about 2 deg/frame, the tracked
+  direction about 53 deg/frame. The rank does NOT change; the direction does.
+- Neither arm converges: A about 0.55, B about 0.26 from frame 3 (3 repeats,
+  spread 0.015), against 0.16 and 0.08 on the static scene -- re-acquiring
+  every frame.
+- The A/B is 5 vs 10 FIXED passes/frame on a moving direction, 2.1x: the gap
+  diagnostic never escalates here, the gap sits about 0.09 against its 0.01
+  threshold -- say so before someone asks what 'adaptive' did.
+- 2:1 compression (m=512 of 1024); at 16:1/64:1 neither arm converges in this
+  many frames, which is why m is not a live knob.
+- No image here on purpose: the error curve is what shows the tracker losing
+  and re-finding the direction. Without the AFE it looks identical -- do not
+  toggle it.
+- At k=4 (not shipped) the gap collapses, the gate spends 6x more, and the
+  cluster still spikes -- 'mitigated', not fixed.
+- Not faster than a full SVD: scoring runs one every frame. The 45x
+  microbenchmark is real, the run time is not.
+- Spacing: lambda/2 at 30 GHz (0.525 at 31.5) -- grating lobes beyond |sin
+  theta| ~0.90.
+- All 1024 elements share one front-end config; a spread would show up in this
+  curve, not in Thrust 1's picture.
+- Prepared answer -- the dashed line is this tracker's settled level on the
+  STATIC scene (0.08), from two other arms. Neither arm reaches it here; that
+  is the finding.
 
 ### Do NOT say
 - Anything with an interferer: three confounders, and the sign of the response

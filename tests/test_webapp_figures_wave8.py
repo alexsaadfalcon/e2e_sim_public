@@ -231,8 +231,11 @@ def test_the_settled_level_line_carries_no_label_on_the_plot():
         assert not on_plot, on_plot
         # ...and the fact itself is still on the default screen, twice.
         strip = " ".join(a.text or "" for a in fig.layout.annotations)
-        assert "warm-start reference" in strip
-        assert "warm-start settled level" in panel_caption(fig)
+        # "static scene", not "warm-start": the 0.08 was measured on two COLD arms of
+        # the STATIC file, and Thrust 3 now runs a swept one (2026-09-25).
+        assert "static-scene reference" in strip
+        assert "settled level, static scene" in panel_caption(fig)
+        assert "warm" not in strip.lower() and "warm" not in panel_caption(fig).lower()
         # The dashed line is still drawn.
         assert any(getattr(sh, "line", None) is not None
                    and getattr(sh.line, "dash", "") == "dash"

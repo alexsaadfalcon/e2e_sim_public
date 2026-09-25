@@ -2561,7 +2561,7 @@ def _keep_non_stat_annotations(fig) -> List[Dict[str, Any]]:
     annotation_text=...)` puts its label in that same list -- so setting the statistic
     after drawing a reference line silently deleted the line's label. That is exactly
     how the subspace panels came to carry an unlabelled grey dashed line at 0.06,
-    from a DIFFERENT (warm-start) run, sitting where arm B lands, with its
+    from a DIFFERENT run on the STATIC scene, sitting where arm B lands, with its
     "reference, not this run" caveat reachable only in Details (hostile round 11, H1).
     Callers that set a statistic on a figure with reference lines compose the two
     lists with this."""
@@ -2749,6 +2749,17 @@ _SUBSPACE_ERR_MIN_YMAX = 0.65
 #: one-chain receiver; it drew the line a third BELOW the curve the cards said settled on
 #: it. Re-measure this whenever the frames or the receiver change; it is a measurement,
 #: not a constant of nature.
+#:
+#: TWO SCOPES ON IT, both load-bearing and both easy to lose (2026-09-25):
+#:   * it was measured on the STATIC scene (`munich_ka.pkl`). Thrust 3 now runs the
+#:     swept-line-of-sight file, where the same two arms hold about 0.55 and 0.26 and
+#:     neither comes near this line -- the line is a reference from another scene there,
+#:     and every string below says "static scene" so a reader cannot take it for this
+#:     run's own floor.
+#:   * it is NOT a warm-start number. Both arms it was measured from (Thrust 2's A and
+#:     Thrust 3's B) run `warm_start="cold"`; the screen called it a "warm-start settled
+#:     level" until 2026-09-25, which was a claim about a start condition the
+#:     measurement never had.
 _SUBSPACE_ERR_SETTLED_LEVEL = 0.08
 #: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
 #: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
@@ -4051,7 +4062,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                  (max(errs) * 1.05 + 0.03) if errs else 0.0)
         fig.update_yaxes(range=[0.0, top])
         fig.update_xaxes(dtick=1)
-        # The settled warm-start level the cards quote, so "is 0.06 good?" has an
+        # The settled level the cards quote, so "is 0.26 good?" has an
         # on-screen answer instead of living only in the operator's script. Labelled
         # "reference" (4th hostile-expert read, 2026-09-23): on a run whose OWN curve
         # sits well above this line (e.g. a cold-start/rank-collapse run reaching
@@ -4092,8 +4103,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(annotations=_keep_non_stat_annotations(fig)
                           + _stat_annotations(
                               f"{errs[-1]:.2f} at frame {len(errs)}",
-                              f"dashed = warm-start reference "
-                              f"{_SUBSPACE_ERR_SETTLED_LEVEL:g} (separate run)"))
+                              f"dashed = static-scene reference "
+                              f"{_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
         # SHORT (measured on the rendered page, 2026-09-24): the caption renders on ONE
         # line with no wrap in a 746 px column at 16 px, which is ~86 characters -- the
         # spec's 110-character budget is the hard cap, not the fitting width, and a
@@ -4106,15 +4117,16 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # arm B settles -- as the one unexplained mark on the screen (H1).
         set_panel(fig, title="Subspace error per frame",
                   caption=["Frobenius, unnormalised",
-                           "dashed = warm-start settled level (reference run)"],
+                           "dashed = settled level, static scene (reference)"],
                   details=[
                       # Verbatim from the retired subtitle, lower case and all: the
                       # honesty pin in tests/test_webapp_layout_acceptance.py matches
                       # the clause as it was written, not a re-punctuated version.
                       "unnormalised distance; grows ~sqrt(k), not a fraction.",
-                      f"The dashed line is the warm-start settled level "
-                      f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference) -- a separate "
-                      "warm-start case, not this run's own level.",
+                      f"The dashed line is this tracker's settled level on the "
+                      f"STATIC scene ({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference), "
+                      "measured on two other arms of two other presets -- NOT this "
+                      "run's own level, and on a swept scene no arm reaches it.",
                   ], row=PANEL_ROW_MAP)
         fig.update_yaxes(automargin=True)
         # Compute spent per frame (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23):
@@ -4183,7 +4195,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             set_panel(fig, title=panel["title"],
                       caption=["solid = error (left axis)",
                                "dotted = passes/frame",
-                               "dashed = warm-start reference"],
+                               "dashed = static-scene reference"],
                       details=list(panel["details"]) + [
                           "The dotted red trace (right axis) is AdaOjaBlock's own "
                           "effective_n_refine() decision per frame -- the compute "
