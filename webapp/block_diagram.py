@@ -56,14 +56,36 @@ from webapp.pipeline_registry import (
 # of cap-height ink against acceptance check 17's 12 px. Long labels spend that margin
 # twice over -- once on the wider box and once on the smaller zoom -- so the detail goes
 # in the node's editor, where it can be read, not on the node.
+#
+# PHYSICAL ORDER, NOT COMPUTATION ORDER (seat's read of the 2026-09-24 renders, item 1a).
+# Until now this list was the order the stages RUN in, which puts the mixing block ahead
+# of the front end -- `e2e/chain/frontend.py` applies the circuit cascade to the sampled
+# BEAT record, which is exact below baseband clipping (F97b) and saves a 4.9 GB RF-rate
+# tensor per frame. As a picture of a receiver that is wrong twice over: it says the
+# signal is dechirped before it is amplified, and `e2e/circuit/rffe_model.py`'s cascade
+# IS LNA -> mixer -> baseband amp, so the "Mixing" node is the front end's own mixer and
+# cannot be drawn upstream of it. The diagram therefore draws the PHYSICAL signal order
+# and each node's editor says where the computation applies it (see the `rffe` and
+# `dechirp` blurbs in `webapp/pipeline_registry.py`).
+#
+# The interconnect sits between the element amplifier and the mixer: `InterconnectBlock`
+# applies S21 per RF grid point over the frame's RF band, so it is an RF-band two-port and
+# belongs on the RF side of the mixer. Whether it precedes or follows the element LNA is
+# NOT fixed by this model (it is linear, and the model injects noise once inside the front
+# end, so nothing here measures the difference; notes/ONE_CHAIN_CONTRACT_2026-09-24.md row
+# 4 writes the equivalence as `interconnect->LNA->mixer`, which is a commutation statement,
+# not an architecture claim). The owner's contract sentence -- "stored channel, waveform,
+# front end, interconnect, one mixing block with a mode, AFE/ADC, one cube" -- is the
+# tiebreak, and it is the Tessera architecture Thrust 4 tells on stage: LNA at the element,
+# TSVs carrying the amplified RF to the RFIC tier, the mixer there.
 _CHAIN: List[tuple] = [
     ("source", "Stored\nchannel", "source",
      ["environment", "rt_environment", "corpus_environment"]),
     ("waveform", "Waveform\nFMCW", "stage",
      ["waveform", "tx_pa", "modulate"]),
+    ("rffe", "RF front\nend", "stage", ["rffe"]),
     ("interconnect", "Inter-\nconnect", "stage", ["interconnect"]),
     ("dechirp", "Mixing\n(dechirp)", "stage", ["dechirp"]),
-    ("rffe", "RF front\nend", "stage", ["rffe"]),
     ("adc", "ADC\nchain", "stage",
      ["thermal_noise", "impairment", "if_hpf", "quantizer"]),
     ("cube", "One cube\n+ AFE", "stage",
@@ -110,29 +132,61 @@ _BLOCK_TO_NODE: Dict[str, str] = {bid: nid
                                   for nid, members in _NODE_MEMBERS.items()
                                   for bid in members}
 
-#: Chain geometry. Node boxes are 160x76 (see CYTO_STYLESHEET), so a 170 px pitch leaves
+#: Chain geometry. Node boxes are 200x130 (see CYTO_STYLESHEET), so a 215 px pitch leaves
 #: a 15 px gap and nothing overlaps. These numbers matter for ONE reason: the canvas fits
 #: the whole extent, so the extent's WIDTH sets the fit zoom, and the fit zoom times the
-#: font size is how much label ink the room actually sees. 7 chain columns at 215 give an
-#: extent of 1490 px against the ~1032 px panel -- a fit zoom near 0.67, which at the 30 px
-#: font in CYTO_STYLESHEET measured 13-17 px of cap-height ink on the rendered card
-#: (2026-09-24), against acceptance check 17's 12 px. Add a column, or lengthen a label so
-#: a box has to grow, and that margin has to be re-measured on a render, not re-argued.
+#: font size is how much label ink the room actually sees. 7 chain columns at 215 plus the
+#: product column give an extent of 1705 px against the ~1032 px panel -- a fit zoom near
+#: 0.58, which at the 34 px font in CYTO_STYLESHEET is the ink acceptance check 17 bounds
+#: at 12 px. Add a column, or lengthen a label so a box has to grow, and that margin has to
+#: be re-measured on a render, not re-argued.
 _CHAIN_PITCH_X = 215
 _CHAIN_Y = 40
-# 240 px pitch and five per row keeps the product block NARROWER than the 1180 px chain,
-# so the products never become the thing that sets the fit zoom (and therefore the label
-# ink -- see the font-size comment in CYTO_STYLESHEET).
-_PRODUCT_PITCH_X = 240
-_PRODUCT_ROW_Y = (260, 410)
-_PRODUCTS_PER_ROW = 5
+
+# PRODUCT PLACEMENT (seat's read of the 2026-09-24 renders, item 1b). The products used to
+# sit in two rows of five UNDER the whole chain, with every edge leaving the last node. Six
+# of the nine tap the cube, which is the RIGHTMOST chain node, so six edges swept back
+# across the row -- and the geometry is worse than untidy: the straight line from the cube
+# to a product under the first columns enters the chain's own y band immediately (measured
+# on the old positions: the `cube -> fft` segment passes through the ADC node's box at
+# x 975-1175), so the fan crossed the boxes it was meant to explain.
+#
+# Two placements, by which point each product taps:
+#   * the six CUBE products go in a right-hand COLUMN beside the cube, reached by
+#     orthogonal (taxi) edges: one vertical trunk in the 15 px gutter between the cube and
+#     the column, then a horizontal spur into each product's left edge. A fan of straight
+#     lines into a stacked column always clips the boxes it passes (the ray to the bottom
+#     product crosses the left half of the ones above it); the trunk-and-spur routing is
+#     the standard bus fan-out and crosses nothing.
+#   * the three products that tap EARLIER points (comms at the mixing block's input,
+#     detector and frame sink at the ADC) go in one row beneath their own tap, reached by
+#     downward taxi edges. They are the only long-ish product edges left and both are
+#     short: `adc -> sink` drops one column to the left, entirely below the chain row.
+# The chain's width is unchanged, so this costs ~0.09 of fit zoom (extent 1490 -> 1705 px);
+# the font goes 30 -> 34 px to pay it back. Both numbers are re-measured on the render, not
+# argued here -- see the CYTO_STYLESHEET font comment.
+_PRODUCT_COL_X = 6 * _CHAIN_PITCH_X + _CHAIN_PITCH_X   # one pitch right of the cube
+_PRODUCT_COL_PITCH_Y = 150
+_PRODUCT_ROW_Y = 300
+#: The six cube products, top to bottom in the right-hand column: the two images first
+#: (they are what Thrusts 1-4 show), then the profile, then range-Doppler, then the two
+#: subspace-chain products.
+_PRODUCT_COLUMN = ("range_az", "range_el", "fft", "range_profile", "radar_cube",
+                   "subspace_err")
+#: The products that tap an earlier point, and the chain column each sits under: directly
+#: below their own tap where that column is free. `sink` sits one column LEFT of the ADC
+#: rather than doubling up on it, because a vertical stack under one node puts the lower
+#: box across the upper one's edge; its taxi edge turns above the product row, so it
+#: crosses neither a chain node nor another product.
+_PRODUCT_ROW = {"comms": "interconnect", "detector": "adc", "sink": "dechirp"}
 
 _POSITIONS: Dict[str, tuple] = {}
 for _i, (_nid, _lbl, _cat, _members) in enumerate(_CHAIN):
     _POSITIONS[_nid] = (_i * _CHAIN_PITCH_X, _CHAIN_Y)
-for _i, _pid in enumerate(_PRODUCT_TAP):
-    _POSITIONS[_pid] = ((_i % _PRODUCTS_PER_ROW) * _PRODUCT_PITCH_X,
-                        _PRODUCT_ROW_Y[_i // _PRODUCTS_PER_ROW])
+for _i, _pid in enumerate(_PRODUCT_COLUMN):
+    _POSITIONS[_pid] = (_PRODUCT_COL_X, _CHAIN_Y + _i * _PRODUCT_COL_PITCH_Y)
+for _pid, _under in _PRODUCT_ROW.items():
+    _POSITIONS[_pid] = (_POSITIONS[_under][0], _PRODUCT_ROW_Y)
 
 # Entry point: the ONE source. There is no second "start here", because there is no
 # second path to start on.
@@ -232,13 +286,14 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             # `thrust1_circuit_knobs_card.png` -- half of acceptance check 17's 12 px,
             # and the same as the pre-redesign state the spec diagnosed. Two changes
             # together, because neither is enough alone: the graph lost six columns and
-            # four compound regions (see _CHAIN above), which lifts the width-bound fit
-            # zoom from ~0.6 to ~0.82 on the ~1032 px panel, and the font goes to 30 px.
-            # 30 x 0.82 x ~0.5 (cap-height / em) ~= 12.3 px of ink. BOTH factors are
-            # load-bearing: add a chain column, widen a label so the extent grows, or
-            # shrink the panel, and this product has to be re-measured on a render, not
-            # re-argued here.
-            "font-size": "30px",
+            # four compound regions (see _CHAIN above), and the font went up.
+            # 30 px at the resulting 0.67 zoom MEASURED 13-17 px of cap-height ink on the
+            # 2026-09-24 21:0x render (so ~0.65-0.85 ink per em, not the 0.5 an earlier
+            # version of this comment assumed). Moving the products to their own column
+            # (see _POSITIONS) widened the extent to 1705 px and dropped the zoom to
+            # ~0.58, so the font goes to 34 px to hold the same rendered ink -- measured
+            # again on the render, because that is the only place this product exists.
+            "font-size": "34px",
             "font-weight": 600,
             "text-wrap": "wrap",
             "text-max-width": "180px",
@@ -286,6 +341,19 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
                                             "target-arrow-color": "#d1d8e0",
                                             "line-style": "dashed",
                                             "width": 2}},
+    # PRODUCT EDGES ARE ORTHOGONAL (taxi), the chain's stay straight. A straight fan from
+    # one node into a stacked column clips the boxes it passes (see the _POSITIONS note);
+    # a trunk-and-spur bus does not. `taxi-turn: 50%` puts the trunk halfway between the
+    # two boxes -- in the 15 px gutter beside the cube for the column, and above the
+    # product row for the three that tap an earlier point.
+    {"selector": "edge.tap-right", "style": {"curve-style": "taxi",
+                                             "taxi-direction": "rightward",
+                                             "taxi-turn": "50%",
+                                             "taxi-turn-min-distance": "5px"}},
+    {"selector": "edge.tap-down", "style": {"curve-style": "taxi",
+                                            "taxi-direction": "downward",
+                                            "taxi-turn": "50%",
+                                            "taxi-turn-min-distance": "5px"}},
 ]
 
 
@@ -346,10 +414,11 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
     for pid in _PRODUCT_TAP:
         _add_node(pid, _PRODUCT_LABELS.get(pid, pid), "product")
 
-    def _add_edge(src: str, dst: str, active: bool) -> None:
+    def _add_edge(src: str, dst: str, active: bool, extra: str = "") -> None:
+        classes = ([] if active else ["inactive"]) + ([extra] if extra else [])
         elements.append({
             "data": {"source": src, "target": dst, "id": f"{src}->{dst}"},
-            "classes": "" if active else "inactive",
+            "classes": " ".join(classes),
         })
 
     # THE CHAIN'S EDGES ARE ALWAYS ACTIVE. The frame passes through every one of these
@@ -363,7 +432,8 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
     # A product's edge, on the other hand, carries real information: this product did not
     # run.
     for pid, tap in _PRODUCT_TAP.items():
-        _add_edge(tap, pid, _node_active(block_state, pid))
+        route = "tap-right" if pid in _PRODUCT_COLUMN else "tap-down"
+        _add_edge(tap, pid, _node_active(block_state, pid), route)
     return elements
 
 

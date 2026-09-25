@@ -152,23 +152,42 @@ BLOCKS: List[BlockSpec] = [
             # The two circuit knobs Thrust 1 turns (notes/DEMO_DEFENSE.md). Bounds are
             # the ranges the circuit model was parameterised over (rffe_model.py quotes
             # 0.5-10 mA from the design email); the defaults are the table's own values,
-            # so a fresh state is bit-identical to the pre-knob backend. They only move
-            # the image near the input-referred noise (signal_scaling ~1e-7); at the
-            # 1e-5 default they correctly do nothing, and the help text says so.
+            # so a fresh state is bit-identical to the pre-knob backend.
+            #
+            # NO DRIVE LEVEL IS QUOTED HERE, and that is the fix, not an omission (seat's
+            # read of the 2026-09-24 renders, item 1c). This help used to read "visible
+            # only when the signal sits near the front-end's own noise (signal scaling
+            # ~1e-7) ... at the 1e-5 default they correctly do nothing". Both halves died
+            # with the front end's move onto the beat record: on the munich_ka trace the
+            # measured pair at 1e-7 is 6.65 / 0.98 dB (both arms noise) and at 1e-5 it is
+            # 49.04 / 37.13 dB (an 11.9 dB A/B -- a working point, not a no-op), and the
+            # shipped Thrust 1 preset now drives at 3e-5. A static string in the registry
+            # cannot know the preset's drive, so it states the mechanism and leaves the
+            # number to the screen, which computes it from the run it just did.
             ParamSpec("lna_bias_ma", "LNA bias current (mA)", "number", 8.0,
                       step=0.5, min=0.5, max=10.0,
                       help="Per-element LNA bias. Raises LNA gain and lowers its noise "
-                           "contribution; visible only when the signal sits near the "
-                           "front-end's own noise (signal scaling ~1e-7). Below ~4 mA "
-                           "the modelled LNA is an attenuator."),
+                           "contribution, so it moves the image by however much of what "
+                           "you see is the front end's own noise -- which depends on the "
+                           "drive (Signal scaling) this run uses. The screen prints the "
+                           "measured pair for its own drive; this help quotes no level "
+                           "on purpose. Below ~4 mA the modelled LNA is an attenuator."),
             ParamSpec("if_bw_mhz", "IF bandwidth (MHz)", "number", 15.0,
                       step=1.0, min=1.0, max=50.0,
                       help="Receiver IF bandwidth the thermal-noise floor is referenced "
                            "to (noise power scales with it: 1 -> 50 MHz is 17 dB). Does "
                            "not band-limit the signal in this model."),
         ],
-        blurb=("Analog RF front-end circuit distortion (e2e/circuit/rffe_model.py). "
-               "Required to run with the current backend."),
+        blurb=("Analog RF front-end circuit distortion: the per-element LNA, mixer and "
+               "baseband amplifier cascade of e2e/circuit/rffe_model.py. DRAWN WHERE IT "
+               "SITS, APPLIED WHERE IT IS CHEAP: on the diagram the front end is at the "
+               "element, ahead of the interconnect and the mixing block, because that is "
+               "the receiver. The computation applies the same cascade to the SAMPLED "
+               "BEAT RECORD after the mixing block -- exact for a unit-modulus chirp "
+               "(the envelope is unchanged by dechirping, F97b/ESTABLISHED_FACTS) and it "
+               "avoids a 4.9 GB RF-rate tensor per frame. The licence stops where the "
+               "baseband stage clips I and Q separately; the shipped presets drive two "
+               "decades below that. Required to run with the current backend."),
     ),
     BlockSpec(
         id="interconnect",
@@ -264,7 +283,12 @@ BLOCKS: List[BlockSpec] = [
                            "several and expose NEXT/FEXT, at the cost of a bigger S-"
                            "matrix per frequency point."),
         ],
-        blurb="Interconnect filtering applied in the frequency domain.",
+        blurb=("Interconnect filtering: S21 applied per RF grid point, so this is an "
+               "RF-band two-port and the diagram draws it on the RF side of the mixing "
+               "block, between the element amplifier and the mixer (the Tessera "
+               "architecture: TSVs carrying the amplified RF to the RFIC tier). It is "
+               "linear, so the computation is free to apply it in the frequency domain "
+               "before the mixing block."),
     ),
     BlockSpec(
         id="afe",
@@ -552,9 +576,13 @@ BLOCKS: List[BlockSpec] = [
                       help="How multiple transmit antennas share the array; "
                            "overrides the preset's own default."),
         ],
-        blurb=("BRIDGE: turns the channel's frequency response into the "
-               "dechirped ADC samples a real radar receiver would digitize -- the "
-               "entry point of the ADC-cube chain below."),
+        blurb=("BRIDGE: turns the channel's frequency response into the dechirped ADC "
+               "samples a real radar receiver would digitize. Physically this IS the "
+               "front end's own mixer (rffe_model.py's cascade is LNA -> mixer -> "
+               "baseband amp), which is why the diagram draws it after the front-end "
+               "node; in the computation it runs BEFORE the front-end cascade, which is "
+               "then applied to the beat record it produces (see the RF Front-End "
+               "block's note)."),
     ),
     BlockSpec(
         id="thermal_noise",
@@ -634,8 +662,8 @@ BLOCKS: List[BlockSpec] = [
                            "0 = AUTOMATIC GAIN (full scale set from the frame's own "
                            "peak with 6 dB of headroom) -- what the corpus generator "
                            "uses, and the only workable setting on a physically "
-                           "scaled cube, whose returns sit near 1e-7 and would "
-                           "quantize to exactly zero against a fixed 1.0."),
+                           "scaled cube, whose returns sit many decades below 1 and "
+                           "would quantize to exactly zero against a fixed 1.0."),
         ],
         blurb=("Digitizes the signal the way a real analog-to-digital converter "
                "would: a limited number of bits and a hard clip past full scale."),

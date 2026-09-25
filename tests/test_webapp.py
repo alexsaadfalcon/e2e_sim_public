@@ -465,6 +465,144 @@ def test_positions_cover_every_diagram_node_without_collisions():
     assert not colliding, f"node boxes ({w}x{h}) geometrically overlap: {colliding}"
 
 
+def test_no_product_edge_crosses_a_node_it_does_not_touch():
+    """SEAT'S READ OF THE 2026-09-24 RENDERS, item 1b: six of the nine products tap the
+    CUBE, which is the last chain node, so with the products in two rows under the whole
+    chain every one of those edges swept back across the row. Not merely untidy --
+    measured on the old positions, the straight `cube -> fft` segment passed through the
+    ADC node's own box, so the fan crossed the boxes it was drawn to explain.
+
+    This models the geometry the stylesheet actually draws: chain edges are straight
+    (same y, adjacent columns), product edges are TAXI (orthogonal) with `taxi-turn: 50%`
+    -- trunk halfway between the two boxes, then a spur into the target. It asserts no
+    segment of any edge enters a node box other than its own two endpoints'. A straight
+    fan into a stacked column cannot pass this (the ray to the bottom product clips the
+    left half of the boxes above it), which is why the routing is taxi and why this test
+    is geometric rather than a list of expected positions.
+    """
+    from webapp import block_diagram
+    from webapp.pipeline_registry import default_block_state
+
+    node_style = next(st["style"] for st in block_diagram.CYTO_STYLESHEET
+                      if st["selector"] == "node")
+    w = float(node_style["width"].rstrip("px"))
+    h = float(node_style["height"].rstrip("px"))
+    pos = block_diagram._POSITIONS
+
+    def box(nid):
+        x, y = pos[nid]
+        return (x - w / 2, x + w / 2, y - h / 2, y + h / 2)
+
+    def segments(src, dst, taxi):
+        """The polyline cytoscape draws, from source border to target border."""
+        sx, sy = pos[src]
+        tx, ty = pos[dst]
+        if taxi == "tap-right":
+            x0 = sx + w / 2
+            x1 = tx - w / 2
+            trunk = (x0 + x1) / 2.0
+            return [((x0, sy), (trunk, sy)), ((trunk, sy), (trunk, ty)),
+                    ((trunk, ty), (x1, ty))]
+        if taxi == "tap-down":
+            y0 = sy + h / 2
+            y1 = ty - h / 2
+            trunk = (y0 + y1) / 2.0
+            return [((sx, y0), (sx, trunk)), ((sx, trunk), (tx, trunk)),
+                    ((tx, trunk), (tx, y1))]
+        return [((sx, sy), (tx, ty))]          # straight (chain edges)
+
+    def hits(seg, b):
+        """Does an axis-aligned OR diagonal segment intersect box `b`? (Liang-Barsky.)"""
+        (x0, y0), (x1, y1) = seg
+        bx0, bx1, by0, by1 = b
+        dx, dy = x1 - x0, y1 - y0
+        t0, t1 = 0.0, 1.0
+        for p, q in ((-dx, x0 - bx0), (dx, bx1 - x0), (-dy, y0 - by0), (dy, by1 - y0)):
+            if p == 0:
+                if q < 0:
+                    return False
+                continue
+            r = q / p
+            if p < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 > t1:
+                return False
+        return True
+
+    elements = block_diagram.build_elements(default_block_state())
+    edges = [e for e in elements if "source" in e["data"]]
+    assert edges
+    offences = []
+    for e in edges:
+        src, dst = e["data"]["source"], e["data"]["target"]
+        classes = (e.get("classes") or "").split()
+        taxi = next((c for c in classes if c.startswith("tap-")), None)
+        for seg in segments(src, dst, taxi):
+            for nid in pos:
+                if nid in (src, dst):
+                    continue
+                if hits(seg, box(nid)):
+                    offences.append((f"{src}->{dst}", nid))
+    assert not offences, f"edges crossing a node box they do not touch: {sorted(set(offences))}"
+
+
+def test_the_front_end_node_says_where_the_computation_applies_the_cascade():
+    """SEAT'S READ OF THE 2026-09-24 RENDERS, item 1a. The diagram draws the PHYSICAL
+    order (front end at the element, then the interconnect, then the mixing block) while
+    the code applies the front-end cascade to the sampled BEAT record after the mixing
+    block. A diagram that shows one order while the numbers come from the other is only
+    honest if the node itself says so, so the sentence is part of the block's own blurb
+    and is rendered in the editor column beside the diagram -- not in a comment."""
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
+
+    rffe = BLOCKS_BY_ID["rffe"].blurb.lower()
+    assert "beat" in rffe and "after the mixing block" in rffe, (
+        "the front-end block must say the cascade is applied to the beat record after "
+        f"the mixing block; blurb reads: {rffe!r}")
+    dechirp = BLOCKS_BY_ID["dechirp"].blurb.lower()
+    assert "mixer" in dechirp, "the mixing node must say it is the front end's own mixer"
+
+    # And it reaches the screen: the editor column for the front-end node renders it.
+    def flat(component):
+        if isinstance(component, str):
+            return component
+        kids = getattr(component, "children", None)
+        if isinstance(kids, (list, tuple)):
+            return " ".join(flat(c) for c in kids if c is not None)
+        return flat(kids) if kids is not None else ""
+
+    text = " ".join(flat(c) for c in
+                    block_diagram.param_editor("rffe", default_block_state()))
+    assert "beat record" in text.lower()
+
+
+def test_no_help_or_caption_string_quotes_a_hand_PICKED_drive_LEVEL():
+    """SEAT'S READ OF THE 2026-09-24 RENDERS, item 1c: the LNA-bias help still read
+    "visible only when the signal sits near the front-end's own noise (signal scaling
+    ~1e-7)" on a screen whose preset drives at 3e-5 -- a level that stopped being true
+    when the front end moved onto the beat record, printed beside the setting that
+    replaced it. A static registry string cannot know a preset's drive, so it may not
+    quote one: either the screen computes it from the run, or it is not stated."""
+    from webapp.pipeline_registry import BLOCKS
+
+    import re
+    # A drive level is a small power of ten in the signal-scaling range; the registry's
+    # own legitimate numbers (1e-6 s chirp, 1e-7 s step, 3e9 Hz) are not in it.
+    pattern = re.compile(r"(?<![\w.])[0-9](?:\.[0-9]+)?e-0?[5-9](?![\w])")
+    offences = []
+    for spec in BLOCKS:
+        for text, where in ([(spec.blurb, f"{spec.id}.blurb")]
+                            + [(ps.help, f"{spec.id}.{ps.key}.help") for ps in spec.params]):
+            for hit in pattern.findall(text or ""):
+                offences.append((where, hit))
+    assert not offences, (
+        "help/blurb strings quoting an absolute drive level (must be computed from the "
+        f"run or deleted): {offences}")
+
+
 def test_the_diagram_extent_leaves_enough_fit_zoom_for_legible_labels():
     """HOSTILE ROUND 11, D2 / acceptance check 17: node labels must render >= 12 px of
     INK after fit zoom, and they measured ~6 px.
@@ -492,9 +630,12 @@ def test_the_diagram_extent_leaves_enough_fit_zoom_for_legible_labels():
     extent_w = (max(xs) - min(xs)) + w
     extent_h = (max(ys) - min(ys)) + h
 
-    # The panel the cytoscape canvas sits in (webapp/block_diagram.layout: flex basis
-    # 1032 px, height 620 px) and the layout's own padding=20 on each side.
-    panel_w, panel_h, pad = 1032.0, 620.0, 20.0
+    # The panel the cytoscape canvas sits in, MEASURED in the browser on the Thrust 1
+    # card (2026-09-24 23:0x): `#block-cytoscape` renders 996 x 620 at the 1600 px
+    # viewport -- the flex basis is 1032 px but the container's border and padding come
+    # off it, so 1032 flattered the zoom by 4 %. Cytoscape's own layout padding is 20 px
+    # a side on top of that.
+    panel_w, panel_h, pad = 996.0, 620.0, 20.0
     zoom = min((panel_w - 2 * pad) / extent_w, (panel_h - 2 * pad) / extent_h, 1.0)
     # Cap-height / em for the default sans stack. MEASURED, not assumed: the rendered
     # card of 2026-09-24 21:0x drew "FMCW" with row-runs of 17 and 21 px of ink at a
@@ -1447,9 +1588,16 @@ def test_the_receive_segment_is_on_the_one_chain_not_a_second_band():
         "thermal_noise", "impairment", "if_hpf", "quantizer"], (
         "the ADC node's members are the corpus generator's stage order")
     assert block_diagram._NODE_MEMBERS["waveform"] == ["waveform", "tx_pa", "modulate"]
+    # THE PHYSICAL ORDER, not the computation order (seat's read of the 2026-09-24
+    # renders, item 1a): front end at the element, then the interconnect, then the mixing
+    # block -- because rffe_model.py's cascade IS LNA -> mixer -> baseband amp, so a
+    # diagram with "Mixing" upstream of "RF front end" says the signal is dechirped before
+    # it is amplified. The computation still applies the cascade to the beat record AFTER
+    # the mixing block (F97b licences it); each node's blurb says so, and
+    # test_the_front_end_node_says_where_the_computation_applies_it pins that sentence.
+    assert ("rffe", "interconnect") in edges
     assert ("interconnect", "dechirp") in edges      # the mixing block, on the chain
-    assert ("dechirp", "rffe") in edges              # front end on the beat record
-    assert ("rffe", "adc") in edges
+    assert ("dechirp", "adc") in edges
     assert ("adc", "cube") in edges                  # the ONE range transform
     assert ("adc", "detector") in edges              # scored detectors read `adc`
     assert ("cube", "radar_cube") in edges           # range-Doppler reads `cube`
