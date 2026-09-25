@@ -143,7 +143,24 @@ _EXTRA_META_KEYS = ("impairment_params", "targets", "meta",
                     # JSON handling (unlike the dataclass/numpy/tensor cases
                     # `_json_default` exists for), so no new field split
                     # (band_start_hz/band_stop_hz) is needed.
-                    "f0_hz", "band_hz")
+                    "f0_hz", "band_hz",
+                    # WHICH stage order wrote this frame (one-chain contract section 5.4).
+                    # `_ChainFlagsStage` has stamped `composition` / `front_end_placement`
+                    # into state since 2026-09-24, but this allowlist did not carry them,
+                    # so they never reached a single npz -- measured 2026-09-24 at shard 3
+                    # integration on a freshly generated corpus (meta keys held
+                    # `use_rffe`/`quant_bits`/`f0_hz` but neither of these). That made
+                    # `notes/SHARD2_REPORT_2026-09-24.md` section 1's "every frame's meta
+                    # now records composition and front_end_placement" true of the state
+                    # dict and FALSE of the artifact, and left
+                    # `webapp.pipeline_runner._stored_frame_composition` -- which must
+                    # build the placement a corpus was generated with or the
+                    # live-vs-stored gate reads a code difference no knob explains --
+                    # with nothing to read. Additive: frames written before this carry
+                    # neither key and are read exactly as they always were (the reader
+                    # treats absence as "legacy_impulse", which is what every corpus on
+                    # disk before 2026-09-24 in fact is).
+                    "composition", "front_end_placement")
 
 
 #: State key under which `CFRCaptureStage` parks the frame entering the chain, for a

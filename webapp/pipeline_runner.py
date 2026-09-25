@@ -197,6 +197,96 @@ def prewarm_tessera_interconnect(state: Dict[str, Dict[str, Any]]) -> None:
         pass
 
 
+def _stored_frame_composition(files) -> str:
+    """WHICH chain composition wrote these corpus frames -- read off the frames.
+
+    The live-chain replay has to build the stage order the corpus was generated with,
+    or the gate reads a non-zero difference that no knob on screen explains. Since
+    2026-09-24 every frame's meta records it (`e2e.ml.chain_generate._ChainFlagsStage`:
+    `composition` = "full" | "legacy_impulse"). A frame written before that key existed
+    carries none, and every such corpus on disk was written by the v1.0 order, so the
+    absence IS the answer: `"legacy_impulse"`.
+
+    Deliberately reads the FIRST readable frame only: the composition is a constant of a
+    `Simulation` run, and the per-frame comparison of the flags that can differ is
+    `_StoredFrameSettingsStage`'s job. Never raises -- a provenance lookup must not take
+    a run down; an unreadable corpus falls through to the legacy answer and the gate
+    then reports whatever difference results.
+    """
+    import json
+
+    for path in list(files)[:1] or []:
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                meta = json.loads(str(data["meta"].item()))
+        except Exception:
+            return "legacy_impulse"
+        recorded = str(meta.get("composition") or "").strip()
+        if recorded in ("full", "legacy_impulse"):
+            return recorded
+        return "legacy_impulse"
+    return "legacy_impulse"
+
+
+def _frequency_chain_radar_cfg(state: Dict[str, Dict[str, Any]], env_block: Any,
+                               array_shape, run_notes: List[str]):
+    """The `RadarConfig` the FULL composition's spine is built from, on a run whose
+    source is a channel frequency response (Thrusts 1-4).
+
+    `Simulation`'s default spine puts the front end on the SAMPLED BEAT RECORD, which
+    needs a beat sample rate to reference its noise bandwidth to (`min(if_bw, fs)`), and
+    it refuses to invent one -- see `FrontEndBlock.fs_hz`. The plan is DERIVED from the
+    frame's own frequency grid by `fmcw_plan_from_freq_plan`, which enforces
+    `S/fs == (stop - start)/(num_freqs - 1)` on the endpoint-inclusive grid the frames
+    were traced on (F97d: getting that `N/(N-1)` factor wrong is a silent 0.02 % range
+    scale error, ~0.45 m at the far end of the munich window).
+
+    A v2 pkl carries the plan. A LEGACY pkl (munich.pkl) and the synthetic test
+    fixtures do not, and for those the grid is reconstructed from the same UI span the
+    rest of this module already falls back to (`_resolve_freq_span_hz`, centred on
+    `KA_BAND_CARRIER_GHZ`) -- with a run note, because the sweep time that follows is a
+    STATED convention and not a measurement. It changes no image: any `(S, fs)` with
+    `S/fs = df` yields the same beat record; it changes only what sample rate the noise
+    and IF filters are referenced to.
+
+    Returns None when even that is impossible, in which case a chain that configures a
+    front end raises `Simulation`'s own error naming all three ways out.
+    """
+    try:
+        from e2e.chain.waveform import fmcw_plan_from_freq_plan
+    except ImportError:
+        return None
+    n_rx = int(array_shape[0]) * int(array_shape[1])
+    plan = getattr(env_block, "freq_plan", None)
+    if plan:
+        try:
+            return fmcw_plan_from_freq_plan(plan, n_rx=n_rx, name="fmcw_from_frame_plan")
+        except ValueError:
+            return None
+    try:
+        n_freqs = int(env_block.get_S_pars().shape[-1])
+    except Exception:
+        return None
+    if n_freqs < 2:
+        return None
+    span = float(_resolve_freq_span_hz(state, env_block))
+    carrier = KA_BAND_CARRIER_GHZ * 1e9
+    try:
+        cfg = fmcw_plan_from_freq_plan(
+            {"start_hz": carrier - span / 2.0, "stop_hz": carrier + span / 2.0,
+             "num_freqs": n_freqs},
+            n_rx=n_rx, name="fmcw_from_ui_span")
+    except ValueError:
+        return None
+    run_notes.append(
+        f"these frames carry no frequency plan, so the beat sample rate the front end "
+        f"references its noise band to ({cfg.fs_hz / 1e6:.3f} MS/s) is derived from the "
+        f"UI's {span / 1e9:.3f} GHz span centred at {KA_BAND_CARRIER_GHZ:g} GHz on a "
+        f"nominal 200 us sweep -- a stated convention, not a measurement; it changes no "
+        f"image, only the band the noise and IF filters are referenced to")
+    return cfg
+
+
 def _comms_freqs(state: Dict[str, Dict[str, Any]], env_block: Any) -> np.ndarray:
     """Frequency grid (Hz) for the comms head's `ModemBlock`.
 
@@ -1008,25 +1098,39 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             run_notes.append("Corpus Replay skipped the enabled blocks it cannot apply to a "
                              "stored ADC frame: " + ", ".join(ignored))
 
-    # --- optional ADC-cube chain (e2e/chain/dechirp.py, e2e/chain/receive.py) ----
-    # "dechirp" is this chain's activation toggle: it BRIDGES the frequency-domain
-    # frame into a dechirped ADC cube (state['signal_domain'] flips from DOMAIN_CFR
-    # to DOMAIN_RX_TIME -- see e2e/frames.py), which is a different domain than the
-    # radar/subspace/comms products built above consume. So enabling it REPLACES
-    # Simulation's default serial-stage build (the composability hook Simulation
-    # itself documents -- see its `serial_stages=` kwarg) and the downstream product
-    # list, rather than being appended alongside them; the two chains are mutually
-    # exclusive within one run. (The TX-time trio -- waveform/tx_pa/modulate -- is
-    # NOT wired in here: see this module's docstring.)
-    serial_stages_override = None
+    # --- the RECEIVE segment of the one chain (e2e/chain/dechirp.py, receive.py) --
+    # "dechirp" is the MIXING block's activation toggle: it carries the frame across
+    # from the channel frequency response into the sampled beat record
+    # (state['signal_domain'] flips from DOMAIN_CFR to DOMAIN_RX_TIME -- see
+    # e2e/frames.py) and everything after it is the receive side. When it is on, this
+    # module composes the whole spine itself (Simulation's documented `serial_stages=`
+    # hook) because it has stages Simulation's own default spine does not carry --
+    # impairments, the IF high-pass, the quantiser, and each frame's stored-settings
+    # stage. It is ONE list either way: the frequency-domain products and the
+    # beat/cube products are taps at different points on it, not two pipelines. (The
+    # 2026-09-24 one-chain contract, section 1.2; the "mutually exclusive chains" rule
+    # that used to live here is gone, and so is the comms-vs-dechirp refusal below.)
+    #
+    # PRODUCTS ARE ORDERED TAPS, and they have to be: `Simulation` drops the previous
+    # domain's payload at every crossing, so a detector that reads `adc` cannot run
+    # after the range transform and `RadarCubeBlock`, which reads `cube`, cannot run
+    # before it. Thrust 5 enables both. See `Simulation._register_product_taps`.
+    spine_stages = None
     adc_gate = None
     meta_stage = None
+    #: Stages on `spine_stages` whose returns are products (passed to Simulation as
+    #: `product_taps=`), in the order they tap the chain.
+    product_taps: List[Any] = []
     if corpus_mode and not corpus_live_cfr:
-        # No serial stages at all: the corpus frame was generated by this very chain
-        # (dechirp -> thermal floor -> impairments -> IF HPF -> quantizer) and stored
-        # AFTER it. Re-running any of it here would impair an already-impaired frame.
-        # This is the LEGACY replay -- a corpus with no stored channel to run from.
-        serial_stages_override = []
+        # The stored ADC replay ENTERS the one chain after the quantiser: the corpus
+        # frame was generated by this very chain (dechirp -> thermal floor ->
+        # impairments -> IF HPF -> quantizer) and stored AFTER it, so re-running any of
+        # that here would impair an already-impaired frame. The spine therefore starts
+        # at the beat-record taps and the range transform -- the stages the stored
+        # frame has NOT been through -- and the run notes below name every enabled
+        # block that was skipped. This is the LEGACY replay: a corpus with no stored
+        # channel to run from.
+        spine_stages = []
     elif _enabled(state, "dechirp") or corpus_live_cfr:
         try:
             from e2e.chain.dechirp import DechirpBlock
@@ -1059,8 +1163,14 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # but run on the RAW [n_rx, n_tx, n_chirp, n_freqs] layout (no GridStage):
         # DechirpBlock's antenna-axis handling needs the raw RX/TX axes, not the
         # aperture-grid reshape GridStage would produce (see e2e/chain/dechirp.py).
-        serial_stages_override = []
+        spine_stages = []
         thermal_block = impairment_block = if_hpf_block = quantizer_block = None
+        #: The beat-placement front end, when this chain uses one. It, not the
+        #: `RFFEBlock` it was built from, is the stage that actually draws the front
+        #: end's noise, so it is the one the stored-settings stage must re-seed per
+        #: frame -- re-seeding the `RFFEBlock` instead left the live chain one LSB off
+        #: the stored cube on every frame but the first (measured 2026-09-24).
+        front_end_block = None
 
         # The transmit tributary, if the user enabled it: generate the waveform, distort
         # it in the amplifier, then merge its spectrum into the channel response. These
@@ -1074,7 +1184,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     "Could not import the transmit chain (e2e.chain.waveform / "
                     "e2e.circuit.tx_pa). Underlying error: " + str(e)
                 )
-            serial_stages_override.append(WaveformBlock(
+            spine_stages.append(WaveformBlock(
                 kind=_p(state, "waveform", "kind"),
                 bw=float(_p(state, "waveform", "bw")),
                 sample_rate=float(_p(state, "waveform", "sample_rate")),
@@ -1086,18 +1196,49 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     small_signal_gain_db=float(_p(state, "tx_pa", "gain_db")),
                     a_sat=float(_p(state, "tx_pa", "a_sat")),
                 ))
-                serial_stages_override.append(TxPABlock(tx_pa))
+                spine_stages.append(TxPABlock(tx_pa))
             if _enabled(state, "modulate"):
-                serial_stages_override.append(ModulateBlock(
+                spine_stages.append(ModulateBlock(
                     tx_pa=tx_pa,
                     bandwidth_hz=float(_p(state, "modulate", "bandwidth_hz")),
                 ))
 
-        if circuit_block is not None:
-            serial_stages_override.append(CircuitStage(circuit_block))
+        # WHERE THE FRONT END SITS is the one-chain contract's central decision, and on
+        # a replay it is not this module's to make: it is a recorded fact about the
+        # frames (`_stored_frame_composition`). Under the FULL composition the front end
+        # acts on the SAMPLED BEAT RECORD after the mixing block, `sqrt(P_tx)` moves to
+        # the source and thermal noise is injected exactly once; under
+        # "legacy_impulse" it acts on `ifft(CFR)` before it, which is how every corpus
+        # generated before 2026-09-24 was written. Getting this wrong is not a subtle
+        # difference: it is what the live-vs-stored gate reads as a non-zero code
+        # difference no knob on screen explains.
+        chain_composition = ("legacy_impulse" if not corpus_live_cfr
+                             else _stored_frame_composition(
+                                 getattr(environment_block, "_files", [])))
+        legacy_placement = chain_composition != "full"
+        if not legacy_placement:
+            try:
+                from e2e.chain.frontend import FrontEndBlock
+                from e2e.chain.link_budget import TxPowerStage
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the beat-placement front end (e2e.chain.frontend "
+                    "/ e2e.chain.link_budget). Underlying error: " + str(e)
+                )
+            if _enabled(state, "thermal_noise"):
+                # sqrt(P_tx) at the SOURCE, so receiver noise cannot scale with
+                # transmit power (contract section 1.4, the coupling F81 is about).
+                spine_stages.append(TxPowerStage(adc_cfg))
+        if legacy_placement and circuit_block is not None:
+            spine_stages.append(CircuitStage(circuit_block))
         if interconnect_block is not None:
-            serial_stages_override.append(InterconnectStage(interconnect_block))
-        serial_stages_override.append(DechirpBlock(adc_cfg))
+            spine_stages.append(InterconnectStage(interconnect_block))
+        spine_stages.append(DechirpBlock(adc_cfg))
+        if not legacy_placement and circuit_block is not None:
+            # Every knob carried across rather than restated -- including a
+            # hand-edited per-element config table (`FrontEndBlock.from_rffe`).
+            front_end_block = FrontEndBlock.from_rffe(circuit_block, adc_cfg)
+            spine_stages.append(front_end_block)
 
         # Stage order mirrors e2e.ml.chain_generate.build_chain_simulation exactly:
         # Dechirp -> ThermalNoise -> Impairment -> IFHighPass -> Quantizer (D6 parity;
@@ -1110,9 +1251,14 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     "Could not import the link-budget stage (e2e.chain.link_budget). "
                     "Underlying error: " + str(e)
                 )
+            # mode="once" under the FULL composition: it adds NOTHING when the front
+            # end already injected (it becomes the provenance record) and IS the one
+            # injection when no front end ran. "legacy" is the mode every stored corpus
+            # was generated with, and the gate reads zero codes only against it.
             thermal_block = ThermalNoiseBlock(
-                adc_cfg, seed=int(_p(state, "thermal_noise", "seed")))
-            serial_stages_override.append(thermal_block)
+                adc_cfg, seed=int(_p(state, "thermal_noise", "seed")),
+                mode=("legacy" if legacy_placement else "once"))
+            spine_stages.append(thermal_block)
 
         if _enabled(state, "impairment"):
             # No-impossible-states guard (batch physics review 2026-08-24): the
@@ -1137,7 +1283,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 )
             impairment_block = ImpairmentBlock(
                 adc_cfg, seed=int(_p(state, "impairment", "seed")))
-            serial_stages_override.append(impairment_block)
+            spine_stages.append(impairment_block)
 
         if _enabled(state, "if_hpf"):
             try:
@@ -1152,7 +1298,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 corner_range_m=float(_p(state, "if_hpf", "corner_range_m")),
                 order=int(_p(state, "if_hpf", "order")),
             )
-            serial_stages_override.append(if_hpf_block)
+            spine_stages.append(if_hpf_block)
 
         if _enabled(state, "quantizer"):
             try:
@@ -1171,7 +1317,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 bits=int(_p(state, "quantizer", "bits")),
                 full_scale=(None if quant_full_scale <= 0.0 else quant_full_scale),
             )
-            serial_stages_override.append(quantizer_block)
+            spine_stages.append(quantizer_block)
 
         if corpus_live_cfr:
             # FIRST in the list: hand each frame's own stored seeds/severities to the
@@ -1188,12 +1334,15 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                               if quantizer_block is not None else None),
             }
             meta_stage = _StoredFrameSettingsStage(
-                [circuit_block, thermal_block, impairment_block], impairment_block,
+                [front_end_block or circuit_block, thermal_block, impairment_block],
+                impairment_block,
                 if_hpf_block=if_hpf_block, chain_flags=chain_flags)
-            serial_stages_override.insert(0, meta_stage)
+            spine_stages.insert(0, meta_stage)
 
-        # None of the frequency-domain products above apply once the chain has
-        # crossed into RX time; replace them with the RX-time products instead.
+        # The frequency-domain products cannot consume a frame that has crossed into
+        # the beat record, so on this chain they produce nothing (said in the run notes
+        # above); the beat/cube products tap the chain instead, in the shared section
+        # below.
         downstream_blocks = []
         # The RX-time products (radar cube, detector) are built in the shared section
         # below, from this chain's cube geometry. The label grid mirrors the corpus
@@ -1239,25 +1388,27 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     "Underlying error: " + str(e)
                 )
             sink_dir = Path(__file__).resolve().parent / "_sink_output"
-            downstream_blocks.append(SinkBlock(sink_dir, tag="webapp", domain=DOMAIN_RX_TIME))
+            sink_block = SinkBlock(sink_dir, tag="webapp", domain=DOMAIN_RX_TIME)
+            # A tap on the beat record, at the point the corpus's own generator
+            # persists (`e2e.ml.chain_generate`: the sink is a serial stage between the
+            # quantiser and the range transform, because what a corpus sample STORES is
+            # the digitised beat record and the range transform crosses out of that
+            # domain).
+            spine_stages.append(sink_block)
+            product_taps.append(sink_block)
 
-    # --- RX-time products, shared by the live dechirp chain and corpus replay ------
+    # --- the beat-record and cube products: ORDERED TAPS on the one chain ----------
+    # Shared by the live dechirp chain and the stored-ADC replay. Order is the
+    # contract's (section 1.2): the scored detectors read `adc` and therefore tap
+    # BEFORE the range transform; `RadarCubeBlock` reads `cube` and taps AFTER it.
     if rx_cfg is not None:
-        if _enabled(state, "radar_cube"):
-            try:
-                from e2e.chain.receive import RadarCubeBlock
-            except ImportError as e:
-                raise PipelineError(
-                    "Could not import the radar-cube product (e2e.chain.receive). "
-                    "Underlying error: " + str(e)
-                )
-            downstream_blocks.append(RadarCubeBlock(rx_cfg))
         if _enabled(state, "detector"):
             if rx_grid is None:
                 raise PipelineError("The Detector needs the label grid (e2e.ml.labels), "
                                     "which could not be imported.")
             detector_block, detector_info = _build_detector(state, rx_cfg, rx_grid)
-            downstream_blocks.append(detector_block)
+            spine_stages.append(detector_block)
+            product_taps.append(detector_block)
             if detector_info.get("training_manifest"):
                 # The network's inputs are divided by the measured scale of the corpus
                 # it was TRAINED on (e2e.ml.dataset.resolve_input_scale -- the 2026-09-22
@@ -1300,6 +1451,51 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 if reason:
                     run_notes.append(f"ML checkpoint {ckpt.parent.name}: {reason} -- "
                                      "run `python -m e2e.ml.recertify` on it to re-verify")
+
+        # The live-vs-stored correctness gate (see `_StoredADCGateBlock`) reads the
+        # DIGITISED BEAT RECORD, so it taps here, beside the detectors, and not after
+        # the range transform where `adc` no longer exists. It is appended after the
+        # real products so it can never make an otherwise-empty run look productive
+        # (the "no product enabled" check below excludes it by identity).
+        if corpus_live_cfr:
+            knobs = ", ".join([
+                f"ADC {int(_p(state, 'quantizer', 'bits'))}-bit" if _enabled(state, "quantizer")
+                else "no quantizer",
+                f"IF corner {float(_p(state, 'if_hpf', 'corner_range_m')):g} m"
+                if _enabled(state, "if_hpf") else "no IF high-pass",
+                "front end on" if _enabled(state, "rffe") else "front end OFF",
+            ])
+            adc_gate = _StoredADCGateBlock(getattr(environment_block, "_files", []), knobs,
+                                           quantizer_block=quantizer_block)
+            spine_stages.append(adc_gate)
+            product_taps.append(adc_gate)
+
+        # THE ONE RANGE TRANSFORM on this chain (contract section 1.2 row 11). Always
+        # present, like the mixing block: it is what makes the chain one chain, and
+        # `range_transform_for` is the single constructor that pins the SCORED protocol
+        # (`transforms.RD_RANGE_PROTOCOL`: hann, DC removal, uncropped) the cube product
+        # checks by name -- which is what keeps Thrust 5's live-vs-stored gate reading
+        # max |diff| = 0 codes on the beat record while the cube stays on the protocol
+        # the corpora were scored with.
+        try:
+            from e2e.chain.transforms import range_transform_for
+        except ImportError as e:
+            raise PipelineError(
+                "Could not import the range transform (e2e.chain.transforms). "
+                "Underlying error: " + str(e)
+            )
+        spine_stages.append(range_transform_for(rx_cfg))
+        if _enabled(state, "radar_cube"):
+            try:
+                from e2e.chain.receive import RadarCubeBlock
+            except ImportError as e:
+                raise PipelineError(
+                    "Could not import the radar-cube product (e2e.chain.receive). "
+                    "Underlying error: " + str(e)
+                )
+            cube_block = RadarCubeBlock(rx_cfg)
+            spine_stages.append(cube_block)
+            product_taps.append(cube_block)
     elif _enabled(state, "radar_cube") or _enabled(state, "detector"):
         raise PipelineError(
             "The Radar Cube and Detector products consume a digitized ADC cube. Enable "
@@ -1307,18 +1503,19 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             "source to produce one."
         )
 
-    # --- optional comms head (swappable "product": OFDM demod instead of / -------
-    # alongside the radar products above). Appended AFTER the radar products so it
-    # composes without disturbing their output ordering. Incompatible with the
-    # ADC-cube chain above (also a frequency-domain consumer).
+    # --- the comms head: a TAP on the one chain, not a rival pipeline -------------
+    # It reads the received channel frequency response, so it taps the chain BEFORE the
+    # mixing block (the `IC -> comms head` edge on the contract's one diagram) and emits
+    # only `comm_*` keys -- it changes nothing the sensing products read. That is what
+    # makes it a tap rather than a branch, and it is why the old refusal here ("the
+    # Comms Head and the ADC-cube chain ... cannot run together") is deleted: with the
+    # products as ordered taps there is no second pipeline for it to be exclusive with.
+    # On a chain whose mixing block is a dechirp the head is still its own noise source
+    # (a beat-placement front end acts on a tensor that does not exist at the tap --
+    # F98), which `ModemBlock` states for itself.
     comms_combining = None
+    comms_head = None
     if _enabled(state, "comms"):
-        if serial_stages_override is not None:
-            raise PipelineError(
-                "The Comms Head and the ADC-cube chain (Dechirp/Impairments/"
-                "Quantizer/...) consume different signal domains and cannot run "
-                "together -- disable one of them."
-            )
         try:
             from e2e.comms.blocks import ModemBlock, BERBlock
         except ImportError as e:
@@ -1337,38 +1534,43 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             )
         except ValueError as e:
             raise PipelineError(str(e))
-        downstream_blocks.append(modem_block)
-        downstream_blocks.append(BERBlock())
+        comms_head_blocks = [modem_block, BERBlock()]
+        if spine_stages is None:
+            # The frequency-domain chain: `Simulation` builds the spine, so the head is
+            # handed to it as `comms_head=` and inserted at the mixing block's input.
+            comms_head = comms_head_blocks
+        else:
+            # This module composed the spine itself. The head goes in at the same
+            # place -- ahead of the mixing block, while a channel response still
+            # exists -- which is the front of the receive segment the meta stage
+            # excepted.
+            insert_at = 1 if meta_stage is not None else 0
+            for offset, block in enumerate(comms_head_blocks):
+                spine_stages.insert(insert_at + offset, block)
+            product_taps.extend(comms_head_blocks)
 
-    # Enabling "dechirp" alone (no Radar Cube / Neural Detector / Frame Sink, and no
-    # Comms Head -- comms is mutually exclusive with dechirp and already rejected
-    # above) would otherwise run to completion with an EMPTY downstream_blocks
-    # list -- Simulation.run happily produces zero outputs, which the Results tab
-    # renders identically to "never ran" ("No results yet"). Fail loudly instead,
-    # before sim.run() below. Checked here (after both branches that can populate
-    # downstream_blocks for the ADC-cube case) so the more specific comms-conflict
-    # message above still wins when both apply.
-    if serial_stages_override is not None and not downstream_blocks:
-        raise PipelineError(
-            "The ADC-cube chain is enabled but no ADC-chain product (Radar "
-            "Cube / Detector / Frame Sink) is enabled -- enable one, "
-            "or disable Dechirp to run the frequency-domain products."
-        )
+    # Enabling the mixing block alone (no Radar Cube / Neural Detector / Frame Sink and
+    # no Comms Head) would otherwise run to completion with NO PRODUCT at all --
+    # Simulation.run happily produces zero outputs, which the Results tab renders
+    # identically to "never ran" ("No results yet"). Fail loudly instead, before
+    # sim.run() below. The live-vs-stored gate is excluded by identity: it is a
+    # correctness check riding along on a run, never the reason a run happened.
+    if spine_stages is not None:
+        real_products = [t for t in product_taps if t is not adc_gate]
+        if not real_products and not downstream_blocks:
+            raise PipelineError(
+                "The receive chain is enabled but no product that consumes it (Radar "
+                "Cube / Detector / Frame Sink / Comms Head) is enabled -- enable one, "
+                "or disable Dechirp to run the frequency-domain products."
+            )
 
-    # The correctness gate rides along on every live-chain run (see
-    # `_StoredADCGateBlock`). Appended AFTER the "no product enabled" check above so it
-    # can never make an otherwise-empty run look productive.
-    if corpus_live_cfr:
-        knobs = ", ".join([
-            f"ADC {int(_p(state, 'quantizer', 'bits'))}-bit" if _enabled(state, "quantizer")
-            else "no quantizer",
-            f"IF corner {float(_p(state, 'if_hpf', 'corner_range_m')):g} m"
-            if _enabled(state, "if_hpf") else "no IF high-pass",
-            "front end on" if _enabled(state, "rffe") else "front end OFF",
-        ])
-        adc_gate = _StoredADCGateBlock(getattr(environment_block, "_files", []), knobs,
-                                       quantizer_block=quantizer_block)
-        downstream_blocks.append(adc_gate)
+    # The FULL composition's front end lives on the beat record, so a frequency-domain
+    # run has to be able to NAME a beat sample rate (see `_frequency_chain_radar_cfg`).
+    # On the receive chain this module composed itself, the cfg is the one its own
+    # dechirp/quantiser were built from.
+    frequency_chain_cfg = (_frequency_chain_radar_cfg(state, environment_block,
+                                                      array_shape, run_notes)
+                           if spine_stages is None else rx_cfg)
 
     sim = Simulation(
         environment_block,
@@ -1379,7 +1581,17 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         afe_block,
         subspace_block,
         array_shape=array_shape,
-        serial_stages=serial_stages_override,
+        serial_stages=spine_stages,
+        # The products that tap the chain mid-way (the scored detectors on the beat
+        # record, the radar cube after the range transform, the comms head at the
+        # mixing block's input). Only meaningful with `serial_stages=`; when
+        # `Simulation` builds its own spine it registers the head itself.
+        product_taps=(product_taps if spine_stages is not None else None),
+        comms_head=comms_head,
+        # The beat plan the FULL composition's front end references its noise band to.
+        # DERIVED from the frame's own frequency grid, never typed -- see
+        # `_frequency_chain_radar_cfg`.
+        radar_cfg=frequency_chain_cfg,
         # "cold" leaves Oja's random basis untouched -- the honest acquisition run
         # (Thrust 3 Demo B). The registry default "warm" keeps the historical numbers.
         warm_start=(_p(state, "subspace", "warm_start") != "cold"),

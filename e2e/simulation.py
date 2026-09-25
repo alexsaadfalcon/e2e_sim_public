@@ -25,6 +25,11 @@ What replaces it, per notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 1.2:
   `outputs['skipped_stages']` rather than silently not existing.
 * Every product reads the one spine's state. The range products consume the cube the
   `RangeTransformBlock` emits; nothing computes a second range transform of its own.
+* Products are ORDERED TAPS, not a flat "everything runs at the end" list. A product
+  that reads the digitised beat record (the scored detectors) taps the chain right
+  after the quantiser; a product that reads the cube (range-Doppler) taps it after the
+  range transform. `product_taps=` marks such a stage so its return reaches `outputs`
+  -- see `_register_product_taps` for why a downstream list cannot express this.
 """
 
 import warnings
@@ -265,6 +270,7 @@ class Simulation:
         front_end=None,
         link_budget="auto",
         comms_head=None,
+        product_taps=None,
     ):
         self.environment_block = environment_block
         self.downstream_blocks = downstream_blocks
@@ -314,6 +320,7 @@ class Simulation:
                 circuit_block, interconnect_block, afe_block, subspace_block,
                 range_transform, front_end, comms_head,
             )
+        self._register_product_taps(product_taps)
         self._check_single_source()
         self.outputs = defaultdict(list)
         # The online subspace tracker is initialized once (from the first frame's
@@ -325,6 +332,46 @@ class Simulation:
         # Names of the spine stages the LAST frame entered past (replay start index).
         # Empty for a live CFR source; that is the same rule with nothing skipped.
         self.skipped_stages = []
+
+    # --------------------------------------------------------------- product taps
+    def _register_product_taps(self, product_taps):
+        """Mark serial stages whose emissions are PRODUCTS, not transforms.
+
+        This is the general form of the mechanism `_build_spine` already uses for the
+        comms head, exposed so a caller that composes its own `serial_stages=` (the
+        webapp) can put its products where they BELONG IN ORDER instead of in a flat
+        "downstream" list after the whole chain:
+
+            ... -> Quantizer -> [CFAR / learned detectors]   (taps, read `adc`)
+                             -> RangeTransformBlock
+                             -> [RadarCubeBlock]              (tap, reads `cube`)
+
+        Why it has to be ordered and not downstream: `_advance_domain` DROPS the
+        previous domain's payload at every crossing (deliberately -- a stale `adc`
+        outliving the range transform is how a block computes silently on
+        pre-transform data). The detectors own their scored transforms and must read
+        `adc` (contract section 1.2, which is what keeps F85/F95 bit-for-bit); the
+        radar cube reads `cube`. No single position in a downstream list satisfies
+        both, and Thrust 5 enables both at once -- that collision is why this exists
+        (`notes/SHARD2_REPORT_2026-09-24.md` section 9.2).
+
+        Membership is checked BY IDENTITY against the serial list: a tap that is not
+        on the chain would silently never run and its product key would come back
+        empty, which is exactly the failure this refuses to ship.
+        """
+        if not product_taps:
+            return
+        on_chain = {id(stage) for stage in self.serial_stages}
+        for block in product_taps:
+            if id(block) not in on_chain:
+                raise ValueError(
+                    f"product tap {frames.component_name(block)} is not in this "
+                    f"chain's serial_stages -- a tap is a stage that happens to emit "
+                    f"a product, so it has to be ON the chain at the point whose "
+                    f"domain it reads. Insert it into serial_stages (or pass it as a "
+                    f"downstream block if it really runs after the whole spine)."
+                )
+            self._product_stages.add(id(block))
 
     # --------------------------------------------------------------- the one spine
     #: Minimal `cfg` for the imaging spine's dechirp: one TX, no multiplexing to undo.

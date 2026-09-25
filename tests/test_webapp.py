@@ -1401,10 +1401,25 @@ def test_pipeline_runner_lazy_imports_adc_chain_backend():
     assert "from e2e.environment.blocks import RTEnvironmentBlock" in run_src
 
 
-def test_run_pipeline_dechirp_and_comms_mutually_exclusive(monkeypatch, make_env_block):
-    """dechirp (RX-time ADC chain) and comms (frequency-domain OFDM head) consume
-    different signal domains; enabling both must raise a clear, named PipelineError
-    rather than a confusing FrameContractError deep inside the run."""
+def test_the_comms_head_is_a_tap_on_the_same_chain_as_the_receive_products(
+        monkeypatch, make_env_block):
+    """ONE CHAIN: the comms head and the mixing block are not rival pipelines.
+
+    This test used to pin the opposite ("dechirp and comms ... cannot run together").
+    That refusal existed because the head was a DOWNSTREAM block: downstream blocks run
+    after the whole spine, by which point the chain is past the mixing block and the
+    channel frequency response the head reads has been dropped at the crossing. The
+    one-chain contract (2026-09-24, section 1.2) makes the head a TAP at the mixing
+    block's INPUT instead, so there is nothing left for the rule to protect -- and the
+    owner's directive was that the diagram must stop showing two pipelines, which a
+    refusal like this one is the runtime half of.
+
+    What is pinned here is the behaviour that replaces it: both are enabled, the run
+    completes, the comms product (`ber`) is present BESIDE the receive chain's own, and
+    the head's own scope note (F98: on a dechirp chain the front end's noise cannot
+    reach a tap that reads a channel response, so the head is its own noise source
+    there) is what the card has to say -- not a refusal.
+    """
     torch = pytest.importorskip("torch")
     from webapp import pipeline_runner
     from webapp.pipeline_registry import default_block_state
@@ -1416,8 +1431,12 @@ def test_run_pipeline_dechirp_and_comms_mutually_exclusive(monkeypatch, make_env
     state = default_block_state()
     state["dechirp"]["enabled"] = True
     state["comms"]["enabled"] = True
-    with pytest.raises(pipeline_runner.PipelineError, match="cannot run together"):
-        pipeline_runner.run_pipeline(state, n_steps=1)
+    # A product on the receive side of the chain, so the run has one of each.
+    state["sink"]["enabled"] = True
+
+    outputs = pipeline_runner.run_pipeline(state, n_steps=1)
+    assert outputs.get("ber"), "the comms head ran as a tap but its product never reached outputs"
+    assert outputs.get("comm_noise_source"), "the head must record which floor it used"
 
 
 def test_run_pipeline_detector_on_single_chirp_source_names_the_fix(
