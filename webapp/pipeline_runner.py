@@ -3471,20 +3471,13 @@ def note_differing_y_extents(figs: Dict[str, Any], prev_figs: Dict[str, Any],
                             f"panel prints. Same return, one window of aliasing apart, "
                             f"not a second scene.")
             panel["details"] = details
-            if i == 0:
-                # Arm A's caption carries BOTH numbers, by REWRITING its own window
-                # clause rather than adding a second one: the caption is one line in a
-                # 746 px panel with ~94 characters of room, and the units/clip/colour
-                # clauses already spend 67 of them. Arm B's caption keeps its own
-                # window (its axis title says the same number), and both arms' Details
-                # spell the pair out in a sentence.
-                caption = [c for c in panel["caption"]
-                           if not (isinstance(c, str)
-                                   and c.startswith(_WINDOW_CLAUSE_PREFIX))]
-                caption.insert(
-                    min(1, len(caption)),
-                    f"{_WINDOW_CLAUSE_PREFIX}{this_m:.1f} m (arm {other} {other_m:.1f})")
-                panel["caption"] = caption
+            # NOTHING IS ADDED TO THE CAPTION HERE any more (2026-09-25). Arm A's
+            # caption used to be rewritten to carry BOTH windows, which with the
+            # burst-rate clause (N9) pushed it past the ~94 characters that fit one line
+            # and the browser clipped it mid-word. The cross-arm fact is now DRAWN --
+            # `_shade_other_arm_window` shades the other arm's window on this map and
+            # labels its edge in the picture's own units -- and each arm's own window is
+            # on its axis title. The sentence stays in both arms' Details.
             if this_m > other_m:
                 # SHADE THE OTHER ARM'S WINDOW ON THIS MAP (round 13, N9). The two maps
                 # render at 4x different vertical scales, so arm B's 62.4 m of scene
@@ -3572,14 +3565,24 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         #: fraction and nothing else. Computed from the cube's own native bin count when
         #: the run recorded one; the exact-zero scan is the fallback for a hand-built
         #: outputs dict that has no `range_n_bins`.
+        #: The crop fires ONLY on evidence that this profile carries padded gates -- a
+        #: trailing run of exact zeros. Without that test it also cropped a hand-built
+        #: `range_profile_agg` (a test fixture, or any caller assembling outputs itself),
+        #: where all gates are real and the arithmetic below describes a binning that
+        #: never happened: two existing tests caught exactly that, cropping 8 real gates
+        #: to 6 and 16 to 11. Padding is the only thing being removed here.
+        _last_data = max((int(np.max(np.nonzero(a)[0])) + 1 if np.any(a) else 0)
+                         for a in _prof_all)
         _keep = _rows
-        _native = (_rmeta or {}).get("range_n_bins")
-        if _native and _rows:
-            _per = -(-int(_native) // _rows)          # `_power_bin`'s ceil division
-            _keep = min(_rows, int(_native) // _per)   # gates with all `_per` bins real
-        else:
-            _keep = max((int(np.max(np.nonzero(a)[0])) + 1 if np.any(a) else 0)
-                        for a in _prof_all)
+        if 0 < _last_data < _rows:
+            _keep = _last_data
+            _native = (_rmeta or {}).get("range_n_bins")
+            if _native:
+                # ...and the gate just before the zeros is part-filled whenever the
+                # native bins do not divide evenly: `_power_bin` groups by CEIL division,
+                # so only `native // per` gates hold all `per` bins.
+                _per = -(-int(_native) // _rows)
+                _keep = min(_keep, max(1, int(_native) // _per))
         if 0 < _keep < _rows:
             _prof_gates_padded = _rows - _keep
             _prof_all = [a[:_keep] for a in _prof_all]
@@ -3885,7 +3888,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # unclipped there is 94 characters (measured across the rehearsal's own
                 # geometry dumps, 2026-09-25). The units clause, the clip clause and the
                 # colour-sharing clause already cost 67 of them.
-                caption.append(f"{_WINDOW_CLAUSE_PREFIX}{window_m:.1f} m")
+                # THE WINDOW IS ON THE AXIS TITLE, NOT IN THE CAPTION (2026-09-25).
+                # Measured on this round's own render: with the burst-rate clause added
+                # (N9) arm A's caption ran to 115 characters against the ~94 that fit one
+                # line in a 746 px panel, and the browser clipped it mid-word at "same
+                # colour scale o..." -- a truncation mark in visible text, which
+                # acceptance check 12 forbids. The window is the one clause with a second
+                # home already on the panel: `fig.update_yaxes(title_text=...)` above
+                # prints "excess path (m), 249.8 m window" on the axis itself, and the
+                # OTHER arm's window is drawn ON the map as a shaded band with a labelled
+                # edge (`_shade_other_arm_window`). Both arms' Details still spell the
+                # pair out in a sentence.
                 # N9: both halves of the split on one line. "window 62.4 m" alone said
                 # what the knob BUYS and never what it costs; 4 more characters say both.
                 _rate_bps = meta.get("data_rate_bps")

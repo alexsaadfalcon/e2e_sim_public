@@ -426,11 +426,34 @@ PAGE_FOOT_NOTE_MAX_CHARS = 420
 def _foot_note(note: str) -> str:
     """`note` cut to `PAGE_FOOT_NOTE_MAX_CHARS` at a clause boundary, with a pointer to
     where the rest is. Never cut mid-phrase: acceptance check 12 forbids a truncation
-    mark in visible text, and the full text is in Details either way."""
+    mark in visible text, and the full text is in Details either way.
+
+    THE ARRAY/SCENE DISCLOSURE SURVIVES THE CUT (hostile round 13, N14). It is the LAST
+    clause of every card that carries it, so it was the first thing this function
+    dropped -- measured on the 2026-09-25 render: Thrust 1's 493-character note was cut
+    at 420 and the visible page-foot ended "...share one front-end config. Full note in
+    each arm's Details.", with the array geometry, the band, the boresight offset and the
+    diffuse-scattering assumption all gone from the screen. It is mandatory on any card
+    that mentions the array (`demo_presets._ARRAY_DISCLOSURE`, the rule the cards are
+    written to), so the BUDGET is reserved for it and the prose before it is what gives
+    way: the total still fits `PAGE_FOOT_NOTE_MAX_CHARS`.
+    """
     note = (note or "").strip()
     if len(note) <= PAGE_FOOT_NOTE_MAX_CHARS:
         return note
-    head = note[:PAGE_FOOT_NOTE_MAX_CHARS]
+    pointer = " Full note in each arm's Details."
+    tail = ""
+    budget = PAGE_FOOT_NOTE_MAX_CHARS
+    try:
+        from webapp.demo_presets import _ARRAY_DISCLOSURE
+        if _ARRAY_DISCLOSURE and _ARRAY_DISCLOSURE in note:
+            tail = " " + _ARRAY_DISCLOSURE
+            # The pointer costs its own characters too -- counted, so the RESULT fits the
+            # budget rather than the intermediate cut.
+            budget = max(80, PAGE_FOOT_NOTE_MAX_CHARS - len(tail) - len(pointer))
+    except Exception:
+        pass
+    head = note[:budget]
     cuts = [head.rfind(sep) for sep in (". ", "; ", " -- ")]
     cut = max(cuts)
     if cut <= 0:
@@ -438,7 +461,7 @@ def _foot_note(note: str) -> str:
     kept = note[:cut].rstrip(" ;,-")
     if not kept.endswith("."):
         kept += "."
-    return kept + " Full note in each arm's Details."
+    return kept + pointer + tail
 
 
 def _one_arm_screen_note(note: str) -> str:

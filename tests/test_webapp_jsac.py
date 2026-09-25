@@ -340,8 +340,12 @@ def test_each_arm_draws_only_its_own_unambiguous_window(monkeypatch,
             if "brightest" in ann["text"]:
                 metres = float(ann["text"].split("@", 1)[1].split("m", 1)[0])
                 assert metres <= window
-        # 4. and the caption says what the window is
-        assert ("window %.1f m" % window) in panel_caption(fig)
+        # 4. and the PANEL says what the window is -- on the axis title since
+        # 2026-09-25, not in the caption: with the burst-rate clause added (round 13's
+        # N9) the caption ran past the ~94 characters that fit one line in a 746 px panel
+        # and the browser clipped it mid-word, which acceptance check 12 forbids. The
+        # axis title is where a window belongs anyway; the caption's copy was the second.
+        assert ("%.1f m window" % window) in fig["layout"]["yaxis"]["title"]["text"]
     assert windows[8] < windows[2], "the window must shrink as the pilot spacing rises"
 
 
@@ -367,8 +371,21 @@ def test_the_two_arms_windows_are_not_unioned_back_into_one_axis(
     assert yb[1] < ya[1]
     # Said on arm A's caption (once per row, layout spec section 4) and in BOTH arms'
     # Details -- the absence of the clause must never be what carries the meaning.
-    cap_a = panel_caption(a["range_az"])
-    assert ("window %.1f m" % ya[1]) in cap_a and ("%.1f" % yb[1]) in cap_a, cap_a
+    # DRAWN on arm A's map, not written into its caption (2026-09-25): a shaded band up
+    # to arm B's window with a labelled edge. The caption had no room left for a second
+    # number once the burst rate joined it, and a picture of the other arm's extent is
+    # what makes two maps at 4x different vertical scales comparable by eye anyway.
+    assert ("%.1f m window" % ya[1]) in a["range_az"]["layout"]["yaxis"]["title"]["text"]
+    shapes = a["range_az"]["layout"].get("shapes") or []
+    band = [sh for sh in shapes if sh.get("name") == "other_arm_window"]
+    assert band and band[0]["y1"] == pytest.approx(yb[1]), shapes
+    marks = [an for an in (a["range_az"]["layout"].get("annotations") or [])
+             if an.get("name") == "other_arm_window"]
+    assert marks and ("%.0f m" % yb[1]) in marks[0]["text"], marks
+    # ...on every animation frame too: a frame layout REPLACES the annotations list.
+    for frame in (a["range_az"].get("frames") or []):
+        names = [an.get("name") for an in ((frame.get("layout") or {}).get("annotations") or [])]
+        assert "other_arm_window" in names, frame.get("name")
     for fig in (a["range_az"], b["range_az"]):
         details = " ".join((fig["layout"]["meta"]["panel"]["details"]))
         assert "not to the same vertical scale" in details
