@@ -353,14 +353,13 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
    Thrust 4 - a worse interconnect, on the range profile (Thrust 4, 3 frames)".
    Scroll the param pane; the knob is below the fold.
 2. Click **Run pipeline**. Both arms run in one click (A = canonical Tessera
-   geometry (50 um presented), B = TSV height -> 30.01 um presented (largest
-   skirt mover)). Wall time: read the last rehearsal's
+   geometry (50 um presented), B = TSV height -> 30 um presented (largest skirt
+   mover)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-- **While it runs, say:** This is the LIVE public Tessera/UIC surrogate
-  (checkpoint, not a CSV); scale factor and frequency are in each arm's
-  Details. Arm B's height shows without a click, in the caption under each
-  banner: 50 um (A) vs 30.01 um (B).
+- **While it runs, say:** LIVE public Tessera/UIC surrogate (checkpoint, not a
+  CSV); scale and frequency in Details. Arm B's height shows without a click,
+  in the caption under each banner: 50 vs 30 um.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -370,11 +369,11 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
   profile"**.
 - Arm chips on screen: "A — Tessera: TSV height (um) 50 um presented" (LEFT
-  column, colour dot) / "B — Tessera: TSV height (um) 30.01 um presented"
-  (RIGHT column) -- each product renders once per column, on the same row, on
-  shared colour limits. The full before/after sentence, plus provenance, band
-  and clip, is one click away behind that arm's own **▸ Details (provenance,
-  band, clip)**.
+  column, colour dot) / "B — Tessera: TSV height (um) 30 um presented" (RIGHT
+  column) -- each product renders once per column, on the same row, on shared
+  colour limits. The full before/after sentence, plus provenance, band and
+  clip, is one click away behind that arm's own **▸ Details (provenance, band,
+  clip)**.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
@@ -384,22 +383,23 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 THE HONEST STORY: the interconnect is NOT the limiting element here; compare
 the backgrounds under the shared colour scale -- any ~0.1 dB difference between
 the arms' printed statistics (either panel) is the run-to-run floor, not the
-knob. This is the LIVE public Tessera/UIC TSV surrogate
-(InterconnectBlock(source='tessera'), scale x2 / half frequency at Ka band).
-Arm A: 50 um presented (= 100 um model geometry). Arm B drops TSV height to its
-presented low end -- OFFLINE the biggest single-knob mover of the skirt (3.53
-dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
+knob. LIVE Tessera/UIC TSV surrogate (scale x2 / half frequency at Ka). Arm A:
+50 um presented (= 100 um model geometry). Arm B drops TSV height to the
+presented low end: OFFLINE the biggest single-knob mover of the skirt, a BULK
+DELAY that sits below the printed median floor (number and scope: say list).
 
 ### Say
-- This is the LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale
-  factor and frequency are in each arm's Details. Arm B's height shows without
-  a click, in the caption under each banner: 50 um (A) vs 30.01 um (B).
+- LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale and
+  frequency in Details. Arm B's height shows without a click, in the caption
+  under each banner: 50 vs 30 um.
+- The 3.53 dB skirt move (-53.90 -> -57.43 dB) is an OFFLINE flat-frame metric,
+  not the statistic this panel prints; it sits below the printed median floor.
 - Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; doi
   10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are theirs.
-- In-band |S21| is invisible on this display (<0.03 dB span); A/B moves TSV
-  height because it measurably moves the skirt.
-- Crosstalk is now modelled -- NEXT/FEXT between vias -- with F89's numbers on
-  the screen note; per-ELEMENT broadcast is still unmodelled.
+- In-band |S21| is invisible here (<0.03 dB span); the A/B moves TSV height
+  because it measurably moves the skirt.
+- Crosstalk is modelled (NEXT/FEXT between vias), F89's numbers on the screen
+  note; per-ELEMENT broadcast is still unmodelled.
 - 77 GHz shipped CSVs are not reconciled with the 30 GHz frames -- caption
   real-CSV results shape-only.
 - Range 0-2 m is not a target: range 0 = earliest arrival
@@ -407,14 +407,13 @@ dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
   window's top is the range-0 skirt's negative-delay side at the crop edge
   (F96).
 - Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated by
-  sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; trends/shape
-  exact (F91).
+  sqrt(2) (~0.2 of 0.5 dB), substrate coupling up to 2x; shape exact (F91).
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
-- The 0 dB reference is a single range-0 gate too small to see; every dB on the
-  map is relative to the direct path.
-- What Thrust 4 DID establish: six knobs run live end to end, and in-band |S21|
-  moves <0.03 dB across all -- a negative result, stated as one.
+- The 0 dB reference is a single range-0 gate too small to see; every dB is
+  relative to the direct path.
+- What Thrust 4 DID establish: six knobs run live end to end, in-band |S21|
+  moving <0.03 dB across all -- a negative result, stated as one.
 - The printed statistics update per frame while the panels loop; pause before
   reading one.
 
@@ -722,11 +721,11 @@ seed-dependent (F86); say so unprompted.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 6 - JSAC: one waveform, an image and a
    constellation", click **Load preset**. The param editor opens on **TX
-   Waveform** (first knob: **Pilot spacing P**); the operator card shows
-   "Loaded: Thrust 6 - JSAC: one waveform, an image and a constellation (Thrust
-   6, 5 frames)".
-2. Click **Run pipeline**. Both arms run in one click (A = pilot spacing 2, B =
-   pilot spacing 8). Wall time: read the last rehearsal's
+   Waveform** (first knob: **Pilot spacing**); the operator card shows "Loaded:
+   Thrust 6 - JSAC: one waveform, an image and a constellation (Thrust 6, 5
+   frames)".
+2. Click **Run pipeline**. Both arms run in one click (A = P = 2, B = P = 8).
+   Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** One frame, one waveform, two products: the image
@@ -739,11 +738,11 @@ seed-dependent (F86); say so unprompted.
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**.
-- Arm chips on screen: "A — Pilot spacing P pilot spacing 2" (LEFT column,
-  colour dot) / "B — Pilot spacing P pilot spacing 8" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
-  The full before/after sentence, plus provenance, band and clip, is one click
-  away behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — Pilot spacing P = 2" (LEFT column, colour dot) / "B
+  — Pilot spacing P = 8" (RIGHT column) -- each product renders once per
+  column, on the same row, on shared colour limits. The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - None: the only `live_knobs` entry for this preset is the knob the built-in

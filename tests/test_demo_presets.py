@@ -717,11 +717,20 @@ def test_thrust4_does_not_claim_50_dB_below_the_noise_floor():
     """Wave 10 (2026-09-24, item 1.8, hostile round 9): the range-profile axis runs
     0 to -60 dB and the offline skirt levels quoted (-53.90 -> -57.43 dB) sit INSIDE
     that range -- not 50 dB below the panel's own -50.3 dB printed floor. Retracted,
-    not reworded: the honest sentence right next to it already says the same panel
-    prints a different statistic."""
+    not reworded.
+
+    MOVED (C3, hostile round 11, fixed 2026-09-24): the "not the statistic the panel
+    prints" scope used to be in the SCREEN NOTE, where it functioned as a walk-back of a
+    number the card had just asserted -- the results screen existing partly to retract
+    the card. One authority now: the figure and its scope are in the say list, together,
+    and the screen note carries neither."""
     p = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
     assert "50 db below" not in p.screen_note.lower()
-    assert "not the statistic the panel" in p.screen_note.lower()
+    assert "3.53" not in p.screen_note, (
+        "the screen note must not re-state (or retract) the card's offline figure")
+    assert any("3.53" in s and "not the statistic this panel" in s.lower()
+               for s in p.say), (
+        "the offline skirt figure belongs in the say list, WITH its scope, exactly once")
 
 
 def test_thrust4_says_what_it_did_establish():

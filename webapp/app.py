@@ -23,6 +23,7 @@ Then open http://127.0.0.1:8050
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import subprocess
@@ -50,6 +51,7 @@ from webapp.demo_presets import PRESETS, PRESETS_BY_ID, DemoPreset, PresetError,
 from webapp.pipeline_registry import BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS, default_block_state
 from webapp.pipeline_runner import (
     CAPTION_SEP,
+    FIGURE_HEIGHT,
     PANEL_HEIGHT,
     PANEL_ROW_MAP,
     PipelineError,
@@ -780,14 +782,33 @@ def _panel_header(panel: Dict[str, Any]):
     ], className="panel-header")
 
 
-def _panel_block(fig_dict, *, width: str = "100%"):
+#: Extra figure height a panel gets when it is the LONE product on a single-arm screen
+#: (hostile round 11, D6). A 1008 px panel leaves ~842 px of plot width, and at the
+#: shared 340 px plot height that is 2.47 : 1 -- past the spec's 2.2 : 1 cap for a
+#: single-arm plot, measured at 2.49 : 1 on the cancel screen. +50 px of figure height
+#: puts the plot at ~390 px, i.e. 2.16 : 1, without touching any two-up panel.
+SINGLE_PANEL_EXTRA_HEIGHT = 50
+
+
+def _panel_block(fig_dict, *, width: str = "100%", extra_height: int = 0):
     """One bordered product panel: fixed height for its row kind, HTML header, plot.
 
     No modebar: the zoom/export toolbar overlaps the header at this width and none of
-    its tools matter for read-only results."""
+    its tools matter for read-only results.
+
+    `extra_height` grows BOTH the panel box and the figure inside it, so the plot area
+    -- not the margins -- is what gets the extra pixels. Used only by the single-arm
+    layout (see `SINGLE_PANEL_EXTRA_HEIGHT`); every A/B panel keeps the fixed row
+    height that makes the same product the same size on every screen (check 20)."""
     panel = panel_of(fig_dict)
     row = panel.get("row") or PANEL_ROW_MAP
-    height = PANEL_HEIGHT.get(row, PANEL_HEIGHT[PANEL_ROW_MAP])
+    height = PANEL_HEIGHT.get(row, PANEL_HEIGHT[PANEL_ROW_MAP]) + extra_height
+    if extra_height:
+        fig_dict = copy.deepcopy(fig_dict)
+        layout = fig_dict.setdefault("layout", {})
+        base = layout.get("height") or FIGURE_HEIGHT.get(row,
+                                                         FIGURE_HEIGHT[PANEL_ROW_MAP])
+        layout["height"] = float(base) + extra_height
     return html.Div([
         _panel_header(panel),
         dcc.Graph(figure=fig_dict, config={"displayModeBar": False},
@@ -813,15 +834,28 @@ def _row(left, right=None):
                      html.Div(right, className="ab-cell")], className="ab-row")
 
 
-def _grid(figs: Dict[str, Any]):
+def _grid(figs: Dict[str, Any], side_column=None):
     """The SINGLE-arm layout. One product gets ONE 1008 px panel (never the full
     width); two or more wrap into the same two-up grid the A/B case uses, so the same
-    product has the same panel geometry on every screen (acceptance check 20)."""
+    product has the same panel geometry on every screen (acceptance check 20).
+
+    `side_column` is the Details disclosure, and with ONE product it goes BESIDE the
+    panel rather than above it -- layout spec section 2.1, "with the details disclosure
+    in the 480 px column beside it". Hostile round 11, D5: on the cancel screen the
+    disclosure sat above and left a 516 x 540 px empty rectangle to the right of the
+    only picture on the page. It is ignored in the multi-product case, where the grid
+    is two-up and there is no spare column."""
     items = list(figs.values())
     if len(items) == 1:
-        return html.Div([_row(_panel_block(items[0],
-                                           width=f"{SINGLE_PANEL_WIDTH}px"))],
-                        className="results-grid")
+        panel = _panel_block(items[0], width=f"{SINGLE_PANEL_WIDTH}px",
+                             extra_height=SINGLE_PANEL_EXTRA_HEIGHT)
+        if side_column is None:
+            return html.Div([_row(panel)], className="results-grid")
+        return html.Div([
+            html.Div([html.Div(panel, className="ab-cell ab-cell-single"),
+                      html.Div(side_column, className="single-side-column")],
+                     className="ab-row"),
+        ], className="results-grid")
     rows = []
     for i in range(0, len(items), 2):
         pair = items[i:i + 2]
@@ -1559,6 +1593,14 @@ def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
     Details disclosure (layout spec section 2.3). Replaces the old bold, 2-4 line
     banner that wrapped across the A/B gutter and read as one garbled paragraph
     (hostile round 10, defect 2.6)."""
+    return html.Div([
+        _arm_summary(payload, arm=arm, fallback_label=fallback_label),
+        _arm_details(payload, figs, screen_note=screen_note),
+    ], className="arm-header")
+
+
+def _arm_summary(payload: Dict[str, Any], *, arm: str, fallback_label: str):
+    """The chip + one-line caption half of an arm header (see `_arm_header`)."""
     chip = payload.get("_arm_chip") or fallback_label
     caption = _arm_caption(payload)
     return html.Div([
@@ -1567,15 +1609,17 @@ def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
         # capping the header clipped the OPENED Details to a 4 px sliver, i.e. the
         # honesty text was one click away and then invisible (found by reading
         # `--expand-details` PNG, 2026-09-24 -- no figure-dict test can see this).
-        html.Div([
-            html.Div([html.Span(className=f"arm-dot arm-dot-{arm}"),
-                      html.Span(chip, className="arm-chip-label")],
-                     className=f"arm-chip arm-chip-{arm}"),
-            html.Div(caption, className="arm-caption"),
-        ], className="arm-summary"),
-        _details_disclosure("▸ Details (provenance, band, clip)",
-                            _details_lines(payload, figs, screen_note)),
-    ], className="arm-header")
+        html.Div([html.Span(className=f"arm-dot arm-dot-{arm}"),
+                  html.Span(chip, className="arm-chip-label")],
+                 className=f"arm-chip arm-chip-{arm}"),
+        html.Div(caption, className="arm-caption"),
+    ], className="arm-summary")
+
+
+def _arm_details(payload: Dict[str, Any], figs: Dict[str, Any], *, screen_note: str):
+    """The Details disclosure half of an arm header (see `_arm_header`)."""
+    return _details_disclosure("▸ Details (provenance, band, clip)",
+                               _details_lines(payload, figs, screen_note))
 
 
 @app.callback(
@@ -1654,11 +1698,20 @@ def _render_results(results_data, active_tab):
     children = [header_row, html.Div(className="section-rule")]
 
     if not prev_figs:
-        children.append(_row(_arm_header(results_data, figs, arm="a",
-                                         screen_note=screen_note,
-                                         fallback_label="This run")))
+        # ONE PRODUCT -> the Details disclosure moves into the column beside the panel
+        # (spec 2.1; hostile round 11, D5). With more than one the grid is two-up and
+        # that column does not exist, so the header keeps both halves as before.
+        lone_product = len(figs) == 1
+        children.append(_row(
+            _arm_summary(results_data, arm="a", fallback_label="This run")
+            if lone_product else
+            _arm_header(results_data, figs, arm="a", screen_note=screen_note,
+                        fallback_label="This run")))
         children.append(html.Div(className="section-rule"))
-        children.append(_grid(figs))
+        children.append(_grid(
+            figs,
+            side_column=(_arm_details(results_data, figs, screen_note=screen_note)
+                         if lone_product else None)))
     else:
         # SIDE BY SIDE (owner, live test 2026-09-24): "default should be side by side".
         # One row per product, arm A left, arm B right, headers above their own column.

@@ -156,7 +156,11 @@ _TESSERA_ARM_B_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.min
 _TESSERA_CANONICAL_HEIGHT_UM = _TESSERA_HEIGHT_SPEC.default
 #: Display-rounded copy for card text -- the override itself (`ab=` below) uses the
 #: exact `.min`, so validation against the ParamSpec's own bound cannot drift.
-_TESSERA_ARM_B_HEIGHT_DISPLAY = round(_TESSERA_ARM_B_HEIGHT_UM, 2)
+#: ONE decimal, not two (C4, hostile round 11): the envelope's low end is 30.005 um and
+#: printed at two decimals it read "30.01 um presented", four significant figures for
+#: what a viewer takes to be a nominal 30 um setting. The value it labels is a
+#: MEASURED envelope bound, not a round number anyone chose, and the card says so.
+_TESSERA_ARM_B_HEIGHT_DISPLAY = round(_TESSERA_ARM_B_HEIGHT_UM, 1)
 #: Model-geometry (pre-scale) copy of the canonical height, PRESENTED value * the
 #: hardcoded x2 scale factor already stated in prose throughout this preset (wave 7
 #: X3, 2026-09-23): the card's Arm A header used to say "h 100 um" -- the MODEL
@@ -799,18 +803,15 @@ PRESETS: List[DemoPreset] = [
         # move at the run-to-run floor), just stated against the new screen.
         # wave 12 (2026-09-24): trimmed for the 450-word card ceiling.
         blurb=("THE HONEST STORY: the interconnect is NOT the limiting element "
-               "here; compare the backgrounds under the shared colour scale -- "
-               "any ~0.1 dB difference between the arms' printed statistics "
-               "(either panel) is the run-to-run floor, not the knob. This is "
-               "the LIVE public Tessera/UIC TSV surrogate "
-               "(InterconnectBlock(source='tessera'), scale x2 / half frequency "
-               "at Ka band). "
+               "here; compare the backgrounds under the shared colour scale -- any "
+               "~0.1 dB difference between the arms' printed statistics (either "
+               "panel) is the run-to-run floor, not the knob. LIVE Tessera/UIC TSV "
+               "surrogate (scale x2 / half frequency at Ka). "
                f"Arm A: {_TESSERA_CANONICAL_HEIGHT_UM:g} um presented "
                f"(= {_TESSERA_CANONICAL_HEIGHT_MODEL_UM:g} um model geometry). "
-               "Arm B drops TSV height to its presented low end -- OFFLINE the "
-               "biggest single-knob mover of the skirt (3.53 dB native "
-               "flat-frame move) -- bulk DELAY, sits below the printed median "
-               "floor."),
+               "Arm B drops TSV height to the presented low end: OFFLINE the "
+               "biggest single-knob mover of the skirt, a BULK DELAY that sits "
+               "below the printed median floor (number and scope: say list)."),
         live_knobs=[("interconnect", "tessera_height_um",
                      f"{_TESSERA_CANONICAL_HEIGHT_UM:g} -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um "
                      "(the A/B above)"),
@@ -845,9 +846,10 @@ PRESETS: List[DemoPreset] = [
         screen_note=("LIVE Tessera surrogate, scale model x2 (see the run-notes "
                      "line inside each arm's Details disclosure); in-band "
                      "|S21| moves <0.03 dB across every knob -- invisible on a "
-                     "peak-normalized display. The 3.53 dB skirt figure on the card "
-                     "is an offline flat-frame metric (bulk delay, not distortion), "
-                     "not the statistic the panel itself prints. With the shared "
+                     "peak-normalized display. Geometry is quoted PRESENTED: the "
+                     "physical Ka-band dimension, which the surrogate is evaluated at "
+                     "2x (and half the frequency) -- so 50 um presented is 100 um of "
+                     "model geometry. With the shared "
                      "colour scale, compare the backgrounds; any difference at "
                      "the ~0.1 dB run-to-run floor is not the knob. "
                      "Crosstalk (NEXT/FEXT) is modelled for a multi-via arrangement, "
@@ -872,19 +874,24 @@ PRESETS: List[DemoPreset] = [
             # under the banner is spent on the TSV height VALUE instead, since the
             # arm chip itself overflows); that value IS the one place the height
             # shows without a click, so the two facts are now attributed correctly.
-            "This is the LIVE public Tessera/UIC surrogate (checkpoint, not a "
-            "CSV); scale factor and frequency are in each arm's Details. "
-            "Arm B's height shows without a click, in the caption under "
-            f"each banner: {_TESSERA_CANONICAL_HEIGHT_UM:g} um (A) vs "
-            f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um (B).",
+            "LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale and "
+            "frequency in Details. Arm B's height shows without a click, "
+            f"in the caption under each banner: {_TESSERA_CANONICAL_HEIGHT_UM:g} vs "
+            f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um.",
+            # C3 (hostile round 11): the card asserted "3.53 dB" and the results screen
+            # then retracted it in a foot note -- the screen existing partly to walk
+            # back a number the card printed. ONE authority now: the figure lives here,
+            # with the scope that makes it true, and nothing retracts it anywhere else.
+            "The 3.53 dB skirt move (-53.90 -> -57.43 dB) is an OFFLINE flat-frame "
+            "metric, not the statistic this panel prints; it sits below the "
+            "printed median floor.",
             "Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; "
             "doi 10.1109/TCAD.2026.3718807) -- block, wrapper and six S21 CSVs are "
             "theirs.",
-            "In-band |S21| is invisible on this display (<0.03 dB span); A/B "
-            "moves TSV height because it measurably moves the skirt.",
-            "Crosstalk is now modelled -- NEXT/FEXT between vias -- with F89's "
-            "numbers on the screen note; per-ELEMENT broadcast is still "
-            "unmodelled.",
+            "In-band |S21| is invisible here (<0.03 dB span); the A/B moves TSV "
+            "height because it measurably moves the skirt.",
+            "Crosstalk is modelled (NEXT/FEXT between vias), F89's numbers on the "
+            "screen note; per-ELEMENT broadcast is still unmodelled.",
             "77 GHz shipped CSVs are not reconciled with the 30 GHz frames -- "
             "caption real-CSV results shape-only.",
             # wave 11 (2026-09-24, F96): the display crops the negative-delay
@@ -895,9 +902,8 @@ PRESETS: List[DemoPreset] = [
             "(normalize_delays=True). Peaks near 37-113 m are multipath; the "
             "rise at the window's top is the range-0 skirt's negative-delay side "
             "at the crop edge (F96).",
-            "Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated "
-            "by sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; "
-            "trends/shape exact (F91).",
+            "Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated by "
+            "sqrt(2) (~0.2 of 0.5 dB), substrate coupling up to 2x; shape exact (F91).",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
             "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
@@ -906,16 +912,15 @@ PRESETS: List[DemoPreset] = [
             # in for.
             # wave 12 (2026-09-24): trimmed, redundant with the pause bullet below.
             "The 0 dB reference is a single range-0 gate too small to see; "
-            "every dB on the map is relative to the direct path.",
+            "every dB is relative to the direct path.",
             # wave 10 (2026-09-24, item 4.2, hostile round 9): the prepared answer
             # for "then why is this a thrust?" -- a negative result stated as such,
             # not hidden behind "THE HONEST STORY" alone.
             # wave 12 (2026-09-24): trimmed -- the blurb already states "the
             # interconnect is NOT the limiting element", so this bullet no
             # longer repeats it.
-            "What Thrust 4 DID establish: six knobs run live end to end, and "
-            "in-band |S21| moves <0.03 dB across all -- a negative result, "
-            "stated as one.",
+            "What Thrust 4 DID establish: six knobs run live end to end, in-band "
+            "|S21| moving <0.03 dB across all -- a negative result, stated as one.",
             # wave 12 (2026-09-24, item 1.5): same warning as Thrust 1/2 -- the
             # printed panel statistics rebuild per frame while the clock loops.
             "The printed statistics update per frame while the panels loop; "

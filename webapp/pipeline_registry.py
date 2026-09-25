@@ -201,9 +201,19 @@ BLOCKS: List[BlockSpec] = [
             # all mean by that name. Picking it turns the interconnect OFF, which a user
             # reading the README's Case3 caption would not expect. "passthrough" is the
             # honest label; the alias is kept so old saved states still load.
+            # C2 (hostile round 11): Thrust 4 runs `source='tessera'`, which supplies the
+            # response and IGNORES this field -- so the presenter clicked the
+            # Interconnect block on the card, read "SYNTHETIC 11-tap boxcar
+            # PLACEHOLDER", and then the results screen said "LIVE Tessera surrogate".
+            # Both were true and nothing on the card said which one was in force. The
+            # override is now the FIRST thing this help says, because it is the first
+            # thing a reader needs.
             ParamSpec("case", "Case", "choice", "default",
                       choices=["default", "passthrough", "case3"],
-                      help="'default' = SYNTHETIC 11-tap boxcar PLACEHOLDER (owner ballot "
+                      help="IGNORED WHENEVER 'Source' IS 'tessera' -- the live surrogate "
+                           "supplies the response and this field is not read (that is "
+                           "how Thrust 4 runs). Otherwise: "
+                           "'default' = SYNTHETIC 11-tap boxcar PLACEHOLDER (owner ballot "
                            "3A: labelled synthetic wherever it appears; smears a target "
                            "across 11 range bins -- not a real interconnect) -- EXCEPT on "
                            "the live-chain path (Corpus Replay from the stored channel), "

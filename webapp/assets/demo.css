@@ -152,6 +152,10 @@ button:disabled {
 }
 .ab-cell { flex: 1 1 var(--ab-column); min-width: 0; max-width: var(--ab-column); }
 .ab-cell-single { flex: 0 0 auto; max-width: none; }
+/* The 480 px column beside a LONE product panel: it holds that run's Details
+   disclosure, which used to sit above the panel and leave 516 px of white to the
+   right of the only picture on the page (hostile round 11, D5). */
+.single-side-column { flex: 0 0 480px; max-width: 480px; min-width: 0; }
 
 .result-panel {
   border: 1px solid var(--border); border-radius: 6px;
