@@ -826,14 +826,24 @@ def test_scoreboard_annotation_states_the_hit_gate_scale_caveat():
 # raw (unmatched-recall) cross counts.
 # --------------------------------------------------------------------------------
 def test_offline_block_leads_with_fa_per_frame_not_ap():
+    """The FA row leads the OFFLINE BLOCK, and AP follows it.
+
+    It used to lead the whole table. The block moved to the BOTTOM on 2026-09-25
+    (hostile round 12 item 2): arm B's offline rows are folded away on an A/B screen,
+    so with the block on top arm A's live rows all sat two rows below their twins in
+    arm B and the two columns could not be read across. What this test is about --
+    which of the two offline rows comes first -- is unchanged."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
                                match_rule_text="rule", beat_cfar_arm_name="raddetnet")
     labels, _values = _table(fig).cells.values
     fa_idx = labels.index(next(l for l in labels if l.startswith("FA/frame at recall")))
     ap_idx = labels.index(next(l for l in labels if l.startswith("AP,")))
-    assert fa_idx == 0, "the matched-recall FA row must be the table's first row"
+    offline = [i for i, l in enumerate(labels)
+               if str(l).startswith(ds.OFFLINE_ROW_PREFIXES)]
+    assert fa_idx == min(offline), "the matched-recall FA row must lead the block"
     assert fa_idx < ap_idx
+    assert offline == list(range(len(labels) - len(offline), len(labels))), labels
 
 
 # --------------------------------------------------------------------------------
@@ -1228,3 +1238,64 @@ def test_scoreboard_rows_name_the_last_frame_the_transport_ends_on():
         assert label.startswith(f"last frame {n_total}/{n_total}:"), label
         # The transport prints "frame i of n"; the rows must not.
         assert " of " not in label, label
+
+
+# ----------------------------------------------------------------------------------
+# Hostile round 12, item 2: the two arms' tables must be readable as two columns of
+# ONE comparison -- same rows, same order, nothing sliced by the panel border.
+# ----------------------------------------------------------------------------------
+
+def _two_arm_scoreboards():
+    """Arm A and arm B scoreboards for one A/B screen, as stored figure DICTS (what
+    `webapp.app` holds by the time the fold runs)."""
+    target = (10.0, 0.0, "vehicle")
+    hit = (10.0, 0.0, 0.9, 10.0)
+    scores = ds.score_frames([[hit], [hit]], [[target], [target]])
+    arm = "classical CFAR"      # a scored arm of e2e/ml/runs/beat_cfar.json
+    figs = []
+    for _ in range(2):
+        figs.append(ds.scoreboard_figure(
+            scores, arm_name="CA-CFAR (guard 2, train 6)", threshold=0.61,
+            match_rule_text=ds.match_rule_text(),
+            beat_cfar_arm_name=arm).to_dict())
+    return figs
+
+
+def test_the_offline_rows_are_the_LAST_rows_so_the_live_rows_line_up_across_arms():
+    """Arm B's offline rows are folded away on an A/B screen (H9). If they were at the
+    top of arm A, every live row of arm A would sit two rows below its twin in arm B --
+    measured on the 2026-09-25 render before this change: arm A's "last frame 5/5: TP"
+    was row 3, arm B's was row 1."""
+    fig_a, fig_b = _two_arm_scoreboards()
+    labels_a = ds._table_cells(fig_a)[1][0]
+    offline = [i for i, l in enumerate(labels_a)
+               if str(l).startswith(ds.OFFLINE_ROW_PREFIXES)]
+    assert offline, "this test needs a scoreboard that HAS offline rows"
+    assert offline == list(range(len(labels_a) - len(offline), len(labels_a))), labels_a
+
+    ds.fold_offline_rows_onto_arm_a(fig_a, fig_b)
+    labels_a = ds._table_cells(fig_a)[1][0]
+    labels_b = ds._table_cells(fig_b)[1][0]
+    # Arm B keeps exactly the live rows, and they are arm A's first rows, in order.
+    assert labels_b == labels_a[:len(labels_b)], (labels_a, labels_b)
+    # Nothing is deleted: what left arm B's table is in arm B's Details, by name.
+    details = " ".join(ds._pr_panel_dict(fig_b).get("details") or [])
+    for lbl in labels_a[len(labels_b):]:
+        assert str(lbl) in details, lbl
+
+
+def test_every_scoreboard_value_is_one_line_and_fits_its_cell():
+    """Item 2's other half: a value that wraps grows its row and pushes the last row
+    under the panel's bottom border (measured on the 2026-09-24 render, y~1795). The
+    no-wrap budget is `_value_fits_one_line`'s, and it is checked AFTER the fold, which
+    is what appends ", both arms" to arm A's offline values."""
+    fig_a, fig_b = _two_arm_scoreboards()
+    ds.fold_offline_rows_onto_arm_a(fig_a, fig_b)
+    for name, fig in (("A", fig_a), ("B", fig_b)):
+        labels, values = ds._table_cells(fig)[1]
+        assert len(labels) <= 8, (name, len(labels))
+        for lbl, val in zip(labels, values):
+            assert "\n" not in str(val) and "<br>" not in str(val), (name, lbl, val)
+            # `_TABLE_COL_CHARS` is the module's own calibrated no-wrap budget, the
+            # one `scoreboard_figure`'s assertion uses.
+            assert len(ds._wrap_text(str(val), ds._TABLE_COL_CHARS).split("<br>")) == 1,                 (name, lbl, val)

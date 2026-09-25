@@ -1597,6 +1597,54 @@ def _mark_pr_identical_on_arm_a(figs: Dict[str, Any], prev_figs: Dict[str, Any])
         panel["caption"] = caption + [PR_IDENTICAL_CLAUSE]
 
 
+#: The key of the offline-scored precision-recall panel, and the label of the
+#: disclosure it now lives in.
+PR_PANEL_KEY = "detector_pr_stored"
+
+
+def _offline_benchmark_disclosure(figs: Dict[str, Any], prev_figs: Dict[str, Any]):
+    """PULL the stored PR panel out of the product rows and render it ONCE, closed,
+    below them -- and return that disclosure (or None).
+
+    Why it moves, measured: the three Thrust 5 screens were 2480 px against the layout
+    spec's 2200 (acceptance check 14), and that is arithmetic rather than a tweak --
+    four product rows at the spec's own fixed heights (540 + 540 + 388 + 552) plus three
+    16 px gaps plus a 303 px header IS 2480. One row had to go, and the PR panel is the
+    one that is not this run's product: it is scored OFFLINE on a fixed test split, an
+    A/B knob never touches it, so the two arms drew the SAME picture twice, and its
+    headline numbers (AP per arm, the interval) are already rows in the scoreboard table
+    beside it. Nothing is deleted -- the panel is one click away, with its own caption
+    and Details, and the numbers stay on the default screen in the table.
+
+    Mutates `figs`/`prev_figs`: the caller then builds its rows from what is left.
+    """
+    fig = figs.pop(PR_PANEL_KEY, None)
+    prev_figs.pop(PR_PANEL_KEY, None)
+    if fig is None:
+        return None
+    panel = panel_of(fig)
+    label = "▸ Offline benchmark"
+    try:
+        from webapp import detector_scoreboard as _ds
+        _, n_frames = _ds._load_recall_target_and_n_frames()
+        if n_frames:
+            # READ from beat_cfar.json, never typed: the split size is exactly the kind
+            # of number that drifts when the file is regenerated.
+            label = f"▸ Offline benchmark ({int(n_frames)}-frame test split)"
+    except Exception:
+        pass
+    return html.Details([
+        html.Summary(label, className="details-summary"),
+        html.Div([
+            html.Div(panel.get("caption") and CAPTION_SEP.join(panel["caption"]) or "",
+                     className="details-line"),
+            _panel_block(fig, width=f"{SINGLE_PANEL_WIDTH}px"),
+        ] + [html.Div(line, className="details-line")
+             for line in (panel.get("details") or [])],
+            className="details-body"),
+    ], open=False, className="details offline-benchmark")
+
+
 def _arm_header(payload: Dict[str, Any], figs: Dict[str, Any], *, arm: str,
                 screen_note: str, fallback_label: str):
     """One arm's whole header block: the arm chip, its one-line caption, and its
@@ -1686,6 +1734,12 @@ def _render_results(results_data, active_tab):
                 _ds.fold_offline_rows_onto_arm_a(figs[_key], prev_figs[_key])
         _mark_pr_identical_on_arm_a(figs, prev_figs)
 
+    # The offline PR panel leaves the product rows and becomes a closed disclosure at
+    # the foot of the page (acceptance check 14 -- see `_offline_benchmark_disclosure`).
+    # Done AFTER the sharing/marking passes above so the panel keeps every clause they
+    # give it; it is rendered below, under the grid.
+    offline_disclosure = _offline_benchmark_disclosure(figs, prev_figs)
+
     screen_note = results_data.get("_screen_note") or ""
     if screen_note and not prev_figs:
         # ONE arm on screen (a single-run preset, or the cancel journey's "arm B did
@@ -1734,6 +1788,9 @@ def _render_results(results_data, active_tab):
             _arm_header(prev, prev_figs, arm="b", screen_note=screen_note,
                         fallback_label="Previous run (for before/after)"),
             figs, prev_figs))
+
+    if offline_disclosure is not None:
+        children.append(offline_disclosure)
 
     if screen_note:
         # The preset's own caveat, at the BOTTOM of the page (layout spec section 2.3):

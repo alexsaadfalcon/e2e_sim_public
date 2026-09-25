@@ -969,8 +969,15 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
         else:
             offline_detail_rows.append(row)
 
-    raw_labels = [r[0] for r in visible_offline] + base_labels
-    raw_values = [r[1] for r in visible_offline] + base_values
+    # THE LIVE ROWS COME FIRST, the offline pair last (2026-09-25, hostile round 12
+    # item 2: "same row set and order on both arms"). Arm B's two offline rows are
+    # folded away on an A/B screen (`fold_offline_rows_onto_arm_a`, H9), so with the
+    # offline pair at the TOP arm A's live rows started two rows lower than arm B's and
+    # the two tables were offset for their whole height -- a reader comparing the
+    # columns was comparing different rows. Last, they are the rows that DISAPPEAR from
+    # arm B, so everything above them lines up.
+    raw_labels = base_labels + [r[0] for r in visible_offline]
+    raw_values = base_values + [r[1] for r in visible_offline]
     n_rows = len(raw_labels)
     assert n_rows <= 8, (
         f"scoreboard table grew to {n_rows} visible rows -- the panel's fixed "
@@ -1121,12 +1128,15 @@ def fold_offline_rows_onto_arm_a(fig_a: Dict[str, Any], fig_b: Dict[str, Any]) -
     cells_a, cells_b = _table_cells(fig_a or {}), _table_cells(fig_b or {})
     if not cells_a or not cells_b:
         return
-    _, (labels_a, values_a) = cells_a
+    _trace_a, (labels_a, values_a) = cells_a
     trace_b, (labels_b, values_b) = cells_b
     for i, lbl in enumerate(labels_a):
         if (str(lbl).startswith(OFFLINE_ROW_PREFIXES)
                 and not str(values_a[i]).endswith(OFFLINE_BOTH_ARMS_SUFFIX)):
             values_a[i] = f"{values_a[i]}{OFFLINE_BOTH_ARMS_SUFFIX}"
+    # The offline rows are already LAST in every scoreboard (`scoreboard_figure`), so
+    # the rows the two arms share sit at the same index on both -- that ordering is the
+    # other half of hostile round 12's item 2 and is pinned there, not here.
     keep = [i for i, lbl in enumerate(labels_b)
             if not str(lbl).startswith(OFFLINE_ROW_PREFIXES)]
     if len(keep) == len(labels_b):

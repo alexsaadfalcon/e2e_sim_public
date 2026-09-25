@@ -623,3 +623,118 @@ def test_every_panel_declares_the_same_plot_background(tmp_path):
     assert not offenders, (
         "panels whose background is not the deck's (%s on %s): %s"
         % (PLOT_BGCOLOR, PAPER_BGCOLOR, offenders))
+
+
+# ----------------------------------------------------------------------------------
+# Check 14: total page height <= 2200 px, as far as the DECLARED geometry can carry it
+# ----------------------------------------------------------------------------------
+#
+# The browser measures the real number (`webapp/rehearse.py` dumps it per preset). What
+# is knowable here is the SUM the layout commits to: every product row is a fixed
+# height by `PANEL_HEIGHT`, the rows are stacked with a fixed gap, and the header band
+# above the first panel is measured (303 px on every rendered results screen,
+# 2026-09-24/25 rehearsals). That sum is what went over budget on Thrust 5 -- four
+# product rows at 540 + 540 + 388 + 552 -- and it is what a fifth product row would blow
+# again without anyone opening a browser.
+
+#: Measured on the rendered pages, not declared anywhere in CSS: the distance from the
+#: top of the results page to the first panel's top border. 303 px on every results
+#: screen of the 2026-09-24 and 2026-09-25 rehearsals (see the `firstPanelTop` /
+#: `rootTop` fields of each `<preset>_geometry.json`).
+MEASURED_HEADER_BAND_PX = 303
+#: `--sp-2` in webapp/assets/demo.css, the `.ab-row` bottom margin.
+ROW_GAP_PX = 16
+#: Acceptance check 14.
+PAGE_HEIGHT_BUDGET_PX = 2200
+
+
+def _declared_page_height(row_kinds) -> int:
+    """What a page of these product rows commits to, top of page to last panel's
+    bottom border."""
+    rows = list(row_kinds)
+    return (MEASURED_HEADER_BAND_PX
+            + sum(PANEL_HEIGHT[k] for k in rows)
+            + ROW_GAP_PX * max(0, len(rows) - 1))
+
+
+def test_the_thrust5_product_rows_fit_the_page_budget():
+    """The three Thrust 5 screens rendered at 2480 px against the spec's 2200 (hostile
+    round 12 / shard 3b's open problem 1), and it was arithmetic: the objectness map,
+    the range-Doppler map, the scoreboard table AND the offline precision-recall panel
+    are 540 + 540 + 388 + 552 = 2020 px of panel before the 303 px header and the gaps.
+
+    The PR panel is the one of the four that is not this run's product -- scored offline
+    on a fixed split, identical on both arms -- so it moved into a closed disclosure
+    below the rows (`webapp.app._offline_benchmark_disclosure`) and its numbers stay in
+    the scoreboard row set beside it. Three rows fit; four did not."""
+    from webapp.pipeline_runner import PANEL_ROW_MAP, PANEL_ROW_PR, PANEL_ROW_TABLE
+
+    four = [PANEL_ROW_MAP, PANEL_ROW_MAP, PANEL_ROW_TABLE, PANEL_ROW_PR]
+    three = four[:3]
+    assert _declared_page_height(four) > PAGE_HEIGHT_BUDGET_PX, (
+        "this test's own premise: four product rows do NOT fit, which is why the PR "
+        "panel moved into a disclosure")
+    assert _declared_page_height(three) <= PAGE_HEIGHT_BUDGET_PX, (
+        _declared_page_height(three))
+
+
+def test_the_offline_pr_panel_leaves_the_product_rows_for_a_closed_disclosure():
+    """Moved, never deleted (acceptance check 15): the panel, its caption and its whole
+    Details body are inside a `<details>` that is CLOSED by default, labelled with the
+    split size READ from beat_cfar.json, and rendered ONCE for both arms."""
+    import webapp.app as appmod
+    from webapp import detector_scoreboard as ds
+    import plotly.graph_objects as go
+
+    pr_fig = ds.stored_pr_figure().to_dict()
+    data = {
+        "range_az": go.Figure().to_dict(),
+        appmod.PR_PANEL_KEY: pr_fig,
+        "_banner": "A: ADC bits 12 bit",
+        "_ab": True,
+        "_previous": {"range_az": go.Figure().to_dict(),
+                      appmod.PR_PANEL_KEY: ds.stored_pr_figure().to_dict(),
+                      "_banner": "B: ADC bits 3 bit", "_ab": True},
+    }
+    tree = appmod._render_results(data, "tab-results")
+    grid = next(c for c in tree.children
+                if getattr(c, "className", None) == "results-grid")
+    rows = [r for r in grid.children if getattr(r, "className", None) == "ab-row"]
+    # header row + ONE product row (range_az). The PR panel is not a row any more.
+    assert len(rows) == 2, len(rows)
+
+    disclosure = next((c for c in tree.children
+                       if "offline-benchmark" in (getattr(c, "className", "") or "")),
+                      None)
+    assert disclosure is not None, "the PR panel vanished instead of moving"
+    assert disclosure.open is False
+    label = disclosure.children[0].children
+    assert "Offline benchmark" in label
+    _, n_frames = ds._load_recall_target_and_n_frames()
+    if n_frames:
+        assert f"{int(n_frames)}-frame test split" in label
+    # ...and exactly one copy of the panel, with its Details text still reachable.
+    text = _all_text_of(disclosure)
+    assert text.count("Precision") <= 2
+    for line in (pr.panel_of(pr_fig).get("details") or []):
+        assert line in text, line
+
+
+def _all_text_of(node) -> str:
+    """Every string in a Dash component tree, joined."""
+    out = []
+
+    def walk(n):
+        if isinstance(n, str):
+            out.append(n)
+            return
+        if isinstance(n, (list, tuple)):
+            for c in n:
+                walk(c)
+            return
+        child = getattr(n, "children", None)
+        if child is not None:
+            walk(child)
+
+    walk(node)
+    return " ".join(out)

@@ -191,3 +191,11 @@ button:disabled {
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
 .control-divider { width: 1px; height: 28px; background: var(--border); }
+
+/* The offline-benchmark disclosure (acceptance check 14): the stored precision-recall
+   panel is not this run's product -- it is scored on a fixed test split, identical on
+   both arms -- so it sits below the product rows, closed, rather than costing every
+   Thrust 5 screen a 552 px row twice over. Full width, because the panel inside it is
+   the single-arm 1008 px one. */
+.offline-benchmark { margin-top: var(--sp-3); }
+.offline-benchmark .details-body { background: #fbfcfd; }
