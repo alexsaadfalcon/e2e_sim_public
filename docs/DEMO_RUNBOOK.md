@@ -309,16 +309,14 @@ azimuth walks 57 deg over the file's 30 frames while the ray-traced paths --
 and the rank -- stay put. The direction the tracker chases rotates about 53 deg
 per frame, four times the static scene, and neither arm converges: it
 re-acquires every frame. Both arms cold, k=2, 8 frames (azimuth -28 -> -15
-deg). A: 5 passes/frame, about 0.55 from frame 3; B: 10, about 0.26 -- 2.1x
-apart, both far above the 0.08 this tracker reaches when the direction holds
-still.
+deg). A: 5 passes/frame, about 0.55 from frame 3; B: 10, about 0.26 -- both far
+above their static-scene levels (0.16, 0.08).
 
 ### Say
 - The scene sweeps: the line of sight moves about 2 deg/frame, the tracked
   direction about 53 deg/frame. The rank does NOT change; the direction does.
 - Neither arm converges: A about 0.55, B about 0.26 from frame 3 (3 repeats,
-  spread 0.015), against 0.16 and 0.08 on the static scene -- re-acquiring
-  every frame.
+  spread 0.015) -- re-acquiring every frame.
 - The A/B is 5 vs 10 FIXED passes/frame on a moving direction, 2.1x: the gap
   diagnostic never escalates here, the gap sits about 0.09 against its 0.01
   threshold -- say so before someone asks what 'adaptive' did.
@@ -500,10 +498,9 @@ The held-out TEST frames, replayed as the STORED RAY-TRACED CHANNEL: the RF
 front end, dechirp, thermal floor, impairments, IF high-pass and ADC all run
 LIVE from that channel, then CA-CFAR. Press Run once: A is the 12-bit ADC the
 corpus was generated at, B the same frames re-digitised at 3 bits. The
-scoreboards print this run's own hits and unmatched/frame -- 5-frame counts,
-read them there. Thresholds are each detector's recall-0.5 point on the
-172-frame split; on 5 frames recall varies, so compare the 172-frame FA/frame
-rows, not the crosses.
+scoreboards print this run's own hits and unmatched/frame. Thresholds are each
+detector's recall-0.5 point on the 172-frame split; on 5 frames recall varies,
+so compare the 172-frame FA/frame rows, not the crosses.
 
 ### Say
 - SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m,
@@ -513,8 +510,7 @@ rows, not the crosses.
 - The gate that makes this honest: at generation settings the live cube is
   BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); moving a knob
   breaks that -- the whole demonstration.
-- Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance floor 0.093;
-  these 5 frames demonstrate, not measure.
+- Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance floor 0.093.
 - The CFAR map spans 0-50 m; the top 10 m is unscored. It and the Range-Doppler
   cube loop together on the shared clock -- pause before discussing one frame;
   the scoreboard beside them is the run, not the frame.
@@ -527,15 +523,12 @@ rows, not the crosses.
 - Unmatched detections can DROP at deeper quantisation: quantisation noise
   raises the CA-CFAR estimate, so fewer weak peaks clear threshold -- a loss of
   sensitivity, not a quality gain.
-- This detector sits at its 172-frame recall-0.5 point; the scoreboard's recall
-  row reads something else. Matched-recall FA comparisons use the 172-frame
-  split -- 5 frames cannot reproduce a recall.
 - How the cube becomes the map: Doppler sums away first (angle FFT) into a
   range-azimuth map; CA-CFAR's guard 2 / train 6 cells form one square annulus
   over range and azimuth, not two 1-D passes.
-- Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it is
-  3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at
-  12 or 6 bits, same frames.
+- Arm B's 0-5 m smear (-8 to -2 m/s) is INSIDE the scoring crop, and is 3-bit
+  quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at 12 or
+  6, same frames.
 
 ### Do NOT say
 - That the two arms' hit counts measure 3-bit quantisation's cost: 5 frames at
@@ -672,7 +665,7 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** The defensible sentence: a learned head on the
   classical front end beats a CFAR threshold on the same cube, in-distribution
-  -- say that, not 'beats CFAR' (F85 addendum).
+  (F85 addendum).
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -722,29 +715,26 @@ unprompted.
 
 ### Say
 - The defensible sentence: a learned head on the classical front end beats a
-  CFAR threshold on the same cube, in-distribution -- say that, not 'beats
-  CFAR' (F85 addendum).
+  CFAR threshold on the same cube, in-distribution (F85 addendum).
 - Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42,
-  b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically.
-  Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI [+0.217,
-  +0.282]; +0.142 vs the best classical baseline (0.326).
-- The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
-  re-measurement of AP; the recall row for this run cannot reproduce
-  recall-0.5. Objectness loops with Range-Doppler; the scoreboard is the run.
-  Pause to discuss one frame.
+  b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically. Four
+  learned arms were screened -- three ported, this one designed to the F83
+  diagnosis -- none dropped. Paired scene bootstrap: +0.250 AP vs shipped CFAR
+  (0.218), 95% CI [+0.217, +0.282]; +0.142 vs the best classical baseline
+  (0.326).
+- The counts on screen are 5 live frames, LAST shown -- not a re-measurement of
+  AP; the recall row for this run cannot reproduce recall-0.5. Objectness loops
+  with Range-Doppler; the scoreboard is the run. Pause to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.326 -- above shipped CFAR (0.218), but still behind
   RADDetNet (0.468, a +0.142 lead).
-- Four learned arms were screened: three ported architectures and this one
-  designed to the F83 diagnosis; all four are in beat_cfar_ka.json, none
-  dropped.
 - THE CAVEAT: one Ka seed exists. The seed spread 0.040 (F86, at 77 GHz)
   exceeds this arm's CI half-width 0.032, so the lead rests on one training
   run, not the CI alone.
-- Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it is
-  3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at
-  12 or 6 bits, same frames.
+- Arm B's 0-5 m smear (-8 to -2 m/s) is INSIDE the scoring crop, and is 3-bit
+  quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at 12 or
+  6, same frames.
 
 ### Do NOT say
 - 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's

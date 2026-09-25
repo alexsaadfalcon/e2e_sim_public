@@ -984,8 +984,8 @@ PRESETS: List[DemoPreset] = [
                "chases rotates about 53 deg per frame, four times the static scene, and "
                "neither arm converges: it re-acquires every frame. Both arms cold, k=2, "
                "8 frames (azimuth -28 -> -15 deg). A: 5 passes/frame, about 0.55 from "
-               "frame 3; B: 10, about 0.26 -- 2.1x apart, both far above the 0.08 this "
-               "tracker reaches when the direction holds still."),
+               "frame 3; B: 10, about 0.26 -- both far above their static-scene levels "
+               "(0.16, 0.08)."),
         # gap_response has no registry ParamSpec (no UI slider -- see
         # demo_presets._INTERNAL_PARAMS); it is the `ab` knob below, not listed here as
         # a manually-turned live_knob. warm_start does have a slider and stays
@@ -1025,8 +1025,7 @@ PRESETS: List[DemoPreset] = [
             # the blurb on the same card. The A/B statistic is the settled FLOOR at
             # two fixed pass counts, not a race.
             "Neither arm converges: A about 0.55, B about 0.26 from frame 3 (3 "
-            "repeats, spread 0.015), against 0.16 and 0.08 on the static scene -- "
-            "re-acquiring every frame.",
+            "repeats, spread 0.015) -- re-acquiring every frame.",
             "The A/B is 5 vs 10 FIXED passes/frame on a moving direction, 2.1x: the "
             "gap diagnostic never escalates here, the gap sits about 0.09 against its "
             "0.01 threshold -- say so before someone asks what 'adaptive' did.",
@@ -1272,7 +1271,7 @@ PRESETS: List[DemoPreset] = [
                "and ADC all run LIVE from that channel, then CA-CFAR. Press Run "
                "once: A is the 12-bit ADC the corpus was generated at, B the same "
                "frames re-digitised at 3 bits. The scoreboards print this run's own "
-               "hits and unmatched/frame -- 5-frame counts, read them there. "
+               "hits and unmatched/frame. "
                "Thresholds are each detector's recall-0.5 point on the 172-frame "
                "split; on 5 frames recall varies, so compare the 172-frame "
                "FA/frame rows, not the crosses."),
@@ -1296,7 +1295,7 @@ PRESETS: List[DemoPreset] = [
             "cube is BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); "
             "moving a knob breaks that -- the whole demonstration.",
             "Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance "
-            "floor 0.093; these 5 frames demonstrate, not measure.",
+            "floor 0.093.",
             # wave 9 (2026-09-24, item 1.7): the old line was wrong on both counts --
             # the detector map spans 0-50 m (a 10 m unscored strip above the 40 m
             # dashed line), and the 0-100 m panel is Range-Doppler power, unlabelled.
@@ -1325,11 +1324,6 @@ PRESETS: List[DemoPreset] = [
             "Unmatched detections can DROP at deeper quantisation: quantisation "
             "noise raises the CA-CFAR estimate, so fewer weak peaks clear "
             "threshold -- a loss of sensitivity, not a quality gain.",
-            # wave 9 (2026-09-24, T5 item 5): prepared answer, shared across the three
-            # T5 cards.
-            "This detector sits at its 172-frame recall-0.5 point; the scoreboard's "
-            "recall row reads something else. Matched-recall FA comparisons use the "
-            "172-frame split -- 5 frames cannot reproduce a recall.",
             # wave 12 (2026-09-24, item 4.3): how the cube becomes a map, read
             # from classical_detection_map/cfar_objectness (e2e/ml/baseline.py):
             # the Doppler axis is summed away first (non-coherent integration,
@@ -1340,9 +1334,9 @@ PRESETS: List[DemoPreset] = [
             "into a range-azimuth map; CA-CFAR's guard 2 / train 6 cells form "
             "one square annulus over range and azimuth, not two 1-D passes.",
             # shard 3f (2026-09-25): measured, m7_3f.py -- only the bit depth moved.
-            "Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it "
-            "is 3-bit quantisation too: 0-109 cells over the clip per frame at 3 "
-            "bits, 0-8 at 12 or 6 bits, same frames.",
+            "Arm B's 0-5 m smear (-8 to -2 m/s) is INSIDE the scoring crop, and is "
+            "3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, "
+            "0-8 at 12 or 6, same frames.",
         ],
         do_not_say=[
             "That the two arms' hit counts measure 3-bit quantisation's cost: 5 "
@@ -1532,12 +1526,12 @@ PRESETS: List[DemoPreset] = [
             "the A/B knob moves ML off its training distribution"),
         say=[
             "The defensible sentence: a learned head on the classical front end beats a "
-            "CFAR threshold on the same cube, in-distribution -- say that, not 'beats "
-            "CFAR' (F85 addendum).",
+            "CFAR threshold on the same cube, in-distribution (F85 addendum).",
             "Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42, "
             "b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically. "
-            "Paired scene bootstrap: " + RADDETNET_CI_SAY_TOKEN + "; "
-            + BEST_CLASSICAL_SAY_TOKEN + ".",
+            "Four learned arms were screened -- three ported, this one designed to "
+            "the F83 diagnosis -- none dropped. Paired scene bootstrap: "
+            + RADDETNET_CI_SAY_TOKEN + "; " + BEST_CLASSICAL_SAY_TOKEN + ".",
             # wave 9 (2026-09-24, T5 item 5): folded the recall-0.5 caveat into this
             # bullet -- the card's say list is already at its 6-bullet cap.
             # wave 10 (2026-09-24, item 2.2, hostile round 9): folded in that the
@@ -1546,8 +1540,8 @@ PRESETS: List[DemoPreset] = [
             # wave 11 (2026-09-24): replaced "no slider here" -- the
             # Range-Doppler panel now auto-plays/loops on the shared clock;
             # kept under the 45-word RADDetNet bullet cap.
-            "The counts on screen are 5 live frames, LAST shown -- a "
-            "demonstration, not a re-measurement of AP; the recall row for this "
+            "The counts on screen are 5 live frames, LAST shown -- not a "
+            "re-measurement of AP; the recall row for this "
             # N6 residue (hostile round 14): "Detector, scoreboard and PR panels hold
             # that frame while Range-Doppler loops" was the retracted claim -- the
             # objectness map steps on the shared clock with Range-Doppler (round 11,
@@ -1558,9 +1552,6 @@ PRESETS: List[DemoPreset] = [
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
             "were scored too, best 0.326 -- above shipped CFAR (0.218), but still "
             "behind RADDetNet (0.468, a +0.142 lead).",
-            "Four learned arms were screened: three ported architectures and "
-            "this one designed to the F83 diagnosis; all four are in "
-            "beat_cfar_ka.json, none dropped.",
             # wave 10 (2026-09-24, item 4.4, hostile round 9): folded in the
             # seed-spread-vs-CI caveat -- the say list is at its 6-bullet cap, and
             # this is the OOD bullet the caveat actually belongs on.
@@ -1571,9 +1562,9 @@ PRESETS: List[DemoPreset] = [
             "77 GHz) exceeds this arm's CI half-width 0.032, so the lead rests "
             "on one training run, not the CI alone.",
             # shard 3f (2026-09-25): measured, m7_3f.py -- only the bit depth moved.
-            "Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it "
-            "is 3-bit quantisation too: 0-109 cells over the clip per frame at 3 "
-            "bits, 0-8 at 12 or 6 bits, same frames.",
+            "Arm B's 0-5 m smear (-8 to -2 m/s) is INSIDE the scoring crop, and is "
+            "3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, "
+            "0-8 at 12 or 6, same frames.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution, on "

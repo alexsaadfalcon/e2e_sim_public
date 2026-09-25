@@ -134,11 +134,16 @@ def test_thrust5_arm_captions_carry_the_gate_verdict_and_the_placement():
 
     data = _run_ab("thrust5_detector_cfar")
     cap_a, cap_b = _arm_caption(data), _arm_caption(data["_previous"])
-    assert "of 4096 LSB vs stored: bit-identical" in cap_a
+    assert "max |diff| = 0 of 4096 LSB vs stored: bit-identical" in cap_a
     assert "of 8 LSB vs stored: differs (this run's ADC 3-bit)" in cap_b
     for cap in (cap_a, cap_b):
-        assert "front end on ifft(CFR)" in cap, cap
         assert len(cap) <= 86, cap
+    # The placement: the longer gate verdict (shard 3f, "max |diff| = ...") leaves arm
+    # B's line no room for it, so `_parallel_arm_facts` drops it from BOTH captions --
+    # parallel, never on one arm only -- and it is still stated on the page.
+    assert ("front end on" in cap_a) == ("front end on" in cap_b), (cap_a, cap_b)
+    _, tree = _rendered(data)
+    assert "ifft(CFR)" in _all_text(tree)
 
 
 @pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error",
@@ -151,7 +156,13 @@ def test_munich_arm_captions_state_the_arm_not_the_preset_wide_drive(pid):
     caps = [_arm_caption(data), _arm_caption(data["_previous"])]
     for cap, label in zip(caps, (preset.ab_label_a, preset.ab_label_b)):
         assert "Front-end drive" not in cap, cap
-        assert label in cap, (label, cap)
+        if pid == "thrust3_cold_start_acquisition" and label == preset.ab_label_b:
+            # Arm B states what the adaptive gate DID on this run, from the passes it
+            # spent (shard 3f), not the preset's label for the knob.
+            assert ("gate did not escalate (" in cap or "gate escalated (" in cap), cap
+            assert "passes" in cap, cap
+        else:
+            assert label in cap, (label, cap)
         assert "frame " in cap and " of " in cap, cap
         assert len(cap) <= 86, cap
     # Parallel: the placement is on both arms or on neither.
@@ -231,6 +242,9 @@ def test_thrust6_fold_is_on_arm_bs_caption_and_matches_the_runbook():
                 if " folds to " in c)
     other_m, rest = fold.split(" m folds to ")
     this_m = rest.split(" m ", 1)[0]
+    # Tagged with the frame it was measured on (shard 3f): the last one.
+    n = len(rendered["_previous"]["range_az"].get("frames") or [])
+    assert f"(frame {n} of {n})" in fold, fold
     # The card's sentence quotes the SAME numbers, measured on the last frame.
     say = " ".join(PRESETS_BY_ID["thrust6_jsac_resource_split"].say)
     assert f"arm A's {other_m} m return folds to {this_m} m" in say, (fold, say)

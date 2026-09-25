@@ -3595,8 +3595,11 @@ def note_differing_y_extents(figs: Dict[str, Any], prev_figs: Dict[str, Any],
                         # measured on the last frame, and it sat beside arm A's strip
                         # reading "@ 72 m, frame 4 of 5" -- two frames, one sentence.
                         _ftag = _fig_meta_get(fig, _BRIGHTEST_M + "_frame")
+                        # With the tag, the window clause is dropped: tag + window
+                        # measured 102 characters on the 2026-09-25 render, past the
+                        # ~94 that fit; this arm's window is in its Details.
                         _fold = (f"{other_bright:.0f} m folds to {this_bright:.0f} m "
-                                 + (f"({_ftag}, {this_m:.1f} m window)" if _ftag
+                                 + (f"({_ftag})" if _ftag
                                     else f"({this_m:.1f} m window)"))
                         panel["caption"] = [
                             c for c in (panel.get("caption") or [])
