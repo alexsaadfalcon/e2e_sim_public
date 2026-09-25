@@ -144,15 +144,15 @@ def test_range_az_subline_states_native_resolution_and_ratio():
     # "m/gate" substring pinned by this module's own wave-7 tests (and, in webapp/
     # demo_presets.py's screen notes, by test_demo_presets.py -- an unowned file).
     assert f"{gate:.2f} m/gate" in text
-    # Wave-8 content: native resolution in cm and the display/native ratio. One decimal
-    # now, because the native bin is 9.99 cm on the shipped munich grid and "10 cm" would
-    # be the nominal-B number F97d retracts.
-    assert f"{native * 100:.1f} cm native" in text
+    # Wave-8 content: native resolution in cm and the display/native ratio. TWO decimals
+    # since hostile round 12 item 13: the native bin is 9.99 cm on the shipped munich
+    # grid and one decimal rounds it to "10.0 cm" -- the nominal-B number F97d retracts.
+    assert f"{native * 100:.2f} cm native" in text
     assert f"{ratio:.0f}:1" in text
     # F96/F97d: the window is the frame's own FULL FFT period; the panel shows the
     # non-negative half the spine keeps, in the bistatic excess-path convention.
-    assert (f"0-{rmeta['range_displayed_m']:.0f} m shown of a "
-            f"{rmeta['range_window_m']:.0f} m window, bistatic excess path") in text
+    assert (f"0-{rmeta['range_displayed_m']:.1f} m shown of a "
+            f"{rmeta['range_window_m']:.1f} m window, bistatic excess path") in text
 
 
 def test_the_native_bin_is_c_tau_on_the_endpoint_inclusive_grid():

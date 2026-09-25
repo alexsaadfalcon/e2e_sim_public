@@ -984,12 +984,15 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     np.testing.assert_allclose(figs["range_az"].data[0].x, expected_u)
     np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
     assert figs["range_az"].layout.xaxis.title.text == "azimuth sin(θ)"
-    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
+    # The axis title names the convention FIRST and then says the axis is the
+    # non-negative half of the transform's period (hostile round 12 item 13); the exact
+    # wording and the half-window number are pinned in test_webapp_figures_wave7.py.
+    assert figs["range_az"].layout.yaxis.title.text.startswith("excess path (m)")
 
     np.testing.assert_allclose(figs["range_el"].data[0].x, expected_u)
     np.testing.assert_allclose(figs["range_el"].data[0].y, expected_range)
     assert figs["range_el"].layout.xaxis.title.text == "elevation sin(θ)"
-    assert figs["range_el"].layout.yaxis.title.text == "excess path (m)"
+    assert figs["range_el"].layout.yaxis.title.text.startswith("excess path (m)")
 
 
 def test_figures_from_outputs_range_axis_valid_for_any_bins():
@@ -1018,7 +1021,7 @@ def test_figures_from_outputs_range_axis_valid_for_any_bins():
     _axis, _ = _display_range_axis(bins, _range_meta_from_grid(n_freqs, freq_span_hz))
     np.testing.assert_allclose(figs["range_az"].data[0].y,
                                _conform_range_axis(_axis, bins))
-    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
+    assert figs["range_az"].layout.yaxis.title.text.startswith("excess path (m)")
 
     # No metadata at all (e.g. a hand-built outputs dict): fall back to raw gates.
     outputs_no_meta = {"range_el": [torch.zeros((bins, bins), dtype=torch.complex64)]}
@@ -1055,7 +1058,7 @@ def test_range_axis_mirrors_power_bin_grouping_when_nondivisible():
     assert gate == pytest.approx(per * rmeta["range_m_per_bin"])
     np.testing.assert_allclose(figs["range_az"].data[0].y,
                                _conform_range_axis(axis, bins))
-    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
+    assert figs["range_az"].layout.yaxis.title.text.startswith("excess path (m)")
 
 
 def test_placeholder_figure_is_plotly_figure():

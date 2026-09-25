@@ -1331,8 +1331,20 @@ PRESETS: List[DemoPreset] = [
             "comb, the constellation from the data subcarriers beside it.",
             "The knob IS the trade: window 249.8 -> 62.4 m against burst rate "
             "2.25 -> 3.94 Gb/s. Both are computed from the frame and printed.",
+            # RE-MEASURED 2026-09-25 on the WINDOWED maps (each arm cropped to its own
+            # unambiguous window, shard 3c): munich Ka, this preset, 5 frames, through
+            # the webapp's own runner -- A 71.94/72.06/72.08/72.56/72.45 dB,
+            # B 59.94/59.99/59.78/60.18/60.23 dB. The pre-crop figures (72.1-72.8 /
+            # 60.2-60.6) were measured over four wrapped copies of arm B's scene.
             "At spacing 8 the comb aliases and the map's floor rises: peak-median "
-            "72.1-72.8 dB (A) against 60.2-60.6 dB (B), measured over the 5 frames.",
+            "71.9-72.6 dB (A) against 59.8-60.2 dB (B), measured over the 5 frames.",
+            # THE ALIAS, as a thing to point at rather than a caveat. No metre digit for
+            # the return itself (hostile round 12, item 6: that digit moves frame to
+            # frame and the panel prints it); the 62.4 m the fold is BY is the window,
+            # which is computed and fixed for the arm.
+            "Each panel draws only its own window -- no wrapped copies. Past arm B's "
+            "62.4 m a return folds back by exactly that window: the strips name the "
+            "same echo at two positions 62.4 m apart.",
             "BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining "
             "SNR of 86-89 dB: a plumbing demonstration, not a link margin.",
             "Rates are UNCODED BURST rates over a 6.67 us frame; the average depends "

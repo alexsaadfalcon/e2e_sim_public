@@ -1912,6 +1912,23 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         "from_meta": bool(getattr(environment_block, "freq_plan", None)),
         **_spine_range_meta(environment_block, _range_transform),
     }
+    # THE SENSING WAVEFORM'S OWN UNAMBIGUOUS WINDOW, when the run had one.
+    #
+    # `_spine_range_meta` describes the TRANSFORM (a full-grid N-point FFT over the
+    # frame's 5000 frequency samples), which is the same for every waveform class. It is
+    # NOT the window the SENSING product is unambiguous over: a `pilots_only` comb of
+    # spacing P samples the channel every P-th subcarrier, so its effective spacing is
+    # `P * df` and its window is `c / (P * df)` -- `OFDMFrame.sensing_window_m`, the one
+    # authority, read here rather than recomputed. Beyond it the same scene is drawn
+    # again, P times, inside the transform's own 0-249.8 m half-window: measured on the
+    # first JSAC renders (2026-09-24/25), arm B (P = 8, window 62.44 m) drew FOUR
+    # copies of the scene and its brightest-return statistic reported an alias
+    # (0.0 dB @ 125 m, which is the 62.4 m window's second copy). Stored so
+    # `figures_from_outputs` can crop each arm's map to the window its own knob buys.
+    if wave_spec is not None and wave_spec.sensing:
+        _window = (wave_spec.notes or {}).get("sensing_window_m")
+        if _window is not None and float(_window) > 0:
+            outputs["_axis_meta"]["sensing_window_m"] = float(_window)
     # How many frames actually ran, and whether the run was cut short by Cancel, so
     # the UI labels partial results as partial.
     # The live-chain gate's verdict, on EVERY live run (not only in the test suite):
@@ -2632,6 +2649,19 @@ INDEPENDENT_SCALE_CLAUSE = "independent colour scales"
 #: (and a test) finds the same words -- in Details.
 _SHARED_LIMITS_MARKER = "colour limits shared with arm "
 
+#: `layout.meta` key holding a y-extent this panel set ON PURPOSE, in the axis's own
+#: units, which the cross-arm axis pass must NOT widen. Today exactly one panel sets it:
+#: a sensing map cropped to its waveform's unambiguous window (`sensing_window_m`), where
+#: the two arms' windows differ BECAUSE of the A/B knob. Sharing that axis would undo the
+#: crop on the shorter arm -- the same failure `_union_fixed_range` was written for, one
+#: level up.
+_Y_EXTENT_LOCK = "y_extent_lock_m"
+
+#: The caption clause naming that window, and the Details clause naming the pair when the
+#: two arms differ. Prefix-recognised for the same reason the clip clause is.
+_WINDOW_CLAUSE_PREFIX = "window "
+_WINDOW_DIFFERS_PREFIX = "y-axis NOT shared: "
+
 
 def _heatmap(data_db, *, x=None, y=None,
              xlabel: str = "Bin", ylabel: str = "Bin", zmin: float = -40.0,
@@ -3017,6 +3047,73 @@ def share_heatmap_z_limits(figs: Dict[str, Any], prev_figs: Dict[str, Any],
             _apply_shared_z(fig, zmin, zmax, other, say_shared=(i == 0))
 
 
+def y_extent_lock_of(fig) -> float:
+    """The deliberate y-extent this figure dict/Figure set, or None. See
+    `_Y_EXTENT_LOCK`."""
+    if hasattr(fig, "layout"):
+        meta = dict(fig.layout.meta) if fig.layout.meta else {}
+    else:
+        meta = ((fig.get("layout") or {}).get("meta") or {})
+        if not isinstance(meta, dict):
+            meta = {}
+    val = meta.get(_Y_EXTENT_LOCK)
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def note_differing_y_extents(figs: Dict[str, Any], prev_figs: Dict[str, Any],
+                             labels=("B", "A")) -> None:
+    """SAY IT when an A/B pair's two panels do not share a y-axis, in place.
+
+    Two maps side by side are read as one comparison, and the strongest thing a
+    photograph of the screen cannot recover is that their axes are different. When both
+    arms locked their own y-extent (a sensing map cropped to its own unambiguous window
+    -- see `_Y_EXTENT_LOCK`) and the two differ, arm A's caption says so with both
+    numbers and both arms' Details repeat the pair. When they are EQUAL, nothing is
+    said: the axes then agree and a clause about them would be noise.
+
+    `labels` matches `share_heatmap_z_limits`: (the other arm's name seen from `figs`,
+    the other arm's name seen from `prev_figs`).
+    """
+    for key in set(figs) & set(prev_figs):
+        pair = (figs[key], prev_figs[key])
+        extents = [y_extent_lock_of(fig) for fig in pair]
+        if any(e is None for e in extents):
+            continue
+        if abs(extents[0] - extents[1]) <= 0.01 * max(extents):
+            continue
+        # `pair[0]` is arm A by the caller's convention, and `labels[0]` names the arm
+        # `prev_figs` holds, so the pair reads (this arm, the other arm) on each side.
+        for i, (fig, other) in enumerate(zip(pair, labels)):
+            panel = _panel_dict(fig)
+            this_m, other_m = extents[i], extents[1 - i]
+            line = (f"{_WINDOW_DIFFERS_PREFIX}this arm draws {this_m:.1f} m, arm "
+                    f"{other} draws {other_m:.1f} m -- each panel shows its own "
+                    f"unambiguous window, so the two maps are not to the same "
+                    f"vertical scale.")
+            details = [d for d in panel["details"]
+                       if not (isinstance(d, str)
+                               and d.startswith(_WINDOW_DIFFERS_PREFIX))]
+            details.append(line)
+            panel["details"] = details
+            if i == 0:
+                # Arm A's caption carries BOTH numbers, by REWRITING its own window
+                # clause rather than adding a second one: the caption is one line in a
+                # 746 px panel with ~94 characters of room, and the units/clip/colour
+                # clauses already spend 67 of them. Arm B's caption keeps its own
+                # window (its axis title says the same number), and both arms' Details
+                # spell the pair out in a sentence.
+                caption = [c for c in panel["caption"]
+                           if not (isinstance(c, str)
+                                   and c.startswith(_WINDOW_CLAUSE_PREFIX))]
+                caption.insert(
+                    min(1, len(caption)),
+                    f"{_WINDOW_CLAUSE_PREFIX}{this_m:.1f} m (arm {other} {other_m:.1f})")
+                panel["caption"] = caption
+
+
 def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     """Build a dict of named Plotly figures from a simulation outputs dict."""
     figs: Dict[str, go.Figure] = {}
@@ -3141,10 +3238,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # displayed half is exactly that divided by 2.
                 _full_window_m = float(_rmeta["range_window_m"])
                 _displayed_m = float(_rmeta["range_displayed_m"])
+                # PRECISION IS THE POINT here (hostile round 12, item 13): at `.1f` cm
+                # and `.0f` m this clause printed "10.0 cm native ... 0-250 m shown of a
+                # 500 m window" -- the exact three nominal-B figures F97d RETRACTED, so
+                # a reader who knew the finding read the panel as still carrying the
+                # bug. The frame's own endpoint-inclusive grid gives 9.99 cm / 249.8 m /
+                # 499.6 m, and two decimals on the centimetre / one on the metre is what
+                # it takes to show the difference.
                 gate_note = (
-                    f"; {_gate_m:.2f} m/gate ({_native_m * 100:.1f} cm native, "
-                    f"{_ratio:.0f}:1); 0-{_displayed_m:.0f} m shown of a "
-                    f"{_full_window_m:.0f} m window, "
+                    f"; {_gate_m:.2f} m/gate ({_native_m * 100:.2f} cm native, "
+                    f"{_ratio:.0f}:1); 0-{_displayed_m:.1f} m shown of a "
+                    f"{_full_window_m:.1f} m window, "
                     f"{_RANGE_CONVENTION_PHRASE[_rmeta['range_convention']]}")
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
@@ -3153,23 +3257,45 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 ylabel = "range (bins)"
                 earliest_arrival_note = ""
                 gate_note = ""
-            # Peak-median dB, per frame, on the UNCLIPPED map BEFORE the nonneg-range
-            # crop below -- matches notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4
-            # cards' own dynamic-range definition (Change 2). Computed for range_el too
-            # (4th hostile-expert read, 2026-09-23): a screen note about the elevation
-            # cut had no number beside it while range_az's identical note did, reading
-            # as if only range_az's dynamic range had been checked.
-            dyn_range_db = [_peak_minus_median_db(d) for d in
-                            (_to_numpy_abs_db(f) for f in outputs[key])]
             frames_db = [_to_numpy_abs_db(f) for f in outputs[key]]
-            # NO CROP HERE ANY MORE. The spine's range transform already keeps only the
-            # non-negative-delay half (`crop_negative_delay`), so the axis this module
-            # builds is ascending from 0 and every gate on it is physical. The old
-            # fftshift-then-crop was the second half of a calibration the products stopped
-            # doing (see `_spine_range_meta`); applying it to an already-cropped cube threw
-            # away the far half of the window a second time.
+            # NO NEGATIVE-DELAY CROP HERE ANY MORE. The spine's range transform already
+            # keeps only the non-negative-delay half (`crop_negative_delay`), so the axis
+            # this module builds is ascending from 0 and every gate on it is physical. The
+            # old fftshift-then-crop was the second half of a calibration the products
+            # stopped doing (see `_spine_range_meta`); applying it to an already-cropped
+            # cube threw away the far half of the window a second time.
             if y.size and frames_db:
                 y = _conform_range_axis(y, frames_db[-1].shape[0])
+            # THE SENSING WAVEFORM'S WINDOW, when this run has one that is SHORTER than
+            # the transform's own displayed half (see `_axis_meta["sensing_window_m"]`).
+            # Everything past it is the same scene drawn again -- measured on the first
+            # JSAC screens: arm B (pilot spacing 8, window 62.44 m) drew four copies
+            # inside the 249.8 m axis and its brightest-return statistic named an alias
+            # at 125 m. Cropping the DATA rather than only the axis range is deliberate:
+            # the clip, the peak-median and the brightest return below are then all
+            # computed on exactly the pixels that reach the screen. `ceil` keeps the last
+            # gate that still STARTS inside the window; at P = 2 the window is the whole
+            # transform half-window and the one gate this drops is the wrap of range 0
+            # onto its own period (that gate is what printed "brightest -0.0 dB @ 250 m").
+            window_m = None
+            if _rmeta and y.size and meta.get("sensing_window_m"):
+                window_m = float(meta["sensing_window_m"])
+                n_keep_gates = max(1, int(np.ceil(window_m / _gate_m - 1e-9)))
+                if n_keep_gates < y.size:
+                    y = y[:n_keep_gates]
+                    frames_db = [f[:n_keep_gates] for f in frames_db]
+                else:
+                    # The window is at or past the axis this panel could draw anyway;
+                    # nothing is cropped and no caption may claim otherwise.
+                    window_m = float(min(window_m, float(y.max()) + _gate_m))
+            # Peak-median dB, per frame, on the UNCLIPPED map -- matches
+            # notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4 cards' own
+            # dynamic-range definition (Change 2). Computed for range_el too (4th
+            # hostile-expert read, 2026-09-23): a screen note about the elevation cut had
+            # no number beside it while range_az's identical note did, reading as if only
+            # range_az's dynamic range had been checked. AFTER the window crop above, so
+            # the number describes the map on screen and not the aliased copies beside it.
+            dyn_range_db = [_peak_minus_median_db(d) for d in frames_db]
             # Item 7 (coordinator addendum, wave 9, 2026-09-23, measured on
             # thrust1_circuit_knobs frame 5): the 0 dB reference cell (range 0, the
             # direct-path/leakage gate the caption above already names) renders as
@@ -3183,6 +3309,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # panels, which use a different, absolute range axis.
             if _rmeta and y.size:
                 _beyond_direct_path = y >= _DIRECT_PATH_EXCLUSION_M
+                if window_m is not None:
+                    # ON AN ALIASED AXIS, RANGE 0 IS ALSO RANGE W. The window is the
+                    # period of the sensing comb, so the direct-path cell this exclusion
+                    # exists to skip appears again at the TOP of the map -- measured on
+                    # the first cropped render (2026-09-25): arm B's statistic read
+                    # "brightest -0.0 dB @ 62 m" on a 62.44 m window, i.e. the same 0 dB
+                    # leakage gate the bottom of the map is excluded for. The same
+                    # exclusion, wrapped.
+                    _beyond_direct_path &= y <= (window_m - _DIRECT_PATH_EXCLUSION_M)
                 # RETRACTED (coordinator re-check, same wave, 2026-09-24): this used
                 # to also quote a "~N px" figure from `_HEATMAP_PLOT_DOMAIN_HEIGHT /
                 # y.size` -- that divides the module's own DECLARED plot-domain
@@ -3211,8 +3346,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     r_idx = np.unravel_index(i_flat, sub.shape)[0]
                     bright_db = float(sub.flat[i_flat])
                     bright_range_m = float(y[_beyond_direct_path][r_idx])
+                    wrap = ("" if window_m is None else
+                            f" and, because range 0 and range {window_m:.1f} m are the "
+                            f"same cell on this arm's aliased axis, at the TOP edge too "
+                            f"-- both are excluded from the statistic below")
                     return (f"; 0 dB cell at range 0 is one {_gate_m:.2g} m gate "
-                            f"(may show as a thin stripe at the bottom edge); "
+                            f"(may show as a thin stripe at the bottom edge){wrap}; "
                             f"brightest visible return: {bright_db:.1f} dB at "
                             f"{bright_range_m:.0f} m")
                 direct_path_notes = [_direct_path_note(f) for f in frames_db]
@@ -3233,7 +3372,35 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 clip_provenance = f"clip {clip_db:.1f} dB (shared floor)"
             fig = _heatmap(frames_db[-1], x=x, y=y, xlabel=aperture_label,
                            ylabel=ylabel, zmin=clip_db, z_share=Z_SHARE_REACH_FLOOR)
-            if key == "range_az" and range_az_yaxis_extent is not None:
+            if window_m is None and _rmeta and y.size and ylabel.startswith("excess path"):
+                # THE AXIS SAYS IT IS A HALF-WINDOW (hostile round 12, item 13). The
+                # transform's period is 499.6 m and this axis draws the non-negative
+                # half of it; before this the only place that said so was a closed
+                # Details disclosure, so a reader of the SCREEN saw an axis ending at
+                # 249.8 m with nothing to say what was past it. Computed from the
+                # frame's own plan, never typed.
+                fig.update_yaxes(
+                    title_text=f"{ylabel}, displayed half of "
+                               f"{float(_rmeta['range_window_m']):.1f} m")
+            if window_m is not None:
+                # THE AXIS SAYS WHAT IT IS. A y-axis reading "excess path (m)" that stops
+                # at 62.4 on one arm and 249.8 on the other is the one fact a photograph
+                # of a single panel cannot recover, and the panel caption is already at
+                # its one-line budget (see below). Rotated, 18 px, ~35 characters against
+                # the ~42 the 363 px plot height allows.
+                fig.update_yaxes(title_text=f"{ylabel}, {window_m:.1f} m window")
+                # This arm draws its OWN window and nothing past it. The axis is pinned
+                # to the window rather than to the last gate's centre, so the number in
+                # the caption is the number the axis ends on, and `_Y_EXTENT_LOCK` tells
+                # `webapp.app._share_y_ranges` not to union it back up to the other arm's
+                # (two arms with different pilot spacings have different windows BY
+                # CONSTRUCTION -- that is the product the knob buys, and unioning them
+                # would put the shorter arm's 62.4 m map back on a 249.8 m axis).
+                fig.update_yaxes(range=[0.0, window_m])
+                _meta = dict(fig.layout.meta or {}) if fig.layout.meta else {}
+                _meta[_Y_EXTENT_LOCK] = float(window_m)
+                fig.update_layout(meta=_meta)
+            elif key == "range_az" and range_az_yaxis_extent is not None:
                 # See `range_az_yaxis_extent`'s definition above the loop.
                 fig.update_yaxes(range=[0.0, range_az_yaxis_extent])
 
@@ -3276,9 +3443,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 details.append(_sentence(gate_note))
             if direct_path_notes[-1]:
                 details.append(_sentence(direct_path_notes[-1]))
-            set_panel(fig, title=title,
-                      caption=[_DB_COLORBAR_PREFIX,
-                               f"{CLIP_CLAUSE_PREFIX}{clip_db:.1f} dB"],
+            caption = [_DB_COLORBAR_PREFIX, f"{CLIP_CLAUSE_PREFIX}{clip_db:.1f} dB"]
+            if window_m is not None:
+                # SHORT, and the number is on the y-axis title as well: this caption is
+                # one line in a 746 px panel and the longest one that has ever rendered
+                # unclipped there is 94 characters (measured across the rehearsal's own
+                # geometry dumps, 2026-09-25). The units clause, the clip clause and the
+                # colour-sharing clause already cost 67 of them.
+                caption.append(f"{_WINDOW_CLAUSE_PREFIX}{window_m:.1f} m")
+                details.append(
+                    f"Unambiguous window of THIS arm's sensing waveform: "
+                    f"{window_m:.2f} m of excess path (c / (pilot spacing x subcarrier "
+                    f"spacing)). The map is cropped to it: past that gate the same "
+                    f"scene repeats, so nothing there would be a new return.")
+            set_panel(fig, title=title, caption=caption,
                       details=details, row=PANEL_ROW_MAP)
 
             # The per-frame layout override REPLACES the whole annotations list when
@@ -3927,10 +4105,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 n_bits = int(np.asarray(_to_numpy_complex(tx_bits[-1])).size)
             except Exception:
                 n_bits = None
+        # SHORT, because this rides in a one-line caption that also has to carry the
+        # panel's own units clause and its "does not step with the clock" clause: the
+        # long form ("... on every frame (5 frames, 15000 bits each)") left the caption
+        # at ~150 characters against the layout spec's 110. Same two facts.
         ber_zero_sentence = (
-            "BER exactly 0.0 on every frame (%d frame%s%s)"
-            % (len(bers), "" if len(bers) == 1 else "s",
-               (", %d bits each" % n_bits) if n_bits else ""))
+            "BER 0.0 on every frame (%d%s)"
+            % (len(bers), (" x %d bits" % n_bits) if n_bits else " frames"))
     if bers and ber_zero_sentence is None:
         # Combining and array gain are CAPTION clauses now, not a parenthesised title
         # (layout spec section 2.2: the title is one short line, the caption carries
@@ -3972,12 +4153,25 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         evms = [float(e) for e in outputs["evm"]]
         fig = go.Figure(data=go.Scatter(y=evms, mode="lines+markers"))
         fig.update_layout(xaxis_title="Frame", yaxis_title="EVM", **_base_layout())
+        # THE HEADLINE NAMES ITS FRAME, in the same words the scoreboard rows use
+        # ("last frame N/N"), and the caption says the panel is static. This panel
+        # draws every frame at once and never steps, while the transport beside it
+        # reads "frame 4 of 5" -- a bold "(last frame)" over a static curve beside a
+        # clock on another frame is exactly the table-and-picture desync hostile
+        # round 12 items 1 and 11 are about. `.2e`, not `.3f`: at this operating point
+        # every frame's EVM is ~1e-3 and three decimals printed all five of them as
+        # "0.001".
         fig.update_layout(annotations=_stat_annotations(
-            f"EVM {evms[-1]:.3f} (last frame)"))
-        evm_caption = ["error vector magnitude, per frame"]
+            f"EVM {evms[-1]:.2e} (last frame {len(evms)}/{len(evms)})"))
+        # Both clauses are short because this caption is one line in a 746 px panel:
+        # measured on the rehearsal's geometry dump, 97 characters render and 133 clip.
+        # "per frame" is already in the panel title.
+        evm_caption = ["error vector magnitude", "static: all frames drawn"]
         evm_details = ["Error vector magnitude of the equalized data symbols, "
                        "one point per frame, against the symbols actually "
-                       "TRANSMITTED (not a decision-directed reference)."]
+                       "TRANSMITTED (not a decision-directed reference).",
+                       "EVM over the run: %.2e (best frame) to %.2e (worst), "
+                       "%.2e at the last frame." % (min(evms), max(evms), evms[-1])]
         if ber_zero_sentence:
             evm_caption.append(ber_zero_sentence)
             evm_details.append(
@@ -4030,11 +4224,19 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(xaxis_title="I", yaxis_title="Q", **_base_layout())
         fig.update_xaxes(range=[-_lim, _lim], constrain="domain")
         fig.update_yaxes(range=[-_lim, _lim], constrain="domain")
+        # NAMES ITS FRAME, and says it is a snapshot: this panel is a scatter of ONE
+        # frame and never steps, while the transport above it reads "frame 4 of 5"
+        # (hostile round 12, items 1 and 11 -- a caption that says only "last frame"
+        # beside a clock on another frame reads as a contradiction).
+        _n_eq = len(outputs["comm_data_eq"])
         set_panel(fig, title="Comms head constellation",
-                  caption=["last frame, equalized",
-                           "coloured by transmitted symbol"],
-                  details=["Last frame, equalized; each received symbol is coloured "
-                           "by the ideal point it was actually TRANSMITTED as."],
+                  caption=[f"last frame {_n_eq}/{_n_eq}, equalized",
+                           "coloured by transmitted symbol",
+                           "static, does not step with the clock"],
+                  details=[f"Last frame ({_n_eq} of {_n_eq}), equalized; each received "
+                           "symbol is coloured by the ideal point it was actually "
+                           "TRANSMITTED as. A snapshot of one frame: this panel does "
+                           "not step with the transport."],
                   row=PANEL_ROW_MAP)
         fig.update_yaxes(scaleanchor="x", scaleratio=1)
         figs["comm_const"] = _make_legible(fig)

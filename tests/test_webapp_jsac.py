@@ -225,3 +225,150 @@ def test_the_mixing_node_says_which_mixing_block_this_class_uses():
     fmcw = nodes("fmcw")
     for nid in ("dechirp", "cube"):
         assert "disabled" not in fmcw[nid]["classes"], nid
+
+
+# --------------------------------------------------------------------------------
+# The sensing window on the SCREEN (shard 3c, hostile round 12 / JSAC deliverable 1)
+# --------------------------------------------------------------------------------
+#
+# What these pin: the resource-split knob changes the image's UNAMBIGUOUS WINDOW
+# (`c / (P * df)`), and the range map must draw that window and nothing past it.
+# Measured on the 2026-09-24/25 renders of Thrust 6 before the fix: arm B (P = 8,
+# window 62.44 m) drew FOUR copies of the scene inside the transform's own 249.8 m
+# half-window and its brightest-return statistic named an alias ("0.0 dB @ 125 m"),
+# while arm A's named the wrap of range 0 onto its own period ("-0.0 dB @ 250 m").
+
+def _jsac_env_class(frames_np, n_freqs):
+    """A stored source with a v2 frequency plan -- what the JSAC class needs to place
+    its subcarriers on the channel's own grid."""
+    torch_ = pytest.importorskip("torch")
+    from e2e.blocks import device
+    import numpy as np
+
+    class _PlanEnv:
+        array_shape = (32, 32)
+        physical_scale = False
+        freq_plan = {"carrier_hz": 30e9, "start_hz": 28.5e9, "stop_hz": 31.5e9,
+                     "num_freqs": int(n_freqs)}
+
+        def __init__(self, *a, **k):
+            self._frames = frames_np
+            self.frame_counter = 0
+
+        def __len__(self):
+            return len(self._frames)
+
+        def step(self):
+            self.frame_counter = (self.frame_counter + 1) % len(self._frames)
+
+        def reset(self):
+            self.frame_counter = 0
+
+        def get_S_pars(self):
+            arr = np.ascontiguousarray(self._frames[self.frame_counter])
+            return torch_.from_numpy(arr).to(device)
+
+    return _PlanEnv
+
+
+def _run_jsac_range_az(monkeypatch, synthetic_frames_np, pilot_spacing, n_freqs=64):
+    """One JSAC run at this pilot spacing -> (range_az figure, axis meta, spec window)."""
+    import e2e.blocks as blocks
+    from webapp.pipeline_runner import figures_from_outputs, run_pipeline
+
+    frames = synthetic_frames_np(2, 1024, n_freqs, 0)
+    monkeypatch.setattr(blocks, "SionnaEnvironmentBlock",
+                        _jsac_env_class(frames, n_freqs))
+    state = default_block_state()
+    state["waveform"]["enabled"] = True
+    state["waveform"]["params"].update(
+        kind="jsac", n_symbols=4, pilot_spacing=pilot_spacing, bits_per_symbol=2,
+        sensing_source="pilots_only")
+    for bid in ("afe", "subspace", "range_profile", "subspace_err", "dechirp",
+                "radar_cube", "fft", "range_el"):
+        if bid in state:
+            state[bid]["enabled"] = False
+    state["range_az"]["enabled"] = True
+    outputs = run_pipeline(state, n_steps=2)
+    figs = figures_from_outputs(outputs)
+    return figs, (outputs.get("_axis_meta") or {})
+
+
+def test_the_sensing_window_reaches_the_axis_meta_from_the_waveform_not_the_transform(
+        monkeypatch, synthetic_frames_np):
+    """`_spine_range_meta` describes the TRANSFORM, which is identical on both arms.
+    The window the knob buys is the waveform's own (`OFDMFrame.sensing_window_m`), and
+    it has to reach the figure builder or the crop below cannot exist."""
+    _, meta = _run_jsac_range_az(monkeypatch, synthetic_frames_np, 2)
+    assert "sensing_window_m" in meta
+    # c / (P * df), df endpoint-inclusive over the plan's own band.
+    df = (31.5e9 - 28.5e9) / (64 - 1)
+    assert meta["sensing_window_m"] == pytest.approx(299792458.0 / (2 * df), rel=1e-6)
+    # ...and it is SHORTER than the transform's displayed half on the tighter arm.
+    assert meta["range_displayed_m"] > 0
+
+
+def test_each_arm_draws_only_its_own_unambiguous_window(monkeypatch,
+                                                        synthetic_frames_np):
+    """The picture, the axis and the statistic, all inside the window -- and the
+    window named in the caption, since two panels of different vertical extent side by
+    side are read as one comparison unless the screen says otherwise."""
+    from webapp.pipeline_runner import decode_plotly_array, panel_caption, y_extent_lock_of
+
+    windows = {}
+    for spacing in (2, 8):
+        figs, meta = _run_jsac_range_az(monkeypatch, synthetic_frames_np, spacing)
+        fig = figs["range_az"].to_plotly_json()
+        window = float(meta["sensing_window_m"])
+        windows[spacing] = window
+        # 1. the axis ends ON the window, not on the transform's half-window
+        assert fig["layout"]["yaxis"]["range"] == pytest.approx([0.0, window])
+        assert y_extent_lock_of(fig) == pytest.approx(window)
+        # 2. no data row past it -- the wrapped copies are gone, not merely hidden
+        ys = [v for v in decode_plotly_array(fig["data"][0].get("y")) if v is not None]
+        assert ys and max(ys) < window
+        # ...on every animation frame too, not only the one the page opens on.
+        for frame in (fig.get("frames") or []):
+            z = frame["data"][0]["z"]
+            # Plotly's compact wire form: a {bdata, dtype, shape} dict, whose first
+            # shape axis is the row (range-gate) count.
+            rows = (int(str(z["shape"]).split(",")[0]) if isinstance(z, dict)
+                    else len(z))
+            assert rows == len(ys), "an animation frame kept the uncropped map"
+        # 3. the per-frame "brightest" statistic is computed inside the window
+        for ann in fig["layout"]["annotations"]:
+            if "brightest" in ann["text"]:
+                metres = float(ann["text"].split("@", 1)[1].split("m", 1)[0])
+                assert metres <= window
+        # 4. and the caption says what the window is
+        assert ("window %.1f m" % window) in panel_caption(fig)
+    assert windows[8] < windows[2], "the window must shrink as the pilot spacing rises"
+
+
+def test_the_two_arms_windows_are_not_unioned_back_into_one_axis(
+        monkeypatch, synthetic_frames_np):
+    """The A/B axis-sharing pass exists so a pair reads as a difference in the DATA.
+    Here the EXTENT is the data: unioning it would redraw the tighter arm's map on the
+    other arm's axis, which is the wrapped-copies picture the crop removes. So the pass
+    must leave it alone AND the screen must say the two axes differ."""
+    from webapp import app as appmod
+    from webapp.pipeline_runner import panel_caption, note_differing_y_extents
+
+    figs_a, meta_a = _run_jsac_range_az(monkeypatch, synthetic_frames_np, 2)
+    figs_b, meta_b = _run_jsac_range_az(monkeypatch, synthetic_frames_np, 8)
+    a = {"range_az": figs_a["range_az"].to_plotly_json()}
+    b = {"range_az": figs_b["range_az"].to_plotly_json()}
+    appmod._share_y_ranges(a, b)
+    note_differing_y_extents(a, b)
+    ya = a["range_az"]["layout"]["yaxis"]["range"]
+    yb = b["range_az"]["layout"]["yaxis"]["range"]
+    assert ya[1] == pytest.approx(float(meta_a["sensing_window_m"]))
+    assert yb[1] == pytest.approx(float(meta_b["sensing_window_m"]))
+    assert yb[1] < ya[1]
+    # Said on arm A's caption (once per row, layout spec section 4) and in BOTH arms'
+    # Details -- the absence of the clause must never be what carries the meaning.
+    cap_a = panel_caption(a["range_az"])
+    assert ("window %.1f m" % ya[1]) in cap_a and ("%.1f" % yb[1]) in cap_a, cap_a
+    for fig in (a["range_az"], b["range_az"]):
+        details = " ".join((fig["layout"]["meta"]["panel"]["details"]))
+        assert "not to the same vertical scale" in details

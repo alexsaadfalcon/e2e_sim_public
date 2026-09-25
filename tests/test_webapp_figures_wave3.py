@@ -115,7 +115,7 @@ def test_range_az_details_states_earliest_arrival_not_bare_range():
     # "excess path (m)", not "range (m)": the munich link is bistatic and the axis is
     # excess path length over the line of sight (owner ballot 2B). A bare "range" label
     # invited both readings of a number that has since doubled.
-    assert fig.layout.yaxis.title.text == "excess path (m)"
+    assert fig.layout.yaxis.title.text.startswith("excess path (m)")
     assert "0 = earliest arrival" in pr.panel_text(fig)
 
 
@@ -130,7 +130,7 @@ def test_range_el_details_states_earliest_arrival_too():
         "range_el": [re_],
         "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
-    assert fig.layout.yaxis.title.text == "excess path (m)"
+    assert fig.layout.yaxis.title.text.startswith("excess path (m)")
     assert "0 = earliest arrival" in pr.panel_text(fig)
 
 

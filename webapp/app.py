@@ -64,7 +64,9 @@ from webapp.pipeline_runner import (
     prewarm_tessera_interconnect,
     run_pipeline,
     scenario_topdown_figure,
+    note_differing_y_extents,
     share_heatmap_z_limits,
+    y_extent_lock_of,
 )
 from webapp.scenario_editor import map_figure, scenario_from_json_safe, summarize
 
@@ -1415,9 +1417,17 @@ def _share_y_ranges(figs, prev_figs) -> None:
                 # fixes nothing and still shares the data extent.
                 xr = _union_fixed_range(pair, "xaxis") or xr
                 yr = _union_fixed_range(pair, "yaxis") or yr
+                # ...and unless the pair LOCKED its y-extent. A sensing map cropped to
+                # its own unambiguous window (pipeline_runner's `_Y_EXTENT_LOCK`) has an
+                # extent the A/B knob itself sets: with pilot spacing 2 vs 8 the windows
+                # are 249.8 m and 62.4 m, and unioning them would redraw arm B's map on a
+                # 249.8 m axis -- the very wrapped-copies picture the crop removes.
+                # `note_differing_y_extents` then puts the pair on the screen in words.
+                y_locked = any(y_extent_lock_of(fig) is not None for fig in pair)
                 for fig in pair:
                     fig.setdefault("layout", {}).setdefault("xaxis", {})["range"] = xr
-                    fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = yr
+                    if not y_locked:
+                        fig.setdefault("layout", {}).setdefault("yaxis", {})["range"] = yr
             if zmins and zmaxs:
                 zr = (min(zmins), max(zmaxs))
                 for fig in pair:
@@ -1658,6 +1668,9 @@ def _render_results(results_data, active_tab):
     # union a no-op over the already-equal pair rather than a second, weaker rule.
     share_heatmap_z_limits(figs, prev_figs)
     _share_y_ranges(figs, prev_figs)
+    # ...and then SAY which pairs `_share_y_ranges` deliberately left unshared, so the
+    # one thing a photograph of two side-by-side maps cannot recover is on the screen.
+    note_differing_y_extents(figs, prev_figs)
     # The arm's colour on its own statistic strip -- `figures_from_outputs` builds one
     # run's figures and has no idea which arm it will be shown as.
     apply_arm_style(figs, "a")

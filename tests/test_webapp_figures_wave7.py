@@ -113,8 +113,10 @@ def test_range_az_subline_states_metres_per_gate_and_unambiguous_range():
     assert f"{expected_gate:.2f} m/gate" in text
     # F96/F97d: the window is the frame's own FULL FFT period, and the panel shows the
     # non-negative half of it -- in the owner's bistatic excess-path convention.
-    assert (f"0-{rmeta['range_displayed_m']:.0f} m shown of a "
-            f"{rmeta['range_window_m']:.0f} m window, bistatic excess path") in text
+    # `.1f` on the metres since hostile round 12 item 13: at `.0f` this clause printed
+    # "0-250 m shown of a 500 m window", which is F97d's RETRACTED nominal-B pair.
+    assert (f"0-{rmeta['range_displayed_m']:.1f} m shown of a "
+            f"{rmeta['range_window_m']:.1f} m window, bistatic excess path") in text
 
 
 def test_range_el_subline_states_metres_per_gate_too():
@@ -140,21 +142,32 @@ def test_range_az_gate_calibration_absent_without_axis_metadata():
     assert "m/gate" not in panel_text(fig)
 
 
-def test_range_az_yaxis_title_stays_short_the_calibration_lives_in_the_subline():
-    """Guards the design choice: the info goes in the (already-mutable) subline, never
-    the yaxis title -- test_webapp_figures_wave3.py (an unowned file) pins the title to
-    the exact short string "range (m)"; if that ever regresses it is this test's job to
-    say why, not that test's."""
+def test_range_az_yaxis_title_names_the_convention_and_the_half_window():
+    """SUPERSEDED, deliberately, 2026-09-25 (hostile round 12, item 13). This test used
+    to guard the opposite rule -- "the axis title stays SHORT, the calibration lives in
+    the caption" -- and the reason it gave (2026-09-23) was that the rotated title ran
+    into the heat map's own FIGURE TITLE at podium font size. That mechanism is gone:
+    under the layout spec a figure carries no title at all (the title and caption are
+    HTML above the plot), so the only thing above the axis is the 52 px statistic strip.
+    Meanwhile the caption is at its one-line budget and the fact that the axis shows the
+    NON-NEGATIVE HALF of a 499.6 m period was reachable only inside a closed Details
+    disclosure. It goes on the axis, which is the thing it is about.
+
+    What stays true, and is what this test now pins: the title names the convention
+    first, and the added clause is computed from the frame's own plan."""
     torch = pytest.importorskip("torch")
 
     ra = torch.rand((8, 8)).to(torch.complex64)
     fig = figures_from_outputs({
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    # "excess path (m)" since the bistatic convention landed (owner ballot 2B); what
-    # this test is about is that the axis title stays SHORT -- the calibration lives in
-    # the caption.
-    assert fig.layout.yaxis.title.text == "excess path (m)"
+    rmeta = _range_meta_from_grid(64, 3e9)
+    title = fig.layout.yaxis.title.text
+    assert title.startswith("excess path (m)")
+    assert f"displayed half of {rmeta['range_window_m']:.1f} m" in title
+    # ...and it stays ONE short line: ~42 characters is what a 363 px plot height fits
+    # at the 18 px figure font.
+    assert len(title) <= 46, title
 
 
 # --------------------------------------------------------------------------------
