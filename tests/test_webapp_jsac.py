@@ -177,3 +177,24 @@ def test_no_card_claims_ofdm_drives_the_front_end_into_its_clamp():
     # And the card must WARN against it, because it is the first thing an RF reader
     # expects to hear and it is false here by 13 dB in the wrong direction.
     assert any("papr" in s.lower() or "clamp" in s.lower() for s in p.do_not_say)
+
+
+def test_the_screen_note_names_the_symbol_the_runner_actually_shows():
+    """The card and the code must not disagree about WHICH symbol is on screen. This is
+    the pairing that already went wrong once: the note was written for symbol 0 while the
+    runner (correctly) shows symbol 1 under `pilots_only`, and nothing but a reader would
+    have caught it."""
+    from e2e.comms.ofdm_isac import waveform_chain_spec
+    from webapp.pipeline_runner import _OFDMTxCfg, _display_symbol_for
+
+    p = PRESETS_BY_ID[JSAC_PRESET]
+    params = apply_preset(p)["waveform"]["params"]
+    plan = {"carrier_hz": 30e9, "start_hz": 28.5e9, "stop_hz": 31.5e9, "num_freqs": 64}
+    spec = waveform_chain_spec(
+        params["kind"], _OFDMTxCfg(), freq_plan=plan,
+        n_symbols=params["n_symbols"], pilot_spacing=params["pilot_spacing"],
+        bits_per_symbol=params["bits_per_symbol"],
+        sensing_source=params["sensing_source"], combining=params["combining"])
+    shown = _display_symbol_for(spec)
+    assert ("IMAGE SHOWN IS SYMBOL %d" % shown) in p.screen_note, (
+        "the screen note must name symbol %d, the one the runner displays" % shown)

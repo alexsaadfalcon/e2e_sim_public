@@ -2016,6 +2016,12 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 "max_range_m": float(rx_grid.max_range_m),
             }),
         }
+    if comms_combining is None and wave_spec is not None and wave_spec.comms:
+        # The OFDM/JSAC head is not the legacy `ModemBlock`, so `comms_combining` (read
+        # off the "comms" block's params) is None on this path and the BER/EVM caption
+        # rendered a literal "? combining" -- read on the first JSAC render, 2026-09-24.
+        # The combining a JSAC run used is the waveform class's own.
+        comms_combining = getattr(wave_spec.receive_block, "combining", None)
     if comms_combining is not None:
         # Small metadata dict figures_from_outputs reads to label the BER figure
         # (mirrors "_axis_meta" above); leading underscore keeps it out of the
@@ -3901,21 +3907,39 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
     # BER/EVM-per-frame lines + a constellation snapshot of the last frame.
-    if outputs.get("ber"):
-        bers = [float(b) for b in outputs["ber"]]
-        comms_meta = outputs.get("_comms_meta") or {}
-        combining = comms_meta.get("combining", "?")
+    bers = [float(b) for b in (outputs.get("ber") or [])]
+    comms_meta = outputs.get("_comms_meta") or {}
+    combining = comms_meta.get("combining", "?")
+    gains = [float(g) for g in (outputs.get("comm_array_gain_db") or [])
+             if g is not None and np.isfinite(float(g))]
+    #: BER as a SENTENCE for the EVM panel, set when every frame scored exactly zero.
+    #: A line plot of a constant zero is not a plot: clamped to a display floor on a log
+    #: axis (what this module did before) Plotly rendered an empty grid whose ticks read
+    #: 1.0000024 ... 1, with one invisible point -- 460 px of page spent on nothing,
+    #: read on the first JSAC render (2026-09-24). The number moves to the panel beside
+    #: it, where a photograph can read it, and the row disappears.
+    ber_zero_sentence = None
+    if bers and max(bers) <= 0.0:
+        n_bits = None
+        tx_bits = outputs.get("comm_tx_bits")
+        if tx_bits:
+            try:
+                n_bits = int(np.asarray(_to_numpy_complex(tx_bits[-1])).size)
+            except Exception:
+                n_bits = None
+        ber_zero_sentence = (
+            "BER exactly 0.0 on every frame (%d frame%s%s)"
+            % (len(bers), "" if len(bers) == 1 else "s",
+               (", %d bits each" % n_bits) if n_bits else ""))
+    if bers and ber_zero_sentence is None:
         # Combining and array gain are CAPTION clauses now, not a parenthesised title
         # (layout spec section 2.2: the title is one short line, the caption carries
         # the qualifiers). Same two facts, same computation.
         caption_clauses = [f"{combining} combining"]
-        gains = [float(g) for g in (outputs.get("comm_array_gain_db") or [])
-                 if g is not None and np.isfinite(float(g))]
         if gains:
             caption_clauses.append(f"array gain {np.mean(gains):.1f} dB")
-        # BER=0 (no bit errors) is common on good frames but unplottable on a log
-        # axis -- Plotly drops the points and the whole figure renders empty. Clamp
-        # to a display floor and say so, rather than showing a blank plot.
+        # A run with SOME errors still plots on a log axis, and its zero frames still
+        # need a floor to be drawn at.
         ber_floor = 1e-6
         plotted = [max(b, ber_floor) for b in bers]
         fig = go.Figure(data=go.Scatter(y=plotted, mode="lines+markers"))
@@ -3950,11 +3974,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig.update_layout(xaxis_title="Frame", yaxis_title="EVM", **_base_layout())
         fig.update_layout(annotations=_stat_annotations(
             f"EVM {evms[-1]:.3f} (last frame)"))
-        set_panel(fig, title="Comms head EVM per frame",
-                  caption=["error vector magnitude, per frame"],
-                  details=["Error vector magnitude of the equalized data symbols, "
-                           "one point per frame."],
-                  row=PANEL_ROW_MAP)
+        evm_caption = ["error vector magnitude, per frame"]
+        evm_details = ["Error vector magnitude of the equalized data symbols, "
+                       "one point per frame, against the symbols actually "
+                       "TRANSMITTED (not a decision-directed reference)."]
+        if ber_zero_sentence:
+            evm_caption.append(ber_zero_sentence)
+            evm_details.append(
+                ber_zero_sentence + " -- so there is no BER curve to plot: a constant "
+                "zero on a log axis is an empty panel, and the number says more here.")
+        if combining != "?":
+            evm_details.append(
+                "Combining: %s." % combining
+                + (" Array gain %.1f dB." % np.mean(gains) if gains else ""))
+        set_panel(fig, title="Comms head EVM per frame", caption=evm_caption,
+                  details=evm_details, row=PANEL_ROW_MAP)
         figs["evm"] = _make_legible(fig)
 
     if outputs.get("comm_data_eq"):
@@ -3985,7 +4019,17 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig = go.Figure(data=go.Scatter(
             x=data_np.real, y=data_np.imag, mode="markers", marker=marker,
         ))
+        # EXPLICIT SYMMETRIC RANGES. With `scaleanchor` and autorange, Plotly rendered
+        # the QPSK cloud with its y-axis running 0 to 0.8 -- the LOWER HALF OF THE
+        # CONSTELLATION OFF THE PANEL, two of four points visible, on data that is
+        # symmetric by construction (read on the first JSAC render, 2026-09-24; the data
+        # spans +-0.711 in both I and Q). A constellation missing half its points is not
+        # a cosmetic defect: it is the panel's whole content.
+        _lim = float(np.max(np.abs(np.concatenate([data_np.real, data_np.imag]))))
+        _lim = _lim * 1.25 if np.isfinite(_lim) and _lim > 0 else 1.0
         fig.update_layout(xaxis_title="I", yaxis_title="Q", **_base_layout())
+        fig.update_xaxes(range=[-_lim, _lim], constrain="domain")
+        fig.update_yaxes(range=[-_lim, _lim], constrain="domain")
         set_panel(fig, title="Comms head constellation",
                   caption=["last frame, equalized",
                            "coloured by transmitted symbol"],

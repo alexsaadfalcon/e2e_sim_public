@@ -1300,16 +1300,27 @@ PRESETS: List[DemoPreset] = [
         live_knobs=[("waveform", "pilot_spacing",
                      "2 -> 8 (window 249.8 -> 62.4 m; rate 2.25 -> 3.94 Gb/s)")],
         ab=("waveform", "pilot_spacing", 8),
-        ab_label_a="pilot spacing 2",
-        ab_label_b="pilot spacing 8",
+        # The arm chip renders "<param label> <ab_label>", so an ab_label that repeats
+        # the parameter's name reads "Pilot spacing P pilot spacing 2" -- read on the
+        # first JSAC render, 2026-09-24.
+        ab_label_a="P = 2",
+        ab_label_b="P = 8",
+        # THE SYMBOL SHOWN IS NOT SYMBOL 0, and the note has to say which it is: under
+        # sensing_source="pilots_only" the frame keeps symbol 0 as a full all-pilot
+        # preamble and puts the comb on symbols 1..M-1, so symbol 0's image is the full
+        # 499.55 m window at EVERY pilot spacing (measured: both arms 72.86-72.88 dB
+        # peak-median, identical to the digit, with the A/B invisible). The runner's
+        # `_display_symbol_for` shows symbol 1 here; a test pins this sentence to it.
         screen_note=("One OFDM-ISAC frame per step: 5000 subcarriers on the stored "
                      "channel's own grid (600.1 kHz spacing), 4 symbols, QPSK. Symbol 0 "
                      "is the all-pilot preamble -- the sensing reference, the channel "
                      "estimate the MRC weights come from, and the FMCW bit-parity "
-                     "point; the image shown is that symbol. No range-Doppler: a "
-                     "Doppler FFT over symbols of one time-invariant stored channel is "
-                     "a delta at bin 0, which is a property of these frames, not of "
-                     "JSAC. " + _ARRAY_DISCLOSURE),
+                     "point. The IMAGE SHOWN IS SYMBOL 1, the first data symbol: the "
+                     "comb rides on the data symbols, so that is where the resource "
+                     "split is (symbol 0's image is the full window at every spacing). "
+                     "No range-Doppler: a Doppler FFT over symbols of one "
+                     "time-invariant stored channel is a delta at bin 0, which is a "
+                     "property of these frames, not of JSAC. " + _ARRAY_DISCLOSURE),
         say=[
             "One frame, one waveform, two products: the image comes from the sensing "
             "comb, the constellation from the data subcarriers beside it.",

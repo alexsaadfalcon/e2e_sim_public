@@ -538,7 +538,7 @@ BLOCKS: List[BlockSpec] = [
                            "reference, the per-element channel estimate the beamformer "
                            "weights come from, and the FMCW bit-parity point. At least "
                            "one data symbol must follow it, so the floor is 2."),
-            ParamSpec("pilot_spacing", "Pilot spacing P", "int", 8, step=1, min=1,
+            ParamSpec("pilot_spacing", "Pilot spacing", "int", 8, step=1, min=1,
                       max=64,
                       help="THE RESOURCE SPLIT, when Sensing source is 'pilots_only': "
                            "one subcarrier in P is a deterministic sensing pilot and the "
