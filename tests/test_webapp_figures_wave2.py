@@ -205,10 +205,18 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
     # legend name; it now lives in the panel's one-line CAPTION instead (layout spec
     # section 4, "Detector map" -- as a legend entry it was a ~100-char sentence inside
     # a dark 72 px block). The legend entry itself is back to a plain "n=" count.
+    # Repointed AGAIN (2026-09-25, hostile round 12 item 10): the rule moved one more
+    # step, from the caption into DETAILS, because at ~100 characters it was rendered
+    # TRUNCATED on all six objectness panels -- "hit = cross inside the box (+-2 m,
+    # +-0.06 sin a..." -- i.e. the panel's only statement of what counts as a hit ended
+    # mid-symbol. The caption now points at it in three words. The rule and both of its
+    # tolerances are still on the panel, one click away, and that is what is checked.
     caption = panel_caption(fig)
-    assert "hit = cross inside the box" in caption
-    assert f"{crit.max_range_err_m:g}" in caption
-    assert f"{crit.max_sin_az_err:g}" in caption
+    assert "hit rule in Details" in caption
+    text = panel_text(fig)
+    assert "hit = cross inside the box" in text
+    assert f"{crit.max_range_err_m:g}" in text
+    assert f"{crit.max_sin_az_err:g}" in text
     # No longer an oversized fixed-pixel circle standing in for the tolerance.
     assert gt_trace.marker.size < 18
 

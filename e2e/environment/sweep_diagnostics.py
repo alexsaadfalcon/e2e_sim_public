@@ -122,13 +122,33 @@ def range_az_peak_minus_median_db(frame, array_shape=(32, 32), bins=256,
     This is the RAW STORED frame, i.e. no RFFE / interconnect / AFE in front of it --
     comparable across files, but not the same number a full pipeline run reports."""
     from e2e.blocks import RangeAzBlock
-    from e2e.frames import to_aperture_grid
+    from e2e.chain.dechirp import DechirpBlock
+    from e2e.chain.receive import RangeTransformBlock
+
+    class _SingleTxCfg:
+        """The two fields `DechirpBlock` reads. The stored munich traces are single-TX,
+        and a full `RadarConfig` here would be four numbers nobody reads."""
+
+        mimo = "single"
+        n_tx = 1
 
     t = torch.as_tensor(np.asarray(frame), dtype=torch.complex64)
     if device is not None:
         t = t.to(device)
-    grid = to_aperture_grid(t, array_shape)
-    ra = RangeAzBlock(bins=bins).apply({"s_pars": grid})["range_az"]
+    # THE SPINE'S OWN TWO STEPS, in its own order, at its own settings. Merged from the
+    # `losweep` branch, which forked before the one-chain contract: `RangeAzBlock` used
+    # to range-compress `s_pars` itself, and now consumes a `cube` that
+    # `RangeTransformBlock` owns -- so this called it on a state dict with no cube and
+    # got a KeyError (found on the merge, 2026-09-25). `window="none"` and
+    # `dc_removal=False` are the imaging spine's settings (e2e/simulation.py
+    # `_build_spine`), NOT the ML protocol's, so the number this returns is the one the
+    # demo cards print; `array_shape=` is required of a direct caller because
+    # `Simulation` is what normally seeds `state["aperture_shape"]`.
+    state = {"s_pars": t}
+    state.update(DechirpBlock(_SingleTxCfg()).apply(state))
+    state.update(RangeTransformBlock(None, window="none",
+                                     dc_removal=False).apply(state))
+    ra = RangeAzBlock(bins=bins, array_shape=tuple(array_shape)).apply(state)["range_az"]
     ra = ra.detach().to(torch.float64).cpu()
     db = 10.0 * torch.log10(torch.clamp(ra, min=1e-300) / ra.max())
     return float((db.max() - db.median()).item())
@@ -206,6 +226,13 @@ def pipeline_subspace_err(path, n_steps=8, k=2, warm_start=False, m=512, n_refin
     """
     import e2e.environment.sionna_iterator as sionna_iterator
 
+    # THE SOURCE MUST CARRY A FREQUENCY PLAN. `Simulation`'s default ('full')
+    # composition puts the front end on the BEAT RECORD and needs the beat sample rate
+    # to reference its noise bandwidth to; with no `radar_cfg=` it derives one from the
+    # source's own `freq_plan`, and refuses by name when there is neither. Every file
+    # this function is pointed at in anger (munich_ka.pkl and the two swept traces) is a
+    # v2 pkl with a plan; a hand-built fixture has to carry one too. Also merged-in
+    # breakage: this module forked before that requirement (2026-09-25).
     saved = sionna_iterator.SIONNA_MUNICH_PATH
     sionna_iterator.SIONNA_MUNICH_PATH = path
     try:

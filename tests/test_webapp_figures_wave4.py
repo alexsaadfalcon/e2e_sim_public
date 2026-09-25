@@ -160,5 +160,16 @@ def test_subspace_err_dashed_line_labelled_as_a_reference_not_this_runs_level():
     fig = ffo({"subspace_err": [0.5, 0.55, 0.62], "_axis_meta": {}})["subspace_err"]
     lines = [s for s in fig.layout.shapes if s.type == "line"]
     assert len(lines) == 1
+    # The LINE carries no label of its own since 2026-09-25 (hostile round 12, item 16:
+    # on the Thrust 3 arm-B curve, which settles ON this level, no end of the line was
+    # free of the data). What this test is about -- that the level is labelled a
+    # REFERENCE and not this run's own -- is unchanged, and now lives in the two places
+    # that cannot collide with the curve: the statistic strip and the caption. The
+    # scope changed with it: the 0.08 was measured on two COLD arms of the STATIC file.
+    from webapp.pipeline_runner import panel_caption
+
     ann_texts = " ".join(a.text or "" for a in fig.layout.annotations)
-    assert f"warm-start settled level ({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference)" in ann_texts
+    assert f"static-scene reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}" in ann_texts
+    assert "reference" in panel_caption(fig)
+    assert not [a for a in fig.layout.annotations
+                if "settled level" in (a.text or "")]

@@ -152,9 +152,24 @@ def test_diagnose_file_frames_limit_and_static_direction(tmp_path):
     assert rows[1]["angle_u1_prev_deg"] == pytest.approx(0.0, abs=_ANGLE_FLOOR_DEG)
 
 
+#: The synthetic fixtures' frequency plan. It is not decoration: `Simulation`'s
+#: default composition puts the front end on the beat record and derives the beat
+#: sample rate from the SOURCE's plan when no `radar_cfg=` is given, refusing by name
+#: when there is neither (e2e/simulation.py `_build_spine`). Every real file this
+#: module runs on is a v2 pkl with a plan; the fixture has to be one too, or it is
+#: testing a source shape that does not exist. Endpoint-inclusive over the frames'
+#: own `n_freqs`, the same convention the generator writes (F97d).
+def _freq_plan(n_freqs):
+    return {"carrier_hz": 30e9, "start_hz": 28.5e9, "stop_hz": 31.5e9,
+            "num_freqs": int(n_freqs)}
+
+
 def _write_pkl(path, frames):
     with open(path, "wb") as f:
         pickle.dump({"meta": {"version": 2,
+                              # TOP-LEVEL: `SionnaIterator.freq_plan` reads
+                              # `meta["freq_plan"]`, not the link's own entry.
+                              "freq_plan": _freq_plan(frames.shape[-1]),
                               "links": {"munich": {"rx_array_shape": [32, 32],
                                                    "physical_scale": False}}},
                      "links": {"munich": frames}}, f)
