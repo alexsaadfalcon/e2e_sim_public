@@ -149,12 +149,14 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     labels, values = table.cells.values
     row = dict(zip(labels, values))
     # Last frame (index 1) was a total miss: tp=0, fp=1, fn=1.
-    # "last frame", not "this frame" (hostile round 11, H3): a Plotly Table cannot
-    # animate, so these rows never follow the screen's transport -- and the objectness
-    # map beside them now does.
-    assert row["last frame: TP"] == "0"
-    assert row["last frame: unmatched (FP)"] == "1"
-    assert row["last frame: FN"] == "1"
+    # The row NAMES that frame ("frame 2 of 2", shard 3, 2026-09-24) rather than saying
+    # "last frame" (hostile round 11, H3): a Plotly Table cannot animate, so these rows
+    # never follow the screen's transport while the objectness map beside them does --
+    # and once that map draws matched vs unmatched detections per frame, a viewer can
+    # count hits on the frame in front of them and compare against a row about another.
+    assert row["frame 2 of 2: TP"] == "0"
+    assert row["frame 2 of 2: unmatched (FP)"] == "1"
+    assert row["frame 2 of 2: FN"] == "1"
     # Cumulative over both frames: 1 hit, 1 false alarm. The "N/N scored" qualifier
     # moved into the value (Change, 2026-09-23 coordinator re-check).
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
@@ -258,7 +260,8 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     # figure builder.
     labels, values = table.cells.values
     row = dict(zip(labels, values))
-    assert labels == ["last frame: TP", "last frame: unmatched (FP)", "last frame: FN",
+    assert labels == ["frame 1 of 1: TP", "frame 1 of 1: unmatched (FP)",
+                      "frame 1 of 1: FN",
                       "cumulative hits", "unmatched / frame, these 0 frames",
                       "recall (hits / GT), this run"]
     assert row["cumulative hits"] == "0 (0/1 scored)"

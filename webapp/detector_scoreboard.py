@@ -867,7 +867,15 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # always. Saying "this frame" beside a panel parked on frame 4 of 5 made the
     # audience count TP/FP/FN against a frame that was not on screen; saying "last
     # frame" is the same number, correctly labelled.
-    base_labels = ["last frame: TP", "last frame: unmatched (FP)", "last frame: FN",
+    # NAME THE FRAME (shard 3, 2026-09-24). "last frame" was correct and still left the
+    # room doing arithmetic: the objectness panel beside this table steps with the clock,
+    # and once its detections are drawn as matched/unmatched glyphs (H8) a viewer can
+    # COUNT the hits on the frame in front of them and compare with a row about a
+    # different frame. Naming which frame these rows are makes the two numbers stop
+    # looking like a contradiction, at the cost of nothing.
+    _last_frame_label = (f"frame {n_total} of {n_total}" if n_total else "last frame")
+    base_labels = [f"{_last_frame_label}: TP", f"{_last_frame_label}: unmatched (FP)",
+                   f"{_last_frame_label}: FN",
                   "cumulative hits",
                   f"unmatched / frame, these {n_scored} frames",
                   "recall (hits / GT), this run"]
@@ -1001,7 +1009,7 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # and title/subtitle.
     # Why three rows say "last frame" on a screen whose other panels follow the clock.
     transport_caveat = (
-        "the \"last frame\" rows are the LAST frame scored, not the frame the "
+        "the per-frame rows name the LAST frame scored, not the frame the "
         "transport is parked on: a table is not an animatable Plotly trace, so it "
         "cannot step with the clock the objectness map beside it follows"
     )

@@ -3384,24 +3384,36 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                        if scoring_max_r is not None else ""),
                   ], row=PANEL_ROW_MAP)
         # One frame per stored frame: the objectness map (trace 0), this frame's
-        # detections (trace 1) and this frame's ground-truth boxes + statistic
-        # (layout). The detections trace is always present, so trace 1 is trace 1 on
-        # every frame (H3).
+        # UNMATCHED detections (trace 1), its MATCHED ones (trace 2), the ground-truth
+        # markers (trace 3) and its boxes + statistic (layout). Both detection traces are
+        # always added, so the indices are the same on every frame (H3).
+        #
+        # THE SPLIT HAS TO STEP WITH THE CLOCK. Caught on the 22:2x render: with only
+        # traces [0, 1, 2] updated, the ground-truth positions were written into the
+        # MATCHED trace, so every screen drew a green diamond on each label and the panel
+        # read "7 detections" beside eight diamonds while the table said TP 0. A trace
+        # added to this figure without a row here is not a cosmetic omission; it silently
+        # feeds one trace's data to another.
         if len(obj_frames) > 1:
             def _frame(i, z):
+                d_i = _at(det_frames, i)
+                matched_i = _matched_detection_indices(d_i, _at(gt_frames, i))
+                miss_i = [d for j, d in enumerate(d_i) if j not in matched_i]
+                hit_i = [d for j, d in enumerate(d_i) if j in matched_i]
                 data = [{"type": "heatmap", "z": z},
                         {"type": "scatter",
-                         "x": [d[1] for d in _at(det_frames, i)],
-                         "y": [d[3] for d in _at(det_frames, i)]}]
-                traces = [0, 1]
+                         "x": [d[1] for d in miss_i], "y": [d[3] for d in miss_i]},
+                        {"type": "scatter",
+                         "x": [d[1] for d in hit_i], "y": [d[3] for d in hit_i]}]
+                traces = [0, 1, 2]
                 if gt:
-                    # Trace 2 is the ground-truth marker trace, which only exists on a
+                    # Trace 3 is the ground-truth marker trace, which only exists on a
                     # replayed corpus frame -- it has to step too, or the white dots
                     # stay on the last frame's labels while their boxes move.
                     data.append({"type": "scatter",
                                  "x": [d[1] for d in _at(gt_frames, i)],
                                  "y": [d[3] for d in _at(gt_frames, i)]})
-                    traces.append(2)
+                    traces.append(3)
                 return go.Frame(
                     name=str(i), data=data, traces=traces,
                     layout=dict(
