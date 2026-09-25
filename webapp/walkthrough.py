@@ -91,6 +91,14 @@ def _frames_for(preset_id: str, viewport=(1280, 1250)) -> List["PIL.Image.Image"
                 shot(page)                           # 5. the knob turned
                 _run_and_wait(page)
                 page.wait_for_timeout(1500)
+                # BACK TO RESULTS before the last frame. `_status_after` above leaves
+                # the page on the Block Diagram tab (that is how it reads the status
+                # line), so without this the GIF's final frame -- the one that is
+                # supposed to show the before/after pair -- was a screenshot of the
+                # block diagram with the Run button greyed out mid-run (read on the
+                # regenerated GIF's own frames, 2026-09-24).
+                page.get_by_text("Results", exact=True).click()
+                page.wait_for_timeout(1500)
                 shot(page)                           # 6. before/after on one screen
         browser.close()
     return shots
