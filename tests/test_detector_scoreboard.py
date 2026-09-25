@@ -340,11 +340,18 @@ def test_stored_pr_figure_one_trace_per_arm(beat_cfar_data):
 
 
 def test_stored_pr_figure_highlights_bold(beat_cfar_data):
+    """The highlighted arm is drawn thicker than every OTHER curve.
+
+    Keyed on the FULL trace name, not on `name.split(" (")[0]`: at Ka the file carries
+    two CFAR arms -- "classical CFAR" and "classical CFAR (val-tuned, cfar_first)", which
+    F95's independent pass requires any Ka screen to print together -- and splitting at
+    " (" collapsed them onto one key, so the val-tuned curve overwrote the highlighted
+    one's width and the test compared a curve against itself."""
     fig = ds.stored_pr_figure(highlight_arm="classical CFAR")
-    widths = {tr.name.split(" (")[0]: tr.line.width for tr in fig.data
-             if tr.mode == "lines"}
-    assert widths["classical CFAR"] > max(
-        w for name, w in widths.items() if name != "classical CFAR")
+    widths = {tr.name: tr.line.width for tr in fig.data if tr.mode == "lines"}
+    highlighted = next(name for name in widths if name.startswith("classical CFAR (AP="))
+    assert widths[highlighted] > max(
+        w for name, w in widths.items() if name != highlighted)
 
 
 def test_stored_pr_figure_fonts_are_legible():
@@ -639,10 +646,16 @@ def test_stored_pr_figure_non_highlighted_arm_never_gets_a_ci_legend(beat_cfar_d
     """Only the highlighted (bold) arm's legend gets the CI treatment -- every other
     curve keeps the plain "(AP=...)" legend even though raddetnet_ci.json also scores
     it (as the baseline every OTHER arm is compared against)."""
+    import json
+
     fig = ds.stored_pr_figure(highlight_arm="classical CFAR")
     trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
     assert "vs CFAR" not in trace.name
-    assert trace.name == "raddetnet (AP=0.476)"
+    # AP read from the file the figure was built from, not typed: the default moved to
+    # the Ka scoring (owner ballot 4A) where RADDetNet is 0.468, not 77 GHz's 0.476.
+    ap = next(a["AP"] for a in json.loads(ds.DEFAULT_BEAT_CFAR_JSON.read_text())["arms"]
+              if a["name"] == "raddetnet")
+    assert trace.name == f"raddetnet (AP={ap:.3f})"
 
 
 def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
@@ -852,8 +865,25 @@ def test_scoreboard_ci_row_states_the_seed_to_seed_spread():
     assert "F86" not in caveat_text
 
 
-def test_default_ood_json_exists():
-    assert ds.DEFAULT_OOD_JSON.is_file()
+# =============================================================================
+# KA (owner 2026-09-24, ballot 4A). `ds.DEFAULT_BEAT_CFAR_JSON` is now
+# `beat_cfar_ka.json` and `ds.DEFAULT_RADDETNET_CI_JSON` is `raddetnet_ci_ka.json`,
+# because the Thrust 5 screens replay the Ka corpus. The 77 GHz OOD and 3rd-corpus
+# scorings have NO Ka counterpart, so those two defaults are None and their rows are
+# absent -- see the reasoning where they are defined. The tests below follow the
+# defaults rather than pinning a band, so the same assertions hold if a Ka OOD scoring
+# lands later.
+# =============================================================================
+
+
+def test_no_ood_row_is_printed_without_a_scoring_in_this_band():
+    """NOT "the file exists" any more. `gen_s43_v2_test.json` is a 77 GHz scoring of a
+    77 GHz checkpoint against a 77 GHz corpus; under a Ka arm it would attribute another
+    band's out-of-distribution result to a network never scored that way. The default is
+    None and the row is simply absent -- which is the behaviour to pin, because the
+    failure mode is a row that still prints."""
+    assert ds.DEFAULT_OOD_JSON is None
+    assert ds._ood_rows_for_arm({"name": "raddetnet"}, ds.DEFAULT_OOD_JSON) == []
 
 
 def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
@@ -871,13 +901,29 @@ def test_scoreboard_offline_block_includes_ood_row_for_raddetnet():
     Details lines, found with an explicit search (a bare `next(...)` against the old
     TABLE labels raised a bare `StopIteration` here once these rows moved)."""
     import json
-    ood_arms = {a["name"]: a for a in json.loads(ds.DEFAULT_OOD_JSON.read_text())["arms"]}
+    from pathlib import Path
+
+    # EXPLICIT PATH (2026-09-24): the DEFAULT is None at Ka (no Ka OOD scoring exists),
+    # so this test names the 77 GHz file it was always really about. What it covers is
+    # the row's FORMAT, which is band-independent; the "is there a row at all" question
+    # is `test_no_ood_row_is_printed_without_a_scoring_in_this_band`.
+    ood_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "gen_s43_v2_test.json"
+    ood_arms = {a["name"]: a for a in json.loads(ood_path.read_text())["arms"]}
     s42, s43 = ood_arms["raddetnet_s42"], ood_arms["raddetnet_s43"]
     cfar = ood_arms["classical CFAR"]
 
+    # The whole test is in the 77 GHz band now: the Ka `raddetnet` arm is a DIFFERENT
+    # checkpoint, which the 77 GHz OOD file has never scored, so matching it would
+    # correctly find nothing. Both paths named together keeps the arm and its OOD row on
+    # one corpus, which is the only way this row means anything.
+    bc_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "beat_cfar.json"
+    ci_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "raddetnet_ci.json"
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
-                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet",
+                               beat_cfar_json_path=bc_path,
+                               raddetnet_ci_json_path=ci_path,
+                               ood_json_path=ood_path)
     details = panel_of(fig)["details"]
     ap_line = _find(details, lambda d: d.startswith("OOD AP,"), what="the OOD AP Details line")
     assert "b1_bench_v2" not in ap_line and "s42" not in ap_line
@@ -923,8 +969,11 @@ def test_scoreboard_offline_block_omits_ood_row_when_file_missing(tmp_path, beat
 # (D4/b1_bench_v4, gen_v4_train.json) no checkpoint here trained on -- one more row,
 # read from that file at test time, never typed.
 # --------------------------------------------------------------------------------
-def test_default_third_corpus_json_exists():
-    assert ds.DEFAULT_THIRD_CORPUS_JSON.is_file()
+def test_no_third_corpus_row_is_printed_without_a_scoring_in_this_band():
+    """Same reasoning as the OOD row above."""
+    assert ds.DEFAULT_THIRD_CORPUS_JSON is None
+    assert ds._third_corpus_rows_for_arm({"name": "raddetnet"},
+                                         ds.DEFAULT_THIRD_CORPUS_JSON) == []
 
 
 def test_scoreboard_offline_block_includes_third_corpus_row_for_raddetnet():
@@ -933,12 +982,21 @@ def test_scoreboard_offline_block_includes_third_corpus_row_for_raddetnet():
     an explicit search rather than a bare `next(...)` (which raised a bare
     `StopIteration` against the old TABLE labels once this row moved)."""
     import json
-    arms = {a["name"]: a for a in json.loads(ds.DEFAULT_THIRD_CORPUS_JSON.read_text())["arms"]}
+    from pathlib import Path
+
+    # EXPLICIT PATH -- see the OOD test above.
+    third_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "gen_v4_train.json"
+    arms = {a["name"]: a for a in json.loads(third_path.read_text())["arms"]}
     s42, s43, cfar = arms["raddetnet_s42"], arms["raddetnet_s43"], arms["classical CFAR"]
 
+    bc_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "beat_cfar.json"
+    ci_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "raddetnet_ci.json"
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="b7_raddetnet", threshold=0.44,
-                               match_rule_text="rule", beat_cfar_arm_name="raddetnet")
+                               match_rule_text="rule", beat_cfar_arm_name="raddetnet",
+                               beat_cfar_json_path=bc_path,
+                               raddetnet_ci_json_path=ci_path,
+                               third_corpus_json_path=third_path)
     details = panel_of(fig)["details"]
     line = _find(details, lambda d: d.startswith("3rd corpus AP,"),
                 what="the 3rd-corpus AP Details line")
@@ -954,11 +1012,19 @@ def test_scoreboard_offline_block_third_corpus_row_for_classical_cfar_is_its_own
     """CFAR has no seed-sibling family -- its row is just its own AP, no merge.
     Details, not the table (see the test above)."""
     import json
-    cfar = next(a for a in json.loads(ds.DEFAULT_THIRD_CORPUS_JSON.read_text())["arms"]
+    from pathlib import Path
+
+    # 77 GHz throughout -- see the two tests above for why this row cannot be read off a
+    # Ka arm (no Ka 3rd-corpus scoring exists).
+    third_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "gen_v4_train.json"
+    bc_path = Path(ds._REPO_ROOT) / "e2e" / "ml" / "runs" / "beat_cfar.json"
+    cfar = next(a for a in json.loads(third_path.read_text())["arms"]
                if a["name"] == "classical CFAR")
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="CFAR", threshold=0.66,
-                               match_rule_text="rule", beat_cfar_arm_name="classical CFAR")
+                               match_rule_text="rule", beat_cfar_arm_name="classical CFAR",
+                               beat_cfar_json_path=bc_path,
+                               third_corpus_json_path=third_path)
     details = panel_of(fig)["details"]
     line = _find(details, lambda d: d.startswith("3rd corpus AP,"),
                 what="the 3rd-corpus AP Details line")

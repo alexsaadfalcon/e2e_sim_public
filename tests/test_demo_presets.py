@@ -114,33 +114,44 @@ def test_thrust5_screen_notes_state_the_live_chain_and_scope_the_offline_numbers
         note = PRESETS_BY_ID[pid].screen_note.lower()
         assert "stored ray-traced channel" in note and "b1_demo_cfr" in note, pid
         assert "adc chain" in note and "live" in note, pid
-        assert "beat_cfar.json" in note and "b1_bench_v3" in note, pid
-        assert "shown for reference" in note and "not re-measured live" in note, pid
+        # The Ka scoring file (ballot 4A). The corpus itself is named by the leading
+        # band clause ("b1_demo_cfr_ka"), so it is not repeated here -- the note has a
+        # one-line character budget and two names for one corpus is what it spends on.
+        assert "beat_cfar_ka.json" in note, pid
+        assert "for reference" in note and "not re-measured live" in note, pid
         assert "training distribution" in note, pid
 
 
-def test_thrust5_screen_notes_lead_with_the_band_disclosure():
-    """Wave 10 (2026-09-24, item 4.6, hostile round 9): "the single most
-    attackable fact on the screen" was buried sixth of eight clauses; moved to be
-    the FIRST clause. The note must still end on the scoring-crop clause (see
+def test_thrust5_screen_notes_lead_with_the_band():
+    """Wave 10 (2026-09-24, item 4.6, hostile round 9) put "the single most attackable
+    fact on the screen" -- the band -- in the FIRST clause, where it stays. What it says
+    changed with the corpus (ballot 4A): the band now MATCHES every other thrust's, so
+    the clause states it rather than disclosing a mismatch. The note must still end on
+    the scoring-crop clause (see
     test_resolve_screen_note_drops_vmax_clause_when_manifest_is_unreadable in
     tests/test_webapp_ab.py, which pins the resolved ending)."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         note = PRESETS_BY_ID[pid].screen_note
-        assert note.startswith("corpus traced at 77 GHz"), pid
+        assert note.startswith("Ka corpus, 28.5-31.5 GHz"), pid
         assert "scoring crop 40 m" in note, pid
 
 
-def test_thrust5_screen_notes_disclose_the_corpus_band():
-    """Owner course-correction, 2026-09-23: these ML corpora were traced with the
-    `benchmark_v1` RadarConfig preset at 77 GHz, a different band from the munich
-    frames (Ka, 28.5-31.5 GHz) every other thrust's screen shows, and a re-trace at
-    Ka-band is scheduled -- so a visitor must not assume the two match, and the
-    disclosure must not read as permanent (it names what is scheduled to change)."""
+def test_thrust5_screen_notes_state_the_ka_band_and_both_cfar_baselines():
+    """THE DISCLOSURE IS RESOLVED, NOT DELETED (owner 2026-09-24, ballot 4A: "Ka across
+    the board"). It used to read "corpus traced at 77 GHz (legacy; Ka-band regen
+    scheduled)" -- a disclosure of a mismatch with the munich frames every other thrust
+    shows. The corpus IS Ka now, so the mismatch is gone and the sentence with it; what a
+    Ka screen must carry instead is F95's condition, which the independent verification
+    pass made the price of presenting the RADDetNet number at all: BOTH CFAR baselines
+    (the shipped one and the val-tuned `cfar_first`), and the chance floor beside any AP,
+    because on this corpus a random detection lands inside some target's tolerance almost
+    surely and AP is a ranking score over a compressed scale."""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         note = PRESETS_BY_ID[pid].screen_note
-        assert "77 GHz" in note, pid
-        assert "Ka-band" in note and "scheduled" in note, pid
+        assert "77 GHz" not in note, pid
+        assert "Ka" in note, pid
+        assert "0.218" in note and "0.326" in note, pid     # both CFAR baselines
+        assert "0.093" in note, pid                          # the chance floor
 
 
 def test_thrust5_ml_label_and_note_admit_it_loses():
@@ -149,7 +160,8 @@ def test_thrust5_ml_label_and_note_admit_it_loses():
     p = PRESETS_BY_ID["thrust5_detector_ml"]
     assert "loses" in p.label.lower() and "shown on purpose" in p.label.lower()
     assert "loses to cfar" in p.screen_note.lower()
-    assert "0.127" in p.screen_note and "0.301" in p.screen_note
+    # The Ka numbers (owner ballot 4A): this checkpoint is `b15_fftradnet_rd_ka`.
+    assert "0.105" in p.screen_note and "0.218" in p.screen_note
     assert "shown on purpose" in p.screen_note.lower()
 
 
@@ -202,7 +214,7 @@ def test_raddetnet_card_discloses_all_four_screened_arms():
     learned arms were screened (three ported architectures plus this one) and that
     none was dropped from beat_cfar.json, so a visitor cannot suspect cherry-picking."""
     p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
-    assert any("four learned arms" in s.lower() and "beat_cfar.json" in s
+    assert any("four learned arms" in s.lower() and "beat_cfar_ka.json" in s
               for s in p.say)
 
 
@@ -748,7 +760,8 @@ def test_thrust5_raddetnet_card_leads_with_the_matched_recall_fa_comparison():
     p = PRESETS_BY_ID["thrust5_detector_raddetnet"]
     opening = p.blurb[:160]  # first sentence -- longer than any decimal-point split
     assert "false alarm" in opening.lower()
-    assert "2.99" in opening and "6.24" in opening
+    # Ka numbers, read from the file below rather than typed twice.
+    assert "3.31" in opening and "10.35" in opening
     # Exact numbers from beat_cfar.json -- never re-typed independently of the file.
     import json
     from webapp.detector_scoreboard import DEFAULT_BEAT_CFAR_JSON
@@ -812,19 +825,27 @@ def test_thrust5_all_cards_say_the_detector_panel_is_frame_pinned():
 
 def test_thrust5_ml_names_the_pr_legend_alias():
     """Wave 10 (2026-09-24, item 3.7, hostile round 9): the panel title/scoreboard
-    say b5_fftradnet_v3, the PR legend says fftradnet_rd_b5 -- one name, stated."""
+    say b15_fftradnet_rd_ka, the PR legend says fftradnet_rd_b15 -- one name, stated."""
     p = PRESETS_BY_ID["thrust5_detector_ml"]
-    assert any("fftradnet_rd_b5" in s and "b5_fftradnet_v3" in s for s in p.say)
+    assert any("fftradnet_rd_b15" in s and "b15_fftradnet_rd_ka" in s for s in p.say)
 
 
-def test_thrust5_ml_and_raddetnet_name_the_seed_spread_caveat():
-    """Wave 10 (2026-09-24, item 4.4, hostile round 9): both scoreboards print
-    "seed spread ... > CI half-width ..." -- a statistician finds the CI understates
-    uncertainty in ten seconds if the card has no sentence for it."""
-    for pid in ("thrust5_detector_ml", "thrust5_detector_raddetnet"):
-        p = PRESETS_BY_ID[pid]
-        assert any("seed spread" in s.lower() and "ci half-width" in s.lower()
-                  for s in p.say), pid
+def test_only_the_raddetnet_card_names_the_seed_spread_caveat():
+    """NARROWED to the RADDetNet arm (F95 addendum, 2026-09-24), and the card follows the
+    screen.
+
+    0.040 is a measurement of ONE architecture's seed-to-seed spread: RADDetNet, seeds 42
+    vs 43, at 77 GHz (F86). The scoreboard used to print the caption on EVERY arm that
+    happened to have a CI entry, which attributed RADDetNet's training variance to the
+    ported FFTRadNet checkpoint; `detector_scoreboard._is_raddetnet_arm` now gates it. A
+    card sentence for a caption that no longer appears on that screen would be the same
+    error one layer up, so the ML card must NOT carry it."""
+    rdn = PRESETS_BY_ID["thrust5_detector_raddetnet"]
+    assert any("seed spread" in s.lower() and "ci half-width" in s.lower()
+               for s in rdn.say)
+    ml = PRESETS_BY_ID["thrust5_detector_ml"]
+    assert not any("seed spread" in s.lower() and "ci half-width" in s.lower()
+                   for s in ml.say)
 
 
 def test_thrust5_ml_threshold_is_pinned_below_the_blank_figure_point():

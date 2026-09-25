@@ -31,21 +31,27 @@ from webapp.pipeline_registry import _TESSERA_KA_SCALE
 #: registry beside MAX_N_STEPS so the runner's error text and this ceiling agree.
 from webapp.pipeline_registry import MAX_PRESET_N_STEPS  # noqa: E402
 
-#: The checkpoint for the ML detector: rd format, test AP 0.127 under the beat_cfar
-#: protocol. It PREDATES the pipeline fingerprint (F84) -- it carries no stamp and is
-#: trusted because re-scoring it under current code reproduces 0.127 (2026-09-22,
-#: `e2e/ml/runs/beat_cfar.json`, arm `fftradnet_rd_b5`). Not tracked by git -- the demo
-#: machine needs the file. The rad-format checkpoints are NOT used here: see F84.
-ML_CHECKPOINT = "e2e/ml/runs/b5_fftradnet_v3/best.pt"
+#: The LOSING arm, at Ka (owner 2026-09-24, ballot 4A): the ported FFTRadNet recipe
+#: retrained on the Ka corpus (b5's recipe, 30 epochs, --deterministic, recertify PASS).
+#: Ka D2 test AP 0.105 vs shipped CFAR 0.218, FA/frame 26.28 -- and only +0.012
+#: [+0.001, +0.026] above the null arm's 0.093, i.e. barely above the chance floor
+#: (F96 addendum, `e2e/ml/runs/beat_cfar_ka.json`, arm `fftradnet_rd_b15`). That is a
+#: STRONGER F83 statement than 77 GHz's 0.127 and the screen should make it, not soften
+#: it. Not tracked by git -- the demo machine needs the file.
+ML_CHECKPOINT = "e2e/ml/runs/b15_fftradnet_rd_ka/best.pt"
 
-#: The repo-native architecture that scored 0.476 vs CFAR 0.301 (F85; seed 42,
-#: deterministic, fingerprint-clean, recertified). Its recall-0.5 operating point is
-#: objectness 0.44 (`beat_cfar.json`). Presented ONLY after F85's verification addendum.
-RADDETNET_CHECKPOINT = "e2e/ml/runs/b7_raddetnet/best.pt"
-RADDETNET_THRESHOLD = 0.44
+#: The repo-native architecture, retrained at Ka (F95): D2 test AP 0.468 vs shipped
+#: CFAR 0.218 (+0.250 [+0.217, +0.282]) and 0.511 vs 0.281 on the never-trained-on D4
+#: corpus; all four controls pass on both; seed 42, deterministic, recertify PASS. Its
+#: recall-0.5 operating point is objectness 0.4753 (`beat_cfar_ka.json`). F95's
+#: INDEPENDENT pass is the condition on presenting it: any Ka screen prints BOTH CFAR
+#: baselines, because against a val-tuned CFAR that detects before collapsing Doppler and
+#: is unclamped the honest lead is 0.468 vs 0.326, not 0.468 vs 0.218.
+RADDETNET_CHECKPOINT = "e2e/ml/runs/b14_raddetnet_ka/best.pt"
+RADDETNET_THRESHOLD = 0.475
 
-#: Classical CA-CFAR's recall-0.5 operating point on the same split (`beat_cfar.json`,
-#: `operating_point.score_threshold` 0.661). All three Thrust 5 presets sit at their
+#: Classical CA-CFAR's recall-0.5 operating point on the same split (`beat_cfar_ka.json`,
+#: `operating_point.score_threshold` 0.6155). All three Thrust 5 presets sit at their
 #: recall-0.5 points on the 172-frame beat_cfar.json split -- not three arbitrary
 #: thresholds -- so the FA/frame numbers quoted from that file (6.2 / 26 / 3.0 per
 #: frame) are the comparison. RETRACTED (hostile-expert read, 2026-09-23, item 4):
@@ -53,23 +59,24 @@ RADDETNET_THRESHOLD = 0.44
 #: comparison; they are not -- recall varies frame to frame on 5 frames (arm-A hit
 #: rates measured 2026-09-23: CFAR 0.53, RADDetNet 0.33, ML 0.50 -- nowhere near
 #: matched), so only the 172-frame rows are comparable across arms.
-CFAR_THRESHOLD = 0.66
+CFAR_THRESHOLD = 0.615
 
 #: Decode threshold for that checkpoint: its recall-0.5 operating point, objectness
-#: 0.22 (`beat_cfar.json`). At the registry default 0.5 the checkpoint draws NO
+#: 0.2203 (`beat_cfar_ka.json`). At the registry default 0.5 the checkpoint draws NO
 #: detections on the test frames -- the "demo landmine" in DEMO_DEFENSE.md, measured
 #: again on the real frames. Pinned here so the figure is never blank.
-ML_THRESHOLD = 0.22
+ML_THRESHOLD = 0.220
 
 #: The demo corpus that stores the RAY-TRACED CHANNEL beside each frame (50 scenes,
 #: seed 4242, splits 40/5/5, every frame with a `.cfr.npy` sidecar -- generated
-#: 2026-09-23 by `chain_generate --store-cfr`). Replaying it in the `cfr` domain runs
+#: 2026-09-24 at Ka by `chain_generate --store-cfr`). Replaying it in the `cfr` domain runs
 #: the whole analog/digital chain LIVE from that channel, which is what makes a
 #: front-end knob reach the detector at all (owner directive, notes/STATE.md §0.1).
 #: The predecessor screens replayed a stored ADC cube and could not do that; the two
 #: pre-generated bridge corpora that stood in for a live ADC knob are retired with
 #: them (the directories may stay on disk).
-DEMO_CFR_CORPUS = "e2e/ml/datasets/b1_demo_cfr/benchmark_v1_D2/manifest.json"
+DEMO_CFR_CORPUS = ("e2e/ml/datasets/b1_demo_cfr_ka/benchmark_v1_ka_D2/"
+                   "benchmark_v1_ka_D2/manifest.json")
 
 
 #: Shared Results-tab screen note for the three Thrust 5 detector presets. The opening
@@ -118,13 +125,16 @@ DEMO_CFR_CORPUS = "e2e/ml/datasets/b1_demo_cfr/benchmark_v1_D2/manifest.json"
 #: actually in force -- trimmed elsewhere in the same edit (dropped the "12-bit"
 #: aside and two connector words) to stay under the 400-char budget on all three
 #: T5 cards; ML has the least headroom because of its own appended sentence.
+# KA (owner 2026-09-24, ballot 4A). The 77 GHz disclosure that used to lead this note is
+# GONE because the fact it disclosed is gone: these screens replay the Ka corpus, the same
+# band as every other thrust. In its place, the two things a Ka screen must carry -- both
+# CFAR baselines (F95's independent pass) and the chance floor beside any AP.
 _T5_SCREEN_NOTE = (
-    "corpus traced at 77 GHz (legacy; Ka-band regen scheduled); frames: stored "
-    "ray-traced channel (b1_demo_cfr); ADC chain LIVE; offline numbers "
-    "(beat_cfar.json, b1_bench_v3) shown for reference, not "
-    "re-measured live; any knob moves ML off training distribution; "
-    "Range-Doppler shares the tighter arm's clip (printed); scoring crop "
-    "40 m{VMAX_CLAUSE}."
+    "Ka corpus, 28.5-31.5 GHz (b1_demo_cfr_ka); stored ray-traced channel, "
+    "ADC chain LIVE; offline numbers (beat_cfar_ka.json) for reference, not "
+    "re-measured live; BOTH CFAR baselines, shipped 0.218 and val-tuned 0.326, "
+    "chance floor 0.093; a knob moves ML off training distribution; "
+    "scoring crop 40 m{VMAX_CLAUSE}."
 )
 
 
@@ -957,9 +967,8 @@ PRESETS: List[DemoPreset] = [
             "The gate that makes this honest: at generation settings the live "
             "cube is BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); "
             "moving a knob breaks that -- the whole demonstration.",
-            "Classical CFAR scores AP 0.301 offline; chance floor 0.081 "
-            "(b1_bench_v3, 12-bit). These 5 frames are a different corpus -- a "
-            "demonstration, not a re-measurement.",
+            "Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance "
+            "floor 0.093; these 5 frames demonstrate, not measure.",
             # wave 9 (2026-09-24, item 1.7): the old line was wrong on both counts --
             # the detector map spans 0-50 m (a 10 m unscored strip above the 40 m
             # dashed line), and the 0-100 m panel is Range-Doppler power, unlabelled.
@@ -967,8 +976,8 @@ PRESETS: List[DemoPreset] = [
             # animated panel on one shared clock -- the Range-Doppler cube
             # loops while the detector/scoreboard/PR panels hold the last
             # frame; pause the cube before pointing at one frame's crosses.
-            "The CFAR map spans 0-50 m; the top 10 m is unscored (scoring "
-            "stops at 40 m). Detector, scoreboard and PR panels hold the LAST "
+            "The CFAR map spans 0-50 m; the top 10 m is unscored. Detector, "
+            "scoreboard and PR panels hold the LAST "
             "frame; the Range-Doppler cube loops beside them -- pause it "
             "before discussing one frame's detections.",
             "Ground truth omits ~3 real objects per frame inside 40 m, so a "
@@ -1003,9 +1012,9 @@ PRESETS: List[DemoPreset] = [
             # rescoring under the current beat_cfar.json protocol; only 0.229 (the old
             # rad-format figure) is retracted.
             "Any learned-detector number before 2026-09-22 except rd-format "
-            "0.127/0.123: the rad-format 0.138 (PR legend) is the 2026-09-22 "
-            "rescoring under beat_cfar.json's protocol, not the retracted 0.229 "
-            "(F84).",
+            "0.105/0.093: every number on this screen is the Ka scoring "
+            "(beat_cfar_ka.json, 2026-09-24); the 77 GHz figures (0.127, 0.138, "
+            "0.229) belong to a different corpus and band.",
             "That fewer CFAR training cells means more false alarms: measured, the "
             "count went 46 -> 39 (train 6 -> 2). Do not turn that knob on stage.",
         ],
@@ -1036,12 +1045,12 @@ PRESETS: List[DemoPreset] = [
         # the task set for keeping the corner as-is, so 25 m is unchanged; the wording
         # now states the measured dB instead of "discards".
         blurb=("The same live chain, decoded by the ported FFTRadNet checkpoint (rd "
-               "input; offline test AP 0.127 vs CFAR's 0.301). Its objectness map is "
+               "input; offline test AP 0.105 vs CFAR's 0.218). Its objectness map is "
                "a range-profile x fixed-azimuth-prior STRIPE, not peaks: the network "
                "never learns azimuth (F83). A/B moves the IF high-pass corner from "
                "1 m (real receiver) to a deliberately broken 25 m, attenuating (not "
                "discarding) returns inside 25 m -- ~4.3 dB at ~22 m: unmatched/frame "
-               "falls 26.60 -> 12.20, hits 15 -> 4. Threshold is pinned at "
+               "falls sharply, and hits with it. Threshold is pinned at "
                "recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing."),
         live_knobs=[("if_hpf", "corner_range_m",
                      "1 m (as built) -> 25 m (attenuates returns inside 25 m; about "
@@ -1054,22 +1063,22 @@ PRESETS: List[DemoPreset] = [
         # separator has to be added back here or the two run together on screen
         # ("v_max +-9.69 m/s Loses to CFAR", read off the rehearsal PNG).
         screen_note=_T5_SCREEN_NOTE.rstrip(".")
-        + ". Loses to CFAR 0.127 vs 0.301, shown on purpose.",
+        + " Loses to CFAR 0.105 vs 0.218, shown on purpose.",
         say=[
-            "The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor "
+            "The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor "
             "0.081. Say it first.",
             "B is not a plausible receiver -- a 25 m high-pass corner -- the "
             "point is a front-end setting reaches the detector at all: "
-            "unmatched/frame 26.60 -> 12.20, hits 15 -> 4.",
+            "unmatched/frame and hits both fall.",
             "At A's operating point, offline expects ~29 crosses/frame = 26.4 FA "
-            "+ 3.0 hits (beat_cfar.json); these 5 live frames give 26.60 "
+            "+ 3.0 hits (beat_cfar_ka.json); these 5 live frames give their own "
             "unmatched/frame -- same regime, not the same number.",
             "Both ported networks emit a near-separable f(range)*g(azimuth) map: "
             "rank-1 energy 0.89/0.76 vs 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant map.",
             "F83's mechanism: neither head converts channel phase into an angle "
             "bin. An architecture with range x azimuth as its spatial plane "
-            "scores 0.476 and passes controls this one fails -- load RADDetNet, "
+            "scores 0.468 and passes controls this one fails -- load RADDetNet, "
             "read its caveats first.",
             "This checkpoint trained on a different corpus; its rd input scaling "
             "comes from that corpus (screen note). Moving a knob takes it "
@@ -1095,13 +1104,17 @@ PRESETS: List[DemoPreset] = [
             "one frame.",
             # wave 10 (2026-09-24, item 3.7, hostile round 9): one name for the
             # detector, not three.
-            "The PR legend's 'fftradnet_rd_b5' is this checkpoint "
-            "(b5_fftradnet_v3).",
-            # wave 10 (2026-09-24, item 4.4, hostile round 9): the same
-            # seed-spread-vs-CI row is on this scoreboard too.
-            "This scoreboard's bootstrap also shows seed spread 0.040 exceeding "
-            "CI half-width 0.029 -- doesn't change the verdict here (already "
-            "loses), but is what undermines RADDetNet's lead claim.",
+            "The PR legend's 'fftradnet_rd_b15' is this checkpoint "
+            "(b15_fftradnet_rd_ka).",
+            # RETIRED (shard 3, 2026-09-24, F95 addendum): this bullet existed for a
+            # scoreboard row that no longer appears on THIS screen. The seed spread
+            # 0.040 is a RADDetNet measurement (seeds 42 vs 43, 77 GHz, F86) and the
+            # caption is now gated to that arm -- printing it here attributed one
+            # architecture's training variance to a different network. In its place, the
+            # fact that IS this screen's:
+            "At Ka this arm scores 0.105 against a 0.093 chance floor -- +0.012 "
+            "[+0.001, +0.026] above chance. It does not merely lose to CFAR; it "
+            "barely beats random.",
         ],
         do_not_say=[
             "'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.",
@@ -1114,7 +1127,8 @@ PRESETS: List[DemoPreset] = [
     ),
     DemoPreset(
         id="thrust5_detector_raddetnet",
-        label="Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476 vs 0.301, in-distribution",
+        label="Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP 0.468 vs 0.218 "
+              "(val-tuned 0.326), in-distribution",
         thrust=5,
         n_steps=5,
         overrides=_merge(
@@ -1139,8 +1153,8 @@ PRESETS: List[DemoPreset] = [
         # sent the presenter to another preset for a number printed on THIS one, same
         # row ("FA/frame at recall 0.5, 172 frames | 2.99 (CFAR 6.24)").
         blurb=("THE REAL CLAIM, first: at matched recall (0.5) on the 172-frame split, "
-               "RADDetNet racks up fewer false alarms than CFAR -- 2.99 vs 6.24 "
-               "FA/frame (6.24 also printed on this screen; AP 0.476 vs 0.301, "
+               "RADDetNet racks up fewer false alarms than CFAR -- 3.31 vs 10.35 "
+               "FA/frame (both printed on this screen; AP 0.468 vs 0.218, "
                "controls pass). On the 5 live frames below, fewer crosses can mean "
                "fewer hits since these aren't recall-matched -- read the "
                "scoreboard's FA rows, not the crosses. The same live chain runs "
@@ -1159,9 +1173,9 @@ PRESETS: List[DemoPreset] = [
             "The defensible sentence: a learned head on the classical front end beats a "
             "CFAR threshold on the same cube, in-distribution -- say that, not 'beats "
             "CFAR' (F85 addendum).",
-            "Every offline number comes from e2e/ml/runs/beat_cfar.json (seed 42, "
-            "b1_bench_v3, 12-bit default impairments); re-scored bit-identically. "
-            "Paired scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI "
+            "Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42, "
+            "b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically. "
+            "Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI "
             "[+0.145, +0.208]; +0.148 vs the best of nine classical baselines (0.328).",
             # wave 9 (2026-09-24, T5 item 5): folded the recall-0.5 caveat into this
             # bullet -- the card's say list is already at its 6-bullet cap.
@@ -1178,21 +1192,20 @@ PRESETS: List[DemoPreset] = [
             "one frame.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
-            "were scored too, best 0.328 -- above shipped CFAR (0.301), but the best "
-            "classical still loses to RADDetNet (0.476).",
+            "were scored too, best 0.326 -- above shipped CFAR (0.218), but still "
+            "behind RADDetNet (0.468, a +0.142 lead).",
             "Four learned arms were screened: three ported architectures and "
             "this one designed to the F83 diagnosis; all four are in "
-            "beat_cfar.json, none dropped.",
+            "beat_cfar_ka.json, none dropped.",
             # wave 10 (2026-09-24, item 4.4, hostile round 9): folded in the
             # seed-spread-vs-CI caveat -- the say list is at its 6-bullet cap, and
             # this is the OOD bullet the caveat actually belongs on.
             # wave 12 (2026-09-24, item 1.8): "3 seeds + the joint arm" read as a
             # bigger sample than the scoreboard shows -- it prints two seed rows
             # (0.208/0.153) plus the joint checkpoint, not three seeds.
-            "THE CAVEAT: on b1_bench_v2 (unseen), seed 42 scores 0.208 vs CFAR "
-            "0.179; seed 43 0.153 -- NOT reliable OOD (F86). Seed spread 0.040 "
-            "exceeds CI half-width 0.032: the lead rests on the 2-seed rows "
-            "shown plus the joint checkpoint (F86), not the CI alone.",
+            "THE CAVEAT: one Ka seed exists. The seed spread 0.040 (F86, at "
+            "77 GHz) exceeds this arm's CI half-width 0.032, so the lead rests "
+            "on one training run, not the CI alone.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution, on "

@@ -31,11 +31,21 @@ PREFERRED_CORPUS = "e2e/ml/datasets/b1_bench_v3/benchmark_v1_D2/manifest.json"
 
 
 def discover_manifests(datasets_dir: Path = DATASETS_DIR) -> List[str]:
-    """Repo-relative paths of every `manifest.json` under `datasets_dir`, sorted."""
+    """Repo-relative paths of every `manifest.json` under `datasets_dir`, sorted.
+
+    TWO depths, because the corpora on disk have two shapes. `chain_generate` normally
+    writes `<corpus>/<config>/manifest.json`, but the Ka regeneration wrote
+    `b1_demo_cfr_ka/benchmark_v1_ka_D2/benchmark_v1_ka_D2/manifest.json` -- the config
+    directory doubled -- and a two-level glob simply did not see it, so the Ka demo
+    corpus was invisible to the Corpus Replay source and to every preset validated
+    against this list. Scanning both depths is the fix that does not require renaming a
+    directory the Ka scoring JSONs already point at by path.
+    """
     if not datasets_dir.is_dir():
         return []
-    found = sorted(p for p in datasets_dir.glob("*/*/manifest.json") if p.is_file())
-    return [p.relative_to(REPO_ROOT).as_posix() for p in found]
+    found = sorted(set(list(datasets_dir.glob("*/*/manifest.json"))
+                       + list(datasets_dir.glob("*/*/*/manifest.json"))))
+    return [p.relative_to(REPO_ROOT).as_posix() for p in found if p.is_file()]
 
 
 CORPUS_MANIFESTS: List[str] = discover_manifests()

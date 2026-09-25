@@ -56,21 +56,37 @@ Detection = Tuple[float, ...]
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 #: The stored offline scoring this module reads by default (e2e.ml.compare_detectors'
 #: output format) -- overridable per call, never edited by this module.
-DEFAULT_BEAT_CFAR_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "beat_cfar.json"
+#: KA (owner 2026-09-24, ballot answer 4A: "Ka across the board"). The 77 GHz file is
+#: still on disk and still readable -- every function here takes the path -- but the
+#: DEFAULT is the Ka scoring, because the Thrust 5 screens now replay the Ka corpus and a
+#: scoreboard reading the other band's numbers beside them would be the worst kind of
+#: wrong: plausible. Both CFAR baselines are arms of this file (shipped default and the
+#: val-tuned `cfar_first`), which is what F95's independent pass requires any Ka screen
+#: to print.
+DEFAULT_BEAT_CFAR_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "beat_cfar_ka.json"
 #: Bootstrap AP-delta-vs-CFAR confidence intervals (e2e.ml's paired-bootstrap CI tool),
 #: keyed by arm name -- optional: a checkpoint scored in beat_cfar.json need not have a
 #: CI entry here yet (F85 addendum). Overridable per call; never edited by this module.
-DEFAULT_RADDETNET_CI_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "raddetnet_ci.json"
+DEFAULT_RADDETNET_CI_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "raddetnet_ci_ka.json"
 #: A SEPARATE offline-scored run against an out-of-distribution corpus (b1_bench_v2,
 #: an earlier generator/impairment model than beat_cfar.json's b1_bench_v3) -- F86
 #: (notes/ESTABLISHED_FACTS.md, measured 2026-09-22). Optional: an arm not scored here
 #: simply gets no OOD row (`_ood_rows_for_arm`). Overridable per call; never edited.
-DEFAULT_OOD_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "gen_s43_v2_test.json"
+#: NONE AT KA, deliberately. `gen_s43_v2_test.json` is a 77 GHz scoring of a 77 GHz
+#: checkpoint against a 77 GHz corpus; printing it under a Ka arm would attribute another
+#: band's out-of-distribution result to a network that has never been scored that way.
+#: The Ka pair that DOES exist (D2 in-distribution, D4 never-trained-on) is
+#: `beat_cfar_ka.json` / `beat_cfar_ka_d4.json`, and D4 is "a different tier of the same
+#: generator family" (F95's independent pass), which is not the OOD claim this row makes.
+#: So the row is absent until a Ka OOD scoring exists -- `_ood_rows_for_arm` already
+#: returns [] for a missing file, which is the behaviour, not a failure.
+DEFAULT_OOD_JSON = None
 #: A THIRD, separately-scored corpus (D4/b1_bench_v4) no checkpoint here trained on --
 #: F87 (notes/ESTABLISHED_FACTS.md, measured 2026-09-22). Optional, same convention as
 #: `DEFAULT_OOD_JSON`: an arm not scored here simply gets no 3rd-corpus row
 #: (`_third_corpus_rows_for_arm`). Overridable per call; never edited by this module.
-DEFAULT_THIRD_CORPUS_JSON = _REPO_ROOT / "e2e" / "ml" / "runs" / "gen_v4_train.json"
+#: Same reasoning as `DEFAULT_OOD_JSON`: 77 GHz scoring, no Ka counterpart, no row.
+DEFAULT_THIRD_CORPUS_JSON = None
 
 #: Hard precision ceiling for ANY detector that fires on every real object, because
 #: ground truth OMITS real objects: ~3.25 real strongly-scattering objects per frame
@@ -103,6 +119,15 @@ _T5_RADAR_PRESET_NAME = "benchmark_v1"
 #: cannot speak to, since bootstrapping resamples SCENES of one already-trained
 #: network, never a second training run.
 SEED_TO_SEED_AP_SPREAD_F86 = 0.040
+
+
+def _is_raddetnet_arm(arm_name) -> bool:
+    """Whether `arm_name` is a RADDetNet arm, i.e. the architecture
+    `SEED_TO_SEED_AP_SPREAD_F86` was measured on. Substring, not equality: the arm reads
+    "raddetnet" in `beat_cfar_ka.json` and has read "raddetnet_s43"/"raddetnet (joint)"
+    in other scorings, and a spread caption that silently stopped firing would be a
+    quieter defect than one that fires too widely."""
+    return "raddetnet" in str(arm_name or "").lower()
 
 #: The null arm's stored name reads as "random INSIDE the ground-truth boxes" (i.e.
 #: the detector is handed the answer) -- it is actually uniform-random scores inside
@@ -466,6 +491,8 @@ def _ood_rows_for_arm(bc_arm: Dict[str, Any], ood_json_path=DEFAULT_OOD_JSON
     Both display as generic "out-of-distribution corpus" / "2 seeds" now; the
     presenter's own card names the actual corpus and seeds where that matters.
     """
+    if ood_json_path is None:
+        return []
     ood_arms = _load_json_arms(ood_json_path)
     if not ood_arms:
         return []
@@ -525,6 +552,8 @@ def _third_corpus_rows_for_arm(bc_arm: Dict[str, Any],
     otherwise the row carries just the matched arm's own AP. The two seeds display as
     "2 seeds" (hostile-expert read, 2026-09-23, item 8), never their internal numbers.
     """
+    if third_corpus_json_path is None:
+        return []
     corpus_arms = _load_json_arms(third_corpus_json_path)
     if not corpus_arms:
         return []
@@ -692,10 +721,17 @@ def _offline_arm_rows(beat_cfar_arm_name: str, beat_cfar_json_path=DEFAULT_BEAT_
             # skimming the CI number alone would miss it. No "(F86)" ledger tag on
             # screen (hostile-expert read, 2026-09-23, item 8): a visitor cannot look
             # that up; the claim stands on the two numbers alone.
-            half_width = (comp["ci_high"] - comp["ci_low"]) / 2.0
-            cmp_op = ">" if SEED_TO_SEED_AP_SPREAD_F86 > half_width else "<="
-            rows.append((f"bootstrap: seed spread {SEED_TO_SEED_AP_SPREAD_F86:.3f}",
-                        f"{cmp_op} CI half-width {half_width:.3f}"))
+            # GATED TO THE RADDETNET ARM (F95 addendum, 2026-09-24). 0.040 is a
+            # measurement of ONE architecture's seed-to-seed spread -- RADDetNet, seeds
+            # 42 vs 43, benchmark_v1_D2/v3 at 77 GHz (F86). It fired on every arm that
+            # happened to have a CI entry, which attributed RADDetNet's training variance
+            # to the ported FFTRadNet checkpoint and to CFAR. A fact stated
+            # unconditionally is applied unconditionally; this is the condition.
+            if _is_raddetnet_arm(beat_cfar_arm_name):
+                half_width = (comp["ci_high"] - comp["ci_low"]) / 2.0
+                cmp_op = ">" if SEED_TO_SEED_AP_SPREAD_F86 > half_width else "<="
+                rows.append((f"bootstrap: seed spread {SEED_TO_SEED_AP_SPREAD_F86:.3f}",
+                            f"{cmp_op} CI half-width {half_width:.3f}"))
 
     rows.extend(_ood_rows_for_arm(arm, ood_json_path))
     rows.extend(_third_corpus_rows_for_arm(arm, third_corpus_json_path))
