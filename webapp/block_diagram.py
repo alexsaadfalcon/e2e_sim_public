@@ -239,6 +239,28 @@ def resolve_node(block_or_node_id: str) -> str:
     return _BLOCK_TO_NODE.get(block_or_node_id, block_or_node_id)
 
 
+def waveform_kind(block_state: Dict[str, Dict[str, Any]]) -> str:
+    """The waveform CLASS this run transmits -- the diagram's one branch point."""
+    if not block_state.get("waveform", {}).get("enabled", False):
+        return "fmcw"
+    return str(block_state.get("waveform", {}).get("params", {}).get("kind") or "fmcw")
+
+
+#: What the mixing node IS, per waveform class. A class is (source, MIXING MODE,
+#: products), so the mixing block is not the same block on all three -- and a diagram
+#: that says "dechirp" on a JSAC run tells the room the frame was dechirped when it was
+#: DIVIDED by the transmitted grid (read on the first JSAC card render, 2026-09-24).
+#: `ofdm` has no mixing block at all: a comms receiver equalises the grid and never
+#: forms a cube, which is exactly what makes the difference between `ofdm` and `jsac` a
+#: screenshot rather than a claim.
+_MIXING_LABELS = {
+    "fmcw": "Mixing\n(dechirp)",
+    "wideband": "Mixing\n(dechirp)",
+    "ofdm": "Mixing\n(none)",
+    "jsac": "Mixing\n(symbol\ndivision)",
+}
+
+
 def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]) -> str:
     """The label as rendered: what the node IS DOING on this run, which is the
     difference between a diagram and a wiring list."""
@@ -248,9 +270,10 @@ def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]
                    "rt_environment": "live RT",
                    "corpus_environment": "corpus"}.get(src, src)
         return "Stored\nchannel\n(%s)" % backend
+    if node_id == "dechirp":
+        return _MIXING_LABELS.get(waveform_kind(block_state), label)
     if node_id == "waveform":
-        kind = str(block_state.get("waveform", {}).get("params", {}).get("kind")
-                   or "fmcw")
+        kind = waveform_kind(block_state)
         # With the transmit tributary off there is still a waveform: for a unit-modulus
         # chirp the dechirp identity IS the modulation (contract section 1.2 row 3), so
         # `s_pars = H` is the FMCW case, not the absence of one. Say which it is rather
@@ -379,6 +402,11 @@ def _node_active(block_state, node_id: str) -> bool:
     something. What each member is doing is in the node's editor, one click away; what
     the graph carries is whether the chain passes through here.
     """
+    if node_id in ("dechirp", "cube") and waveform_kind(block_state) == "ofdm":
+        # The one class with no mixing block and therefore no cube. Structural for the
+        # other two, absent here -- and drawing it lit would be the diagram claiming a
+        # radar product this run cannot produce (the runner refuses those by name).
+        return False
     if node_id in _STRUCTURAL_NODES:
         return True
     return any(_block_active(block_state, bid)

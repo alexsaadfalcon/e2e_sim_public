@@ -198,3 +198,30 @@ def test_the_screen_note_names_the_symbol_the_runner_actually_shows():
     shown = _display_symbol_for(spec)
     assert ("IMAGE SHOWN IS SYMBOL %d" % shown) in p.screen_note, (
         "the screen note must name symbol %d, the one the runner displays" % shown)
+
+
+def test_the_mixing_node_says_which_mixing_block_this_class_uses():
+    """A class is (source, MIXING MODE, products), so the mixing block is not the same
+    block on all three -- and a diagram reading "dechirp" on a JSAC run tells the room
+    the frame was dechirped when it was DIVIDED by the transmitted grid (read on the
+    first JSAC card render, 2026-09-24). `ofdm` has no mixing block at all, and no cube
+    with it: the node pair is drawn disabled, which is the same statement the runner
+    makes when it refuses a sensing product on that class."""
+    from webapp import block_diagram as bd
+
+    def nodes(kind):
+        state = apply_preset(PRESETS_BY_ID[JSAC_PRESET])
+        state["waveform"]["params"]["kind"] = kind
+        els = bd.build_elements(state)
+        return {e["data"]["id"]: e for e in els if "position" in e}
+
+    assert "symbol" in nodes("jsac")["dechirp"]["data"]["label"]
+    assert "dechirp" in nodes("fmcw")["dechirp"]["data"]["label"]
+    ofdm = nodes("ofdm")
+    assert "none" in ofdm["dechirp"]["data"]["label"]
+    for nid in ("dechirp", "cube"):
+        assert "disabled" in ofdm[nid]["classes"], nid
+    # ... and the FMCW chain still draws both as structural.
+    fmcw = nodes("fmcw")
+    for nid in ("dechirp", "cube"):
+        assert "disabled" not in fmcw[nid]["classes"], nid

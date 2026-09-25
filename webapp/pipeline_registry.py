@@ -178,16 +178,19 @@ BLOCKS: List[BlockSpec] = [
                            "to (noise power scales with it: 1 -> 50 MHz is 17 dB). Does "
                            "not band-limit the signal in this model."),
         ],
-        blurb=("Analog RF front-end circuit distortion: the per-element LNA, mixer and "
-               "baseband amplifier cascade of e2e/circuit/rffe_model.py. DRAWN WHERE IT "
-               "SITS, APPLIED WHERE IT IS CHEAP: on the diagram the front end is at the "
-               "element, ahead of the interconnect and the mixing block, because that is "
-               "the receiver. The computation applies the same cascade to the SAMPLED "
-               "BEAT RECORD after the mixing block -- exact for a unit-modulus chirp "
-               "(the envelope is unchanged by dechirping, F97b/ESTABLISHED_FACTS) and it "
-               "avoids a 4.9 GB RF-rate tensor per frame. The licence stops where the "
-               "baseband stage clips I and Q separately; the shipped presets drive two "
-               "decades below that. Required to run with the current backend."),
+        # SHORT ON PURPOSE (measured on the rendered card, 2026-09-24): this paragraph
+        # sits above the knobs in the editor column, and at ten lines it pushed 'Signal
+        # scaling' past the container's bottom edge -- the defect round 11 raised as D4,
+        # re-created by a blurb. The placement sentence is the part that has to be here;
+        # the drive-level provenance is a computed run note on the Results screen.
+        blurb=("Analog RF front-end distortion: the per-element LNA, mixer and baseband "
+               "amplifier cascade (e2e/circuit/rffe_model.py). DRAWN WHERE IT SITS, "
+               "APPLIED WHERE IT IS CHEAP -- the diagram puts the front end at the "
+               "element, ahead of the interconnect and the mixer, because that is the "
+               "receiver; the computation applies the same cascade to the SAMPLED BEAT "
+               "RECORD after the mixing block, which is exact for a unit-modulus chirp "
+               "(F97b) until the baseband stage clips, two decades above the shipped "
+               "drive."),
     ),
     BlockSpec(
         id="interconnect",
