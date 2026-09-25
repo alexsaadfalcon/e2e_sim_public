@@ -175,10 +175,10 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
     fig = figures_from_outputs(outputs)["cfar_detection"]
 
     shapes = fig.layout.shapes
-    assert len([sh for sh in shapes if sh.type == "rect"]) == 1  # wave 4 adds a 40 m limit line
-    s = shapes[0]
+    rects = [sh for sh in shapes if sh.type == "rect"]
+    assert len(rects) == 1  # wave 4 adds a 40 m limit line
+    s = rects[0]
     cx, cy = -0.2, 20.0  # (sin_azimuth, surface_range_m) -- see d[1]/d[3] convention
-    assert s.type == "rect"
     assert s.x0 == pytest.approx(cx - crit.max_sin_az_err)
     assert s.x1 == pytest.approx(cx + crit.max_sin_az_err)
     assert s.y0 == pytest.approx(cy - crit.max_range_err_m)
