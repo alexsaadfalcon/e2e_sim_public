@@ -246,25 +246,33 @@ def test_thrust1_label_names_the_noise_floor_not_image_quality():
     assert "image quality" not in p.label.lower()
 
 
-def test_thrust1_and_2_multipath_number_matches_the_panel():
-    """Wave 10 (2026-09-24, item 1.7, hostile round 9): the panel subtitles print
-    "36 m" (1 m display gates rounding the true 37.1 m delay, F94); the cards used
-    to tell the presenter to read "37 m" off the screen, a number not printed
-    there.
+def test_no_card_types_a_metre_digit_for_the_brightest_return():
+    """THE CARD NAMES NO DIGIT for a per-frame return, and this is the FOURTH correction
+    of the same sentence -- which is the argument.
 
-    RETRACTED wave 12 (2026-09-24, item 1.4, hostile round 10): the round-10 read
-    found the T1 and T4 panels actually print "37 m"/"38 m", not "36 m" -- the
-    wave-10 fix pinned the wrong digit. The card no longer asserts a specific
-    digit at all, only that it names the panel's own return alongside the true
-    37.1 m delay (F94)."""
-    # BISTATIC (owner ballot 2B, 2026-09-24): the same return is 74.2 m of EXCESS PATH.
-    # F94's 37.1 m is kept beside it, named as the old c*tau/2 convention, so the two
-    # numbers can never be read as two different returns.
+      * wave 10 (round 9): the card said "37 m", the panel printed "36 m".
+      * wave 12 (round 10): the panel actually printed "37 m"/"38 m"; the wave-10 fix
+        had pinned the wrong digit.
+      * owner ballot 2B: the convention became bistatic excess path, doubling every
+        number, and the card became "the ~74 m return the panel names (74.2 m)".
+      * round 12, item 6 (2026-09-25): the panels print "@ 72 m" (T1, T2) and "@ 73 m"
+        (T4, cancel). Wrong again.
+
+    The quantity is the BRIGHTEST VISIBLE RETURN on the frame the clock is parked on.
+    It is real data, it moves frame to frame and preset to preset, and the statistic
+    strip computes and prints it. A card cannot hold it. So the card points at the
+    strip, and this test fails any digit that comes back."""
+    import re
+
     for pid in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error"):
         p = PRESETS_BY_ID[pid]
-        assert any("the ~74 m return the panel names" in s and "74.2 m" in s
-                   and "37.1 m" in s for s in p.say), pid
-        assert not any("~36 m" in s for s in p.say), pid
+        multipath = [s for s in p.say if "ultipath" in s]
+        assert multipath, pid
+        for text in multipath:
+            assert "strip" in text or "panel" in text, (pid, text)
+            # No "74 m" / "74.2 m" / "37.1 m" / "36 m" style digit in the sentence.
+            assert not re.search(r"\d+(\.\d+)?\s*m", text.replace("0-4 m", "")
+                                 .replace("0-2 m", "")), (pid, text)
 
 
 def test_thrust1_names_the_operating_point_difference_from_thrust2():
@@ -366,9 +374,12 @@ def test_wave7_stale_stripe_claim_is_gone(pid):
     p = PRESETS_BY_ID[pid]
     for text in [p.blurb, p.screen_note, *p.say, *p.do_not_say]:
         assert "20-22 m" not in text
-    assert any("74" in s and "136" in s for s in p.say), (
-        f"{pid}: expected the true multipath families on the card, in the bistatic "
-        f"excess-path convention (74.2 m / 136 m = F94's 37.1 m / 68 m at c*tau/2)")
+    # The card must still TALK about multipath -- what it may not do is type the
+    # per-frame digit (see test_no_card_types_a_metre_digit_for_the_brightest_return,
+    # which replaced the "74 m / 136 m" assertion that used to live here on 2026-09-25).
+    assert any("ultipath" in s for s in p.say), (
+        f"{pid}: the card must still name the multipath families, pointing at the "
+        f"statistic strip rather than typing a metre digit")
 
 
 @pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error"])
@@ -919,7 +930,12 @@ def test_thrust5_ab_arms_move_a_front_end_knob_not_the_corpus():
         # count go UP relative to 12-bit (10 -> 11), reading backwards on screen --
         # 3-bit is the largest depth at which BOTH detectors lose hits.
         assert p.ab == ("quantizer", "bits", 3), pid
-        assert "12-bit" in p.ab_label_a and "3-bit" in p.ab_label_b
+        # The arm LABEL carries the value only; the chip prints "<param label> <value>"
+        # and the param label is already "ADC bits", so "12-bit ADC (as built)" said
+        # both words twice in 20 px (hostile round 12, item 16, 2026-09-25).
+        assert p.ab_label_a.startswith("12") and p.ab_label_b.startswith("3")
+        for lbl in (p.ab_label_a, p.ab_label_b):
+            assert "bit" not in lbl.lower() and "adc" not in lbl.lower(), (pid, lbl)
     ml = PRESETS_BY_ID["thrust5_detector_ml"]
     assert ml.ab == ("if_hpf", "corner_range_m", 25.0)
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):

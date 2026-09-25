@@ -800,7 +800,27 @@ def _detector_meta(state: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     else:
         ckpt_text = str(_p(state, "detector", "checkpoint") or "").strip()
         label = _resolve_repo_path(ckpt_text).parent.name if ckpt_text else "ML"
-    return {"mode": mode, "threshold": threshold, "label": label}
+    meta = {"mode": mode, "threshold": threshold, "label": label,
+            "display_label": label}
+    if mode != "cfar":
+        # ONE NAME PER CHECKPOINT ON SCREEN (hostile round 12, item 16). `label` is the
+        # checkpoint's DIRECTORY name (`b15_fftradnet_rd_ka`) and it stays `label`,
+        # because it is the key `arm_name_for_detector` matches the scored arms on. But
+        # the panel title printed it while the PR legend and the scoreboard heading
+        # printed the SCORED ARM's name (`fftradnet_rd_b15`) -- two names for one
+        # checkpoint, on one screen, neither of them wrong. The screen now says the
+        # scored arm's name everywhere; the directory name is in the detector's own
+        # Details. CFAR keeps its label ("CA-CFAR (guard 2, train 6)"), which carries
+        # the operating point the arm name does not.
+        try:
+            from webapp import detector_scoreboard as _ds
+
+            arm = _ds.arm_name_for_detector(meta)
+            if arm:
+                meta["display_label"] = _ds._display_arm_name(arm)
+        except (FileNotFoundError, ValueError, ImportError):
+            pass
+    return meta
 
 
 def _build_detector(state: Dict[str, Dict[str, Any]], cfg, grid):
@@ -1550,6 +1570,22 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                 full_scale=(None if quant_full_scale <= 0.0 else quant_full_scale),
             )
             spine_stages.append(quantizer_block)
+            # SAID ON THE SCREEN, from what the run is about to do rather than from a
+            # preset's prose (hostile round 12, item 15b). Automatic gain is why a
+            # 3-bit converter still produces a picture at all, and until now it was
+            # disclosed only in the parameter editor's help text on the other tab.
+            _bits = int(_p(state, "quantizer", "bits"))
+            if quant_full_scale <= 0.0:
+                run_notes.append(
+                    f"ADC full scale: PER-FRAME AUTOMATIC GAIN -- set from each "
+                    f"frame's own peak with 6 dB of headroom (the 'Full-scale "
+                    f"amplitude 0' setting the corpus generator uses), so the "
+                    f"{_bits}-bit converter's codes span the frame in front of it. "
+                    f"A fixed full scale would clip or starve it instead.")
+            else:
+                run_notes.append(
+                    f"ADC full scale: FIXED at {quant_full_scale:g} (no automatic "
+                    f"gain), {_bits} bits.")
 
         if corpus_live_cfr:
             # FIRST in the list: hand each frame's own stored seeds/severities to the
@@ -2648,6 +2684,8 @@ INDEPENDENT_SCALE_CLAUSE = "independent colour scales"
 #: itself is word-for-word the one that used to sit on the panel subtitle, so a reader
 #: (and a test) finds the same words -- in Details.
 _SHARED_LIMITS_MARKER = "colour limits shared with arm "
+#: ...and the same line on a ONE-arm screen, where there is no other arm to name.
+_SINGLE_ARM_FLOOR_MARKER = "colour limits, this arm only: "
 
 #: `layout.meta` key holding a y-extent this panel set ON PURPOSE, in the axis's own
 #: units, which the cross-arm axis pass must NOT widen. Today exactly one panel sets it:
@@ -3045,6 +3083,57 @@ def share_heatmap_z_limits(figs: Dict[str, Any], prev_figs: Dict[str, Any],
         # hostile round 10, section 5.8, on the PR panel's own once-only clause.
         for i, (fig, other) in enumerate(zip(pair, labels)):
             _apply_shared_z(fig, zmin, zmax, other, say_shared=(i == 0))
+
+
+def reach_floor_single_arm(figs: Dict[str, Any]) -> None:
+    """The SAME colour rule on a one-arm screen as on a two-arm one, in place.
+
+    `share_heatmap_z_limits` puts a `Z_SHARE_REACH_FLOOR` panel's limit 3 dB below the
+    deepest per-frame median floor EITHER ARM reaches, because that is what makes an
+    11-12 dB difference in background a visible difference in colour (owner, live test
+    2026-09-24). With one arm there is no pair, so that pass never ran and the panel
+    kept `_radar_cube_clip_db`'s own limit -- which is `max(-40, median + 3)`, i.e. a
+    hard -40 dB whenever the floor is below it. Measured on the 2026-09-24 renders: the
+    cancel screen clipped at -40.0 dB and rendered a UNIFORMLY DARK map, against -61.3 dB
+    and visible structure for the identical product on the two-arm Thrust 1 screen
+    (hostile round 12, item 8). Same rule, one arm.
+
+    Only panels that declare `Z_SHARE_REACH_FLOOR`; a `Z_SHARE_KEEP_CLIP` panel keeps
+    its own clip by design, and an untagged one (the detector's 0-1 objectness map) is
+    not in dB at all.
+    """
+    for fig in figs.values():
+        meta = (fig.get("layout") or {}).get("meta")
+        if not isinstance(meta, dict) or meta.get("z_share") != Z_SHARE_REACH_FLOOR:
+            continue
+        floors = _heatmap_floors_db(fig)
+        if not floors:
+            continue
+        zmin = min(floors) - _SHARED_FLOOR_MARGIN_DB
+        own = [float(tr["zmin"]) for tr in (fig.get("data") or [])
+               if tr.get("type") == "heatmap" and tr.get("zmin") is not None]
+        if own and zmin >= min(own) - 0.05:
+            # Already at or below the floor-reaching limit (a frame whose own median
+            # sits above -43 dB): leave the tighter, adaptive clip alone.
+            continue
+        panel = _panel_dict(fig)
+        panel.setdefault("own_zmin", own[0] if own else None)
+        for trace in (fig.get("data") or []):
+            if trace.get("type") == "heatmap":
+                trace["zmin"], trace["zmax"] = zmin, 0.0
+        caption = [c for c in panel["caption"]
+                   if not (isinstance(c, str) and c.startswith(CLIP_CLAUSE_PREFIX))]
+        caption.append(f"{CLIP_CLAUSE_PREFIX}{zmin:.1f} dB")
+        panel["caption"] = caption
+        was = (f" (was {panel['own_zmin']:.1f})"
+               if panel.get("own_zmin") is not None else "")
+        panel["details"] = [d for d in panel["details"]
+                            if not (isinstance(d, str)
+                                    and d.startswith(_SINGLE_ARM_FLOOR_MARKER))] + [
+            f"{_SINGLE_ARM_FLOOR_MARKER}zmin {zmin:.1f} dB{was}, zmax 0 dB -- "
+            f"{_SHARED_FLOOR_MARGIN_DB:.0f} dB below the deepest per-frame median "
+            f"floor this run reaches, the same rule a two-arm screen applies across "
+            f"both arms."]
 
 
 def y_extent_lock_of(fig) -> float:
@@ -3467,10 +3556,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                                                            frame_layouts=frame_layouts))
 
     if outputs.get("range_profile_agg"):
-        prof = outputs["range_profile_agg"][-1]
-        if hasattr(prof, "detach"):
-            prof = prof.detach().cpu().numpy()
-        prof = np.asarray(prof, dtype=float)
+        def _prof_np(t):
+            t = t.detach().cpu().numpy() if hasattr(t, "detach") else t
+            return np.asarray(t, dtype=float)
+
+        prof_all = [_prof_np(t) for t in outputs["range_profile_agg"]]
+        prof = prof_all[-1]
         bins_rp = meta.get("range_profile_bins") or prof.shape[0]
         if _rmeta:
             x, _ = _display_range_axis(bins_rp, _rmeta)
@@ -3487,8 +3578,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             x = np.arange(bins_rp)
             xlabel = "range (bins)"
             direct_path_note = ""
-        peak = max(float(prof.max()), 1e-12)
-        prof_db = 10 * np.log10(prof / peak + 1e-12)
+        # EACH FRAME NORMALISED TO ITS OWN PEAK, exactly as the single static frame
+        # always was -- this panel's y axis is "dB rel. peak" and the peak is the
+        # frame's own.
+        def _prof_db(a):
+            return 10 * np.log10(a / max(float(a.max()), 1e-12) + 1e-12)
+
+        prof_db_all = [_prof_db(a) for a in prof_all]
+        prof_db = prof_db_all[-1]
         x = np.asarray(x)
         # Already the non-negative half -- see the range_az loop's note.
         if x.size:
@@ -3511,13 +3608,19 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # annotation collided with the title text at this font size (rehearsal,
         # 2026-09-23).
         floor_db = float(np.median(prof_db)) if prof_db.size else float("nan")
-        # The median-floor statistic is the one the Thrust 4 card quotes, so it goes in
-        # the reserved strip above the plot, not into a subtitle (layout spec section 4).
-        # This panel is built from the LAST frame and does not animate -- the strip says
-        # so, which is the disclosure hostile round 10 (defect 3.2) found missing.
-        fig.update_layout(annotations=_stat_annotations(
-            f"{floor_db:.1f} dB median floor",
-            f"last frame of {len(outputs['range_profile_agg'])} (static)"))
+        # IT ANIMATES NOW (hostile round 12, item 14). It was built from the LAST frame
+        # and said so, while the range-azimuth map beside it looped on the clock -- so
+        # Thrust 4's two panels printed "frame 2 of 3" and "last frame of 3 (static)"
+        # side by side, on one screen, about one run. Every frame of the profile was
+        # already computed and thrown away; stepping it on the same clock costs nothing
+        # and makes the column one frame again. The median-floor statistic (the number
+        # the Thrust 4 card quotes) steps with it.
+        prof_floors = [float(np.median(d)) if d.size else float("nan")
+                       for d in prof_db_all]
+        n_prof = len(prof_db_all)
+        prof_stats = [(f"{f:.1f} dB median floor", f"frame {i + 1} of {n_prof}")
+                      for i, f in enumerate(prof_floors)]
+        fig.update_layout(annotations=_stat_annotations(*prof_stats[-1]))
         fig.update_layout(xaxis_title=xlabel,
                           yaxis_title="power (dB rel. peak)",
                           **_base_layout())
@@ -3525,12 +3628,18 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                   caption=["power, dB rel. peak", "non-coherent over channels"],
                   details=[
                       "Non-coherent (power) integration over channels.",
-                      f"median floor, dB rel. peak: {floor_db:.1f}.",
+                      "median floor, dB rel. peak, per frame: "
+                      + ", ".join(f"{f:.1f}" for f in prof_floors)
+                      + f" (last frame {floor_db:.1f}).",
                       _sentence(direct_path_note),
-                      "Built from the LAST frame and static: the range-azimuth map "
-                      "above it loops on the clock, this panel does not.",
+                      "Steps with the same clock as the range-azimuth map above it, "
+                      "so the two panels in this column always show the same frame; "
+                      "each frame is normalised to its own peak.",
                   ], row=PANEL_ROW_MAP)
-        figs["range_profile"] = _make_legible(fig)
+        figs["range_profile"] = _make_legible(_add_frame_animation(
+            fig, prof_db_all, key="y", trace_type="scatter",
+            frame_layouts=[dict(annotations=_stat_annotations(st, sub))
+                           for st, sub in prof_stats]))
 
     rx = meta.get("rx") or {}
     if outputs.get("radar_cube"):
@@ -3579,19 +3688,29 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         else:
             rd_clip_provenance = f"clip {rd_clip:.1f} dB (shared floor)"
         rd_frames = [_rd_db(c) for c in outputs["radar_cube"]]
-        # THE HEADLINE IS THE RUN MEDIAN, not this frame's value (hostile round 11,
-        # H2): measured on the rendered screens, arm A's per-frame peak−median went
-        # 52.8 dB (frame 4) -> 32.6 dB (frame 5), so the A/B gap this panel exists to
-        # show moved 9.3 -> 3.7 dB in one frame step and any reviewer who dragged the
-        # transport got a different headline number than the presenter had said. The
-        # per-frame value is still on screen, as the small readout beside it, and the
-        # full per-frame spread is in Details -- what changes is which of the two the
-        # room reads as THE number. Computed here, never typed.
+        # THE HEADLINE IS THE FRAME ON SCREEN, and the run median is the readout beside
+        # it. The two swapped places on 2026-09-25 (hostile round 12, item 11), and the
+        # history matters because both orders have been defended:
+        #
+        #   * round 11 (H2) made the headline the RUN MEDIAN, because arm A's per-frame
+        #     peak−median went 52.8 dB (frame 4) -> 32.6 dB (frame 5) and a reviewer who
+        #     dragged the transport got a different headline than the presenter said.
+        #   * round 12 read the result on the screen: bold "36.6 dB peak−median (run
+        #     median) · this frame 38.7" -- a 26 px number in the arm's colour, directly
+        #     above a map of ONE frame, with the qualifier in 17 px beside it. It is read
+        #     as the frame's value, because that is what a statistic over a picture is.
+        #
+        # The fix keeps both facts and reverses which one is bold: every animated panel
+        # on these screens now headlines the frame the clock is parked on (the same rule
+        # the peak−median maps, the EVM panel and the scoreboard rows follow), and the
+        # run median -- the stable number the presenter quotes -- is on the same strip,
+        # one size down, with the full per-frame spread in Details. Both computed here,
+        # never typed.
         rd_per_frame = [_peak_minus_median_db(d) for d in rd_frames]
         rd_median = float(np.median(rd_per_frame))
-        rd_stats = [f"{rd_median:.1f} dB peak−median (run median)"] * len(rd_frames)
-        rd_subs = [f"this frame {v:.1f} · frame {i + 1} of {len(rd_frames)}"
-                   for i, v in enumerate(rd_per_frame)]
+        rd_stats = [f"{v:.1f} dB peak−median" for v in rd_per_frame]
+        rd_subs = [f"run median {rd_median:.1f} · frame {i + 1} of {len(rd_frames)}"
+                   for i in range(len(rd_frames))]
         fig = _heatmap(first, x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
                        z_share=Z_SHARE_KEEP_CLIP)
         fig.update_layout(annotations=_stat_annotations(rd_stats[-1], rd_subs[-1]))
@@ -3619,8 +3738,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       # headline is defined (H2).
                       f"peak−median per frame over this run: "
                       + ", ".join(f"{v:.1f}" for v in rd_per_frame)
-                      + f" dB (median {rd_median:.1f}, the headline; the strip's "
-                      "small readout is the frame the clock is parked on).",
+                      + f" dB (median {rd_median:.1f}). The strip's bold number is the "
+                      "FRAME the clock is parked on; the run median is the readout "
+                      "beside it, and it is the number that does not move when the "
+                      "transport does.",
                   ], row=PANEL_ROW_MAP)
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             fig, rd_frames,
@@ -3633,7 +3754,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if not outputs.get(key):
             continue
         n_frames = len(outputs[key])
-        det_label = str(det_meta.get("label", "")) if det_meta else ""
+        det_label = str(det_meta.get("display_label")
+                        or det_meta.get("label", "")) if det_meta else ""
+        det_dir = str(det_meta.get("label", "")) if det_meta else ""
         det_threshold = float(det_meta.get("threshold", 0.0)) if det_meta else None
         # Name the detector and its operating point ON the panel: the three Thrust 5
         # presets are compared across screens, and their cross counts are set by the
@@ -3800,16 +3923,29 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
         def _det_stat(i: int):
             d, g = _at(det_frames, i), _at(gt_frames, i)
-            return _stat_annotations(f"{len(d)} detections, {len(g)} labelled",
+            # "1 detections" is a grammar error in 20 px bold on the LEAD screen of the
+            # detector thrust (hostile round 12, item 16). It is reachable on every arm
+            # -- a single detection on one frame -- so it is pluralised, not hoped away.
+            def _n(k: int, word: str) -> str:
+                return f"{k} {word}" if k == 1 else f"{k} {word}s"
+
+            return _stat_annotations(f"{_n(len(d), 'detection')}, "
+                                     f"{len(g)} labelled",
                                      f"frame {i + 1} of {n_frames}")
 
         if gt:
             fig.update_layout(shapes=_static_shapes + _gt_rects(gt))
         fig.update_layout(annotations=_static_anns + _det_stat(n_frames - 1))
+        # THE HIT RULE IS IN DETAILS, and the caption says where (hostile round 12,
+        # item 10; spec check 12). It is a 100-character sentence and the caption is
+        # ONE line in a 746 px panel -- measured on the 2026-09-24 and 2026-09-25
+        # renders, all six objectness panels printed it truncated at "...(±2 m, ±0.06
+        # sin a...", i.e. the panel's only statement of what counts as a hit ended
+        # mid-symbol. A pointer that fits beats a rule that does not.
         set_panel(fig, title=panel_title,
                   caption=[f"objectness ≥ {thr_txt}",
                            "✕ detections, ○ ground-truth boxes"]
-                          + ([hit_rule] if hit_rule else []),
+                          + (["hit rule in Details"] if hit_rule else []),
                   details=[
                       f"detections at objectness >= {thr_txt}; the panel shows the "
                       f"frame the transport is parked on, of {n_frames}.",
@@ -3821,6 +3957,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                        if hit_rule else ""),
                       (f"labels & scoring stop at {scoring_max_r:g} m."
                        if scoring_max_r is not None else ""),
+                      # The other name this one checkpoint has, said once, here
+                      # (hostile round 12, item 16).
+                      (f"Checkpoint directory: {det_dir}; scored on this screen as "
+                       f"\"{det_label}\", the name the scoreboard and the PR legend "
+                       f"use." if det_dir and det_dir != det_label else ""),
                   ], row=PANEL_ROW_MAP)
         # One frame per stored frame: the objectness map (trace 0), this frame's
         # UNMATCHED detections (trace 1), its MATCHED ones (trace 2), the ground-truth
@@ -3922,25 +4063,21 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # under the annotation. Moved to the right end of the line instead whenever an
         # early frame's error sits within this band; unaffected runs (the common case)
         # keep the original "top left" placement.
-        _early = errs[:min(4, len(errs))]
-        _annotation_collides = any(
-            abs(e - _SUBSPACE_ERR_SETTLED_LEVEL) <= 0.03 for e in _early)
-        # Padding off the right plot edge (item 3, wave 9 hostile-expert read,
-        # 2026-09-23): "top right" sat the label flush against x=1 (paper), which then
-        # ran into the right-hand axis's own tick label (the primary y-axis when there
-        # is no refinement-passes trace, or that trace's y2 axis when there is one) --
-        # a SECOND collision this branch introduced while fixing the first (the early-
-        # frame marker). `annotation_xshift` nudges it left, off that edge, without
-        # touching which side ("top right" vs "top left") is chosen -- keeping that
-        # choice intact matters: it is what a cold-start/refine-gate run (an early
-        # frame near the settled level) versus a clear run actually differ on.
-        fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash", line_color="#576574",
-                     annotation_text=(f"warm-start settled level "
-                                      f"({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference)"),
-                     annotation_position=("top right" if _annotation_collides
-                                          else "top left"),
-                     annotation_xshift=(-15 if _annotation_collides else 0),
-                     annotation_font=dict(size=_LEGIBLE_TICK_SIZE, color="#576574"))
+        # THE LINE CARRIES NO LABEL OF ITS OWN (hostile round 12, item 16). It used
+        # to, and two waves were spent moving that label around the plot: "top left"
+        # put it beside the first frames, "top right" ran it into the right-hand axis,
+        # and a collision test over the first four frames chose between them. On the
+        # Thrust 3 arm-B curve -- which SETTLES on this very level -- both ends are on
+        # the data, and round 12 read it sitting across the curve at frames 3-4. There
+        # is no free position on a line the curve lies along.
+        #
+        # It does not need one. The same fact is already stated twice on the default
+        # screen, in places that cannot collide with data: the caption ("dashed =
+        # warm-start settled level (reference run)") and the statistic strip's own
+        # sub-line, which prints the level. The plot keeps the dashed line; the words
+        # stay off the picture, which is the layout spec's rule (check 8).
+        fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash",
+                      line_color="#576574")
         fig.update_layout(
             xaxis_title="frame",
             # Unnormalised: said in the caption; the rotated axis title at 20 px

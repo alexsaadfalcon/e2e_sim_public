@@ -51,7 +51,7 @@ import pytest
 from webapp.pipeline_runner import (
     _C, _SUBSPACE_ERR_MIN_YMAX, _SUBSPACE_ERR_SETTLED_LEVEL, _REFINE_AXIS_MIN_YMAX,
     _display_range_axis, _range_meta_from_grid,
-    figures_from_outputs, panel_text,
+    figures_from_outputs, panel_caption, panel_text,
 )
 
 
@@ -208,20 +208,32 @@ def test_subspace_err_yaxis_leaves_headroom_above_a_cold_start_frame_one():
     assert top - 0.6 >= 0.03
 
 
-def test_settled_level_annotation_moves_when_an_early_frame_collides():
-    """An early frame sitting within the collision band of the settled-level line
-    (wave 8, W15: "T3-B frame-2 marker inside the annotation") moves the annotation to
-    the right end of the line; a run with no early frame near that level keeps the
-    original top-left placement."""
-    collide = figures_from_outputs(
-        {"subspace_err": [0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3]})["subspace_err"]
-    clear = figures_from_outputs(
-        {"subspace_err": [0.5, 0.4, 0.3]})["subspace_err"]
+def test_the_settled_level_line_carries_no_label_on_the_plot():
+    """SUPERSEDED by removal, 2026-09-25 (hostile round 12, item 16), and the history
+    is the argument for removing it.
 
-    def _hline_annotation(fig):
-        for ann in fig.layout.annotations:
-            if "settled level" in (ann.text or ""):
-                return ann
-        raise AssertionError("no settled-level annotation found")
+    This test used to pin a COLLISION-AVOIDANCE rule: an early frame near the
+    settled-level line moved the line's own label from "top left" to "top right" (wave
+    8, W15), and wave 9 then added an `xshift` because the right end ran into the
+    right-hand axis. Round 12 read the Thrust 3 screen and found the label sitting
+    across arm B's curve at frames 3-4 -- because that arm SETTLES on this level, so
+    the curve lies along the line and there is no free position at either end.
 
-    assert _hline_annotation(collide).xanchor != _hline_annotation(clear).xanchor
+    The label is gone. The same fact is stated twice on the default screen where it
+    cannot touch data: the panel caption ("dashed = warm-start settled level (reference
+    run)") and the statistic strip's own sub-line, which prints the level. What this
+    test now pins is that nothing puts words back on the line, for either shape of
+    run."""
+    for errs in ([0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3], [0.5, 0.4, 0.3]):
+        fig = figures_from_outputs({"subspace_err": errs})["subspace_err"]
+        on_plot = [a.text for a in fig.layout.annotations
+                   if "settled level" in (a.text or "")]
+        assert not on_plot, on_plot
+        # ...and the fact itself is still on the default screen, twice.
+        strip = " ".join(a.text or "" for a in fig.layout.annotations)
+        assert "warm-start reference" in strip
+        assert "warm-start settled level" in panel_caption(fig)
+        # The dashed line is still drawn.
+        assert any(getattr(sh, "line", None) is not None
+                   and getattr(sh.line, "dash", "") == "dash"
+                   for sh in (fig.layout.shapes or ()))

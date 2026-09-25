@@ -95,7 +95,14 @@ def test_render_does_not_embed_wall_times():
     # number lives. (`doc.count`, not `flat.count`: the sentence starts a new
     # numbered list item in the wrapped source, so counting on the flattened
     # text would also match the two module-docstring mentions of "rehearsal".)
-    assert doc.count("Wall time: read the last rehearsal's") == len(PRESETS)
+    # `_flat`, not `doc`: the sentence is inside a wrapped numbered list item, so
+    # whether a line break falls inside it depends on the length of everything BEFORE
+    # it in that item -- which is the preset's own arm labels. Shortening two of those
+    # (hostile round 12 item 16, 2026-09-25) moved one wrap into the middle of this
+    # phrase and the raw-text count dropped to 7 of 8, with nothing wrong in the
+    # document. The flattened count is what this test is actually about, and the
+    # module docstring's own mentions of "rehearsal" do not contain this phrase.
+    assert _flat(doc).count("Wall time: read the last rehearsal's") == len(PRESETS)
     assert "summary.json" in flat and "`wall_s`" in flat
     assert "preflight timing pass" in flat
     # The retracted claim must not reappear, on this run or any future one.
@@ -317,21 +324,27 @@ def test_panel_titles_match_the_rendered_source():
     assert '"scored offline: ' in scoreboard_src
 
 
-def test_render_tells_thrust_1_and_4_to_scroll_the_param_pane():
-    """Wave 10 (2026-09-24, item 3.6, hostile round 9): the Thrust 1 and Thrust 4
-    param editors clip mid-sentence at the bottom of the pane; the knob the click
-    sequence just named is below the fold on both."""
+def test_render_points_at_the_knob_badge_and_never_tells_anyone_to_scroll():
+    """RETRACTED, 2026-09-25 (hostile round 12, item 17). This test used to REQUIRE the
+    sentence "Scroll the param pane; the knob is below the fold" on Thrusts 1 and 4.
+    Read on the 2026-09-25 card renders of both: the preset's knob is the FIRST control
+    in the pane, carrying the green "this screen's knob" badge, fully visible -- the
+    redesign that put controls above their help text moved it, and the script was
+    sending the presenter scrolling for something already on screen.
+
+    What the script says now is a MARK, not a position: the badge is on the knob
+    wherever the pane puts it."""
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render
 
     doc = render(PRESETS)
+    assert "below the fold" not in _flat(doc)
+    assert "Scroll the param pane" not in _flat(doc)
     for p in PRESETS:
         section = doc[doc.index(f'## {PRESETS.index(p) + 1}. {p.label}'):]
         section = section[:section.index("### What you are looking at")]
-        if p.thrust in (1, 4):
-            assert "Scroll the param pane" in _flat(section), p.id
-        else:
-            assert "Scroll the param pane" not in _flat(section), p.id
+        if p.live_knobs:
+            assert "this screen's knob" in _flat(section), p.id
 
 
 def test_render_names_the_block_to_click_when_second_knob_differs_from_opening_block():

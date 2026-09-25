@@ -253,27 +253,19 @@ def test_cfar_arm_prints_no_self_reference(beat_cfar_data):
 # --------------------------------------------------------------------------------
 # Item 3/4: annotation padding off the right edge, collision-avoidance choice kept
 # --------------------------------------------------------------------------------
-def test_settled_level_annotation_is_padded_off_the_edge_when_it_moves_right():
-    """Mirrors wave 8's own pinned collision test (xanchor still differs -- the
-    choice of side is unchanged), and additionally checks the new padding: a
-    colliding run gets a negative xshift so its closing ")" clears the right-hand
-    axis tick; a clear run gets none."""
-    collide = figures_from_outputs(
-        {"subspace_err": [0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3]}
-    )["subspace_err"]
-    clear = figures_from_outputs({"subspace_err": [0.5, 0.4, 0.3]})["subspace_err"]
-
-    def _hline_annotation(fig):
-        for ann in fig.layout.annotations:
-            if "settled level" in (ann.text or ""):
-                return ann
-        raise AssertionError("no settled-level annotation found")
-
-    ann_collide = _hline_annotation(collide)
-    ann_clear = _hline_annotation(clear)
-    assert ann_collide.xanchor != ann_clear.xanchor       # wave 8's own invariant
-    assert (ann_collide.xshift or 0) < 0
-    assert (ann_clear.xshift or 0) == 0
+def test_the_settled_level_line_needs_no_padding_because_it_has_no_label():
+    """RETIRED with the label it padded (2026-09-25, hostile round 12 item 16). This
+    checked that the line's own annotation, when a colliding early frame pushed it to
+    the right end, got a negative `xshift` so its closing ")" cleared the right-hand
+    axis tick. There is no annotation on the line any more -- it was landing on the
+    curve itself on the Thrust 3 arm-B shape, which neither end could avoid -- and the
+    level is named in the caption and the statistic strip instead. The replacement pin
+    lives in tests/test_webapp_figures_wave8.py::
+    test_the_settled_level_line_carries_no_label_on_the_plot."""
+    for errs in ([0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3], [0.5, 0.4, 0.3]):
+        fig = figures_from_outputs({"subspace_err": errs})["subspace_err"]
+        assert not [a for a in fig.layout.annotations
+                    if "settled level" in (a.text or "")]
 
 
 def test_detector_map_range_line_annotation_is_padded_off_the_right_edge():
@@ -669,12 +661,16 @@ def test_settled_level_annotation_clears_the_right_axis_on_both_flagged_screens(
     reproduced here as the same underlying data shape rather than the full preset
     -- must still show the padding fix from item 3 (first read): a colliding
     early frame moves the annotation right AND clears the axis via `xshift`."""
-    collide = figures_from_outputs(
-        {"subspace_err": [0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3, 0.3, 0.3, 0.3]}
-    )["subspace_err"]
-    ann = next(a for a in collide.layout.annotations if "settled level" in (a.text or ""))
-    assert ann.xanchor == "right"
-    assert (ann.xshift or 0) < 0
+    # 2026-09-25: the padding this re-verified is gone with the label itself (hostile
+    # round 12, item 16 -- on the Thrust 3 arm-B shape the label sat ON the curve, and
+    # no end of the line was free). Re-verified here as the absence, on the same two
+    # flagged shapes, so this test still fails if a label comes back to collide again.
+    for errs in ([0.5, _SUBSPACE_ERR_SETTLED_LEVEL + 0.01, 0.3, 0.3, 0.3, 0.3],
+                 [0.3, 0.1, _SUBSPACE_ERR_SETTLED_LEVEL, _SUBSPACE_ERR_SETTLED_LEVEL,
+                  _SUBSPACE_ERR_SETTLED_LEVEL, _SUBSPACE_ERR_SETTLED_LEVEL]):
+        fig = figures_from_outputs({"subspace_err": errs})["subspace_err"]
+        assert not [a for a in fig.layout.annotations
+                    if "settled level" in (a.text or "")], errs
 
 
 # --------------------------------------------------------------------------------

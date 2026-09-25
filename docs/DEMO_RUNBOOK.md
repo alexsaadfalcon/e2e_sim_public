@@ -104,9 +104,11 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 1 - RF circuit knobs vs the image's
    noise floor", click **Load preset**. The param editor opens on **RF
-   Front-End (RFFE)** (first knob: **LNA bias current (mA)**); the operator
-   card shows "Loaded: Thrust 1 - RF circuit knobs vs the image's noise floor
-   (Thrust 1, 5 frames)". Scroll the param pane; the knob is below the fold.
+   Front-End (RFFE)** (first knob: **LNA bias current (mA)**). The knob for
+   this screen carries a green "this screen's knob" badge. The "Loaded: Thrust
+   1 - RF circuit knobs vs the image's noise floor (Thrust 1, 5 frames)" line
+   is inside **▸ Presenter notes (Thrust 1)**, which is collapsed by default --
+   open it only if you want the card.
 2. Click **Run pipeline**. Both arms run in one click (A = 8 mA, B = 0.5 mA).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
@@ -120,11 +122,11 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**.
-- Arm chips on screen: "A — LNA bias current (mA) 8 mA" (LEFT column, colour
-  dot) / "B — LNA bias current (mA) 0.5 mA" (RIGHT column) -- each product
-  renders once per column, on the same row, on shared colour limits. The full
-  before/after sentence, plus provenance, band and clip, is one click away
-  behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — LNA bias current 8 mA" (LEFT column, colour dot) /
+  "B — LNA bias current 0.5 mA" (RIGHT column) -- each product renders once per
+  column, on the same row, on shared colour limits. The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **RF Front-End (RFFE)** -> **IF bandwidth (MHz)** (min 1, max 50, default
@@ -147,8 +149,8 @@ IF bandwidth 15 -> 50 MHz.
 - No trade-off today: nothing clips; the IF filter only sets noise variance (1
   MHz = 1 ms sweep, 20 us at 50 MHz).
 - Excess path 0-4 m is not a target: it is the direct path the display
-  normalises to (0 dB). Multipath: the ~74 m return the panel names (74.2 m;
-  F94's 37.1 m at c*tau/2) and 136 m.
+  normalises to (0 dB). Multipath: the strip names the brightest return's
+  excess path on the frame shown; a second family sits near twice it.
 - Noise figure IS quotable: Friis 11.97 vs measured 11.80 dB validates the
   mechanism and this knob's downstream effect. Absolute dBm is NOT: the input
   level is free.
@@ -160,8 +162,8 @@ IF bandwidth 15 -> 50 MHz.
   target SNR; it moves with the noise floor this knob changes.
 - The 0 dB reference is a single range-0 gate too small to see; every dB is
   relative to the direct path.
-- Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median ~58 dB, ~11 dB
-  below Thrust 2's ~77 dB -- a different operating point. That drive is a
+- Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median 58 dB on arm A, 9
+  dB ABOVE Thrust 2's 49 -- a different operating point, both strips printed. A
   DISPLAY choice, not an input level (Details).
 - The printed statistics update per frame while the panels loop; pause before
   reading one.
@@ -187,13 +189,15 @@ IF bandwidth 15 -> 50 MHz.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 2 - feature-reduction (AFE) error vs
    end result", click **Load preset**. The param editor opens on **Adaptive
-   Feature Extraction** (first knob: **FP mantissa bits**); the operator card
-   shows "Loaded: Thrust 2 - feature-reduction (AFE) error vs end result
-   (Thrust 2, 6 frames)".
-2. Click **Run pipeline**. Both arms run in one click (A = 6 bit, B = 1 bit).
-   Wall time: read the last rehearsal's
-   `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
+   Feature Extraction** (first knob: **FP mantissa bits**). The knob for this
+   screen carries a green "this screen's knob" badge. The "Loaded: Thrust 2 -
+   feature-reduction (AFE) error vs end result (Thrust 2, 6 frames)" line is
+   inside **▸ Presenter notes (Thrust 2)**, which is collapsed by default --
+   open it only if you want the card.
+2. Click **Run pipeline**. Both arms run in one click (A = 6, B = 1). Wall
+   time: read the last rehearsal's `e2e/main/figures/rehearsal/summary.json`
+   (`wall_s`) or the preflight timing pass; a Run takes roughly 15-30 s for
+   both arms -- talk over it.
 - **While it runs, say:** As loaded the curve starts near 0, settles at about
   0.08 by frame 2; the knob compares SETTLED levels, 0.08 vs 0.32.
 3. The app switches to the **Results** tab automatically.
@@ -204,11 +208,11 @@ IF bandwidth 15 -> 50 MHz.
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**,
   **"Range-elevation power"**, **"Subspace error per frame"**.
-- Arm chips on screen: "A — FP mantissa bits 6 bit" (LEFT column, colour dot) /
-  "B — FP mantissa bits 1 bit" (RIGHT column) -- each product renders once per
-  column, on the same row, on shared colour limits. The full before/after
-  sentence, plus provenance, band and clip, is one click away behind that arm's
-  own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — FP mantissa bits 6" (LEFT column, colour dot) / "B
+  — FP mantissa bits 1" (RIGHT column) -- each product renders once per column,
+  on the same row, on shared colour limits. The full before/after sentence,
+  plus provenance, band and clip, is one click away behind that arm's own **▸
+  Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - None: the only `live_knobs` entry for this preset is the knob the built-in
@@ -232,8 +236,8 @@ mantissa 6 -> 1 bit.
 - No detection metric is wired here; say so before asked what it means for P_d
   or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); multipath: the ~74 m return the panel names (74.2 m; F94's 37.1 m at
-  c*tau/2) and 136 m.
+  (0 dB); multipath: the strip names the brightest return's excess path per
+  frame, a second family near twice it.
 - Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
   retrace (rank 3-4, F94); k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
@@ -268,9 +272,11 @@ mantissa 6 -> 1 bit.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 3 - adaptive feature extraction:
    cold-start acquisition", click **Load preset**. The param editor opens on
-   **AdaOja Subspace** (first knob: **Tracker initialisation**); the operator
-   card shows "Loaded: Thrust 3 - adaptive feature extraction: cold-start
-   acquisition (Thrust 3, 8 frames)".
+   **AdaOja Subspace** (first knob: **Tracker initialisation**). The knob for
+   this screen carries a green "this screen's knob" badge. The "Loaded: Thrust
+   3 - adaptive feature extraction: cold-start acquisition (Thrust 3, 8
+   frames)" line is inside **▸ Presenter notes (Thrust 3)**, which is collapsed
+   by default -- open it only if you want the card.
 2. Click **Run pipeline**. Both arms run in one click (A = fixed effort (5
    passes/frame), B = adaptive gate (shipped default, 10 passes/frame
    baseline)). Wall time: read the last rehearsal's
@@ -349,9 +355,11 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 4 - a worse interconnect, on the range
    profile", click **Load preset**. The param editor opens on **Interconnect**
-   (first knob: **Tessera: TSV height (um)**); the operator card shows "Loaded:
-   Thrust 4 - a worse interconnect, on the range profile (Thrust 4, 3 frames)".
-   Scroll the param pane; the knob is below the fold.
+   (first knob: **Tessera: TSV height (um)**). The knob for this screen carries
+   a green "this screen's knob" badge. The "Loaded: Thrust 4 - a worse
+   interconnect, on the range profile (Thrust 4, 3 frames)" line is inside **▸
+   Presenter notes (Thrust 4)**, which is collapsed by default -- open it only
+   if you want the card.
 2. Click **Run pipeline**. Both arms run in one click (A = canonical Tessera
    geometry (50 um presented), B = TSV height -> 30 um presented (largest skirt
    mover)). Wall time: read the last rehearsal's
@@ -368,12 +376,11 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
   profile"**.
-- Arm chips on screen: "A — Tessera: TSV height (um) 50 um presented" (LEFT
-  column, colour dot) / "B — Tessera: TSV height (um) 30 um presented" (RIGHT
-  column) -- each product renders once per column, on the same row, on shared
-  colour limits. The full before/after sentence, plus provenance, band and
-  clip, is one click away behind that arm's own **▸ Details (provenance, band,
-  clip)**.
+- Arm chips on screen: "A — Tessera: TSV height 50 um presented" (LEFT column,
+  colour dot) / "B — Tessera: TSV height 30 um presented" (RIGHT column) --
+  each product renders once per column, on the same row, on shared colour
+  limits. The full before/after sentence, plus provenance, band and clip, is
+  one click away behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
@@ -435,11 +442,13 @@ DELAY that sits below the printed median floor (number and scope: say list).
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 5 - live chain from the stored
    channel: classical CFAR", click **Load preset**. The param editor opens on
-   **ADC Quantizer** (first knob: **ADC bits**); the operator card shows
-   "Loaded: Thrust 5 - live chain from the stored channel: classical CFAR
-   (Thrust 5, 5 frames)".
-2. Click **Run pipeline**. Both arms run in one click (A = 12-bit ADC (as
-   built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
+   **ADC Quantizer** (first knob: **ADC bits**). The knob for this screen
+   carries a green "this screen's knob" badge. The "Loaded: Thrust 5 - live
+   chain from the stored channel: classical CFAR (Thrust 5, 5 frames)" line is
+   inside **▸ Presenter notes (Thrust 5)**, which is collapsed by default --
+   open it only if you want the card.
+2. Click **Run pipeline**. Both arms run in one click (A = 12 (as built), B = 3
+   (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** SAY FIRST: the frames change -- Thrusts 1-4 ran
@@ -464,11 +473,11 @@ DELAY that sits below the printed median floor (number and scope: say list).
   the transport before talking about one frame's detections, and read the
   scoreboard's numbers as through its own last frame, not necessarily the one
   on screen.
-- Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
-  colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
-  The full before/after sentence, plus provenance, band and clip, is one click
-  away behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — ADC bits 12 (as built)" (LEFT column, colour dot) /
+  "B — ADC bits 3 (same frames)" (RIGHT column) -- each product renders once
+  per column, on the same row, on shared colour limits. The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -479,11 +488,11 @@ DELAY that sits below the printed median floor (number and scope: say list).
 The held-out TEST frames, replayed as the STORED RAY-TRACED CHANNEL: the RF
 front end, dechirp, thermal floor, impairments, IF high-pass and ADC all run
 LIVE from that channel, then CA-CFAR. Press Run once: A is the 12-bit ADC the
-corpus was generated at, B the same frames re-digitised at 3 bits. Measured
-over 5 frames: 16 hits / 45 unmatched (9.0/frame) at 12 bits, 13 / 36 (7.2) at
-3 bits. Thresholds are each detector's recall-0.5 point on the 172-frame split;
-on 5 frames recall varies, so compare the 172-frame FA/frame rows, not the
-crosses.
+corpus was generated at, B the same frames re-digitised at 3 bits. The
+scoreboards print this run's own hits and unmatched/frame -- 5-frame counts,
+read them there. Thresholds are each detector's recall-0.5 point on the
+172-frame split; on 5 frames recall varies, so compare the 172-frame FA/frame
+rows, not the crosses.
 
 ### Say
 - SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m,
@@ -501,21 +510,22 @@ crosses.
 - Ground truth omits ~3 real objects per frame inside 40 m, so a detector
   catching every real object caps precision at 0.64 -- some 'false alarms' are
   real.
-- Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); corpus targets
-  are slower by construction, so a 20 m/s car would alias.
+- Unambiguous velocity is +-v_max from the manifest (±24.67 m/s); corpus
+  targets are slower by construction, so anything faster than that folds back
+  into the map.
 - Unmatched detections can DROP at deeper quantisation: quantisation noise
   raises the CA-CFAR estimate, so fewer weak peaks clear threshold -- a loss of
   sensitivity, not a quality gain.
-- This detector sits at its 172-frame recall-0.5 point, yet gives 0.53 recall
-  here; matched-recall FA comparisons use that 172-frame split -- 5 frames
-  cannot reproduce a recall.
+- This detector sits at its 172-frame recall-0.5 point; the scoreboard's recall
+  row reads something else. Matched-recall FA comparisons use the 172-frame
+  split -- 5 frames cannot reproduce a recall.
 - How the cube becomes the map: Doppler sums away first (angle FFT) into a
   range-azimuth map; CA-CFAR's guard 2 / train 6 cells form one square annulus
   over range and azimuth, not two 1-D passes.
 
 ### Do NOT say
-- That 16 vs 13 hits measures 3-bit quantisation's cost: 5 frames at one
-  threshold is a demonstration that the knob reaches the detector, not a
+- That the two arms' hit counts measure 3-bit quantisation's cost: 5 frames at
+  one threshold is a demonstration that the knob reaches the detector, not a
   measurement of it.
 - Any learned-detector number before 2026-09-22 except rd-format 0.105/0.093:
   every number on this screen is the Ka scoring (beat_cfar_ka.json,
@@ -531,12 +541,13 @@ crosses.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 5 - live chain, ported network (the
    arm that LOSES, shown on purpose)", click **Load preset**. The param editor
-   opens on **IF High-Pass** (first knob: **Corner range (m)**); the operator
-   card shows "Loaded: Thrust 5 - live chain, ported network (the arm that
-   LOSES, shown on purpose) (Thrust 5, 5 frames)".
-2. Click **Run pipeline**. Both arms run in one click (A = IF high-pass corner
-   1 m (as built), B = IF high-pass corner 25 m (attenuates ~4.3 dB at 22 m)).
-   Wall time: read the last rehearsal's
+   opens on **IF High-Pass** (first knob: **Corner range (m)**). The knob for
+   this screen carries a green "this screen's knob" badge. The "Loaded: Thrust
+   5 - live chain, ported network (the arm that LOSES, shown on purpose)
+   (Thrust 5, 5 frames)" line is inside **▸ Presenter notes (Thrust 5)**, which
+   is collapsed by default -- open it only if you want the card.
+2. Click **Run pipeline**. Both arms run in one click (A = 1 m (as built), B =
+   25 m (attenuates ~4.3 dB at 22 m)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** The learned detector LOSES to CFAR: 0.105 vs 0.218,
@@ -559,8 +570,8 @@ crosses.
   the transport before talking about one frame's detections, and read the
   scoreboard's numbers as through its own last frame, not necessarily the one
   on screen.
-- Arm chips on screen: "A — Corner range (m) 1 m" (LEFT column, colour dot) /
-  "B — Corner range (m) 25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) --
+- Arm chips on screen: "A — Corner range 1 m (as built)" (LEFT column, colour
+  dot) / "B — Corner range 25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) --
   each product renders once per column, on the same row, on shared colour
   limits. The full before/after sentence, plus provenance, band and clip, is
   one click away behind that arm's own **▸ Details (provenance, band, clip)**.
@@ -603,10 +614,10 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 - You cannot see the 4.3 dB: both maps are peak-normalised and the peak sits
   inside 25 m; you see the floor coming up relative to a peak attenuated along
   with it.
-- This detector sits at its 172-frame recall-0.5 threshold, yet gives 0.50
-  recall on these 5 frames (the LAST) -- 5 frames cannot reproduce a recall.
-  Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
-  pause it to discuss one frame.
+- This detector sits at its 172-frame recall-0.5 threshold, and the
+  scoreboard's recall row for this run reads something else -- 5 frames cannot
+  reproduce a recall. Detector, scoreboard and PR panels hold that frame while
+  Range-Doppler loops; pause it to discuss one frame.
 - The PR legend's 'fftradnet_rd_b15' is this checkpoint (b15_fftradnet_rd_ka).
 - At Ka this arm scores 0.105 against a 0.093 chance floor -- +0.012 [+0.001,
   +0.026] above chance. It does not merely lose to CFAR; it barely beats
@@ -627,11 +638,14 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP
    0.468 vs 0.218 (val-tuned 0.326), in-distribution", click **Load preset**.
-   The param editor opens on **ADC Quantizer** (first knob: **ADC bits**); the
-   operator card shows "Loaded: Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP
-   0.468 vs 0.218 (val-tuned 0.326), in-distribution (Thrust 5, 5 frames)".
-2. Click **Run pipeline**. Both arms run in one click (A = 12-bit ADC (as
-   built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
+   The param editor opens on **ADC Quantizer** (first knob: **ADC bits**). The
+   knob for this screen carries a green "this screen's knob" badge. The
+   "Loaded: Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP 0.468 vs 0.218
+   (val-tuned 0.326), in-distribution (Thrust 5, 5 frames)" line is inside **▸
+   Presenter notes (Thrust 5)**, which is collapsed by default -- open it only
+   if you want the card.
+2. Click **Run pipeline**. Both arms run in one click (A = 12 (as built), B = 3
+   (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** The defensible sentence: a learned head on the
@@ -655,11 +669,11 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   the transport before talking about one frame's detections, and read the
   scoreboard's numbers as through its own last frame, not necessarily the one
   on screen.
-- Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
-  colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
-  product renders once per column, on the same row, on shared colour limits.
-  The full before/after sentence, plus provenance, band and clip, is one click
-  away behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — ADC bits 12 (as built)" (LEFT column, colour dot) /
+  "B — ADC bits 3 (same frames)" (RIGHT column) -- each product renders once
+  per column, on the same row, on shared colour limits. The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -673,9 +687,10 @@ printed on this screen; AP 0.468 vs 0.218, controls pass). On the 5 live frames
 below, fewer crosses can mean fewer hits since these aren't recall-matched --
 read the scoreboard's FA rows, not the crosses. The same live chain runs
 RADDetNet (Doppler as channels, range x azimuth as the spatial plane) on CFAR's
-cube. A/B re-digitises the stored channel at 3 bits: hits go 10 -> 5 -- the
-knob reaching the detector, not a ranking. Out of distribution the result is
-seed-dependent (F86); say so unprompted.
+cube. A/B re-digitises the stored channel at 3 bits and the hits fall with it
+(the scoreboards print both counts) -- the knob reaching the detector, not a
+ranking. Out of distribution the result is seed-dependent (F86); say so
+unprompted.
 
 ### Say
 - The defensible sentence: a learned head on the classical front end beats a
@@ -683,12 +698,12 @@ seed-dependent (F86); say so unprompted.
   CFAR' (F85 addendum).
 - Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42,
   b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically.
-  Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI [+0.145,
-  +0.208]; +0.148 vs the best of nine classical baselines (0.328).
+  Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI [+0.217,
+  +0.282]; +0.142 vs the best classical baseline (0.326).
 - The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
-  re-measurement of AP; recall here (0.33) cannot reproduce recall-0.5.
-  Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
-  pause it to discuss one frame.
+  re-measurement of AP; the recall row for this run cannot reproduce
+  recall-0.5. Detector, scoreboard and PR panels hold that frame while
+  Range-Doppler loops; pause it to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.326 -- above shipped CFAR (0.218), but still behind
@@ -703,8 +718,8 @@ seed-dependent (F86); say so unprompted.
 ### Do NOT say
 - 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's
   front end (F85 addendum).
-- That 5 hits at 3 bits vs 10 at 12 bits measures quantisation cost: 5 frames
-  at one threshold shows the knob reaches the detector, not measures it.
+- That the drop in hits at 3 bits measures quantisation cost: 5 frames at one
+  threshold shows the knob reaches the detector, not measures it.
 - Do not volunteer generalisation/robustness; if asked, read the OOD and
   3rd-corpus rows as printed (a third corpus never trained on; the lead holds)
   and stop there.
@@ -721,9 +736,11 @@ seed-dependent (F86); say so unprompted.
 ### Click sequence
 1. Open **Demo preset:**, select "Thrust 6 - JSAC: one waveform, an image and a
    constellation", click **Load preset**. The param editor opens on **TX
-   Waveform** (first knob: **Pilot spacing**); the operator card shows "Loaded:
-   Thrust 6 - JSAC: one waveform, an image and a constellation (Thrust 6, 5
-   frames)".
+   Waveform** (first knob: **Pilot spacing**). The knob for this screen carries
+   a green "this screen's knob" badge. The "Loaded: Thrust 6 - JSAC: one
+   waveform, an image and a constellation (Thrust 6, 5 frames)" line is inside
+   **▸ Presenter notes (Thrust 6)**, which is collapsed by default -- open it
+   only if you want the card.
 2. Click **Run pipeline**. Both arms run in one click (A = P = 2, B = P = 8).
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
@@ -762,7 +779,10 @@ the run just used, and printed.
 - The knob IS the trade: window 249.8 -> 62.4 m against burst rate 2.25 -> 3.94
   Gb/s. Both are computed from the frame and printed.
 - At spacing 8 the comb aliases and the map's floor rises: peak-median
-  72.1-72.8 dB (A) against 60.2-60.6 dB (B), measured over the 5 frames.
+  71.9-72.6 dB (A) against 59.8-60.2 dB (B), measured over the 5 frames.
+- Each panel draws only its own window -- no wrapped copies. Past arm B's 62.4
+  m a return folds back by exactly that window: the strips name the same echo
+  at two positions 62.4 m apart.
 - BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining SNR
   of 86-89 dB: a plumbing demonstration, not a link margin.
 - Rates are UNCODED BURST rates over a 6.67 us frame; the average depends on a

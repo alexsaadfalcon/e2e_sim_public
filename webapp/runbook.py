@@ -61,7 +61,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from webapp.app import _ab_arm_chip
-from webapp.demo_presets import PRESETS, DemoPreset, apply_preset
+from webapp.demo_presets import (PRESETS, DemoPreset, apply_preset,
+                                 resolved_say as _resolved_say)
 from webapp.pipeline_registry import (
     BLOCKS_BY_ID,
     MAX_N_STEPS,
@@ -251,14 +252,19 @@ def _panel_title(bid: str, preset: DemoPreset) -> str:
 # Per-preset section
 # =====================================================================================
 
-#: wave 10 (2026-09-24, item 3.6, hostile round 9): the Thrust 1 and Thrust 4
-#: param editors clip mid-sentence at the bottom of the pane (rehearsal PNG,
-#: round 9 item 2.5) -- the knob the click sequence just named (Tessera: TSV
-#: height (um) on T4; LNA bias current (mA) on T1, though that one opens
-#: visible -- the SECOND control below it does not) is below the fold on both.
-#: Keyed by thrust number, not preset id, since the fold is a param-pane-height
-#: fact, not a per-preset one.
-_SCROLL_PARAM_PANE_THRUSTS = {1, 4}
+#: RETRACTED 2026-09-25 (hostile round 12, item 17). This set named the thrusts whose
+#: knob the runbook told the presenter to SCROLL for -- "Scroll the param pane; the
+#: knob is below the fold" -- a wave-10 note written against the round-9 rehearsal.
+#: Read on the 2026-09-25 renders of both of those cards (thrust1_circuit_knobs_card,
+#: thrust4_interconnect_range_profile_card): on BOTH, the preset's knob is the FIRST
+#: control in the pane, carrying the green "this screen's knob" badge, fully visible
+#: without scrolling -- the redesign that put the control above its help text (spec
+#: 2.4) moved it. A script that says to scroll for something already on screen costs
+#: the presenter the one thing this document exists to save.
+#:
+#: What replaces it is not another position claim: the badge is a MARK on the knob, so
+#: it stays true wherever the pane puts it.
+_KNOB_BADGE = "this screen's knob"
 
 
 def _render_preset(i: int, preset: DemoPreset) -> str:
@@ -270,24 +276,28 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
     ab = _ab_lines(preset)
     arm_sentence = (f" Both arms run in one click (A = {preset.ab_label_a}, "
                     f"B = {preset.ab_label_b})." if preset.ab is not None else "")
-    scroll_note = (" Scroll the param pane; the knob is below the fold."
-                   if preset.thrust in _SCROLL_PARAM_PANE_THRUSTS else "")
+    knob_note = (f' The knob for this screen carries a green "{_KNOB_BADGE}" badge.'
+                 if open_param else "")
 
     lines.append("### Click sequence")
     lines.append(_numbered(1,
         f'Open **Demo preset:**, select "{preset.label}", click **Load preset**. '
-        f'The param editor opens on {open_desc}; the operator card shows "Loaded: '
-        f'{preset.label} (Thrust {preset.thrust}, {preset.n_steps} frames)".'
-        f'{scroll_note}'))
+        f'The param editor opens on {open_desc}.{knob_note} The "Loaded: '
+        f'{preset.label} (Thrust {preset.thrust}, {preset.n_steps} frames)" line is '
+        f'inside **▸ Presenter notes (Thrust {preset.thrust})**, which is collapsed '
+        f'by default -- open it only if you want the card.'))
     lines.append(_numbered(2,
         f"Click **Run pipeline**.{arm_sentence} {_WALL_TIME_NOTE}"))
-    if preset.say:
+    _say = _resolved_say(preset)
+    if _say:
         # wave 10 (2026-09-24, item 3.2, hostile round 9): a prepared line for the
         # 15-30 s dead air, always the preset's own first `say` bullet -- never
         # hand-typed, so it cannot drift from the card. Sits between the Run
         # click and the tab switch (item 4, round-9 cold read) -- it names what
         # to say WHILE the run is in flight, not after it lands.
-        lines.append(_bullet(f"**While it runs, say:** {preset.say[0]}"))
+        # `_resolved_say`, not `preset.say`: a bullet may carry the corpus's own v_max
+        # as a token, and the card fills it in from the manifest (item 4, round 12).
+        lines.append(_bullet(f"**While it runs, say:** {_say[0]}"))
     lines.append(_numbered(3, "The app switches to the **Results** tab automatically."))
     lines.append(_numbered(4,
         "Before loading the next preset: click the **Block Diagram** tab to "
@@ -408,9 +418,10 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
 
     lines.append(_wrap(preset.blurb) + "\n")
 
-    if preset.say:
+    _say = _resolved_say(preset)
+    if _say:
         lines.append("### Say")
-        for s in preset.say:
+        for s in _say:
             lines.append(_bullet(s))
         lines.append("")
 

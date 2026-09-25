@@ -511,12 +511,24 @@ def test_every_animated_panel_says_which_frame_it_is_on(figs):
         assert "frame 1 of 3" in first, key
 
 
-def test_the_static_range_profile_says_it_is_static(figs):
-    """Hostile round 10, section 3.2: the range-profile panel is built from the LAST
-    frame and does not animate while the map above it loops, and nothing said so."""
-    anns = " ".join(a.text for a in (figs["range_profile"].layout.annotations or ()))
-    assert "static" in anns
-    assert not (figs["range_profile"].frames or ())
+def test_the_range_profile_steps_with_the_map_above_it(figs):
+    """SUPERSEDED, and the supersession is the point (hostile round 12, item 14).
+
+    Round 10 (section 3.2) found this panel built from the LAST frame while the
+    range-azimuth map above it looped, with nothing saying so, and the fix was to SAY
+    it: the strip read "last frame of 3 (static)". Round 12 read the result on the
+    Thrust 4 screen -- "frame 2 of 3" beside "last frame of 3 (static)", one column,
+    one run, two frames -- and the honest label turned out to be a worse answer than
+    the animation. Every frame's profile was already computed and discarded; the panel
+    now steps on the same clock, which is what makes a column one frame again.
+
+    So: frames, and a strip that names the frame it is on."""
+    fig = figs["range_profile"]
+    anns = " ".join(a.text for a in (fig.layout.annotations or ()))
+    assert "static" not in anns
+    assert "frame" in anns
+    assert len(fig.frames or ()) == len(figs["range_az"].frames or ())
+    assert "same clock" in panel_text(fig)
 
 
 # ----------------------------------------------------------------------------------

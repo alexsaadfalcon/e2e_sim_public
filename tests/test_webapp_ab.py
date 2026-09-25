@@ -452,7 +452,9 @@ def test_range_profile_panel_carries_the_median_floor_statistic():
                                 "_axis_meta": {"range_profile_bins": 16}})["range_profile"]
     text = panel_text(fig)
     assert "median floor" in text
-    measured = float(re.search(r"median floor, dB rel\. peak:\s*(-?\d+\.\d+)", text).group(1))
+    # PER FRAME since 2026-09-25 (the panel animates -- hostile round 12, item 14):
+    # the Details line lists every frame's floor and names the last one.
+    measured = float(re.search(r"last frame (-?\d+\.\d+)\)", text).group(1))
     peak = max(float(prof.max()), 1e-12)
     prof_db = 10 * np.log10(prof / peak + 1e-12)
     expected = round(float(np.median(prof_db)), 1)

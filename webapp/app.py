@@ -65,6 +65,7 @@ from webapp.pipeline_runner import (
     run_pipeline,
     scenario_topdown_figure,
     note_differing_y_extents,
+    reach_floor_single_arm,
     share_heatmap_z_limits,
     y_extent_lock_of,
 )
@@ -402,6 +403,44 @@ _TWO_ARM_CLAUSE = re.compile(
     r"both arms|two arms|other arm|either arm|arm A\b|arm B\b|A/B", re.IGNORECASE)
 
 
+#: The page-foot screen note is capped at this many characters, cut at a CLAUSE
+#: boundary, with the remainder reachable in both arms' Details (where the whole note
+#: already lives, verbatim).
+#:
+#: Hostile round 12, item 16: Thrust 4's note is 968 characters and rendered as FIVE
+#: lines of the smallest type on the page, carrying -- in that type -- the NEXT/FEXT
+#: reference pair and the 3.53 dB scale-model admission. A caveat nobody can read at
+#: podium distance is not a disclosure; a short line that says what the caveat is
+#: about, over a disclosure one click away, is.
+#:
+#: 420, NOT a tighter number, and the value is not free: the three Thrust 5 notes carry
+#: mandatory disclosures (both CFAR baselines, the chance floor, the scoring crop, the
+#: corpus's v_max, the ADC's automatic gain) and are already held to a 400-character
+#: budget by `tests/test_demo_presets.py`. A cap below that would start deciding which
+#: of those reaches the screen, which is a content decision this function must not
+#: make. At 420 every Thrust 5 note renders WHOLE and only the genuinely over-long
+#: notes (T4 968, T6 749, T2 612) are cut.
+PAGE_FOOT_NOTE_MAX_CHARS = 420
+
+
+def _foot_note(note: str) -> str:
+    """`note` cut to `PAGE_FOOT_NOTE_MAX_CHARS` at a clause boundary, with a pointer to
+    where the rest is. Never cut mid-phrase: acceptance check 12 forbids a truncation
+    mark in visible text, and the full text is in Details either way."""
+    note = (note or "").strip()
+    if len(note) <= PAGE_FOOT_NOTE_MAX_CHARS:
+        return note
+    head = note[:PAGE_FOOT_NOTE_MAX_CHARS]
+    cuts = [head.rfind(sep) for sep in (". ", "; ", " -- ")]
+    cut = max(cuts)
+    if cut <= 0:
+        cut = head.rfind(" ")
+    kept = note[:cut].rstrip(" ;,-")
+    if not kept.endswith("."):
+        kept += "."
+    return kept + " Full note in each arm's Details."
+
+
 def _one_arm_screen_note(note: str) -> str:
     """`note` with every two-arm clause removed -- what a SINGLE-arm screen prints.
 
@@ -423,6 +462,10 @@ def _ab_arm_line(preset: "DemoPreset", arm: str) -> str:
     a visitor reading a single panel could not tell which arm was on screen (defect
     found reading the rendered Results tab)."""
     bid, key, _value_b = preset.ab
+    # The FULL registry label here, unit parenthetical and all: this line is the
+    # verbatim record in each arm's Details, where there is room for it. Only the CHIP
+    # drops a duplicated unit (`_chip_label_without_a_duplicated_unit`), because that is
+    # the 20 px line a photograph identifies the arm by.
     label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
     if arm == "a":
         return f"A (as loaded): {label} {preset.ab_label_a or '?'} -- before"
@@ -508,6 +551,28 @@ def _chip_value_forms(text: str) -> List[str]:
     return [text, keep_digit_parens, tightened, from_number, no_parens, bare]
 
 
+def _chip_label_without_a_duplicated_unit(label: str, *values: str) -> str:
+    """`label` with its trailing unit parenthetical dropped when the arm VALUES already
+    carry that unit.
+
+    The chip is "<param label> <value>", and a registry label names its unit for the
+    parameter EDITOR, where there is no value beside it. On a chip there is: the pairs
+    read "LNA bias current (mA) 8 mA", "Corner range (m) 1 m", "Tessera: TSV height
+    (um) 50 um presented" -- the unit twice, in a 20 px chip that is the one thing a
+    photograph of the screen is meant to identify the arm by (hostile round 12, item
+    16). Dropped only when a value actually repeats it, so a label whose unit is NOT in
+    the value keeps it and no arm is left unitless.
+    """
+    m = re.search(r"\s*\(([^()]{1,6})\)\s*$", label)
+    if not m:
+        return label
+    unit = m.group(1).strip()
+    if not unit or not all(re.search(r"\d\s*" + re.escape(unit) + r"\b", v or "")
+                           for v in values if v):
+        return label
+    return label[:m.start()].rstrip()
+
+
 def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     """The ARM CHIP (layout spec section 2.3): just the knob and its value, e.g.
     "A -- ADC 12 bit (as built)". The full banner line above is not deleted -- it is
@@ -523,6 +588,8 @@ def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
     full in Details."""
     bid, key, _value_b = preset.ab
     label = next((ps.label for ps in BLOCKS_BY_ID[bid].params if ps.key == key), key)
+    label = _chip_label_without_a_duplicated_unit(label, preset.ab_label_a or "",
+                                                  preset.ab_label_b or "")
     forms_a = _chip_value_forms(preset.ab_label_a or "?")
     forms_b = _chip_value_forms(preset.ab_label_b or "?")
     rung = len(forms_a) - 1
@@ -627,20 +694,43 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
     # path, whose source string already names its band.
     band = axis_meta.get("band") or ""
 
+    # THE ENVIRONMENT IS ONE FIELD, band included, on every screen (hostile round 12,
+    # item 16: "identity line format identical on every screen"). Before this the band
+    # was its own clause, so the corpus screens read
+    # "Thrust 5 . classical CFAR . Corpus Replay . 30 GHz corpus . 5 frames . run #1"
+    # -- six fields against the Sionna screens' five -- and the cancel screen, whose
+    # budget is smaller, shortened "munich (Ka-band, 30 GHz)" to a bare "munich", so
+    # one run's environment had three spellings across seven screens.
+    def _with_band(name: str) -> str:
+        return f"{name} ({band})" if band and band not in name else name
+
+    env_full = _with_band(source)
+    #: "Corpus Replay (live chain from stored channel): test split from frame 0"
+    #: -> the environment without its run-specific tail.
+    env_name = _with_band(_clause_head(source, (": ",)))
+    #: ...and without its parenthetical, which is a mouthful on the corpus path. On the
+    #: Sionna path the parenthetical IS the band, so it is kept by `_with_band`'s own
+    #: test unless the band is already inside the name.
+    env_short = _with_band(_clause_head(source, (": ", " (")))
+
     # A ladder of progressively shorter forms, each made of WHOLE clauses. The first
-    # that fits wins; the last rung always fits.
+    # that fits wins; the last rung always fits. Every rung keeps the environment as
+    # ONE field, and the frame count is given up BEFORE the environment's own name is
+    # shortened: on the cancel path the amber chip beside this line already reads
+    # "CANCELLED -- N of M frames", while nothing else on that screen says which
+    # environment ran.
     candidates = [
-        [thrust, label, source, band, frames, run],
-        [thrust, slot, source, band, frames, run],
-        # The source's parenthetical is a mouthful ("Corpus Replay (live chain from
-        # stored channel): test split from ..."); the environment NAME is the identity.
-        [thrust, slot, _clause_head(source, (": ", " (")), band, frames, run],
+        [thrust, label, env_full, frames, run],
+        [thrust, slot, env_full, frames, run],
+        [thrust, slot, env_name, frames, run],
+        [thrust, slot, env_name, run],
+        [thrust, slot, env_short, frames, run],
         # Keep the ENVIRONMENT before giving up on the label: a screen that says only
         # "Thrust 5 . 5 frames . run #1" has lost the two facts a photograph needs
         # (which preset, which corpus). Measured on thrust5_detector_ml, 2026-09-24.
-        [thrust, slot, _clause_head(source, (": ", " (")), band, run],
-        [thrust, slot, band, frames, run],
-        [thrust, band, frames, run],
+        [thrust, slot, env_short, run],
+        [thrust, env_short, frames, run],
+        [thrust, env_short, run],
     ]
     # A cancelled run also draws an amber `CANCELLED -- N of M frames` chip in this
     # same row, which takes ~230 px out of the line's own width (measured on
@@ -1714,7 +1804,14 @@ def _render_results(results_data, active_tab):
     # CAPTION clause (and appends the exact shared limits to its Details), while
     # `_share_y_ranges` only unions numbers -- running it second keeps its zmin/zmax
     # union a no-op over the already-equal pair rather than a second, weaker rule.
-    share_heatmap_z_limits(figs, prev_figs)
+    if prev_figs:
+        share_heatmap_z_limits(figs, prev_figs)
+    else:
+        # ONE ARM: the same floor-reaching rule, applied to this arm alone. Without it
+        # a single-arm screen (the cancel journey, a preset with no B) kept the hard
+        # -40 dB clip and drew a uniformly dark map of the same product the two-arm
+        # screen draws at -61.3 dB (hostile round 12, item 8).
+        reach_floor_single_arm(figs)
     _share_y_ranges(figs, prev_figs)
     # ...and then SAY which pairs `_share_y_ranges` deliberately left unshared, so the
     # one thing a photograph of two side-by-side maps cannot recover is on the screen.
@@ -1796,8 +1893,10 @@ def _render_results(results_data, active_tab):
         # The preset's own caveat, at the BOTTOM of the page (layout spec section 2.3):
         # a photograph of the screen still catches it; a viewer of the screen is no
         # longer made to read three lines of it before any data appears. It is also
-        # inside both arms' Details, so it is never more than one click away.
-        children.append(html.Div(screen_note, className="page-foot-note"))
+        # inside both arms' Details, IN FULL, so nothing here is more than one click
+        # away -- which is what lets the foot line be capped (see `_foot_note`).
+        children.append(html.Div(_foot_note(screen_note),
+                                 className="page-foot-note"))
 
     return html.Div(children, className="results-page")
 

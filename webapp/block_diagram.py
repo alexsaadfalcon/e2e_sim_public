@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 import dash_cytoscape as cyto
 from dash import dcc, html
 
-from webapp.demo_presets import PRESETS, DemoPreset
+from webapp.demo_presets import PRESETS, DemoPreset, resolved_say as _resolved_say
 from webapp.pipeline_registry import (
     BLOCKS, BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS,
 )
@@ -675,7 +675,9 @@ def preset_notes(preset: DemoPreset) -> Any:
                  style={"fontWeight": "bold"}),
         html.P(preset.blurb, style={"marginTop": "4px", "marginBottom": "2px"}),
         _list("Turn live", knobs, "#3867d6"),
-        _list("Say", preset.say, "#20bf6b"),
+        # `resolved_say`, not `preset.say`: a bullet may carry the corpus's own v_max as
+        # a token, filled in from the manifest (webapp/demo_presets.py `resolved_say`).
+        _list("Say", _resolved_say(preset), "#20bf6b"),
         _list("Do NOT say or show", preset.do_not_say, "#eb3b5a"),
     ], style={"fontSize": "16px", "color": "#2d3a4a", "marginTop": "8px"})
     # Collapsed by default (was a 750px wall of text between the tab strip and the

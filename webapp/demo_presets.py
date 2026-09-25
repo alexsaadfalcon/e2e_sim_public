@@ -57,8 +57,11 @@ RADDETNET_THRESHOLD = 0.475
 #: frame) are the comparison. RETRACTED (hostile-expert read, 2026-09-23, item 4):
 #: this comment used to say the on-screen CROSS COUNTS (5 live frames) ARE that
 #: comparison; they are not -- recall varies frame to frame on 5 frames (arm-A hit
-#: rates measured 2026-09-23: CFAR 0.53, RADDetNet 0.33, ML 0.50 -- nowhere near
-#: matched), so only the 172-frame rows are comparable across arms.
+#: rates measured 2026-09-23 on that day's corpus were nowhere near matched, and the
+#: live rows on today's screens differ again), so only the 172-frame rows are
+#: comparable across arms. The live figures are deliberately NOT repeated here or on
+#: any card: they are 5-frame counts, they move with the corpus and with the frame the
+#: clock is parked on, and the scoreboard prints them (hostile round 12, item 12).
 CFAR_THRESHOLD = 0.615
 
 #: Decode threshold for that checkpoint: its recall-0.5 operating point, objectness
@@ -77,6 +80,157 @@ ML_THRESHOLD = 0.220
 #: them (the directories may stay on disk).
 DEMO_CFR_CORPUS = ("e2e/ml/datasets/b1_demo_cfr_ka/benchmark_v1_ka_D2/"
                    "benchmark_v1_ka_D2/manifest.json")
+
+
+#: The token a `say` bullet writes instead of typing the corpus's unambiguous velocity,
+#: filled in by `resolved_say` from the manifest itself. Same rule as the screen note's
+#: "{VMAX_CLAUSE}" (webapp/app.py `_resolve_screen_note`), and it exists for the same
+#: reason, one level up: hostile round 12 item 4 found the card and the runbook saying
+#: "~9.7 m/s ... a 20 m/s car would alias" beside a screen printing +-24.67 m/s. The
+#: 9.7 was read off a PNG of an older corpus; the screen reads the manifest.
+VMAX_SAY_TOKEN = "{VMAX}"
+
+#: Two more `say` tokens, filled in by `resolved_say` from the SAME two files the
+#: Thrust 5 panels read -- `e2e/ml/runs/raddetnet_ci_ka.json` (the paired-scene
+#: bootstrap) and `e2e/ml/runs/beat_cfar_ka.json` (every arm's AP).
+#:
+#: Hostile round 12, item 3: the RADDetNet card and the runbook line generated from it
+#: read "+0.250 AP vs shipped CFAR (0.218), 95% CI [+0.145, +0.208]" -- an interval that
+#: EXCLUDES its own point estimate, because it is F85's 77 GHz interval typed beside a
+#: Ka point estimate, while the panel two inches away printed [+0.217, +0.282] from the
+#: Ka file. Item 17: the same bullet read "+0.148 vs the best of nine classical
+#: baselines (0.328)" where the file says 0.326, and 0.468 - 0.326 = +0.142.
+#:
+#: Neither number is typed any more. A card that cannot read the file drops the bullet
+#: rather than printing a hole (`resolved_say`).
+RADDETNET_CI_SAY_TOKEN = "{RADDETNET_CI}"
+BEST_CLASSICAL_SAY_TOKEN = "{RADDETNET_VS_BEST_CLASSICAL}"
+
+
+def raddetnet_ci_clause():
+    """"+0.250 AP vs shipped CFAR (0.218), 95% CI [+0.217, +0.282]" -- every number
+    read from the bootstrap file the scoreboard and the PR panel read. None when the
+    file is missing or has no RADDetNet row."""
+    try:
+        from webapp.detector_scoreboard import (DEFAULT_BEAT_CFAR_JSON,
+                                                DEFAULT_RADDETNET_CI_JSON,
+                                                _raddetnet_ci_for_arm)
+        import json
+        from pathlib import Path
+
+        ci = _raddetnet_ci_for_arm("raddetnet", DEFAULT_RADDETNET_CI_JSON)
+        if not ci:
+            return None
+        arms = json.loads(Path(DEFAULT_BEAT_CFAR_JSON).read_text())["arms"]
+        base = next((a for a in arms if a.get("name") == ci.get("baseline")), None)
+        base_ap = _arm_ap(base)
+        base_txt = f" ({base_ap:.3f})" if base_ap is not None else ""
+        return (f"{ci['delta_AP']:+.3f} AP vs shipped CFAR{base_txt}, 95% CI "
+                f"[{ci['ci_low']:+.3f}, {ci['ci_high']:+.3f}]")
+    except Exception:
+        return None
+
+
+def _arm_ap(arm):
+    """An arm's AP from `beat_cfar*.json`, whichever key that file uses for it."""
+    if not arm:
+        return None
+    for key in ("ap", "AP", "average_precision"):
+        v = arm.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
+    metrics = arm.get("metrics") or {}
+    for key in ("ap", "AP", "average_precision"):
+        v = metrics.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return None
+
+
+def best_classical_lead_clause():
+    """"+0.142 vs the best classical baseline (0.326)" -- the RADDetNet arm's AP minus
+    the best-scoring `classical ...` arm's, both from `beat_cfar_ka.json`. None when
+    either is missing."""
+    try:
+        import json
+        from pathlib import Path
+
+        from webapp.detector_scoreboard import DEFAULT_BEAT_CFAR_JSON
+
+        arms = json.loads(Path(DEFAULT_BEAT_CFAR_JSON).read_text())["arms"]
+        rad = _arm_ap(next((a for a in arms if a.get("name") == "raddetnet"), None))
+        classical = [ap for ap in (_arm_ap(a) for a in arms
+                                   if str(a.get("name", "")).startswith("classical"))
+                     if ap is not None]
+        if rad is None or not classical:
+            return None
+        best = max(classical)
+        return f"{rad - best:+.3f} vs the best classical baseline ({best:.3f})"
+    except Exception:
+        return None
+
+#: Peak-median of the range-azimuth map at each screen's OWN operating point, arm A.
+#: MEASURED 2026-09-25 through `webapp.pipeline_runner.run_pipeline` on the shipped
+#: munich Ka frames, every frame of each preset: Thrust 1 58.30/58.32/58.30/58.32/58.33
+#: dB (signal_scaling 3e-5, scale_mode legacy) and Thrust 2 49.04/49.01/48.98/49.01/
+#: 49.01/49.03 dB. Both are flat to 0.06 dB across their runs, which is why one figure
+#: each is honest here.
+#:
+#: They are a PAIR and live together because the only claim either is used for is the
+#: comparison between the two screens -- and that claim was wrong in BOTH magnitude and
+#: DIRECTION until 2026-09-25: the card read "peak-median ~58 dB, ~11 dB below Thrust
+#: 2's ~77 dB" while Thrust 2's own screen printed 49.0 / 48.8 dB, i.e. Thrust 1 is
+#: about 9 dB ABOVE it (hostile round 12, item 5). The 77 dB predates the Ka retrace.
+#: `tests/test_demo_presets.py` pins the card sentence to these two constants, so the
+#: sentence cannot drift from them again and re-measuring is a one-line edit.
+T1_PEAK_MEDIAN_DB_ARM_A = 58.3
+T2_PEAK_MEDIAN_DB_ARM_A = 49.0
+
+
+def corpus_v_max_mps(manifest: str = DEMO_CFR_CORPUS):
+    """+-v_max (m/s) of a corpus manifest, or None -- the SAME quantity
+    `webapp.app._read_corpus_v_max` reads off a live run's block state, read here from
+    the preset's own corpus so a card and a generated runbook can state it without a
+    run. Never raises: a missing or unparseable manifest drops the clause."""
+    try:
+        import json
+        from pathlib import Path
+
+        from e2e.radar_config import RadarConfig      # dependency-free, stdlib only
+        from webapp.corpus_catalog import REPO_ROOT
+        path = Path(manifest)
+        if not path.is_absolute():
+            path = REPO_ROOT / manifest
+        cfg = RadarConfig.from_dict(json.loads(path.read_text(encoding="utf-8"))["config"])
+        return float(cfg.max_velocity_mps)
+    except Exception:
+        return None
+
+
+def resolved_say(preset: "DemoPreset", manifest: str = DEMO_CFR_CORPUS) -> List[str]:
+    """`preset.say` with `VMAX_SAY_TOKEN` filled in from the manifest.
+
+    EVERY consumer of `say` goes through this -- the operator card
+    (webapp/block_diagram.py) and both places the runbook prints it -- so there is one
+    authority for the substitution and a card and its runbook line cannot disagree.
+    When the manifest cannot be read the whole bullet is DROPPED rather than printed
+    with a hole in it: a velocity sentence with no velocity is worse than no sentence.
+    """
+    v_max = corpus_v_max_mps(manifest)
+    fills = {
+        VMAX_SAY_TOKEN: (f"±{v_max:.2f} m/s" if v_max is not None else None),
+        RADDETNET_CI_SAY_TOKEN: raddetnet_ci_clause(),
+        BEST_CLASSICAL_SAY_TOKEN: best_classical_lead_clause(),
+    }
+    out: List[str] = []
+    for bullet in (preset.say or []):
+        tokens = [t for t in fills if t in bullet]
+        if any(fills[t] is None for t in tokens):
+            continue            # a number with no source is a bullet with a hole
+        for t in tokens:
+            bullet = bullet.replace(t, fills[t])
+        out.append(bullet)
+    return out
 
 
 #: Shared Results-tab screen note for the three Thrust 5 detector presets. The opening
@@ -134,6 +288,14 @@ _T5_SCREEN_NOTE = (
     "ADC chain LIVE; offline numbers (beat_cfar_ka.json) for reference, not "
     "re-measured live; BOTH CFAR baselines, shipped 0.218 and val-tuned 0.326, "
     "chance floor 0.093; a knob moves ML off training distribution; "
+    # 15b (hostile round 12): the ADC runs at full_scale 0 = PER-FRAME AUTOMATIC GAIN,
+    # 6 dB of headroom over the frame's own peak. It is why a 3-bit converter still
+    # produces a picture, and it lived only in the parameter editor's help text on the
+    # Block Diagram tab -- a hostile reader who asks "how does 3 bits survive?" got no
+    # answer from the results screen. The run also emits it as a note computed from
+    # what the quantizer actually ran with (pipeline_runner), so Details cannot claim
+    # an AGC a run did not use; this clause is the default-screen half.
+    "ADC: per-frame AGC, 6 dB headroom; "
     "scoring crop 40 m{VMAX_CLAUSE}."
 )
 
@@ -421,9 +583,15 @@ PRESETS: List[DemoPreset] = [
             # 68 m families read 74.2 m and 136 m of excess path. Same returns, same
             # delays, one convention -- and the panel's axis now says "excess path (m)"
             # so the card and the screen cannot disagree about which quantity it is.
+            # NO METRE DIGIT FOR THE BRIGHTEST RETURN (hostile round 12, item 6, and
+            # the third time this exact line has been corrected: 36 vs 37 m, then 74.2
+            # vs 72 m). The statistic strip prints the brightest visible return's own
+            # excess path PER FRAME -- it is real data and it moves frame to frame, so
+            # any digit typed on a card is wrong on most frames. The card points at the
+            # strip; the panel does the quoting.
             "Excess path 0-4 m is not a target: it is the direct path the display "
-            "normalises to (0 dB). Multipath: the ~74 m return the panel names "
-            "(74.2 m; F94's 37.1 m at c*tau/2) and 136 m.",
+            "normalises to (0 dB). Multipath: the strip names the brightest return's "
+            "excess path on the frame shown; a second family sits near twice it.",
             # wave 10 (2026-09-24): merged the old "noise figure" and "what
             # end-to-end buys over Friis" bullets -- both turned on the same 0.17 dB
             # agreement figure.
@@ -459,9 +627,12 @@ PRESETS: List[DemoPreset] = [
             # wave 10 (2026-09-24, item 4.1, hostile round 9): the noise floor
             # moves 11 dB between this slide and the next; name the cause before
             # the room asks.
-            "Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median ~58 dB, "
-            "~11 dB below Thrust 2's ~77 dB -- a different operating point. That "
-            "drive is a DISPLAY choice, not an input level (Details).",
+            "Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median "
+            f"{T1_PEAK_MEDIAN_DB_ARM_A:.0f} dB on arm A, "
+            f"{T1_PEAK_MEDIAN_DB_ARM_A - T2_PEAK_MEDIAN_DB_ARM_A:.0f} dB ABOVE "
+            f"Thrust 2's {T2_PEAK_MEDIAN_DB_ARM_A:.0f} -- a different operating "
+            "point, both strips printed. A DISPLAY choice, not an input level "
+            "(Details).",
             # SEAT'S READ OF THE 2026-09-24 RENDERS, item 1d. The obvious question from
             # the floor is why a hand-picked drive is used when the block offers a
             # `physical` mode. Answered by measurement, taken 2026-09-24 on this preset:
@@ -554,7 +725,9 @@ PRESETS: List[DemoPreset] = [
         # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.08 arm); run B drops
         # to 1 bit, the 0.32 arm the card's headline quotes.
         ab=("afe", "mantissa", 1),
-        ab_label_a="6 bit", ab_label_b="1 bit",
+        # The chip reads "<param label> <value>" and the label is "FP mantissa bits",
+        # so a value of "6 bit" printed the unit twice (hostile round 12, item 16).
+        ab_label_a="6", ab_label_b="1",
         # Rewritten (hostile-expert fourth read, 2026-09-23): the old note claimed the
         # elevation cut moves ~2.7 dB, a number no panel on THIS screen shows (that
         # figure was a cross-arm mean |dB| difference on the off-screen FFT az-el
@@ -601,8 +774,8 @@ PRESETS: List[DemoPreset] = [
             # PATH LENGTH c*tau over the line of sight, so F94's 37.1 m and 68 m
             # families read 74.2 m and 136 m. Same returns, same delays, one
             # convention -- and the panel's own axis now says "excess path (m)".
-            "normalises to (0 dB); multipath: the ~74 m return the panel names "
-            "(74.2 m; F94's 37.1 m at c*tau/2) and 136 m.",
+            "normalises to (0 dB); multipath: the strip names the brightest "
+            "return's excess path per frame, a second family near twice it.",
             "Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the "
             "Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
@@ -962,16 +1135,18 @@ PRESETS: List[DemoPreset] = [
                "the RF front end, dechirp, thermal floor, impairments, IF high-pass "
                "and ADC all run LIVE from that channel, then CA-CFAR. Press Run "
                "once: A is the 12-bit ADC the corpus was generated at, B the same "
-               "frames re-digitised at 3 bits. Measured over 5 frames: 16 hits / "
-               "45 unmatched (9.0/frame) at 12 bits, 13 / 36 (7.2) at 3 bits. "
+               "frames re-digitised at 3 bits. The scoreboards print this run's own "
+               "hits and unmatched/frame -- 5-frame counts, read them there. "
                "Thresholds are each detector's recall-0.5 point on the 172-frame "
                "split; on 5 frames recall varies, so compare the 172-frame "
                "FA/frame rows, not the crosses."),
         live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.66 -> 0.8 (fewer detections)")],
         ab=("quantizer", "bits", 3),
-        ab_label_a="12-bit ADC (as built)",
-        ab_label_b="3-bit ADC (same frames)",
+        # "ADC bits 12-bit ADC (as built)" said both words twice on a 20 px chip
+        # (hostile round 12, item 16); the label carries "ADC bits" already.
+        ab_label_a="12 (as built)",
+        ab_label_b="3 (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m, "
@@ -997,15 +1172,22 @@ PRESETS: List[DemoPreset] = [
             "Ground truth omits ~3 real objects per frame inside 40 m, so a "
             "detector catching every real object caps precision at 0.64 -- "
             "some 'false alarms' are real.",
-            "Unambiguous velocity is +-v_max from the manifest (~9.7 m/s); corpus "
-            "targets are slower by construction, so a 20 m/s car would alias.",
+            # INTERPOLATED FROM THE MANIFEST, never typed (hostile round 12, item 4).
+            # This bullet said "~9.7 m/s ... a 20 m/s car would alias" -- a number read
+            # off an older corpus's PNG -- while the screen note beside it printed
+            # +-24.67 m/s from the manifest, at which a 20 m/s car does NOT alias. The
+            # bullet now quotes the same source the screen does and makes no claim
+            # about a speed it has not been given.
+            "Unambiguous velocity is +-v_max from the manifest (" + VMAX_SAY_TOKEN
+            + "); corpus targets are slower by construction, so anything faster than "
+            "that folds back into the map.",
             "Unmatched detections can DROP at deeper quantisation: quantisation "
             "noise raises the CA-CFAR estimate, so fewer weak peaks clear "
             "threshold -- a loss of sensitivity, not a quality gain.",
             # wave 9 (2026-09-24, T5 item 5): prepared answer, shared across the three
             # T5 cards.
-            "This detector sits at its 172-frame recall-0.5 point, yet gives "
-            "0.53 recall here; matched-recall FA comparisons use that "
+            "This detector sits at its 172-frame recall-0.5 point; the scoreboard's "
+            "recall row reads something else. Matched-recall FA comparisons use the "
             "172-frame split -- 5 frames cannot reproduce a recall.",
             # wave 12 (2026-09-24, item 4.3): how the cube becomes a map, read
             # from classical_detection_map/cfar_objectness (e2e/ml/baseline.py):
@@ -1018,9 +1200,9 @@ PRESETS: List[DemoPreset] = [
             "one square annulus over range and azimuth, not two 1-D passes.",
         ],
         do_not_say=[
-            "That 16 vs 13 hits measures 3-bit quantisation's cost: 5 frames at one "
-            "threshold is a demonstration that the knob reaches the detector, not a "
-            "measurement of it.",
+            "That the two arms' hit counts measure 3-bit quantisation's cost: 5 "
+            "frames at one threshold is a demonstration that the knob reaches the "
+            "detector, not a measurement of it.",
             # wave 9 (2026-09-24, T5 item 2): 0.138 (fftradnet_rad, on every PR legend
             # here) is not one of the retracted numbers -- it is the 2026-09-22
             # rescoring under the current beat_cfar.json protocol; only 0.229 (the old
@@ -1071,13 +1253,19 @@ PRESETS: List[DemoPreset] = [
                      "4.3 dB at the targets' 22 m range)"),
                     ("detector", "threshold", "0.22 -> 0.5 (the figure goes blank)")],
         ab=("if_hpf", "corner_range_m", 25.0),
-        ab_label_a="IF high-pass corner 1 m (as built)",
-        ab_label_b="IF high-pass corner 25 m (attenuates ~4.3 dB at 22 m)",
-        # ".": the shared note ends on the render-time v_max clause, so the sentence
-        # separator has to be added back here or the two run together on screen
-        # ("v_max +-9.69 m/s Loses to CFAR", read off the rehearsal PNG).
+        # The chip's label is "Corner range (m)" and the block is the IF high-pass, so
+        # naming the knob again inside the value read "Corner range (m) IF high-pass
+        # corner 1 m" (hostile round 12, item 16).
+        ab_label_a="1 m (as built)",
+        ab_label_b="25 m (attenuates ~4.3 dB at 22 m)",
+        # THE SEPARATOR, and it has to be added back BEFORE the appended sentence:
+        # the shared note ends on the render-time v_max clause, `rstrip(".")` takes the
+        # full stop off, and joining with a bare space ran the two together on screen --
+        # "v_max +-24.67 m/s Loses to CFAR 0.105 vs 0.218" (hostile round 12, item 16,
+        # and read the same way on the 2026-09-24 PNG at the previous v_max). The
+        # comment that used to sit here claimed this was already fixed; it was not.
         screen_note=_T5_SCREEN_NOTE.rstrip(".")
-        + " Loses to CFAR 0.105 vs 0.218, shown on purpose.",
+        + ". Loses to CFAR 0.105 vs 0.218, shown on purpose.",
         say=[
             "The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor "
             "0.081. Say it first.",
@@ -1111,9 +1299,9 @@ PRESETS: List[DemoPreset] = [
             # Range-Doppler panel now auto-plays and loops on the shared clock
             # rather than sitting still; the detector panel still holds the
             # last frame regardless.
-            "This detector sits at its 172-frame recall-0.5 threshold, yet "
-            "gives 0.50 recall on these 5 frames (the LAST) -- 5 frames "
-            "cannot reproduce a recall. Detector, scoreboard and PR panels "
+            "This detector sits at its 172-frame recall-0.5 threshold, and the "
+            "scoreboard's recall row for this run reads something else -- 5 "
+            "frames cannot reproduce a recall. Detector, scoreboard and PR panels "
             "hold that frame while Range-Doppler loops; pause it to discuss "
             "one frame.",
             # wave 10 (2026-09-24, item 3.7, hostile round 9): one name for the
@@ -1174,14 +1362,17 @@ PRESETS: List[DemoPreset] = [
                "scoreboard's FA rows, not the crosses. The same live chain runs "
                "RADDetNet (Doppler as channels, range x azimuth as the spatial "
                "plane) on CFAR's cube. A/B re-digitises the stored channel at 3 "
-               "bits: hits go 10 -> 5 -- the knob reaching the detector, not a "
+               "bits and the hits fall with it (the scoreboards print both counts) "
+               "-- the knob reaching the detector, not a "
                "ranking. Out of distribution the result is seed-dependent (F86); "
                "say so unprompted."),
         live_knobs=[("quantizer", "bits", "12 -> 3 (the ADC is re-run, not re-loaded)"),
                     ("detector", "threshold", "0.44 -> 0.2 (more, weaker detections)")],
         ab=("quantizer", "bits", 3),
-        ab_label_a="12-bit ADC (as built)",
-        ab_label_b="3-bit ADC (same frames)",
+        # "ADC bits 12-bit ADC (as built)" said both words twice on a 20 px chip
+        # (hostile round 12, item 16); the label carries "ADC bits" already.
+        ab_label_a="12 (as built)",
+        ab_label_b="3 (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
             "The defensible sentence: a learned head on the classical front end beats a "
@@ -1189,8 +1380,8 @@ PRESETS: List[DemoPreset] = [
             "CFAR' (F85 addendum).",
             "Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42, "
             "b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically. "
-            "Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI "
-            "[+0.145, +0.208]; +0.148 vs the best of nine classical baselines (0.328).",
+            "Paired scene bootstrap: " + RADDETNET_CI_SAY_TOKEN + "; "
+            + BEST_CLASSICAL_SAY_TOKEN + ".",
             # wave 9 (2026-09-24, T5 item 5): folded the recall-0.5 caveat into this
             # bullet -- the card's say list is already at its 6-bullet cap.
             # wave 10 (2026-09-24, item 2.2, hostile round 9): folded in that the
@@ -1200,8 +1391,8 @@ PRESETS: List[DemoPreset] = [
             # Range-Doppler panel now auto-plays/loops on the shared clock;
             # kept under the 45-word RADDetNet bullet cap.
             "The counts on screen are 5 live frames, LAST shown -- a "
-            "demonstration, not a re-measurement of AP; recall here (0.33) "
-            "cannot reproduce recall-0.5. Detector, scoreboard and PR panels "
+            "demonstration, not a re-measurement of AP; the recall row for this "
+            "run cannot reproduce recall-0.5. Detector, scoreboard and PR panels "
             "hold that frame while Range-Doppler loops; pause it to discuss "
             "one frame.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
@@ -1224,9 +1415,9 @@ PRESETS: List[DemoPreset] = [
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution, on "
             "CFAR's front end (F85 addendum).",
-            "That 5 hits at 3 bits vs 10 at 12 bits measures quantisation cost: "
-            "5 frames at one threshold shows the knob reaches the detector, not "
-            "measures it.",
+            "That the drop in hits at 3 bits measures quantisation cost: 5 frames "
+            "at one threshold shows the knob reaches the detector, not measures "
+            "it.",
             # wave 9 (2026-09-24, T5 item 1): the screen itself prints OOD and
             # 3rd-corpus rows now, so "anything" contradicted what is on screen --
             # reworded to don't-volunteer-but-read-what's-printed.
@@ -1316,16 +1507,21 @@ PRESETS: List[DemoPreset] = [
         # 499.55 m window at EVERY pilot spacing (measured: both arms 72.86-72.88 dB
         # peak-median, identical to the digit, with the A/B invisible). The runner's
         # `_display_symbol_for` shows symbol 1 here; a test pins this sentence to it.
-        screen_note=("One OFDM-ISAC frame per step: 5000 subcarriers on the stored "
-                     "channel's own grid (600.1 kHz spacing), 4 symbols, QPSK. Symbol 0 "
-                     "is the all-pilot preamble -- the sensing reference, the channel "
-                     "estimate the MRC weights come from, and the FMCW bit-parity "
-                     "point. The IMAGE SHOWN IS SYMBOL 1, the first data symbol: the "
-                     "comb rides on the data symbols, so that is where the resource "
-                     "split is (symbol 0's image is the full window at every spacing). "
-                     "No range-Doppler: a Doppler FFT over symbols of one "
-                     "time-invariant stored channel is a delta at bin 0, which is a "
-                     "property of these frames, not of JSAC. " + _ARRAY_DISCLOSURE),
+        # LEADS WITH THE SYMBOL (2026-09-25). The page-foot note is capped at a clause
+        # boundary and its tail lives in Details (webapp/app.py `_foot_note`, hostile
+        # round 12 item 16), and at 749 characters this note's most load-bearing
+        # sentence -- WHICH SYMBOL the image is of -- sat past the cap. Same sentences,
+        # ordered by what a reader of this screen has to know first.
+        screen_note=("The IMAGE SHOWN IS SYMBOL 1, the first data symbol: the comb "
+                     "rides on the data symbols, so that is where the resource split "
+                     "is (symbol 0's image is the full window at every spacing). One "
+                     "OFDM-ISAC frame per step: 5000 subcarriers on the stored "
+                     "channel's own grid (600.1 kHz spacing), 4 symbols, QPSK; symbol "
+                     "0 is the all-pilot preamble -- the sensing reference, the "
+                     "channel estimate the MRC weights come from, and the FMCW "
+                     "bit-parity point. No range-Doppler: a Doppler FFT over symbols "
+                     "of one time-invariant stored channel is a delta at bin 0, which "
+                     "is a property of these frames, not of JSAC. " + _ARRAY_DISCLOSURE),
         say=[
             "One frame, one waveform, two products: the image comes from the sensing "
             "comb, the constellation from the data subcarriers beside it.",
