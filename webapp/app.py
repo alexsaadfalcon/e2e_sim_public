@@ -29,7 +29,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from dash import (
@@ -58,6 +58,7 @@ from webapp.pipeline_runner import (
     apply_arm_style,
     decode_plotly_array,
     figures_from_outputs,
+    _HEADLINE_META,
     _panel_dict,
     panel_of,
     placeholder_figure,
@@ -913,6 +914,21 @@ def _arm_caption(payload: Dict[str, Any]) -> str:
     overflow = payload.get("_arm_chip_value")
     if overflow:
         parts.append(overflow)
+    facts = [f for f in (payload.get("_arm_facts") or []) if f]
+    if facts:
+        # THIS ARM'S OWN FACTS (hostile round 14, J3/J4/K2), built by `_arm_facts`:
+        # the first is mandatory, each later one rides only while the line still fits
+        # the ~86 characters one 16 px line holds in a 746 px column.
+        # A later fact that does not fit whole falls back to its head clause (up to
+        # its first ", "), which is a complete phrase: "front end on ifft(CFR), the
+        # frames' own order" -> "front end on ifft(CFR)".
+        line = CAPTION_SEP.join(parts + facts[:1])
+        for extra in facts[1:]:
+            for form in (extra, extra.split(", ", 1)[0]):
+                if len(line) + len(CAPTION_SEP) + len(form) <= ARM_CAPTION_FIT_CHARS:
+                    line += CAPTION_SEP + form
+                    break
+        return line
     notes = [n for n in (payload.get("_notes") or [])
              # The environment note ("Environment 'munich (Ka-band, 30 GHz)': frames
              # carry a 30 GHz carrier.", pipeline_runner.run_pipeline) is IDENTICAL on
@@ -968,6 +984,99 @@ def _chip_carries_the_numbers(chip: str, value: str) -> bool:
     decide which of two facts keeps the arm's one line."""
     numbers = [tok for tok in value.split() if any(c.isdigit() for c in tok)]
     return bool(numbers) and all(tok in chip for tok in numbers)
+
+
+#: What one 16 px arm-caption line holds in a 746 px column, measured on the
+#: rehearsal renders (see `_arm_caption`'s own comment on the same number).
+ARM_CAPTION_FIT_CHARS = 86
+
+#: The run note every munich screen carries on both arms: the front-end drive is a
+#: display choice. Preset-wide, so it belongs in the page foot ONCE, not as the one
+#: line each arm has for its own fact (hostile round 14, J3).
+DRIVE_NOTE_PREFIX = "Front-end drive "
+
+
+def _fig_meta(fig) -> Dict[str, Any]:
+    """`layout.meta` of a `go.Figure` or its stored dict form, `{}` when absent."""
+    if hasattr(fig, "layout"):
+        meta = fig.layout.meta
+        return dict(meta) if meta else {}
+    meta = ((fig or {}).get("layout") or {}).get("meta") or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _arm_facts(preset: Optional["DemoPreset"], arm: str, meta: Dict[str, Any],
+               figs: Dict[str, Any]) -> List[str]:
+    """The facts THIS arm adds, for its one-line caption, most important first.
+
+    * A live-vs-stored gate (Thrust 5): its count WITH its verdict (J4), built by the
+      gate itself (`_StoredADCGateBlock.caption`).
+    * Otherwise, on a screen whose caption would be the preset-wide drive caveat
+      (Thrust 1-3, J3): the knob value and the arm's headline statistic at the last
+      frame, read off the figure's own meta so it is the number the strip prints.
+    * Then the MEASURED front-end placement (K2), from the run's composition record.
+
+    `[]` leaves `_arm_caption` on its older run-note path (Thrust 4's Tessera note,
+    Thrust 6's waveform note), which already carries an arm-specific fact."""
+    facts: List[str] = []
+    gate = meta.get("gate_caption")
+    notes = [n for n in (meta.get("notes") or [])
+             if not str(n).startswith("Environment '")]
+    if gate:
+        facts.append(str(gate))
+    elif notes and str(notes[0]).startswith(DRIVE_NOTE_PREFIX):
+        head = None
+        for key in ("subspace_err", "range_az"):
+            if key in figs:
+                head = _fig_meta(figs[key]).get(_HEADLINE_META)
+                if head:
+                    break
+        if not head:
+            return []
+        value = ""
+        if preset is not None and preset.ab:
+            value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or ""
+            if value and not re.search(r"[A-Za-z]", value):
+                # A bare number ("6") says nothing without its knob: use the chip's
+                # own label + value ("FP mantissa bits 6").
+                value = _ab_arm_chip(preset, arm).split(" — ", 1)[-1]
+        facts.append(f"{value}: {head}" if value else str(head))
+    else:
+        return []
+    placement = meta.get("placement_caption")
+    if placement:
+        facts.append(str(placement))
+    return facts
+
+
+def _parallel_arm_facts(data_a: Dict[str, Any], data_b: Dict[str, Any]) -> None:
+    """Keep the two arm captions PARALLEL: the trailing fact (the placement) is given in
+    the SAME form on both arms -- whole when it fits both lines, its head clause when
+    only that fits both, and dropped from both otherwise -- so the two columns never
+    read as if only one arm had a front end, or had it somewhere else. In place."""
+    fa, fb = data_a.get("_arm_facts") or [], data_b.get("_arm_facts") or []
+    if len(fa) < 2 or len(fb) < 2:
+        return
+    for form_a, form_b in ((fa[-1], fb[-1]),
+                           (fa[-1].split(", ", 1)[0], fb[-1].split(", ", 1)[0])):
+        data_a["_arm_facts"] = fa[:-1] + [form_a]
+        data_b["_arm_facts"] = fb[:-1] + [form_b]
+        if (_arm_caption(data_a).endswith(form_a)
+                and _arm_caption(data_b).endswith(form_b)):
+            return
+    data_a["_arm_facts"] = fa[:-1]
+    data_b["_arm_facts"] = fb[:-1]
+
+
+def _drive_foot_line(notes: List[str], *, two_arms: bool) -> str:
+    """The drive caveat's headline, once, for the page foot -- "" when the run carried
+    none (J3). The full note stays in each arm's Details."""
+    for n in notes or []:
+        if str(n).startswith(DRIVE_NOTE_PREFIX):
+            return (_note_headline(str(n))
+                    + (" (both arms" if two_arms else " (")
+                    + ("; " if two_arms else "") + "full note in Details).")
+    return ""
 
 
 # =================================================================================
@@ -1351,6 +1460,8 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
                 _meta_a = outputs_a.get("_axis_meta") or {}
                 data_a["_run_identity"] = _run_identity_line(
                     ab_preset, _meta_a, n_clicks, n_steps)
+                data_a["_arm_facts"] = _arm_facts(ab_preset, "a", _meta_a,
+                                                  result_a["figs"])
                 data_a["_cancelled_chip"] = (
                     f"CANCELLED -- {_meta_a.get('n_steps_run', '?')} of {n_steps} "
                     "frames; arm B did not run")
@@ -1383,6 +1494,11 @@ def _run_pipeline(n_clicks, block_state, n_steps, scenario_json, prev_results=No
             _meta_a = outputs_a.get("_axis_meta") or {}
             data_a["_run_identity"] = _run_identity_line(ab_preset, _meta_a,
                                                          n_clicks, n_steps)
+            data_a["_arm_facts"] = _arm_facts(ab_preset, "a", _meta_a, result_a["figs"])
+            data_b["_arm_facts"] = _arm_facts(ab_preset, "b",
+                                              outputs_b.get("_axis_meta") or {},
+                                              result_b["figs"])
+            _parallel_arm_facts(data_a, data_b)
             if result_b["cancelled"] or _meta_a.get("cancelled"):
                 data_a["_cancelled_chip"] = (
                     f"CANCELLED -- arm B ran "
@@ -1630,8 +1746,12 @@ def _share_y_ranges(figs, prev_figs) -> None:
                 # scoring both stop at 40 m -- pipeline_runner reads that crop from
                 # beat_cfar.json), and recomputing from the cube's own 0-102 m extent
                 # silently undid the crop the moment those screens gained an A/B arm
-                # (found in the rehearsal PNGs, 2026-09-23). The range-Doppler panel
-                # fixes nothing and still shares the data extent.
+                # (found in the rehearsal PNGs, 2026-09-23). SINCE 2026-09-25 (hostile
+                # round 14, J1/J5) the Range-Doppler panel above it fixes the SAME
+                # y-range, so this union keeps one axis for the whole column instead of
+                # pulling the cube back out to its own 0-102 m extent -- the earlier
+                # version of this comment said that panel "fixes nothing", which was
+                # true when it was written and is not now.
                 xr = _union_fixed_range(pair, "xaxis") or xr
                 yr = _union_fixed_range(pair, "yaxis") or yr
                 # ...and unless the pair LOCKED its y-extent. A sensing map cropped to
@@ -1866,8 +1986,9 @@ def _offline_benchmark_disclosure(figs: Dict[str, Any], prev_figs: Dict[str, Any
     return html.Details([
         html.Summary(label, className="details-summary"),
         html.Div([
-            html.Div(panel.get("caption") and CAPTION_SEP.join(panel["caption"]) or "",
-                     className="details-line"),
+            # The caption is printed ONCE, by the panel's own header inside
+            # `_panel_block` (hostile round 14, L2: it was also a details-line directly
+            # above that header, so the subtitle read twice in a row).
             _panel_block(fig, width=f"{SINGLE_PANEL_WIDTH}px"),
         ] + [html.Div(line, className="details-line")
              for line in (panel.get("details") or [])],
@@ -2035,8 +2156,14 @@ def _render_results(results_data, active_tab):
         # longer made to read three lines of it before any data appears. It is also
         # inside both arms' Details, IN FULL, so nothing here is more than one click
         # away -- which is what lets the foot line be capped (see `_foot_note`).
-        children.append(html.Div(_foot_note(screen_note),
-                                 className="page-foot-note"))
+        # THE DRIVE CAVEAT, ONCE (hostile round 14, J3): it is preset-wide and used
+        # to fill BOTH arms' one-line captions, the line reserved for the fact the arm
+        # adds. It is stated here, on the same foot as the preset's other caveats.
+        _drive = _drive_foot_line(results_data.get("_notes") or [],
+                                  two_arms=bool(results_data.get("_ab")))
+        children.append(html.Div(
+            ([html.Div(_drive)] if _drive else []) + [html.Div(_foot_note(screen_note))],
+            className="page-foot-note"))
 
     return html.Div(children, className="results-page")
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import plotly.graph_objects as go
@@ -429,6 +429,18 @@ def _composition_note(record: Dict[str, Any]) -> str:
         + (", ".join(floors) if floors else "nothing on this run")
         + "."
     )
+
+
+def _placement_caption(record: Dict[str, Any]) -> str:
+    """`_composition_note` at ARM-CAPTION length (hostile round 14, K2): the measured
+    placement reached only Details, so no visible surface said where the front end ran.
+    Same record, same authority; "" when nothing was measured."""
+    return {
+        "beat": "front end on the beat record",
+        "symbol": "front end on the OFDM symbol",
+        "impulse": "front end on ifft(CFR), the frames' own order",
+        "none": "no front end",
+    }.get(str((record or {}).get("front_end_placement") or ""), "")
 
 
 def _frequency_chain_radar_cfg(state: Dict[str, Dict[str, Any]], env_block: Any,
@@ -870,6 +882,26 @@ class _StoredADCGateBlock:
         return (f"live vs stored ADC: max |diff| {self.max_lsb_diff} of {self.lsb_total} "
                 f"LSB ({self.bits}-bit)"
                 + (" (bit-identical)" if self.max_lsb_diff == 0 else " (differs)"))
+
+    def caption(self, frames_bits: Optional[int] = None) -> str:
+        """The gate at ARM-CAPTION length, WITH its verdict (hostile round 14, J4):
+        "0 of 4096 LSB vs stored: bit-identical" / "1 of 8 LSB vs stored: differs
+        (this run's ADC 3-bit)". The verdict word is the one `note()` and `short()`
+        use, from the same comparison, so the caption cannot disagree with Details.
+        `frames_bits` (the depth the frames were WRITTEN at, when they record it) lets
+        a difference be attributed to the bit depth only when the bit depth is what
+        differs; otherwise "differs" stands alone and the run notes attribute it."""
+        if self.problem is not None or not self.n_compared:
+            return "live vs stored ADC: not compared"
+        if self.quantizer_block is None:
+            return ("live vs stored ADC: "
+                    + ("bit-identical" if self.max_abs_diff == 0.0 else "differs"))
+        head = f"{self.max_lsb_diff} of {self.lsb_total} LSB vs stored: "
+        if self.max_lsb_diff == 0:
+            return head + "bit-identical"
+        if frames_bits is not None and self.bits is not None and int(frames_bits) != self.bits:
+            return head + f"differs (this run's ADC {self.bits}-bit)"
+        return head + "differs"
 
     def note(self) -> str:
         """The one line this gate contributes to the run notes."""
@@ -2086,6 +2118,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # floor, the stage list) -- what the placement test reads and what the run note
         # above states in words.
         "composition": composition_record,
+        "placement_caption": _placement_caption(composition_record),
         **_spine_range_meta(environment_block, _range_transform),
     }
     # THE SENSING WAVEFORM'S OWN UNAMBIGUOUS WINDOW, when the run had one.
@@ -2127,6 +2160,33 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     if adc_gate is not None:
         run_notes.insert(0, adc_gate.note())
         outputs["_axis_meta"]["gate"] = adc_gate.short()
+    # THE RUN'S ADC BIT DEPTH, and the depth the frames were written at when the frames
+    # record it (hostile round 14, J1/J4). `figures_from_outputs` needs both to say WHY
+    # the Range-Doppler floor above the scoring crop is higher on one arm than the other
+    # (re-digitising the same stored frames at fewer bits raises the quantisation floor,
+    # which is a different sentence from "this arm's peak was attenuated"), and the
+    # gate's caption needs them to name the bit depth as the difference only when it is.
+    _frames_bits = None
+    if _enabled(state, "quantizer"):
+        if meta_stage is not None:
+            for _label, _stored, _live in (meta_stage.chain_flags_mismatch or ()):
+                if _label == "ADC bit depth":
+                    _frames_bits = int(_stored)
+        outputs["_axis_meta"]["adc"] = {
+            "bits": int(_p(state, "quantizer", "bits")),
+            # None when the frames do not record it (every corpus before 2026-09-23) or
+            # when it MATCHES this run -- `chain_flags_mismatch` only records diffs, so
+            # "no entry" means "same as this run" on a corpus that carries the key.
+            "frames_bits": _frames_bits,
+        }
+    if adc_gate is not None:
+        # The same verdict, at ARM-CAPTION length (hostile round 14, J4). The caption
+        # carried `_note_headline(note)` -- everything before the note's first " -- " --
+        # which is the LSB count and nothing else, so the Thrust 5 screens printed the
+        # count with the one word that says whether it is fine ("bit-identical") or the
+        # point of the arm ("differs") on the far side of the separator, in Details.
+        # Built by the gate from its OWN comparison, so the two cannot drift apart.
+        outputs["_axis_meta"]["gate_caption"] = adc_gate.caption(_frames_bits)
     if meta_stage is not None:
         run_notes.append(
             "live chain: each frame's stored noise seeds and domain-randomised "
@@ -2732,6 +2792,32 @@ def _stat_annotations(stat: str, sub: str = "", *, arm: str = "a") -> List[Dict[
                  name=_STAT_ANNOTATION_FLAG,
                  font=dict(size=_STAT_FONT_SIZE,
                            color=ARM_COLORS.get(arm, ARM_COLORS["a"])))]
+
+
+def _frame_tag(i: int, n: int) -> str:
+    """Frame `i` (0-based index) of `n`, in the TRANSPORT's own words and numbering:
+    "frame 5 of 5". One authority for the phrase, so a statistic strip, a Details line
+    and the transport beside them can be compared by eye (hostile round 14, K1/K4:
+    Details said "(last frame)", the strip "frame 4 of 5", and the T6 EVM axis counted
+    from 0 while the transport counts from 1)."""
+    return f"frame {int(i) + 1} of {int(n)}"
+
+
+def _n_frames_phrase(frames: List[int]) -> str:
+    """1-based frame numbers as a short phrase: [3, 4, 5] -> "frames 3-5",
+    [1] -> "frame 1", [1, 3] -> "frames 1, 3"."""
+    frames = sorted(int(f) for f in frames)
+    if len(frames) == 1:
+        return f"frame {frames[0]}"
+    if frames == list(range(frames[0], frames[-1] + 1)):
+        return f"frames {frames[0]}-{frames[-1]}"
+    return "frames " + ", ".join(str(f) for f in frames)
+
+
+#: `fig.layout.meta` key: the panel's headline statistic at the LAST frame, with its
+#: frame tag -- what an arm's one-line caption quotes (hostile round 14, J3), read off
+#: the figure so the caption and the strip cannot disagree.
+_HEADLINE_META = "headline_last_frame"
 
 
 def _keep_non_stat_annotations(fig) -> List[Dict[str, Any]]:
@@ -3470,6 +3556,16 @@ def note_differing_y_extents(figs: Dict[str, Any], prev_figs: Dict[str, Any],
                             f"{folded:.0f} m -- which is the {this_bright:.0f} m this "
                             f"panel prints. Same return, one window of aliasing apart, "
                             f"not a second scene.")
+                        # ON THE VISIBLE CAPTION TOO (hostile round 14, M2): the runbook
+                        # told the presenter to point at a fold the screen only carried
+                        # in Details. Short -- this caption is one line of ~94
+                        # characters and already carries units, rate and clip -- and
+                        # made of the same three computed numbers as the sentence above.
+                        _fold = (f"{other_bright:.0f} m folds to {this_bright:.0f} m "
+                                 f"({this_m:.1f} m window)")
+                        panel["caption"] = [
+                            c for c in (panel.get("caption") or [])
+                            if not (isinstance(c, str) and " folds to " in c)] + [_fold]
             panel["details"] = details
             # NOTHING IS ADDED TO THE CAPTION HERE any more (2026-09-25). Arm A's
             # caption used to be rewritten to carry BOTH windows, which with the
@@ -3708,6 +3804,23 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     # The window is at or past the axis this panel could draw anyway;
                     # nothing is cropped and no caption may claim otherwise.
                     window_m = float(min(window_m, float(y.max()) + _gate_m))
+            # K3 (hostile round 14): PER ARM, not preset-wide. `gate_note` above is built
+            # from the TRANSFORM's geometry, which is identical on both arms -- so the
+            # narrower JSAC arm, whose map is cropped to 62.4 m two lines below, printed
+            # "0-249.8 m shown of a 499.6 m window" in its own Details. The transform's
+            # half-window is still the right denominator (it is what the FFT computed and
+            # what a return past the window folds inside), so it stays; what changes is
+            # that the "shown" number is now the number this arm's axis actually ends on.
+            # Only when this arm's window is actually NARROWER than the transform's
+            # half: on the P = 2 arm the two are the same axis and the old sentence is
+            # already the true one.
+            if (window_m is not None and gate_note
+                    and window_m < _displayed_m - 0.5 * _gate_m):
+                gate_note = gate_note.replace(
+                    f"0-{_displayed_m:.1f} m shown of a {_full_window_m:.1f} m window",
+                    f"0-{window_m:.1f} m shown (this arm's own sensing window), of the "
+                    f"transform's 0-{_displayed_m:.1f} m half of a "
+                    f"{_full_window_m:.1f} m period")
             # Peak-median dB, per frame, on the UNCLIPPED map -- matches
             # notes/tools/demo_thrust1_rescue.py::q, the T1/T2/T4 cards' own
             # dynamic-range definition (Change 2). Computed for range_el too (4th
@@ -3868,11 +3981,27 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     # are in Details; what has to be READABLE here is the number.
                     bright = dp.split("brightest visible return: ", 1)[1].strip()
                     bright = f"brightest {bright.replace(' at ', ' @ ')} · "
-                sub_texts.append(f"{bright}frame {i + 1} of {n_frames_key}")
+                sub_texts.append(f"{bright}{_frame_tag(i, n_frames_key)}")
             fig.update_layout(annotations=_stat_annotations(stat_texts[-1],
                                                             sub_texts[-1]))
+            # EVERY STATISTIC IN DETAILS NAMES ITS FRAME, in the transport's own words
+            # (hostile round 14, K1). Both the strip and these lines are computed at
+            # index -1, so they have always been the same frame -- but the strip printed
+            # "frame 5 of 5" while Details said "(last frame)" or nothing at all, and the
+            # strip RE-STEPS with the clock. Read on the 2026-09-25 renders with the
+            # animation mid-loop, that is a Details line saying "brightest visible
+            # return: -14.5 dB at 71 m" beside a strip saying "brightest -14.3 dB @ 74 m"
+            # with nothing on either to say they are two different frames. The tag is the
+            # same string the strip and the transport use, so the two can be compared
+            # instead of guessed at (pinned by
+            # `test_details_statistics_name_the_same_frame_the_strip_does`).
+            _last_tag = _frame_tag(n_frames_key - 1, n_frames_key)
+            _meta_h = dict(fig.layout.meta or {}) if fig.layout.meta else {}
+            _meta_h[_HEADLINE_META] = f"{stat_texts[-1]}, {_last_tag}"
+            fig.update_layout(meta=_meta_h)
             details = [f"Integration: ({qualifier}).",
-                       f"peak - median, dB: {dyn_range_db[-1]:.1f} (last frame).",
+                       f"peak - median, dB: {dyn_range_db[-1]:.1f} ({_last_tag}, the "
+                       f"last).",
                        clip_provenance + "; superseded by the shared limits below "
                        "when both arms render this product."]
             if earliest_arrival_note:
@@ -3880,7 +4009,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if gate_note:
                 details.append(_sentence(gate_note))
             if direct_path_notes[-1]:
-                details.append(_sentence(direct_path_notes[-1]))
+                details.append(_sentence(direct_path_notes[-1])
+                               + f" ({_last_tag}; the strip above re-steps with the "
+                                 f"clock and names the frame it shows.)")
             caption = [_DB_COLORBAR_PREFIX, f"{CLIP_CLAUSE_PREFIX}{clip_db:.1f} dB"]
             if window_m is not None:
                 # SHORT, and the number is on the y-axis title as well: this caption is
@@ -4024,6 +4155,16 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                            for st, sub in prof_stats]))
 
     rx = meta.get("rx") or {}
+    # ONE RANGE CROP FOR THE WHOLE COLUMN (hostile round 14, J1/J5). The scoring crop the
+    # objectness panel draws its dashed line at, hoisted above the Range-Doppler branch
+    # so both panels in that column can be pinned to the same axis. Read from
+    # beat_cfar.json, never typed; `None` (file missing) leaves both panels uncropped
+    # rather than inventing a crop.
+    scoring_max_r = detector_scoreboard.scoring_max_range_m()
+    #: The display margin above the scoring crop, shared by the Range-Doppler and
+    #: objectness panels. Not itself a claim about anything -- the crop value drawn and
+    #: labelled on both IS one, and only it comes from `scoring_max_r`.
+    det_column_max_r = 50.0
     if outputs.get("radar_cube"):
         # [n_channels, range, doppler] complex -> non-coherent power over channels, dB
         # relative to the frame's peak (same display convention as the range products).
@@ -4101,6 +4242,78 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         fig = _heatmap(first, x=x, y=y, xlabel=xlabel, ylabel=ylabel, zmin=rd_clip,
                        z_share=Z_SHARE_KEEP_CLIP)
         fig.update_layout(annotations=_stat_annotations(rd_stats[-1], rd_subs[-1]))
+        # ---- The crop this panel shares with the objectness map below it -------------
+        # HOSTILE ROUND 14, J1 (SEVERE) and J5. This panel drew 0-102 m directly above
+        # an objectness panel drawn 0-50 m, in ONE column, with no axis tick in common:
+        # so the two pictures of the same frame could not be read against each other,
+        # and the 40 m line that says where scoring stops existed on only one of them.
+        # Worse, the top 60 m of THIS panel is where arm B's re-digitised floor shows
+        # (measured below), which is outside the scoring crop entirely -- so the hero
+        # panel of the detector thrust argued the opposite of what the screen claims.
+        #
+        # The AXIS is cropped, not the data: every statistic on this panel (the clip,
+        # the per-frame peak-median, the run median) is defined over the whole cube and
+        # is quoted on the T5 cards, so cropping the data would silently move a card
+        # number. Details says so, and says what the axis now ends at.
+        rd_window_m = float(y[-1]) if len(y) else 0.0
+        # THE BIN SIZE ON THE AXIS, like the munich maps carry their calibration on
+        # theirs (hostile round 14, low item: T5 never stated its range bin). Computed
+        # from the run's own RadarConfig; the full sentence is in Details.
+        if rx.get("range_resolution_m"):
+            fig.update_yaxes(title_text=(
+                f"{ylabel}, {float(rx['range_resolution_m']):.2f} m bins"))
+        rd_visible_above_crop = 0
+        #: 1-based frames on which that band has anything above the clip -- named in
+        #: the caption when it is not every frame, so a parked clock on a clean frame
+        #: does not contradict the clause.
+        rd_frames_above_crop: List[int] = []
+        if scoring_max_r is not None and rd_window_m > det_column_max_r:
+            fig.update_yaxes(range=[0.0, det_column_max_r])
+            fig.add_hline(
+                y=scoring_max_r, line_dash="dash", line_color="#ffffff",
+                annotation_text=f" scoring ≤ {scoring_max_r:g} m ",
+                annotation_position="top right",
+                annotation_xshift=-10, annotation_yshift=6,
+                annotation_bgcolor="rgba(45,58,74,0.7)",
+                annotation_font=dict(size=17, color="#ffffff"),
+            )
+            # MEASURED, on the pixels that actually reach the screen: how many cells of
+            # the drawn window sit ABOVE the scoring line and ABOVE this panel's own
+            # display clip, over every frame of this run. Zero on the 12-bit arm; that
+            # is what makes the caption clause below an observation rather than a guess.
+            _band = (y > float(scoring_max_r)) & (y <= det_column_max_r)
+            if _band.any():
+                _per_frame = [int((d[_band] > rd_clip).sum()) for d in rd_frames]
+                rd_visible_above_crop = max(_per_frame)
+                rd_frames_above_crop = [i + 1 for i, c in enumerate(_per_frame) if c]
+        # WHY anything is visible up there, when it is -- and only from what this run
+        # recorded. MEASURED 2026-09-25 on thrust5_detector_cfar and _raddetnet (same
+        # 5 corpus frames, both arms, j1_measure2 in the shard-3e scratchpad): at the 12
+        # bits the frames were written at, NO cell above 40 m clears the panel's clip on
+        # any frame (0 of 5 frames); re-digitised at 3 bits, 55-1064 cells per frame do
+        # (0-345 of them inside the 40-50 m band this panel now draws), spread over up
+        # to 41 of 64 Doppler bins and 196 of 311 range rows. So they are the 3-bit
+        # converter's own products -- they vanish at 12 bits on the same frames -- and
+        # spread like a risen floor rather than a few discrete spurs. When the bit depth
+        # is NOT what moved (thrust5_detector_ml turns the IF high-pass corner at 12
+        # bits and also clears the clip up there, 169 cells on frame 1: the corner
+        # lowers the near-range peak every dB is referenced to), the clause says only
+        # what is measurable and does not borrow the other screen's mechanism.
+        _adc = meta.get("adc") or {}
+        _bits_now, _bits_frames = _adc.get("bits"), _adc.get("frames_bits")
+        rd_above_is_quant = bool(
+            _bits_now is not None and _bits_frames is not None
+            and int(_bits_now) < int(_bits_frames))
+        rd_above_clause = ""
+        if rd_visible_above_crop:
+            _where = f"above {scoring_max_r:g} m"
+            if len(rd_frames_above_crop) < len(rd_frames):
+                _where += (" (" + _n_frames_phrase(rd_frames_above_crop) + ")")
+            if rd_above_is_quant:
+                rd_above_clause = (f"{_where}: {int(_bits_now)}-bit quantisation "
+                                   f"floor, unscored")
+            else:
+                rd_above_clause = f"{_where}: floor over the clip, unscored"
         # "sparse scene: mostly dark on purpose" ON THE DEFAULT SCREEN (hostile round
         # 11, D9): these two near-empty blue panels are a quarter of the first screen
         # on three of seven presets, and the sentence explaining that the emptiness is
@@ -4109,11 +4322,50 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # the sharing pass appends "same colour scale on both arms" to arm A's copy,
         # so the unit clause moves to Details to make room: the colour bar is the
         # only thing this clause was labelling, and it is beside the panel.
+        # ONE LINE, ~86 characters in a 746 px column, so the new clause displaces the
+        # "sparse scene" one rather than joining it: on the arm where it fires the panel
+        # is NOT empty up there, which is the whole point, and "sparse, dark on purpose"
+        # beside it would be two half-true sentences. The displaced clause is unchanged
+        # in Details (acceptance check 15) and still on the caption of the arm that IS
+        # dark, which is where it is true.
+        rd_caption = [rd_clip_caption,
+                      rd_above_clause or "sparse scene, dark on purpose"]
         set_panel(fig, title="Range-Doppler power",
-                  caption=[rd_clip_caption, "sparse scene, dark on purpose"],
-                  details=[
+                  caption=rd_caption,
+                  details=[_d for _d in [
                       "Non-coherent (power) integration over channels; the colour "
                       f"scale is {_DB_COLORBAR_PREFIX} of this frame.",
+                      # THE GEOMETRY THIS PANEL DRAWS, in the same words the munich
+                      # panels use (hostile round 14, low item: "T5 screens state their
+                      # range bin size and window like T1-T4"). Computed from the run's
+                      # own cube, never typed.
+                      (f"{float(rx['range_resolution_m']):.2f} m/gate "
+                       f"({len(y)} range bins, 0-{rd_window_m:.1f} m computed), "
+                       f"monostatic range c*tau/2"
+                       if rx.get("range_resolution_m") and len(y) else ""),
+                      # WHAT THE CROP DOES AND DOES NOT DO (J1/J5).
+                      (f"The range axis is cropped to 0-{det_column_max_r:g} m so this "
+                       f"panel and the objectness map below it share one axis, with the "
+                       f"{scoring_max_r:g} m scoring line on both. The AXIS is cropped, "
+                       f"not the data: the clip and every peak-median below are computed "
+                       f"over the whole {rd_window_m:.1f} m cube."
+                       if scoring_max_r is not None and rd_window_m > det_column_max_r
+                       else ""),
+                      (f"Between {scoring_max_r:g} and {det_column_max_r:g} m this arm "
+                       f"draws up to {rd_visible_above_crop} cell(s) above its own "
+                       f"{rd_clip:.1f} dB clip, on "
+                       f"{_n_frames_phrase(rd_frames_above_crop or [0])}. That band is "
+                       f"outside the "
+                       f"scoring crop, so no detector metric on this screen sees it."
+                       if rd_visible_above_crop else ""),
+                      ("Why it is there (measured 2026-09-25 on the corpus these "
+                       "presets replay): at the 12 bits the frames were written at, no "
+                       "cell above 40 m clears the clip on any of the 5 frames; "
+                       "re-digitised at 3 bits, on the SAME frames, 55-1064 cells per "
+                       "frame do, over up to 41 of 64 Doppler bins -- the 3-bit "
+                       "converter's own quantisation products, spread like a risen "
+                       "floor rather than a few discrete spurs."
+                       if (rd_visible_above_crop and rd_above_is_quant) else ""),
                       rd_clip_provenance + ": this panel's display clip is a "
                       "deliberate decision about what to hide, so sharing it across "
                       "arms only unifies the two clips instead of pushing the limit "
@@ -4129,7 +4381,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       "FRAME the clock is parked on; the run median is the readout "
                       "beside it, and it is the number that does not move when the "
                       "transport does.",
-                  ], row=PANEL_ROW_MAP)
+                  ] if _d], row=PANEL_ROW_MAP)
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             fig, rd_frames,
             frame_layouts=[dict(annotations=_stat_annotations(s, sub))
@@ -4175,7 +4427,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # beat_cfar.json rather than a literal so this cannot silently drift from what
         # the offline scoring actually used; `None` (file missing) leaves the axis at
         # its old, uncropped behaviour rather than inventing a crop.
-        scoring_max_r = detector_scoreboard.scoring_max_range_m()
+        # Hoisted above the Range-Doppler branch (hostile round 14, J1/J5) so BOTH
+        # panels in this column pin to the same axis; the read itself is unchanged.
         x = -1.0 + (np.arange(n_a) + 0.5) * 2.0 / n_a  # sin(azimuth) bin centres
         fig = go.Figure(data=go.Heatmap(
             z=obj, x=x, y=y, zmin=0.0, zmax=1.0, colorscale="Viridis",
@@ -4284,10 +4537,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             **_base_layout(),
         )
         if scoring_max_r is not None:
-            # 50 m is a fixed display margin above the scoring crop (not itself a
-            # claim about anything); the crop value drawn/labelled below IS one, so
-            # only it comes from `scoring_max_r`.
-            fig.update_yaxes(range=[0.0, 50.0])
+            # `det_column_max_r` is the fixed display margin above the scoring crop
+            # (not itself a claim about anything), shared with the Range-Doppler panel
+            # above -- one axis for the column (J5); the crop value drawn/labelled below
+            # IS a claim, so only it comes from `scoring_max_r`.
+            fig.update_yaxes(range=[0.0, det_column_max_r])
             fig.add_hline(
                 y=scoring_max_r, line_dash="dash", line_color="#ffffff",
                 # A short TAG at the right end of the line, not a centred white
@@ -4325,7 +4579,16 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # frame on screen -- so it has to carry the split the glyphs already draw,
             # counted with the scoreboard's own matcher (`_matched_detection_indices`).
             n_hit = len(_matched_detection_indices(d, g))
-            return _stat_annotations(f"{_n(len(d), 'detection')}, "
+            # THE SCOPE WORD, IN THE BOLD (hostile round 14, J2). The strip and the
+            # scoreboard beside it were both already correct -- this strip is one frame,
+            # the table's visible rows are the run ("cumulative hits", "unmatched /
+            # frame, these N frames", "recall ... this run") -- and read together on the
+            # ML screen they still land as "11 detections, 0 matched" beside "recall
+            # 0.43", which is a contradiction until you know which is which. The sub-line
+            # already named the frame; the bold number, which is what the eye reads
+            # first, did not say it was about one. Nothing is recomputed: the same counts
+            # get the word that scopes them.
+            return _stat_annotations(f"this frame: {_n(len(d), 'detection')}, "
                                      f"{n_hit} matched, {len(g)} labelled",
                                      f"frame {i + 1} of {n_frames}")
 
@@ -4493,7 +4756,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # see `_keep_non_stat_annotations`.
         fig.update_layout(annotations=_keep_non_stat_annotations(fig)
                           + _stat_annotations(
-                              f"{errs[-1]:.2f} at frame {len(errs)}",
+                              f"{errs[-1]:.2f} at {_frame_tag(len(errs) - 1, len(errs))}",
                               f"dashed = static-scene reference "
                               f"{_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
         # SHORT (measured on the rendered page, 2026-09-24): the caption renders on ONE
@@ -4577,7 +4840,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             panel = panel_of(fig)
             fig.update_layout(annotations=_keep_non_stat_annotations(fig)
                               + _stat_annotations(
-                                  f"{errs[-1]:.2f} at frame {len(errs)}",
+                                  f"{errs[-1]:.2f} at {_frame_tag(len(errs) - 1, len(errs))}",
                                   f"{int(n_refine_used[-1])} refinement passes/frame"))
             # ALL THREE line styles, and only them: with the passes/frame trace on,
             # "Frobenius, unnormalised" moves out of the caption (the y-axis title
@@ -4619,8 +4882,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 frames.append(go.Frame(
                     name=str(i), data=data, traces=traces,
                     layout=dict(annotations=_keep + _stat_annotations(
-                        f"{errs[i]:.2f} at frame {i + 1}", sub))))
+                        f"{errs[i]:.2f} at {_frame_tag(i, len(errs))}", sub))))
             fig.frames = frames
+        _meta_h = dict(fig.layout.meta or {}) if fig.layout.meta else {}
+        _meta_h[_HEADLINE_META] = (f"tracker error {errs[-1]:.2f}, "
+                                   f"{_frame_tag(len(errs) - 1, len(errs))}")
+        fig.update_layout(meta=_meta_h)
         figs["subspace_err"] = _make_legible(fig)
 
     # Comms head (opt-in "product" -- see webapp/pipeline_registry.py "comms"):
@@ -4671,7 +4938,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # need a floor to be drawn at.
         ber_floor = 1e-6
         plotted = [max(b, ber_floor) for b in bers]
-        fig = go.Figure(data=go.Scatter(y=plotted, mode="lines+markers"))
+        # 1-based x, the transport's numbering (hostile round 14, K4).
+        fig = go.Figure(data=go.Scatter(x=list(range(1, len(plotted) + 1)), y=plotted,
+                                        mode="lines+markers"))
         fig.update_layout(
             xaxis_title="Frame",
             yaxis_title="BER",
@@ -4679,7 +4948,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             **_base_layout(),
         )
         fig.update_layout(annotations=_stat_annotations(
-            f"BER {bers[-1]:.2e} (last frame)"))
+            f"BER {bers[-1]:.2e} ({_frame_tag(len(bers) - 1, len(bers))})"))
         set_panel(fig, title=f"{_head} BER", caption=caption_clauses,
                   details=[f"Combining: {combining}."
                            + (f" Array gain {np.mean(gains):.1f} dB." if gains else ""),
@@ -4699,8 +4968,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
     if outputs.get("evm"):
         evms = [float(e) for e in outputs["evm"]]
-        fig = go.Figure(data=go.Scatter(y=evms, mode="lines+markers"))
-        fig.update_layout(xaxis_title="Frame", yaxis_title="EVM", **_base_layout())
+        # 1-BASED FRAMES, the transport's own numbering (hostile round 14, K4): this
+        # axis counted 0-4 while the transport beside it said "frame 5 of 5" and the
+        # subspace panels on T2/T3 already counted from 1. Integer ticks only.
+        fig = go.Figure(data=go.Scatter(x=list(range(1, len(evms) + 1)), y=evms,
+                                        mode="lines+markers"))
+        fig.update_layout(xaxis_title="frame", yaxis_title="EVM", **_base_layout())
+        fig.update_xaxes(tickmode="linear", tick0=1, dtick=1)
         # THE HEADLINE NAMES ITS FRAME, in the same words the scoreboard rows use
         # ("last frame N/N"), and the caption says the panel is static. This panel
         # draws every frame at once and never steps, while the transport beside it
@@ -4710,7 +4984,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # every frame's EVM is ~1e-3 and three decimals printed all five of them as
         # "0.001".
         fig.update_layout(annotations=_stat_annotations(
-            f"EVM {evms[-1]:.2e} (last frame {len(evms)}/{len(evms)})"))
+            f"EVM {evms[-1]:.2e} ({_frame_tag(len(evms) - 1, len(evms))}, the last)"))
         # Both clauses are short because this caption is one line in a 746 px panel:
         # measured on the rehearsal's geometry dump, 97 characters render and 133 clip.
         # "per frame" is already in the panel title.
@@ -4785,18 +5059,52 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # (hostile round 12, items 1 and 11 -- a caption that says only "last frame"
         # beside a clock on another frame reads as a contradiction).
         _n_eq = len(outputs["comm_data_eq"])
-        set_panel(fig, title=f"{_head} constellation",
-                  caption=[f"last frame {_n_eq}/{_n_eq}, equalized",
-                           "coloured by transmitted symbol",
-                           "static, does not step with the clock"],
-                  details=[f"Last frame ({_n_eq} of {_n_eq}), equalized; each received "
-                           "symbol is coloured by the ideal point it was actually "
-                           "TRANSMITTED as. A snapshot of one frame: this panel does "
-                           "not step with the transport."],
-                  row=PANEL_ROW_MAP)
+        _tag = _frame_tag(_n_eq - 1, _n_eq)
         # 1:1 after the ranges are set, so the constraint above has something to act on.
         fig.update_yaxes(scaleanchor="x", scaleratio=1, constrain="range")
-        figs["comm_const"] = _make_legible(fig)
+        fig = _make_legible(fig)
+        # WHY THE PANEL LOOKS LIKE FOUR DOTS (hostile round 14, L1): thousands of
+        # symbols sit on four points because the EVM is ~1e-3, so every received symbol
+        # lands inside its own marker -- a correct picture that read as an empty one.
+        # The clause is MEASURED, not asserted: the largest distance from any received
+        # symbol to its nearest ideal point, converted to pixels on this panel's own
+        # y-axis (the 1:1 axis whose range is [-_lim, _lim]), against the marker radius.
+        _n_sym = int(data_np.size)
+        _evm_last = (float(outputs["evm"][-1]) if outputs.get("evm") else None)
+        _inside = False
+        _max_err_px = None
+        try:
+            _c = np.asarray(_to_numpy_complex(const[-1] if isinstance(const, list)
+                                              else const)).ravel()
+            _err = np.min(np.abs(data_np.ravel()[:, None] - _c[None, :]), axis=1)
+            _m = fig.layout.margin
+            _plot_h = float(fig.layout.height) - float(_m.t or 0) - float(_m.b or 0)
+            _max_err_px = float(_err.max()) * _plot_h / (2.0 * _lim)
+            _inside = _max_err_px <= float(marker.get("size", 4)) / 2.0
+        except Exception:
+            _inside = False
+        _stat = f"{_tag}: {_n_sym:,} symbols".replace(",", " ")
+        if _evm_last is not None:
+            _mant, _exp = f"{_evm_last:.1e}".split("e")
+            _stat += f", EVM {_mant}e{int(_exp)}"
+        caption = [_stat]
+        if _inside:
+            caption.append("every point inside its marker")
+        caption.append("static snapshot")
+        details = [f"Last frame ({_tag}), equalized: {_n_sym} received symbols; each "
+                   "is coloured by the ideal point it was actually TRANSMITTED as. A "
+                   "snapshot of one frame: this panel does not step with the transport."]
+        if _max_err_px is not None:
+            details.append(
+                f"Largest distance from a received symbol to its nearest ideal point: "
+                f"{_max_err_px:.2f} px on this panel, against a marker radius of "
+                f"{float(marker.get('size', 4)) / 2.0:.1f} px -- "
+                + ("so every symbol is drawn inside its own marker and the thousands "
+                   "of points read as four dots." if _inside else
+                   "so the spread around each point is visible."))
+        set_panel(fig, title=f"{_head} constellation", caption=caption,
+                  details=details, row=PANEL_ROW_MAP)
+        figs["comm_const"] = fig
 
     return figs
 
