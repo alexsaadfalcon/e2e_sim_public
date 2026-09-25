@@ -45,10 +45,11 @@ tolerant modules this one deliberately does not import), so
 IS allowed to import torch) greps their source for these exact literal substrings,
 catching a rename here that this module cannot see at generation time.
 
-Deliberately torch-free: only ``webapp.demo_presets`` and
-``webapp.pipeline_registry`` and the standard library are imported, so the doc can
-be regenerated (and ``--check``ed) on any machine, CI included, without installing
-torch/Sionna.
+Deliberately torch-free: only ``webapp.demo_presets``, ``webapp.pipeline_registry``,
+``webapp.app`` (for ``_ab_arm_chip`` alone -- confirmed torch-free at module level by
+``tests/test_webapp.py``'s own subprocess import check) and the standard library are
+imported, so the doc can be regenerated (and ``--check``ed) on any machine, CI
+included, without installing torch/Sionna.
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ import textwrap
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from webapp.app import _ab_arm_chip
 from webapp.demo_presets import PRESETS, DemoPreset, apply_preset
 from webapp.pipeline_registry import (
     BLOCKS_BY_ID,
@@ -163,9 +165,16 @@ def _opening_block(preset: DemoPreset) -> Tuple[str, str]:
 
 
 def _ab_lines(preset: DemoPreset) -> Optional[Tuple[str, str]]:
-    """(A's visible arm-chip text, B's), matching `webapp.app._ab_arm_chip` -- the
-    small chip next to each arm's colour dot, e.g. "A — LNA bias current (mA)
-    8 mA". None if this preset has no built-in A/B.
+    """(A's visible arm-chip text, B's) -- the small chip next to each arm's
+    colour dot, e.g. "A — LNA bias current (mA) 8 mA". None if this preset has
+    no built-in A/B.
+
+    Calls `webapp.app._ab_arm_chip` directly (rather than rebuilding the same
+    string here) so this doc always quotes exactly the chip the audience sees,
+    including its rung-ladder shortening (hostile round 11, D1): a preset whose
+    full label/value does not fit one line steps BOTH arms down together, and a
+    hand-rebuilt `f"A — {label} {value}"` here silently stopped matching once
+    that ladder shipped (wave 13 beautification pass, item 2).
 
     Wave 13 (2026-09-24, beautification pass): this used to match
     `webapp.app._ab_arm_line`'s longer "A (as loaded): <label> <value> --
@@ -175,10 +184,7 @@ def _ab_lines(preset: DemoPreset) -> Optional[Tuple[str, str]]:
     "Arm chips on screen" bullet says where to find it."""
     if preset.ab is None:
         return None
-    bid, key, _value_b = preset.ab
-    label = _param_label(bid, key)
-    return (f"A — {label} {preset.ab_label_a or '?'}",
-            f"B — {label} {preset.ab_label_b or '?'}")
+    return (_ab_arm_chip(preset, "a"), _ab_arm_chip(preset, "b"))
 
 
 def _second_knobs(preset: DemoPreset) -> List[Tuple[str, str, str]]:
@@ -302,25 +308,48 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         # the scoreboard and PR-curve panels are not separately toggleable
         # blocks, so the generic per-product enumeration below would undercount
         # them by half.
+        # Wave 13 fix (2026-09-24, hostile round 11 H3): RETRACTED "pinned to the
+        # last frame regardless of the transport" for the objectness panel --
+        # `pipeline_runner.figures_from_outputs` now carries one animation frame
+        # per stored frame for it (detections + GT boxes + statistic all step),
+        # and it steps on the SAME shared clock as the Range-Doppler cube. Only
+        # the scoreboard (a Plotly table, not an animatable trace -- its live
+        # rows say "last frame") and the offline PR-curve panel (scored once,
+        # never per-frame) still do not move.
         det_title = _panel_title("detector", preset)
+        # Two separate bullets, not one flowing sentence: the quoted panel
+        # titles below must never straddle a `_wrap` line break (they are
+        # substring-matched by tests/webapp.runbook's own callers), and
+        # `det_title` varies in length by preset ("CFAR objectness" vs "Neural
+        # detector objectness"), which shifts where a single combined sentence
+        # would wrap.
         lines.append(_bullet(
-            f'Four panels render: **"{_panel_title("radar_cube", preset)}"** '
-            f'(Range-Doppler, follows the screen\'s one shared transport), '
-            f'**"{det_title}"** (pinned to the last frame regardless of the '
-            'transport), **"Detector scoreboard"**, and the offline PR-curve '
-            'panel (**"scored offline: ... test frames"**).'))
+            f'Two panels follow the screen\'s one shared transport, frame for '
+            f'frame: **"{_panel_title("radar_cube", preset)}"** and '
+            f'**"{det_title}"**.'))
+        lines.append(_bullet(
+            'Two more do not animate at all: **"Detector scoreboard"** (live '
+            'rows say "last frame") and the offline PR-curve panel '
+            '(**"scored offline: ... test frames"**).'))
         # wave 11 (2026-09-24, owner live test): the Results-tab clock now animates
         # the cube WITHOUT a click, so the desync the wave-10 "leave the slider
         # alone" note warned about is the default state of these three screens.
         # wave 13 (2026-09-24, beautification pass): there is one shared transport
         # for the whole screen now, not a per-panel slider -- reworded so "press
         # pause" points at that one control, not an implied per-panel one.
+        # Wave 13 fix (hostile round 11 H3): the objectness panel joined the
+        # Range-Doppler panel on the shared clock (see the bullet above); only
+        # the scoreboard and PR panel are left static, so they can quote an
+        # older frame than whatever the cube and objectness map are parked on.
         lines.append(_bullet(
-            'The Range-Doppler panel loops by itself on the shared clock; the '
-            'other three hold the LAST frame regardless of where the one '
-            'transport (pause/play + frame N of M + slider, in the run-identity '
-            'row) is parked. Pause it before talking about one frame\'s '
-            'detections.'))
+            'The Range-Doppler and objectness panels loop together on the '
+            'shared clock (pause/play + frame N of M + slider, in the '
+            "run-identity row); the Detector scoreboard and the offline "
+            'PR-curve panel do not animate at all, so they can lag behind '
+            "whichever frame the cube and objectness map are parked on. "
+            "Pause the transport before talking about one frame's "
+            "detections, and read the scoreboard's numbers as through its "
+            "own last frame, not necessarily the one on screen."))
     else:
         state = apply_preset(preset)
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
@@ -440,11 +469,14 @@ _BEFORE_AUDIENCE = """## Before the audience
    range-azimuth map above it keeps looping on the shared clock regardless of
    where the one transport is parked, so the two panels can show different
    frames by design, with no scrubbing needed to cause it.
-   **Thrust 5 exception**: only the Range-Doppler panel has frames. The
-   objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
-   clock desyncs the cube from those frozen detections by itself, with no
-   scrubbing at all. Pause the cube (the one transport) before talking about a
-   specific frame's detections.
+   **Thrust 5 exception**: RETRACTED (hostile round 11 H3) -- the objectness
+   panel used to be pinned to the last frame like the scoreboard and PR panel;
+   it now follows the same shared clock as the Range-Doppler cube, frame for
+   frame. Only the Detector scoreboard (its live rows say "last frame") and
+   the offline PR-curve panel still do not animate at all -- the clock
+   desyncs the cube from those two, not from the objectness map, with no
+   scrubbing needed to cause it. Pause the transport before talking about a
+   specific frame's detections or reading the scoreboard's numbers aloud.
 """
 
 

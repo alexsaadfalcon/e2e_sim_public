@@ -478,9 +478,11 @@ screen now -- a pause/play button, a "frame N of M" readout, and one slider,
 together in the run-identity row at the top. Press pause with that ONE button to
 hold a frame while you talk about it -- it stops every panel together, both arms
 included -- then press it again to resume; dragging its slider does the same and
-now parks BOTH arms (there is only the one slider). Thrust 5 exception: only the
-Range-Doppler panel has frames; the objectness/scoreboard/PR panels hold the
-LAST frame, so the clock desyncs the cube from them by itself.
+now parks BOTH arms (there is only the one slider). Thrust 5 exception:
+RETRACTED (hostile round 11 H3) -- the objectness panel now follows the same
+shared clock as the Range-Doppler cube; only the Detector scoreboard (live
+rows say "last frame") and the offline PR panel still do not animate, so the
+clock desyncs the cube from those two by itself.
 
 Preset stage order:
 {order}

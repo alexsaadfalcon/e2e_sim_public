@@ -46,11 +46,14 @@ change to `webapp/demo_presets.py`.
    range-azimuth map above it keeps looping on the shared clock regardless of
    where the one transport is parked, so the two panels can show different
    frames by design, with no scrubbing needed to cause it.
-   **Thrust 5 exception**: only the Range-Doppler panel has frames. The
-   objectness/scoreboard/PR panels are pinned to the LAST frame by design, so the
-   clock desyncs the cube from those frozen detections by itself, with no
-   scrubbing at all. Pause the cube (the one transport) before talking about a
-   specific frame's detections.
+   **Thrust 5 exception**: RETRACTED (hostile round 11 H3) -- the objectness
+   panel used to be pinned to the last frame like the scoreboard and PR panel;
+   it now follows the same shared clock as the Range-Doppler cube, frame for
+   frame. Only the Detector scoreboard (its live rows say "last frame") and
+   the offline PR-curve panel still do not animate at all -- the clock
+   desyncs the cube from those two, not from the objectness map, with no
+   scrubbing needed to cause it. Pause the transport before talking about a
+   specific frame's detections or reading the scoreboard's numbers aloud.
 
 Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
@@ -284,11 +287,11 @@ Manual: AFE mantissa 6 -> 1 bit.
 ### What you are looking at
 - Product panel(s) this preset enables: **"Subspace error per frame"**.
 - Arm chips on screen: "A — gap_response fixed effort (5 passes/frame)" (LEFT
-  column, colour dot) / "B — gap_response adaptive gate (shipped default, 10
-  passes/frame baseline)" (RIGHT column) -- each product renders once per
-  column, on the same row (no heat map here, so no shared colour scale). The
-  full before/after sentence, plus provenance, band and clip, is one click away
-  behind that arm's own **▸ Details (provenance, band, clip)**.
+  column, colour dot) / "B — gap_response adaptive gate (10 passes/frame
+  baseline)" (RIGHT column) -- each product renders once per column, on the
+  same row (no heat map here, so no shared colour scale). The full before/after
+  sentence, plus provenance, band and clip, is one click away behind that arm's
+  own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
@@ -366,12 +369,12 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
   profile"**.
-- Arm chips on screen: "A — Tessera: TSV height (um) canonical Tessera geometry
-  (50 um presented)" (LEFT column, colour dot) / "B — Tessera: TSV height (um)
-  TSV height -> 30.01 um presented (largest skirt mover)" (RIGHT column) --
-  each product renders once per column, on the same row, on shared colour
-  limits. The full before/after sentence, plus provenance, band and clip, is
-  one click away behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — Tessera: TSV height (um) 50 um presented" (LEFT
+  column, colour dot) / "B — Tessera: TSV height (um) 30.01 um presented"
+  (RIGHT column) -- each product renders once per column, on the same row, on
+  shared colour limits. The full before/after sentence, plus provenance, band
+  and clip, is one click away behind that arm's own **▸ Details (provenance,
+  band, clip)**.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
@@ -449,14 +452,18 @@ dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
-  screen's one shared transport), **"CFAR objectness"** (pinned to the last
-  frame regardless of the transport), **"Detector scoreboard"**, and the
-  offline PR-curve panel (**"scored offline: ... test frames"**).
-- The Range-Doppler panel loops by itself on the shared clock; the other three
-  hold the LAST frame regardless of where the one transport (pause/play + frame
-  N of M + slider, in the run-identity row) is parked. Pause it before talking
-  about one frame's detections.
+- Two panels follow the screen's one shared transport, frame for frame:
+  **"Range-Doppler power"** and **"CFAR objectness"**.
+- Two more do not animate at all: **"Detector scoreboard"** (live rows say
+  "last frame") and the offline PR-curve panel (**"scored offline: ... test
+  frames"**).
+- The Range-Doppler and objectness panels loop together on the shared clock
+  (pause/play + frame N of M + slider, in the run-identity row); the Detector
+  scoreboard and the offline PR-curve panel do not animate at all, so they can
+  lag behind whichever frame the cube and objectness map are parked on. Pause
+  the transport before talking about one frame's detections, and read the
+  scoreboard's numbers as through its own last frame, not necessarily the one
+  on screen.
 - Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
   colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
   product renders once per column, on the same row, on shared colour limits.
@@ -540,20 +547,23 @@ crosses.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
-  screen's one shared transport), **"Neural detector objectness"** (pinned to
-  the last frame regardless of the transport), **"Detector scoreboard"**, and
-  the offline PR-curve panel (**"scored offline: ... test frames"**).
-- The Range-Doppler panel loops by itself on the shared clock; the other three
-  hold the LAST frame regardless of where the one transport (pause/play + frame
-  N of M + slider, in the run-identity row) is parked. Pause it before talking
-  about one frame's detections.
-- Arm chips on screen: "A — Corner range (m) IF high-pass corner 1 m (as
-  built)" (LEFT column, colour dot) / "B — Corner range (m) IF high-pass corner
-  25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) -- each product renders
-  once per column, on the same row, on shared colour limits. The full
-  before/after sentence, plus provenance, band and clip, is one click away
-  behind that arm's own **▸ Details (provenance, band, clip)**.
+- Two panels follow the screen's one shared transport, frame for frame:
+  **"Range-Doppler power"** and **"Neural detector objectness"**.
+- Two more do not animate at all: **"Detector scoreboard"** (live rows say
+  "last frame") and the offline PR-curve panel (**"scored offline: ... test
+  frames"**).
+- The Range-Doppler and objectness panels loop together on the shared clock
+  (pause/play + frame N of M + slider, in the run-identity row); the Detector
+  scoreboard and the offline PR-curve panel do not animate at all, so they can
+  lag behind whichever frame the cube and objectness map are parked on. Pause
+  the transport before talking about one frame's detections, and read the
+  scoreboard's numbers as through its own last frame, not necessarily the one
+  on screen.
+- Arm chips on screen: "A — Corner range (m) 1 m" (LEFT column, colour dot) /
+  "B — Corner range (m) 25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) --
+  each product renders once per column, on the same row, on shared colour
+  limits. The full before/after sentence, plus provenance, band and clip, is
+  one click away behind that arm's own **▸ Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - Click the **Detector (CFAR | ML)** node in the block diagram to open its
@@ -633,14 +643,18 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Four panels render: **"Range-Doppler power"** (Range-Doppler, follows the
-  screen's one shared transport), **"Neural detector objectness"** (pinned to
-  the last frame regardless of the transport), **"Detector scoreboard"**, and
-  the offline PR-curve panel (**"scored offline: ... test frames"**).
-- The Range-Doppler panel loops by itself on the shared clock; the other three
-  hold the LAST frame regardless of where the one transport (pause/play + frame
-  N of M + slider, in the run-identity row) is parked. Pause it before talking
-  about one frame's detections.
+- Two panels follow the screen's one shared transport, frame for frame:
+  **"Range-Doppler power"** and **"Neural detector objectness"**.
+- Two more do not animate at all: **"Detector scoreboard"** (live rows say
+  "last frame") and the offline PR-curve panel (**"scored offline: ... test
+  frames"**).
+- The Range-Doppler and objectness panels loop together on the shared clock
+  (pause/play + frame N of M + slider, in the run-identity row); the Detector
+  scoreboard and the offline PR-curve panel do not animate at all, so they can
+  lag behind whichever frame the cube and objectness map are parked on. Pause
+  the transport before talking about one frame's detections, and read the
+  scoreboard's numbers as through its own last frame, not necessarily the one
+  on screen.
 - Arm chips on screen: "A — ADC bits 12-bit ADC (as built)" (LEFT column,
   colour dot) / "B — ADC bits 3-bit ADC (same frames)" (RIGHT column) -- each
   product renders once per column, on the same row, on shared colour limits.

@@ -103,6 +103,27 @@ def test_render_does_not_embed_wall_times():
     assert "roughly 15-30 s for both arms" in flat
 
 
+def test_ab_lines_matches_the_rendered_arm_chip():
+    """`_ab_lines` must quote exactly the chip `webapp.app._ab_arm_chip` renders
+    on screen, including its rung-ladder shortening -- a hand-rebuilt
+    `f"A — {label} {value}"` here silently drifted from the real chip once that
+    ladder shipped (wave 13 beautification pass, item 2)."""
+    from webapp.app import _ab_arm_chip
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import _ab_lines
+
+    checked_ab = False
+    for p in PRESETS:
+        if p.ab is None:
+            assert _ab_lines(p) is None, p.id
+            continue
+        checked_ab = True
+        chip_a, chip_b = _ab_lines(p)
+        assert chip_a == _ab_arm_chip(p, "a"), p.id
+        assert chip_b == _ab_arm_chip(p, "b"), p.id
+    assert checked_ab, "no A/B preset found -- this test would pass vacuously"
+
+
 def test_render_has_no_previous_run_divider_label():
     """Wave 10 (2026-09-24, item 3.1, hostile round 9): webapp/app.py only prints
     the "Previous run (for before/after): " label when `_ab` is false; every
