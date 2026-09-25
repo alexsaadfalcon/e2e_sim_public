@@ -32,11 +32,14 @@ default OFF so the shipped `munich_ka.pkl` recipe is unchanged:
   rx->tx line ("across the street"), re-aimed at the array each frame; the receiver's
   attitude is left as the shipped file has it (aimed once at frame 0). This moves the
   real geometry, so the whole multipath set changes with it.
-  MEASURED WINDOW (2026-09-24, real solves, specular-only probe, this scene, 30 GHz,
-  `<scratch>/losweep_probe/tx_{move,edge}.py`): the direct path survives for lateral
-  offsets about -100 m .. +32 m at BOTH ends of the receiver's own 30 m travel; it is
-  BLOCKED (min delay 407-643 ns vs a 298-321 ns geometric direct delay, LoS share
-  0.0-0.02 %) from +34 m outward, and at -110 m for the frame-0 receiver position. The
+  MEASURED WINDOW (2026-09-24/25, real solves, specular-only probe, this scene, 30 GHz,
+  `<scratch>/losweep_probe/tx_{move,edge}.py` + their logs): the direct path is present
+  for lateral offsets -100 m .. +32 m at BOTH ends of the receiver's own 30 m travel
+  (probed at 10 m steps on the negative side, 2 m steps near the positive edge, and at 9
+  coarse interior points); it is BLOCKED from +34 m outward (smallest solved delay
+  383-644 ns against a 298-322 ns geometric direct delay, that path's power share
+  0.0-0.02 %). The boundary is NOT clean beyond the window: at -110 m the frame-0
+  receiver loses it, while at -120 m a weak direct path returns carrying 6.6 %. The
   direct-path power share inside the window is 67-93 % (92 % for the shipped static
   geometry), i.e. the LoS still dominates but the multipath is not held fixed.
 

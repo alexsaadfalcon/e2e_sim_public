@@ -17,6 +17,7 @@ from e2e.environment.sweep_diagnostics import (  # noqa: E402
     angular_peak,
     diagnose_file,
     frame_matrix,
+    pipeline_subspace_err,
     principal_angle_deg,
     range_az_peak_minus_median_db,
     subspace_angle_deg,
@@ -149,3 +150,60 @@ def test_diagnose_file_frames_limit_and_static_direction(tmp_path):
     rows, _meta = diagnose_file(str(path), n_frames=2, k=1)
     assert len(rows) == 2
     assert rows[1]["angle_u1_prev_deg"] == pytest.approx(0.0, abs=_ANGLE_FLOOR_DEG)
+
+
+def _write_pkl(path, frames):
+    with open(path, "wb") as f:
+        pickle.dump({"meta": {"version": 2,
+                              "links": {"munich": {"rx_array_shape": [32, 32],
+                                                   "physical_scale": False}}},
+                     "links": {"munich": frames}}, f)
+    return str(path)
+
+
+def test_pipeline_subspace_err_runs_the_real_chain_and_restores_the_path(tmp_path):
+    """`--pipeline` must actually drive `Simulation` (RFFE -> interconnect -> AFE ->
+    AdaOja) on the given file and hand back one error per frame per repeat -- and must
+    leave `SIONNA_MUNICH_PATH` as it found it, since that attribute is global and the
+    rest of the process (and the rest of the suite) reads it."""
+    import e2e.environment.sionna_iterator as sionna_iterator
+
+    before = sionna_iterator.SIONNA_MUNICH_PATH
+    path = _write_pkl(tmp_path / "chain.pkl",
+                      np.stack([_rank1_frame(u, n_freqs=64, seed=i)
+                                for i, u in enumerate((-0.25, 0.0, 0.25))], axis=0))
+    runs = pipeline_subspace_err(path, n_steps=3, k=1, m=64, n_refine=2, repeats=2)
+    assert sionna_iterator.SIONNA_MUNICH_PATH == before
+    assert len(runs) == 2
+    assert all(len(r) == 3 for r in runs)
+    assert all(np.isfinite(e) and e >= 0.0 for r in runs for e in r)
+
+
+def test_pipeline_subspace_err_restores_the_path_even_when_the_run_raises(tmp_path):
+    import e2e.environment.sionna_iterator as sionna_iterator
+
+    before = sionna_iterator.SIONNA_MUNICH_PATH
+    # k larger than the frame's rx count is a loud failure inside the run, not a silent
+    # one -- whatever it raises, the global path must be put back.
+    path = _write_pkl(tmp_path / "bad.pkl",
+                      np.stack([_rank1_frame(0.0, n_freqs=8, seed=0)], axis=0))
+    with pytest.raises(Exception):
+        pipeline_subspace_err(path, n_steps=1, k=4096, m=8, n_refine=1)
+    assert sionna_iterator.SIONNA_MUNICH_PATH == before
+
+
+def test_pipeline_subspace_err_separates_a_rotating_file_from_a_static_one(tmp_path):
+    """The claim the T3 choice rests on, in miniature: a file whose principal direction
+    jumps every frame must leave the tracker at a HIGHER error than one whose direction
+    stands still, with everything else equal. Synthetic rank-1 frames, so the only
+    difference between the two files is whether the direction moves."""
+    static = _write_pkl(tmp_path / "static_chain.pkl",
+                        np.stack([_rank1_frame(0.25, n_freqs=64, seed=i)
+                                  for i in range(4)], axis=0))
+    moving = _write_pkl(tmp_path / "moving_chain.pkl",
+                        np.stack([_rank1_frame(u, n_freqs=64, seed=i)
+                                  for i, u in enumerate((-0.375, -0.125, 0.125, 0.375))],
+                                 axis=0))
+    err_static = pipeline_subspace_err(static, n_steps=4, k=1, m=64, n_refine=2)[0][1:]
+    err_moving = pipeline_subspace_err(moving, n_steps=4, k=1, m=64, n_refine=2)[0][1:]
+    assert np.mean(err_moving) > np.mean(err_static)

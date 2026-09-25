@@ -12,7 +12,10 @@ import pytest
 from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.environment.sionna_simple_channel import (
     _CFR_TENSOR_BUDGET,
+    _LOS_DELAY_TOL_NS,
     _cfr_chunk_size,
+    _los_receipt,
+    _path_power_share,
     _synthesize_cfr,
     boresight_sin_az,
     build_frequencies,
@@ -305,16 +308,24 @@ def test_no_sweep_keeps_the_fixed_attitude_and_barely_moves_the_azimuth():
     """CONTROL for the test above: the shipped recipe (aim once, then translate only)
     leaves the LoS azimuth drifting by ~14 deg over 30 frames -- an order of magnitude
     less per frame than the swept file, and driven by the receiver's own 30 m of travel,
-    not by the scene. Measured 2026-09-24 against the shipped `munich_ka.pkl` geometry."""
-    orientation = _look_at_orientation(_RX0 + _RX_STEP, _TX0, 35.0)  # aimed ONCE
+    not by the scene.
+
+    Note the aim happens at `_RX0` itself, BEFORE the loop's first `+= [1,0,0]` step
+    (`build_scene` aims; `generate` then steps and solves), so frame i sits at
+    `_RX0 + (i+1)*step` with an attitude fixed at `_RX0`. The two endpoint values below
+    are what the generator itself printed for a 2-frame run in this configuration on
+    2026-09-25 (+32.46 / +31.89 for frames 0 and 1)."""
+    orientation = _look_at_orientation(_RX0, _TX0, 35.0)  # aimed ONCE, pre-step
     az = []
     for i in range(30):
         rx = _RX0 + (i + 1) * _RX_STEP
         az.append(np.degrees(np.arcsin(np.clip(boresight_sin_az(rx, _TX0, orientation),
                                                -1, 1))))
     az = np.array(az)
-    assert az[0] == pytest.approx(33.1, abs=0.5)
-    assert az[-1] == pytest.approx(18.9, abs=0.5)
+    assert az[0] == pytest.approx(32.46, abs=0.05)
+    assert az[1] == pytest.approx(31.89, abs=0.05)
+    assert az[-1] == pytest.approx(18.28, abs=0.05)
+    assert az.max() - az.min() == pytest.approx(14.19, abs=0.05)
     assert abs(np.diff(az)).max() < 0.6  # deg/frame
 
 
@@ -358,6 +369,111 @@ def test_tx_lateral_sweep_moves_the_azimuth_with_a_fixed_attitude():
     az = np.array(az)
     assert (np.diff(az) > 0).all()
     assert az.max() - az.min() == pytest.approx(51.0, abs=4.0)
+
+
+# ------------------------------------------------------- the per-frame LoS receipt
+# `_los_receipt` decides `meta["frames"][i]["los_present"]`, i.e. the claim "the direct
+# path is in every frame". It reads a Sionna `Paths` object, but only through `.tau` and
+# `.a`, so a duck-typed stand-in exercises it with no Sionna and with delays chosen to
+# put the answer beyond doubt.
+
+_C_MPS = 299792458.0
+
+
+class _StubDrJitArray:
+    def __init__(self, arr):
+        self._arr = np.asarray(arr)
+        self.shape = self._arr.shape
+
+    def numpy(self):
+        return self._arr
+
+
+class _StubPaths:
+    """Minimal stand-in for `sionna.rt.Paths`: `tau` in SECONDS (invalid paths <= 0, as
+    Sionna marks them) and `a` as the `(real, imag)` pair sionna-rt 1.2.2 returns."""
+
+    def __init__(self, tau_s, amp=None):
+        self.tau = _StubDrJitArray(tau_s)
+        if amp is None:
+            self.a = None
+        else:
+            amp = np.asarray(amp, dtype=complex)
+            self.a = (_StubDrJitArray(amp.real), _StubDrJitArray(amp.imag))
+
+
+def _pair_at(distance_m, extra_ns=0.0):
+    """rx/tx positions `distance_m` apart, and the delay of a path that arrives
+    `extra_ns` after the geometric direct one."""
+    rx = np.array([0.0, 0.0, 0.0])
+    tx = np.array([distance_m, 0.0, 0.0])
+    tau_s = distance_m / _C_MPS + extra_ns * 1e-9
+    return rx, tx, tau_s
+
+
+def test_los_receipt_sees_the_direct_path_when_the_shortest_delay_matches_geometry():
+    rx, tx, tau_s = _pair_at(82.568)
+    paths = _StubPaths([tau_s, tau_s * 1.3, -1.0], amp=[3.0, 1.0, 0.0])
+    min_ns, direct_ns, present, share = _los_receipt(paths, rx, tx)
+    assert present is True
+    assert min_ns == pytest.approx(direct_ns, abs=_LOS_DELAY_TOL_NS)
+    assert direct_ns == pytest.approx(82.568 / _C_MPS * 1e9)
+    # 3^2 / (3^2 + 1^2): invalid (tau <= 0) paths are excluded from the shortest-path
+    # search but the share is over the solved power, as the docstring says.
+    assert share == pytest.approx(9.0 / 10.0, rel=1e-6)
+
+
+def test_los_receipt_reports_a_blocked_direct_path():
+    """The occluded case measured on this scene: the shortest solved delay sits tens to
+    hundreds of ns past d/c, and it carries almost no power."""
+    rx, tx, tau_s = _pair_at(90.1, extra_ns=245.0)
+    paths = _StubPaths([tau_s, tau_s * 1.1], amp=[0.01, 1.0])
+    min_ns, direct_ns, present, share = _los_receipt(paths, rx, tx)
+    assert present is False
+    assert min_ns - direct_ns == pytest.approx(245.0, abs=1e-3)
+    assert share == pytest.approx(1e-4 / (1e-4 + 1.0), rel=1e-6)
+
+
+def test_los_receipt_handles_a_frame_with_no_valid_paths():
+    rx, tx, _tau = _pair_at(50.0)
+    min_ns, direct_ns, present, share = _los_receipt(_StubPaths([-1.0, 0.0]), rx, tx)
+    assert (min_ns, present, share) == (None, False, None)
+    assert direct_ns == pytest.approx(50.0 / _C_MPS * 1e9)
+
+
+def test_path_power_share_returns_none_instead_of_raising_on_an_unreadable_tensor():
+    """A receipt must never fail a multi-hour generation: an unexpected `a` layout gives
+    None, not an exception."""
+    rx, tx, tau_s = _pair_at(60.0)
+    paths = _StubPaths([tau_s])          # a is None -> unreadable
+    assert _path_power_share(paths, 0) is None
+    min_ns, _direct, present, share = _los_receipt(paths, rx, tx)
+    assert present is True and share is None
+
+
+def test_los_receipt_tolerance_is_tight_enough_to_reject_a_one_metre_error():
+    """The 0.3 ns tolerance is 9 cm of path length: a path a metre longer than the direct
+    one must NOT be accepted as the LoS."""
+    rx, tx, tau_s = _pair_at(82.568, extra_ns=1.0 / _C_MPS * 1e9)
+    assert _los_receipt(_StubPaths([tau_s], amp=[1.0]), rx, tx)[2] is False
+
+
+def test_both_sweeps_together_compose_the_two_schedules():
+    """`--los-sweep-deg` and `--tx-lateral-m` are independent schedules and may be given
+    together: the transmitter walks AND the array is re-aimed at wherever it now is, so
+    the commanded azimuth still lands (within the elevation-coupling tolerance) while the
+    range follows the transmitter."""
+    offs = los_sweep_offsets(30, (-30.0, 30.0))
+    tx_pos = tx_sweep_positions(_TX0, _RX0 + _RX_STEP, (-100.0, 32.0), 30)
+    sins, ranges = [], []
+    for i in range(30):
+        rx = _RX0 + (i + 1) * _RX_STEP
+        orientation = _look_at_orientation(rx, tx_pos[i], offs[i])   # re-aimed at the NEW tx
+        sins.append(boresight_sin_az(rx, tx_pos[i], orientation))
+        ranges.append(float(np.linalg.norm(tx_pos[i] - rx)))
+    assert np.allclose(sins, np.sin(np.radians(offs)), atol=0.05)
+    # The transmitter's own walk shows up as range, not as azimuth.
+    assert max(ranges) - min(ranges) > 20.0
 
 
 # --------------------------------------------------------------------------- writer/reader
