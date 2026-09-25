@@ -176,7 +176,9 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
 
     shapes = fig.layout.shapes
     assert len([sh for sh in shapes if sh.type == "rect"]) == 1  # wave 4 adds a 40 m limit line
-    s = shapes[0]
+    # BY TYPE, not by index: wave 4's 40 m scoring-limit line is shape 0, so `shapes[0]`
+    # read the line and every assertion below it failed on a defect that was not there.
+    s = next(sh for sh in shapes if sh.type == "rect")
     cx, cy = -0.2, 20.0  # (sin_azimuth, surface_range_m) -- see d[1]/d[3] convention
     assert s.type == "rect"
     assert s.x0 == pytest.approx(cx - crit.max_sin_az_err)
@@ -188,8 +190,14 @@ def test_ground_truth_drawn_as_match_tolerance_rectangle_sized_by_match_criterio
     assert s.fillcolor in ("rgba(0,0,0,0)", None)
 
     # Crosses (detections) are untouched.
-    det_trace = next(t for t in fig.data if "detections" in (t.name or ""))
+    # Hostile round 11, H8: detections are split into two traces by whether the
+    # SCOREBOARD's own matcher matched them, so the room can count hits by eye. The
+    # unmatched ones keep the cross.
+    det_trace = next(t for t in fig.data if "unmatched" in (t.name or ""))
     assert det_trace.marker.symbol == "x"
+    hit_trace = next(t for t in fig.data if "matched" in (t.name or "")
+                     and "unmatched" not in (t.name or ""))
+    assert hit_trace.marker.symbol == "diamond"
 
     gt_trace = next(t for t in fig.data if "ground truth" in (t.name or ""))
     # Repointed: the hit-RULE sentence used to be part of the ground-truth trace's own

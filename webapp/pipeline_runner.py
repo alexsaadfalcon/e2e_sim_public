@@ -1819,6 +1819,31 @@ def _sin_angle_axis(n_bins: int):
     return (np.arange(n_bins) - n_bins // 2) / (n_bins / 2)
 
 
+def _matched_detection_indices(dets, gt) -> set:
+    """Indices of `dets` that MATCH a ground-truth target, by the scoreboard's matcher.
+
+    Calls `e2e.ml.metrics.match_detections` -- the same function
+    `webapp.detector_scoreboard.score_frames` pools per frame and the same one
+    `compare_detectors` scores with -- so the glyph on the picture and the TP count in
+    the table beneath it can never disagree. Returns an empty set when there is no
+    ground truth for this frame (nothing is claimed matched) or when the import fails
+    (the panel then draws every detection as unmatched, which is the pre-2026-09-24
+    behaviour and visibly conservative rather than quietly wrong).
+    """
+    if not dets or not gt:
+        return set()
+    try:
+        from e2e.ml.metrics import MatchCriterion, match_detections
+    except ImportError:
+        return set()
+    try:
+        matches, _unmatched_det, _unmatched_gt = match_detections(
+            list(dets), list(gt), MatchCriterion())
+    except Exception:
+        return set()
+    return {int(d_i) for d_i, _t_i in matches}
+
+
 def _spine_range_meta(env_block, range_transform):
     """The ONE range calibration, read off the spine that actually ran.
 
@@ -3219,16 +3244,41 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
         dets = _at(det_frames, len(obj_frames) - 1)
         n_dets = len(dets)
+        gt_now = _at(gt_frames, len(obj_frames) - 1)
+        # HITS AND MISSES ARE DIFFERENT GLYPHS (hostile round 11, H8). The room counts
+        # crosses; the table counts matches; on `thrust5_detector_ml` arm B the table
+        # said "this frame: TP 0" while three crosses sat on the top edge of a
+        # ground-truth box, and "inside the box" is not decidable by eye at a marker
+        # whose arms reach past the tolerance. So the drawing says which is which.
+        #
+        # THE SAME MATCHER THE SCOREBOARD SCORES WITH -- `e2e.ml.metrics.
+        # match_detections`, via `_matched_detection_indices` -- not a second
+        # implementation of the rule. A picture that disagreed with the table beneath it
+        # would be worse than the ambiguity it replaced.
+        matched_idx = _matched_detection_indices(dets, gt_now)
+        hit_pts = [d for i, d in enumerate(dets) if i in matched_idx]
+        miss_pts = [d for i, d in enumerate(dets) if i not in matched_idx]
         # ALWAYS added, even when this frame has no detections: the animation
         # addresses traces by INDEX, so a trace that appears only on some frames
         # would shift the ground-truth trace under it.
         fig.add_trace(go.Scatter(
-            x=[d[1] for d in dets], y=[d[3] for d in dets], mode="markers",
-            name=f"✕ detections (n={n_dets})",
-            marker=dict(symbol="x", size=14, color="#ff3b3b", line=dict(width=2)),
-            text=[f"score {d[2]:.2f}" for d in dets],
+            x=[d[1] for d in miss_pts], y=[d[3] for d in miss_pts], mode="markers",
+            name=f"✕ unmatched (n={len(miss_pts)})",
+            # 10 px, down from 14: at the shipped panel geometry the tolerance box is
+            # ~36 x 27 px, so a 14 px cross with 2 px arms reached to its edge. The
+            # marker now sits inside its own tolerance, which is what makes "the centre
+            # is what counts" checkable rather than asserted.
+            marker=dict(symbol="x", size=10, color="#ff3b3b", line=dict(width=2)),
+            text=[f"score {d[2]:.2f}" for d in miss_pts],
         ))
-        gt = _at(gt_frames, len(obj_frames) - 1)
+        fig.add_trace(go.Scatter(
+            x=[d[1] for d in hit_pts], y=[d[3] for d in hit_pts], mode="markers",
+            name=f"◆ matched (n={len(hit_pts)})",
+            marker=dict(symbol="diamond", size=11, color="#20bf6b",
+                        line=dict(width=1, color="#0b5c34")),
+            text=[f"score {d[2]:.2f}" for d in hit_pts],
+        ))
+        gt = gt_now
         n_gt = len(gt) if gt else 0
         hit_rule = ""
         if gt:
@@ -3258,7 +3308,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # map"): as a legend entry it was a 100-character sentence inside a dark
             # block that took 72 px of the panel.
             hit_rule = (f"hit = cross inside the box (±{r_tol:g} m, "
-                        f"±{az_tol:g} sin az)")
+                        f"±{az_tol:g} sin az); matched ones are drawn as green "
+                        f"diamonds, by the scoreboard's own matcher")
             fig.add_trace(go.Scatter(
                 x=[d[1] for d in gt], y=[d[3] for d in gt], mode="markers",
                 name=f"● ground truth (n={len(gt)})",

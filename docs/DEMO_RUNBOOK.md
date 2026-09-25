@@ -63,7 +63,7 @@ Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 4. Thrust 4 - a worse interconnect, on the range profile
 5. Thrust 5 - live chain from the stored channel: classical CFAR
 6. Thrust 5 - live chain, ported network (the arm that LOSES, shown on purpose)
-7. Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476 vs 0.301, in-distribution
+7. Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP 0.468 vs 0.218 (val-tuned 0.326), in-distribution
 
 General click mechanics that apply to every preset below (from `webapp/app.py`,
 `webapp/block_diagram.py`):
@@ -133,35 +133,34 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 
 Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) share one
 colour scale down to the deeper floor, so arm B's background reads visibly
-brighter, about twelve dB by the printed numbers; streaks match. Signal sits
-just below input-referred noise (1e-7 vs 1.36e-7 V; SNR recovered by coherent
-gain). Manual second knob: IF bandwidth 15 -> 50 MHz.
+brighter, about twelve dB by the printed numbers; streaks match. Manual second
+knob: IF bandwidth 15 -> 50 MHz.
 
 ### Say
 - With the shared colour scale, arm B's background reads about twelve dB
   brighter than arm A's (+-0.6-0.9 dB); streaks match.
-- At default signal level (1e-5) these knobs do nothing (0.5 dB, under the 40
-  dB floor).
+- Drive it harder and these knobs stop mattering: the A/B is 0.96 dB at 1e-3
+  and 0.08 dB at 1e-2, against 11.7 dB at 3e-5 (2026-09-24).
 - Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB leaves
   the attenuator (4->8 mA: +1.6 dB).
 - No trade-off today: nothing clips; the IF filter only sets noise variance (1
   MHz = 1 ms sweep vs 20 us at 50 MHz).
-- Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); multipath: the ~37 m return the panel names (37.1 m true delay, F94)
-  and 68 m.
+- Excess path 0-4 m is not a target: it is the direct path the display
+  normalises to (0 dB); multipath: the ~74 m return the panel names (74.2 m;
+  F94's 37.1 m at c*tau/2) and 136 m.
 - Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB validates the
   mechanism and this knob's AFE/tracker/detector effect. Absolute dBm is NOT
   quotable: input level is free.
 - Channel mismatch: all 1024 elements share one config; mismatch is
   structurally zero; a per-element spread is a small change.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m gates.
+  |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
 - Peak-to-median dynamic range measures how empty the map is (median set by
   empty gates), not target SNR; it moves with the noise floor this knob
   changes.
 - The 0 dB reference is a single range-0 gate too small to see; every dB on the
   map is relative to the direct path.
-- Thrust 1 runs at signal_scaling 1e-7 (legacy mode): peak-median ~66 dB is ~11
+- Thrust 1 runs at signal_scaling 3e-5 (legacy mode): peak-median ~58 dB is ~11
   dB below Thrust 2's ~77 dB -- a different operating point.
 - The printed statistics update per frame while the panels loop; pause before
   reading one.
@@ -232,12 +231,12 @@ Manual: AFE mantissa 6 -> 1 bit.
 - No detection metric is wired here; say so before asked what it means for P_d
   or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
-  (0 dB); multipath: the ~37 m return the panel names (37.1 m true delay, F94)
-  and 68 m.
+  (0 dB); multipath: the ~74 m return the panel names (74.2 m; F94's 37.1 m at
+  c*tau/2) and 136 m.
 - Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
   retrace (rank 3-4, F94); k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; range resolution 5 cm, binned to 1 m gates.
+  |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
 - Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank ~3-4, F94)
   part of A's residual is rank mismatch; the 5x gap to B is the knob
   (interpretation).
@@ -322,7 +321,7 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 - The run is not faster than a full SVD: scoring runs the full SVD every frame.
   The 45x microbenchmark is real, the run time is not.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; native range resolution 5 cm, binned 20:1 to 1 m gates.
+  |sin theta| ~0.90; 9.99 cm excess-path bins (F97d), 10:1 to 1.00 m gates.
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the tracker's acquisition curve here, not Thrust 1's picture.
 - Prepared answer -- both arms are cold starts; the dashed line is a
@@ -403,13 +402,14 @@ dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
 - 77 GHz shipped CSVs are not reconciled with the 30 GHz frames -- caption
   real-CSV results shape-only.
 - Range 0-2 m is not a target: range 0 = earliest arrival
-  (normalize_delays=True). Peaks near 37-113 m are multipath; the 120-125 m
-  rise is the range-0 skirt's negative-delay side at the crop edge (F96).
+  (normalize_delays=True). Peaks near 37-113 m are multipath; the rise at the
+  window's top is the range-0 skirt's negative-delay side at the crop edge
+  (F96).
 - Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated by
   sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; trends/shape
   exact (F91).
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; range resolution 5 cm, binned to 1 m gates.
+  |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
 - The 0 dB reference is a single range-0 gate too small to see; every dB on the
   map is relative to the direct path.
 - What Thrust 4 DID establish: six knobs run live end to end, and in-band |S21|
@@ -443,7 +443,7 @@ dB native flat-frame move) -- bulk DELAY, sits below the printed median floor.
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** SAY FIRST: the frames change -- Thrusts 1-4 ran
-  munich (125 m, range-azimuth); this is the benchmark corpus (100 m,
+  munich (249.8 m, range-azimuth); this is the benchmark corpus (100 m,
   range-Doppler). STORED is the ray-traced channel; everything after runs live,
   so the ADC knob reaches the detector.
 3. The app switches to the **Results** tab automatically.
@@ -486,19 +486,18 @@ on 5 frames recall varies, so compare the 172-frame FA/frame rows, not the
 crosses.
 
 ### Say
-- SAY FIRST: the frames change -- Thrusts 1-4 ran munich (125 m,
+- SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m,
   range-azimuth); this is the benchmark corpus (100 m, range-Doppler). STORED
   is the ray-traced channel; everything after runs live, so the ADC knob
   reaches the detector.
 - The gate that makes this honest: at generation settings the live cube is
   BIT-IDENTICAL to the stored one (max |diff| = 0 ADC codes); moving a knob
   breaks that -- the whole demonstration.
-- Classical CFAR scores AP 0.301 offline; chance floor 0.081 (b1_bench_v3,
-  12-bit). These 5 frames are a different corpus -- a demonstration, not a
-  re-measurement.
-- The CFAR map spans 0-50 m; the top 10 m is unscored (scoring stops at 40 m).
-  Detector, scoreboard and PR panels hold the LAST frame; the Range-Doppler
-  cube loops beside them -- pause it before discussing one frame's detections.
+- Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance floor 0.093;
+  these 5 frames demonstrate, not measure.
+- The CFAR map spans 0-50 m; the top 10 m is unscored. Detector, scoreboard and
+  PR panels hold the LAST frame; the Range-Doppler cube loops beside them --
+  pause it before discussing one frame's detections.
 - Ground truth omits ~3 real objects per frame inside 40 m, so a detector
   catching every real object caps precision at 0.64 -- some 'false alarms' are
   real.
@@ -518,9 +517,10 @@ crosses.
 - That 16 vs 13 hits measures 3-bit quantisation's cost: 5 frames at one
   threshold is a demonstration that the knob reaches the detector, not a
   measurement of it.
-- Any learned-detector number before 2026-09-22 except rd-format 0.127/0.123:
-  the rad-format 0.138 (PR legend) is the 2026-09-22 rescoring under
-  beat_cfar.json's protocol, not the retracted 0.229 (F84).
+- Any learned-detector number before 2026-09-22 except rd-format 0.105/0.093:
+  every number on this screen is the Ka scoring (beat_cfar_ka.json,
+  2026-09-24); the 77 GHz figures (0.127, 0.138, 0.229) belong to a different
+  corpus and band.
 - That fewer CFAR training cells means more false alarms: measured, the count
   went 46 -> 39 (train 6 -> 2). Do not turn that knob on stage.
 
@@ -539,7 +539,7 @@ crosses.
    Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
-- **While it runs, say:** The learned detector LOSES to CFAR: 0.127 vs 0.301,
+- **While it runs, say:** The learned detector LOSES to CFAR: 0.105 vs 0.218,
   chance floor 0.081. Say it first.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
@@ -572,27 +572,27 @@ crosses.
   0.22 -> 0.5 (the figure goes blank)
 
 The same live chain, decoded by the ported FFTRadNet checkpoint (rd input;
-offline test AP 0.127 vs CFAR's 0.301). Its objectness map is a range-profile x
+offline test AP 0.105 vs CFAR's 0.218). Its objectness map is a range-profile x
 fixed-azimuth-prior STRIPE, not peaks: the network never learns azimuth (F83).
 A/B moves the IF high-pass corner from 1 m (real receiver) to a deliberately
 broken 25 m, attenuating (not discarding) returns inside 25 m -- ~4.3 dB at ~22
-m: unmatched/frame falls 26.60 -> 12.20, hits 15 -> 4. Threshold is pinned at
+m: unmatched/frame falls sharply, and hits with it. Threshold is pinned at
 recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 
 ### Say
-- The learned detector LOSES to CFAR: 0.127 vs 0.301, chance floor 0.081. Say
+- The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor 0.081. Say
   it first.
 - B is not a plausible receiver -- a 25 m high-pass corner -- the point is a
-  front-end setting reaches the detector at all: unmatched/frame 26.60 ->
-  12.20, hits 15 -> 4.
+  front-end setting reaches the detector at all: unmatched/frame and hits both
+  fall.
 - At A's operating point, offline expects ~29 crosses/frame = 26.4 FA + 3.0
-  hits (beat_cfar.json); these 5 live frames give 26.60 unmatched/frame -- same
-  regime, not the same number.
+  hits (beat_cfar_ka.json); these 5 live frames give their own unmatched/frame
+  -- same regime, not the same number.
 - Both ported networks emit a near-separable f(range)*g(azimuth) map: rank-1
   energy 0.89/0.76 vs 0.31 for ground truth. Under azimuth-only matching they
   score no better than a constant map.
 - F83's mechanism: neither head converts channel phase into an angle bin. An
-  architecture with range x azimuth as its spatial plane scores 0.476 and
+  architecture with range x azimuth as its spatial plane scores 0.468 and
   passes controls this one fails -- load RADDetNet, read its caveats first.
 - This checkpoint trained on a different corpus; its rd input scaling comes
   from that corpus (screen note). Moving a knob takes it further out of its
@@ -607,10 +607,10 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   recall on these 5 frames (the LAST) -- 5 frames cannot reproduce a recall.
   Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
   pause it to discuss one frame.
-- The PR legend's 'fftradnet_rd_b5' is this checkpoint (b5_fftradnet_v3).
-- This scoreboard's bootstrap also shows seed spread 0.040 exceeding CI
-  half-width 0.029 -- doesn't change the verdict here (already loses), but is
-  what undermines RADDetNet's lead claim.
+- The PR legend's 'fftradnet_rd_b15' is this checkpoint (b15_fftradnet_rd_ka).
+- At Ka this arm scores 0.105 against a 0.093 chance floor -- +0.012 [+0.001,
+  +0.026] above chance. It does not merely lose to CFAR; it barely beats
+  random.
 
 ### Do NOT say
 - 'The rad input doubles AP' or any 0.229 / 0.484 figure: retracted, F84.
@@ -622,14 +622,14 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 
 ---
 
-## 7. Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476 vs 0.301, in-distribution
+## 7. Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP 0.468 vs 0.218 (val-tuned 0.326), in-distribution
 
 ### Click sequence
-1. Open **Demo preset:**, select "Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476
-   vs 0.301, in-distribution", click **Load preset**. The param editor opens on
-   **ADC Quantizer** (first knob: **ADC bits**); the operator card shows
-   "Loaded: Thrust 5 (LEAD) - RADDetNet vs CFAR: AP 0.476 vs 0.301,
-   in-distribution (Thrust 5, 5 frames)".
+1. Open **Demo preset:**, select "Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP
+   0.468 vs 0.218 (val-tuned 0.326), in-distribution", click **Load preset**.
+   The param editor opens on **ADC Quantizer** (first knob: **ADC bits**); the
+   operator card shows "Loaded: Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP
+   0.468 vs 0.218 (val-tuned 0.326), in-distribution (Thrust 5, 5 frames)".
 2. Click **Run pipeline**. Both arms run in one click (A = 12-bit ADC (as
    built), B = 3-bit ADC (same frames)). Wall time: read the last rehearsal's
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
@@ -668,37 +668,37 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   0.44 -> 0.2 (more, weaker detections)
 
 THE REAL CLAIM, first: at matched recall (0.5) on the 172-frame split,
-RADDetNet racks up fewer false alarms than CFAR -- 2.99 vs 6.24 FA/frame (6.24
-also printed on this screen; AP 0.476 vs 0.301, controls pass). On the 5 live
-frames below, fewer crosses can mean fewer hits since these aren't
-recall-matched -- read the scoreboard's FA rows, not the crosses. The same live
-chain runs RADDetNet (Doppler as channels, range x azimuth as the spatial
-plane) on CFAR's cube. A/B re-digitises the stored channel at 3 bits: hits go
-10 -> 5 -- the knob reaching the detector, not a ranking. Out of distribution
-the result is seed-dependent (F86); say so unprompted.
+RADDetNet racks up fewer false alarms than CFAR -- 3.31 vs 10.35 FA/frame (both
+printed on this screen; AP 0.468 vs 0.218, controls pass). On the 5 live frames
+below, fewer crosses can mean fewer hits since these aren't recall-matched --
+read the scoreboard's FA rows, not the crosses. The same live chain runs
+RADDetNet (Doppler as channels, range x azimuth as the spatial plane) on CFAR's
+cube. A/B re-digitises the stored channel at 3 bits: hits go 10 -> 5 -- the
+knob reaching the detector, not a ranking. Out of distribution the result is
+seed-dependent (F86); say so unprompted.
 
 ### Say
 - The defensible sentence: a learned head on the classical front end beats a
   CFAR threshold on the same cube, in-distribution -- say that, not 'beats
   CFAR' (F85 addendum).
-- Every offline number comes from e2e/ml/runs/beat_cfar.json (seed 42,
-  b1_bench_v3, 12-bit default impairments); re-scored bit-identically. Paired
-  scene bootstrap: +0.175 AP vs shipped CFAR (0.301), 95% CI [+0.145, +0.208];
-  +0.148 vs the best of nine classical baselines (0.328).
+- Every offline number comes from e2e/ml/runs/beat_cfar_ka.json (seed 42,
+  b1_bench_v3_ka, 12-bit default impairments); re-scored bit-identically.
+  Paired scene bootstrap: +0.250 AP vs shipped CFAR (0.218), 95% CI [+0.145,
+  +0.208]; +0.148 vs the best of nine classical baselines (0.328).
 - The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
   re-measurement of AP; recall here (0.33) cannot reproduce recall-0.5.
   Detector, scoreboard and PR panels hold that frame while Range-Doppler loops;
   pause it to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
-  scored too, best 0.328 -- above shipped CFAR (0.301), but the best classical
-  still loses to RADDetNet (0.476).
+  scored too, best 0.326 -- above shipped CFAR (0.218), but still behind
+  RADDetNet (0.468, a +0.142 lead).
 - Four learned arms were screened: three ported architectures and this one
-  designed to the F83 diagnosis; all four are in beat_cfar.json, none dropped.
-- THE CAVEAT: on b1_bench_v2 (unseen), seed 42 scores 0.208 vs CFAR 0.179; seed
-  43 0.153 -- NOT reliable OOD (F86). Seed spread 0.040 exceeds CI half-width
-  0.032: the lead rests on the 2-seed rows shown plus the joint checkpoint
-  (F86), not the CI alone.
+  designed to the F83 diagnosis; all four are in beat_cfar_ka.json, none
+  dropped.
+- THE CAVEAT: one Ka seed exists. The seed spread 0.040 (F86, at 77 GHz)
+  exceeds this arm's CI half-width 0.032, so the lead rests on one training
+  run, not the CI alone.
 
 ### Do NOT say
 - 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's

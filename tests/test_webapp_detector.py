@@ -120,14 +120,23 @@ def test_detector_block_has_both_modes_and_a_checkpoint_path():
     assert {"cfar_guard", "cfar_train", "threshold"} <= set(keys)
 
 
-def test_corpus_source_is_registered_and_drawn():
+def test_corpus_source_is_registered_and_reachable_on_the_one_chain():
+    """The one-chain diagram draws ONE source node, not three (only one source ever
+    feeds a run), so "corpus_environment is a node id" stopped being the question. What
+    matters is that the block is registered, opt-in, and reachable: the source node
+    resolves to it when it is enabled, and its editor opens on it."""
     from webapp import block_diagram
     from webapp.pipeline_registry import BLOCKS_BY_ID, default_block_state
     assert BLOCKS_BY_ID["corpus_environment"].category == "source"
     assert BLOCKS_BY_ID["corpus_environment"].enabled_default is False
-    elements = block_diagram.build_elements(default_block_state())
-    ids = {e["data"]["id"] for e in elements if "id" in e.get("data", {})}
-    assert "corpus_environment" in ids
+
+    state = default_block_state()
+    state["corpus_environment"]["enabled"] = True
+    assert block_diagram.active_source(state) == "corpus_environment"
+    elements = block_diagram.build_elements(state)
+    src = next(e for e in elements if e["data"].get("id") == "source")
+    assert src["data"]["block"] == "corpus_environment"
+    assert block_diagram.resolve_node("corpus_environment") == "source"
 
 
 def test_param_editor_renders_text_kind_as_text_input():
