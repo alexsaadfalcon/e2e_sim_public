@@ -12,16 +12,39 @@ import pytest
 from e2e.environment.sionna_iterator import SionnaIterator
 from e2e.environment.sionna_simple_channel import (
     _CFR_TENSOR_BUDGET,
+    _LOS_DELAY_TOL_NS,
     _cfr_chunk_size,
+    _los_receipt,
+    _path_power_share,
     _synthesize_cfr,
     boresight_sin_az,
     build_frequencies,
     build_scene,
     generate,
+    los_az_deg_from_sin,
+    los_sweep_offsets,
     parse_args,
+    street_lateral_axis,
+    tx_sweep_positions,
     unambiguous_range_m,
     write_payload,
 )
+
+#: The munich scene's tx/rx placement (`build_scene`) and its per-frame receiver step --
+#: the geometry the sweep tests below reproduce in plain numpy, no Sionna.
+_TX0 = np.array([8.5, 21.0, 27.0])
+_RX0 = np.array([45.0, 90.0, 1.5])
+_RX_STEP = np.array([1.0, 0.0, 0.0])
+
+
+def _look_at_orientation(rx_pos, tx_pos, offset_deg=0.0):
+    """`(alpha, beta, gamma)` for `rx.look_at(tx)` followed by `aim_receiver`'s yaw --
+    the closed form Sionna's `look_at` sets (alpha=phi, beta=theta-pi/2, gamma=0), with
+    `offset_deg` SUBTRACTED from alpha, as `aim_receiver` does."""
+    d = np.asarray(tx_pos, dtype=float) - np.asarray(rx_pos, dtype=float)
+    theta = np.arccos(d[2] / np.linalg.norm(d))
+    phi = np.arctan2(d[1], d[0])
+    return (phi - np.radians(offset_deg), theta - np.pi / 2, 0.0)
 
 
 def test_build_frequencies_relative_to_carrier_and_symmetric_for_default_band():
@@ -217,6 +240,240 @@ def test_boresight_sin_az_negative_offset_gives_negative_sin_az():
     offset_rad = np.radians(-35.0)
     orientation = (phi0 - offset_rad, beta0, 0.0)
     assert boresight_sin_az(rx_pos, tx_pos, orientation) < 0.0
+
+
+# ----------------------------------------------------------------- moving LoS (sweeps)
+# The 2026-09-24 owner directive: "the line of sight path change angle so that even if
+# the rank doesn't change, the direction changes". These tests cover the PER-FRAME
+# GEOMETRY the two sweep options compute -- no Sionna, no solve.
+
+
+def test_parse_args_sweeps_default_off():
+    """Both sweeps must default off, so the shipped `munich_ka.pkl` recipe (a bare
+    `--boresight-offset-deg 35`) is unchanged by their existence."""
+    args = parse_args([])
+    assert args.los_sweep_deg is None
+    assert args.tx_lateral_m is None
+
+
+def test_parse_args_sweep_overrides():
+    args = parse_args(["--los-sweep-deg", "-30", "30", "--tx-lateral-m", "-100", "32"])
+    assert args.los_sweep_deg == [-30.0, 30.0]
+    assert args.tx_lateral_m == [-100.0, 32.0]
+
+
+def test_los_sweep_offsets_endpoints_uniform_and_monotonic():
+    offs = los_sweep_offsets(30, (-30.0, 30.0))
+    assert offs.shape == (30,)
+    assert offs[0] == pytest.approx(-30.0)
+    assert offs[-1] == pytest.approx(30.0)
+    steps = np.diff(offs)
+    assert np.allclose(steps, 60.0 / 29.0)  # uniform
+    assert (steps > 0).all()                # monotonic
+
+
+def test_los_sweep_offsets_single_frame_sits_at_the_start():
+    assert los_sweep_offsets(1, (-30.0, 30.0)) == pytest.approx(np.array([-30.0]))
+
+
+def test_los_az_deg_from_sin_clips_to_the_physical_domain():
+    assert los_az_deg_from_sin(0.5) == pytest.approx(30.0)
+    assert los_az_deg_from_sin(-0.5) == pytest.approx(-30.0)
+    # A projection of a unit vector can round off past 1.0; arcsin must not go nan.
+    assert los_az_deg_from_sin(1.0 + 1e-15) == pytest.approx(90.0)
+    assert los_az_deg_from_sin(-1.0 - 1e-15) == pytest.approx(-90.0)
+
+
+def test_los_sweep_puts_the_los_at_the_commanded_azimuth_every_frame():
+    """The point of the array-pan sweep: re-aiming at the transmitter and yawing by
+    `offsets[i]` puts the LoS at sin(offsets[i]) in the array frame, frame by frame.
+
+    Exact equality does not hold because this scene's direct path has a ~18 deg
+    elevation component (see `build_scene`), which is why the tolerance is 0.05 in
+    sin -- the same tolerance the fixed-offset test above uses."""
+    offs = los_sweep_offsets(30, (-30.0, 30.0))
+    sins = []
+    for i, off in enumerate(offs):
+        rx = _RX0 + (i + 1) * _RX_STEP          # rx translates every frame ...
+        orientation = _look_at_orientation(rx, _TX0, off)  # ... and is re-aimed
+        sins.append(boresight_sin_az(rx, _TX0, orientation))
+    sins = np.array(sins)
+    assert np.allclose(sins, np.sin(np.radians(offs)), atol=0.05)
+    az = np.degrees(np.arcsin(np.clip(sins, -1, 1)))
+    assert (np.diff(az) > 0).all()                          # monotonic sweep
+    assert az.max() - az.min() == pytest.approx(60.0, abs=3.0)  # ~the commanded span
+
+
+def test_no_sweep_keeps_the_fixed_attitude_and_barely_moves_the_azimuth():
+    """CONTROL for the test above: the shipped recipe (aim once, then translate only)
+    leaves the LoS azimuth drifting by ~14 deg over 30 frames -- an order of magnitude
+    less per frame than the swept file, and driven by the receiver's own 30 m of travel,
+    not by the scene.
+
+    Note the aim happens at `_RX0` itself, BEFORE the loop's first `+= [1,0,0]` step
+    (`build_scene` aims; `generate` then steps and solves), so frame i sits at
+    `_RX0 + (i+1)*step` with an attitude fixed at `_RX0`. The two endpoint values below
+    are what the generator itself printed for a 2-frame run in this configuration on
+    2026-09-25 (+32.46 / +31.89 for frames 0 and 1)."""
+    orientation = _look_at_orientation(_RX0, _TX0, 35.0)  # aimed ONCE, pre-step
+    az = []
+    for i in range(30):
+        rx = _RX0 + (i + 1) * _RX_STEP
+        az.append(np.degrees(np.arcsin(np.clip(boresight_sin_az(rx, _TX0, orientation),
+                                               -1, 1))))
+    az = np.array(az)
+    assert az[0] == pytest.approx(32.46, abs=0.05)
+    assert az[1] == pytest.approx(31.89, abs=0.05)
+    assert az[-1] == pytest.approx(18.28, abs=0.05)
+    assert az.max() - az.min() == pytest.approx(14.19, abs=0.05)
+    assert abs(np.diff(az)).max() < 0.6  # deg/frame
+
+
+def test_street_lateral_axis_is_horizontal_unit_and_perpendicular_to_the_los():
+    lat = street_lateral_axis(_RX0 + _RX_STEP, _TX0)
+    assert lat[2] == 0.0                                   # never changes tx height
+    assert np.linalg.norm(lat) == pytest.approx(1.0)
+    d = _TX0 - (_RX0 + _RX_STEP)
+    assert float(np.dot(lat, [d[0], d[1], 0.0])) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_street_lateral_axis_raises_when_nodes_are_vertically_aligned():
+    with pytest.raises(ValueError):
+        street_lateral_axis([0.0, 0.0, 0.0], [0.0, 0.0, 10.0])
+
+
+def test_tx_sweep_positions_walk_the_endpoints_at_constant_height():
+    pos = tx_sweep_positions(_TX0, _RX0 + _RX_STEP, (-100.0, 32.0), 30)
+    assert pos.shape == (30, 3)
+    lat = street_lateral_axis(_RX0 + _RX_STEP, _TX0)
+    assert pos[0] == pytest.approx(_TX0 - 100.0 * lat)
+    assert pos[-1] == pytest.approx(_TX0 + 32.0 * lat)
+    assert np.allclose(pos[:, 2], _TX0[2])                  # height untouched
+    # Uniform steps of (32 - -100)/29 m along the lateral axis.
+    steps = np.linalg.norm(np.diff(pos, axis=0), axis=1)
+    assert np.allclose(steps, 132.0 / 29.0)
+
+
+def test_tx_lateral_sweep_moves_the_azimuth_with_a_fixed_attitude():
+    """The transmitter-motion option: with the receiver's attitude fixed as the shipped
+    file has it (aimed once, 35 deg offset), walking the transmitter -100 -> +32 m across
+    the LoS sweeps the arrival azimuth monotonically by ~50 deg. -100/+32 m is the window
+    in which the direct path survives in this scene (measured 2026-09-24, real solves)."""
+    orientation = _look_at_orientation(_RX0 + _RX_STEP, _TX0, 35.0)
+    tx_pos = tx_sweep_positions(_TX0, _RX0 + _RX_STEP, (-100.0, 32.0), 30)
+    az = []
+    for i in range(30):
+        rx = _RX0 + (i + 1) * _RX_STEP
+        az.append(np.degrees(np.arcsin(np.clip(
+            boresight_sin_az(rx, tx_pos[i], orientation), -1, 1))))
+    az = np.array(az)
+    assert (np.diff(az) > 0).all()
+    assert az.max() - az.min() == pytest.approx(51.0, abs=4.0)
+
+
+# ------------------------------------------------------- the per-frame LoS receipt
+# `_los_receipt` decides `meta["frames"][i]["los_present"]`, i.e. the claim "the direct
+# path is in every frame". It reads a Sionna `Paths` object, but only through `.tau` and
+# `.a`, so a duck-typed stand-in exercises it with no Sionna and with delays chosen to
+# put the answer beyond doubt.
+
+_C_MPS = 299792458.0
+
+
+class _StubDrJitArray:
+    def __init__(self, arr):
+        self._arr = np.asarray(arr)
+        self.shape = self._arr.shape
+
+    def numpy(self):
+        return self._arr
+
+
+class _StubPaths:
+    """Minimal stand-in for `sionna.rt.Paths`: `tau` in SECONDS (invalid paths <= 0, as
+    Sionna marks them) and `a` as the `(real, imag)` pair sionna-rt 1.2.2 returns."""
+
+    def __init__(self, tau_s, amp=None):
+        self.tau = _StubDrJitArray(tau_s)
+        if amp is None:
+            self.a = None
+        else:
+            amp = np.asarray(amp, dtype=complex)
+            self.a = (_StubDrJitArray(amp.real), _StubDrJitArray(amp.imag))
+
+
+def _pair_at(distance_m, extra_ns=0.0):
+    """rx/tx positions `distance_m` apart, and the delay of a path that arrives
+    `extra_ns` after the geometric direct one."""
+    rx = np.array([0.0, 0.0, 0.0])
+    tx = np.array([distance_m, 0.0, 0.0])
+    tau_s = distance_m / _C_MPS + extra_ns * 1e-9
+    return rx, tx, tau_s
+
+
+def test_los_receipt_sees_the_direct_path_when_the_shortest_delay_matches_geometry():
+    rx, tx, tau_s = _pair_at(82.568)
+    paths = _StubPaths([tau_s, tau_s * 1.3, -1.0], amp=[3.0, 1.0, 0.0])
+    min_ns, direct_ns, present, share = _los_receipt(paths, rx, tx)
+    assert present is True
+    assert min_ns == pytest.approx(direct_ns, abs=_LOS_DELAY_TOL_NS)
+    assert direct_ns == pytest.approx(82.568 / _C_MPS * 1e9)
+    # 3^2 / (3^2 + 1^2): invalid (tau <= 0) paths are excluded from the shortest-path
+    # search but the share is over the solved power, as the docstring says.
+    assert share == pytest.approx(9.0 / 10.0, rel=1e-6)
+
+
+def test_los_receipt_reports_a_blocked_direct_path():
+    """The occluded case measured on this scene: the shortest solved delay sits tens to
+    hundreds of ns past d/c, and it carries almost no power."""
+    rx, tx, tau_s = _pair_at(90.1, extra_ns=245.0)
+    paths = _StubPaths([tau_s, tau_s * 1.1], amp=[0.01, 1.0])
+    min_ns, direct_ns, present, share = _los_receipt(paths, rx, tx)
+    assert present is False
+    assert min_ns - direct_ns == pytest.approx(245.0, abs=1e-3)
+    assert share == pytest.approx(1e-4 / (1e-4 + 1.0), rel=1e-6)
+
+
+def test_los_receipt_handles_a_frame_with_no_valid_paths():
+    rx, tx, _tau = _pair_at(50.0)
+    min_ns, direct_ns, present, share = _los_receipt(_StubPaths([-1.0, 0.0]), rx, tx)
+    assert (min_ns, present, share) == (None, False, None)
+    assert direct_ns == pytest.approx(50.0 / _C_MPS * 1e9)
+
+
+def test_path_power_share_returns_none_instead_of_raising_on_an_unreadable_tensor():
+    """A receipt must never fail a multi-hour generation: an unexpected `a` layout gives
+    None, not an exception."""
+    rx, tx, tau_s = _pair_at(60.0)
+    paths = _StubPaths([tau_s])          # a is None -> unreadable
+    assert _path_power_share(paths, 0) is None
+    min_ns, _direct, present, share = _los_receipt(paths, rx, tx)
+    assert present is True and share is None
+
+
+def test_los_receipt_tolerance_is_tight_enough_to_reject_a_one_metre_error():
+    """The 0.3 ns tolerance is 9 cm of path length: a path a metre longer than the direct
+    one must NOT be accepted as the LoS."""
+    rx, tx, tau_s = _pair_at(82.568, extra_ns=1.0 / _C_MPS * 1e9)
+    assert _los_receipt(_StubPaths([tau_s], amp=[1.0]), rx, tx)[2] is False
+
+
+def test_both_sweeps_together_compose_the_two_schedules():
+    """`--los-sweep-deg` and `--tx-lateral-m` are independent schedules and may be given
+    together: the transmitter walks AND the array is re-aimed at wherever it now is, so
+    the commanded azimuth still lands (within the elevation-coupling tolerance) while the
+    range follows the transmitter."""
+    offs = los_sweep_offsets(30, (-30.0, 30.0))
+    tx_pos = tx_sweep_positions(_TX0, _RX0 + _RX_STEP, (-100.0, 32.0), 30)
+    sins, ranges = [], []
+    for i in range(30):
+        rx = _RX0 + (i + 1) * _RX_STEP
+        orientation = _look_at_orientation(rx, tx_pos[i], offs[i])   # re-aimed at the NEW tx
+        sins.append(boresight_sin_az(rx, tx_pos[i], orientation))
+        ranges.append(float(np.linalg.norm(tx_pos[i] - rx)))
+    assert np.allclose(sins, np.sin(np.radians(offs)), atol=0.05)
+    # The transmitter's own walk shows up as range, not as azimuth.
+    assert max(ranges) - min(ranges) > 20.0
 
 
 # --------------------------------------------------------------------------- writer/reader
