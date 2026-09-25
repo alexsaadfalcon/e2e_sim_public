@@ -1160,3 +1160,71 @@ def test_thrust3_card_says_the_scene_sweeps_and_never_says_rank_one():
         assert stale not in text.lower(), stale
     # ...and the label the room reads is not the retired story either.
     assert "cold start" not in p.label.lower()
+
+
+# ------------------------------------------------------------------------------------
+# WHERE THE FRONT END RAN, per preset -- measured off the run, not read off a branch
+# ------------------------------------------------------------------------------------
+#: The placement each preset is CONTRACTED to run, and why. Measured 2026-09-25 on all
+#: eight presets at `3017497` (before any change), and the reason this table exists:
+#: hostile round 13 read `pipeline_runner`'s corpus-branch `chain_composition` and
+#: concluded Thrusts 1-4 ran the front end on `ifft(CFR)`. They do not -- they leave
+#: `serial_stages=None` and `Simulation._build_spine` builds the FULL composition. A
+#: claim about the placement is now a test on the run, not a reading of the builder.
+EXPECTED_PLACEMENT = {
+    # Stored munich channel: FULL composition, front end on the sampled beat record.
+    "thrust1_circuit_knobs": "beat",
+    "thrust2_feature_reduction_error": "beat",
+    "thrust3_cold_start_acquisition": "beat",
+    "thrust4_interconnect_range_profile": "beat",
+    # Corpus replay: the placement is a recorded fact about the FRAMES, and every corpus
+    # on disk was written in the impulse domain -- which is the only reason the flag
+    # exists (F97c: signal below one LSB, floors identical, bit parity load-bearing).
+    "thrust5_detector_cfar": "impulse",
+    "thrust5_detector_ml": "impulse",
+    "thrust5_detector_raddetnet": "impulse",
+    # JSAC: `ifft` of a RECEIVED OFDM grid is the received time-domain symbol, so the
+    # cascade sees a sampled signal there too (F98).
+    "thrust6_jsac_resource_split": "symbol",
+}
+
+
+@pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])
+def test_every_preset_reports_the_front_end_placement_it_contracted_for(preset):
+    """One frame of every preset, reading the placement off the stage list that ran.
+
+    This is the test that would have caught the round-13 claim either way: it fails if a
+    munich screen quietly drops onto the v1.0 impulse order (which would make the RFFE
+    help text false) AND it fails if a corpus replay quietly moves off the order its
+    frames were generated with (which is what the live-vs-stored gate reads as a
+    non-zero code difference nobody can explain from the screen)."""
+    from webapp.pipeline_runner import run_pipeline
+
+    outputs = run_pipeline(apply_preset(preset), n_steps=1)
+    record = (outputs["_axis_meta"] or {})["composition"]
+    assert record["front_end_placement"] == EXPECTED_PLACEMENT[preset.id], (
+        preset.id, record)
+    # "full" is every placement the contract endorses; the legacy order is the corpus
+    # bit-parity one, and nothing else may carry that name.
+    assert record["composition"] == (
+        "legacy_impulse" if record["front_end_placement"] == "impulse" else "full")
+    # A floor with no named injector is a floor nobody can attribute.
+    assert record["noise_injected_by"], (preset.id, record)
+    # And the run SAYS it, in the notes the Results screen prints.
+    notes = " ".join((outputs["_axis_meta"] or {}).get("notes") or [])
+    assert "Front end applied to" in notes, preset.id
+
+
+def test_the_corpus_presets_report_the_placement_their_frames_recorded():
+    """Not "impulse because we hardcoded impulse": the replay reads the composition off
+    the first frame's own meta (`_stored_frame_composition`), so a corpus regenerated
+    under the FULL contract would move these screens with it and this test with them."""
+    from webapp.pipeline_runner import _corpus_source, _stored_frame_composition
+
+    for pid in ("thrust5_detector_cfar", "thrust5_detector_ml",
+                "thrust5_detector_raddetnet"):
+        st = apply_preset(PRESETS_BY_ID[pid])
+        env_block, _cfg, _grid = _corpus_source(st)
+        recorded = _stored_frame_composition(getattr(env_block, "_files", []))
+        assert recorded == "legacy_impulse", (pid, recorded)
+        assert EXPECTED_PLACEMENT[pid] == "impulse", pid

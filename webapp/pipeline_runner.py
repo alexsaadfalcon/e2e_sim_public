@@ -323,6 +323,114 @@ def _stored_frame_composition(files) -> str:
     return "legacy_impulse"
 
 
+#: The stage classes that MIX -- the one point on the spine where a frequency response
+#: becomes a sampled record. Named here so `_composition_record` reads the crossing off
+#: the stage list instead of assuming which one a run used.
+_MIXING_STAGES = ("DechirpBlock", "OFDMReceiveBlock")
+
+#: Where the analog front end sat, as a word the cards and the help text may both use.
+#: "beat"    -- `FrontEndBlock` on the sampled beat record, AFTER the mixing block
+#:              (the FULL contract, section 1.2 row 5).
+#: "symbol"  -- `CircuitStage` ahead of an OFDM receiver: `ifft` of a received OFDM grid
+#:              IS the received time-domain symbol, so the cascade sees a real sampled
+#:              signal here too (F98; `OFDMReceiveBlock`'s docstring).
+#: "impulse" -- `CircuitStage` ahead of a dechirp, i.e. on `ifft(CFR)`, the channel
+#:              impulse response: the v1.0 order, kept ONLY to reproduce corpora that
+#:              were generated with it bit-for-bit (F96, F97c).
+#: "none"    -- no front end on this run.
+FRONT_END_PLACEMENTS = ("beat", "symbol", "impulse", "none")
+
+
+def _composition_record(stages) -> Dict[str, Any]:
+    """WHICH composition this run actually built, read off the stage list that ran.
+
+    Measured, never assumed: the placement is a property of the ORDER of the stages the
+    run composed, and three different code paths in this module compose one (the
+    frequency-domain spine `Simulation` builds, the receive chain this module builds for
+    a corpus replay, and the OFDM/JSAC spine). Reading the built list is the only answer
+    that cannot drift from any of them.
+
+    Why this exists (measured 2026-09-25, all eight presets at `3017497`): a hostile
+    round read `chain_composition` at the corpus branch below and concluded that Thrusts
+    1-4 run the front end on `ifft(CFR)`. They do not -- that variable governs only the
+    branch that composes its own `serial_stages`, and the munich presets leave
+    `serial_stages=None`, so `Simulation._build_spine` builds its default, which is
+    `composition="full"`: `DechirpBlock -> FrontEndBlock -> RangeTransformBlock`. A
+    claim about the placement now comes from this record, on the run, rather than from
+    reading one branch of the builder.
+
+    Returns `composition` ("full" | "legacy_impulse"), `front_end_placement` (one of
+    `FRONT_END_PLACEMENTS`) and `noise_injected_by` (the stages that actually draw a
+    thermal sample, in chain order -- empty when nothing does).
+    """
+    names = [type(s).__name__ for s in stages]
+    mix = next((i for i, n in enumerate(names) if n in _MIXING_STAGES), None)
+    mixer = names[mix] if mix is not None else None
+    fe_beat = next((i for i, n in enumerate(names) if n == "FrontEndBlock"), None)
+    fe_cfr = next((i for i, n in enumerate(names) if n == "CircuitStage"), None)
+
+    if fe_beat is not None:
+        placement = "beat"
+    elif fe_cfr is None:
+        placement = "none"
+    elif mixer == "OFDMReceiveBlock":
+        placement = "symbol"
+    else:
+        placement = "impulse"
+
+    injectors: List[str] = []
+    for i, stage in enumerate(stages):
+        name = names[i]
+        if name == "FrontEndBlock" and getattr(stage, "inject_noise", True):
+            injectors.append("front end (Friis cascade on the beat record)")
+        elif name == "CircuitStage":
+            rffe = getattr(stage, "rffe_block", None)
+            if getattr(rffe, "inject_noise", True):
+                injectors.append("front end (Friis cascade, %s domain)"
+                                 % ("symbol" if mixer == "OFDMReceiveBlock"
+                                    else "impulse"))
+        elif name == "ThermalNoiseBlock":
+            mode = str(getattr(stage, "mode", "legacy"))
+            if mode == "legacy":
+                injectors.append("link budget / thermal floor (k.T.B.F, legacy mode)")
+            elif not injectors:
+                injectors.append("link budget / thermal floor (k.T.B.F, the one "
+                                 "injection -- no front end ran)")
+    return {
+        # "full" is every placement the contract endorses; only the v1.0 order that
+        # exists for stored-corpus bit parity is the legacy one.
+        "composition": "legacy_impulse" if placement == "impulse" else "full",
+        "front_end_placement": placement,
+        "noise_injected_by": injectors,
+        "mixing_block": mixer,
+        "stages": names,
+    }
+
+
+def _composition_note(record: Dict[str, Any]) -> str:
+    """The run note that says WHERE the front end ran on this run, in the words the
+    RFFE help text uses. One authority: the help text points at this note rather than
+    asserting a placement that is only true on some screens."""
+    placement = record.get("front_end_placement")
+    where = {
+        "beat": "the SAMPLED BEAT RECORD, after the mixing block (the full "
+                "composition: dechirp -> front end -> range transform)",
+        "symbol": "the RECEIVED OFDM SYMBOL, ahead of the receiver -- ifft of the "
+                  "received grid is the time-domain symbol a real amplifier sees",
+        "impulse": "the CHANNEL IMPULSE RESPONSE ifft(CFR), before the mixing block "
+                   "-- the v1.0 order, which is what these stored frames were "
+                   "generated with, so the live-vs-stored gate can read zero codes "
+                   "(F96, F97c: below one LSB on the signal path, floors identical)",
+        "none": "nowhere: no front end is enabled on this run",
+    }.get(placement, str(placement))
+    floors = record.get("noise_injected_by") or []
+    return (
+        "Front end applied to " + where + ". Thermal floor injected by: "
+        + (", ".join(floors) if floors else "nothing on this run")
+        + "."
+    )
+
+
 def _frequency_chain_radar_cfg(state: Dict[str, Dict[str, Any]], env_block: Any,
                                array_shape, run_notes: List[str]):
     """The `RadarConfig` the FULL composition's spine is built from, on a run whose
@@ -1429,9 +1537,16 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
                     bandwidth_hz=float(_p(state, "modulate", "bandwidth_hz")),
                 ))
 
-        # WHERE THE FRONT END SITS is the one-chain contract's central decision, and on
-        # a replay it is not this module's to make: it is a recorded fact about the
-        # frames (`_stored_frame_composition`). Under the FULL composition the front end
+        # WHERE THE FRONT END SITS *ON THIS BRANCH ONLY* -- the branch that composes its
+        # own `serial_stages` for a corpus source. SCOPE, because it has been misread
+        # (hostile round 13, refuted by measurement 2026-09-25): the frequency-domain
+        # presets (Thrusts 1-4) never reach this line. They leave `serial_stages=None`
+        # and `Simulation._build_spine` builds `composition="full"` for them, so their
+        # front end is a `FrontEndBlock` on the beat record. What this variable decides
+        # is the order for a corpus whose frames were WRITTEN with one of the two orders.
+        #
+        # On a replay the choice is not this module's to make: it is a recorded fact
+        # about the frames (`_stored_frame_composition`). Under the FULL composition the front end
         # acts on the SAMPLED BEAT RECORD after the mixing block, `sqrt(P_tx)` moves to
         # the source and thermal noise is injected exactly once; under
         # "legacy_impulse" it acts on `ifft(CFR)` before it, which is how every corpus
@@ -1863,7 +1978,23 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # "cold" leaves Oja's random basis untouched -- the honest acquisition run
         # (Thrust 3 Demo B). The registry default "warm" keeps the historical numbers.
         warm_start=(_p(state, "subspace", "warm_start") != "cold"),
+        # STATED, not inherited. `Simulation`'s default already is "full", and on the
+        # frequency-domain path (Thrusts 1-4, `serial_stages=None`) that default is what
+        # builds the spine -- dechirp -> FrontEndBlock on the beat record -> range
+        # transform. Passing it explicitly is the difference between a placement this
+        # module chose and one it happened to inherit: a hostile round read the corpus
+        # branch's `chain_composition` above and concluded T1-T4 ran the v1.0 impulse
+        # order, which measurement refuted (2026-09-25, all eight presets). Ignored when
+        # `serial_stages=` is passed, which is why the record below is read off the
+        # BUILT list rather than off this argument.
+        composition="full",
     )
+
+    # WHAT THIS RUN ACTUALLY COMPOSED. Measured off the stage list that was built, so
+    # the note below and the placement test cannot drift from whichever of the three
+    # spine-composing branches above ran (see `_composition_record`).
+    composition_record = _composition_record(sim.serial_stages)
+    run_notes.append(_composition_note(composition_record))
 
     try:
         outputs = sim.run(n_steps=max(1, int(n_steps)), should_stop=should_stop)
@@ -1946,6 +2077,10 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # True when the values above came from the frames' own v2 metadata (env
         # block freq_plan), not from UI params/fallbacks -- lets the UI say so.
         "from_meta": bool(getattr(environment_block, "freq_plan", None)),
+        # The measured composition of THIS run (front-end placement, who injected the
+        # floor, the stage list) -- what the placement test reads and what the run note
+        # above states in words.
+        "composition": composition_record,
         **_spine_range_meta(environment_block, _range_transform),
     }
     # THE SENSING WAVEFORM'S OWN UNAMBIGUOUS WINDOW, when the run had one.

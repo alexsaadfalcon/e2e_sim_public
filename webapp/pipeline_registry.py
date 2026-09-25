@@ -183,14 +183,18 @@ BLOCKS: List[BlockSpec] = [
         # scaling' past the container's bottom edge -- the defect round 11 raised as D4,
         # re-created by a blurb. The placement sentence is the part that has to be here;
         # the drive-level provenance is a computed run note on the Results screen.
+        # ONE AUTHORITY on the placement: the RUN, not this paragraph. Measured
+        # 2026-09-25 on all eight presets -- the stored-channel screens (Thrusts 1-4) do
+        # run the cascade on the sampled beat record, and a corpus replay runs it in the
+        # impulse domain its frames were generated with, so a blurb that names one
+        # placement is false on the other screen. Every run now prints the placement it
+        # used in its own run notes (`pipeline_runner._composition_note`).
         blurb=("Analog RF front-end distortion: the per-element LNA, mixer and baseband "
                "amplifier cascade (e2e/circuit/rffe_model.py). DRAWN WHERE IT SITS, "
-               "APPLIED WHERE IT IS CHEAP -- the diagram puts the front end at the "
-               "element, ahead of the interconnect and the mixer, because that is the "
-               "receiver; the computation applies the same cascade to the SAMPLED BEAT "
-               "RECORD after the mixing block, which is exact for a unit-modulus chirp "
-               "(F97b) until the baseband stage clips, two decades above the shipped "
-               "drive."),
+               "APPLIED WHERE THE CHAIN PUTS IT -- a stored-channel run applies the "
+               "cascade to the SAMPLED BEAT RECORD after the mixing block (exact for a "
+               "unit-modulus chirp, F97b); a corpus replay applies it in the impulse "
+               "domain its frames were written with. Each run's notes say which ran."),
     ),
     BlockSpec(
         id="interconnect",
