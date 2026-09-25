@@ -49,19 +49,41 @@ from webapp.pipeline_registry import (
 # block's controls (see `param_editor`), so no knob became unreachable.
 #
 #: (node_id, label, category, member registry block ids). ORDER IS THE SPINE'S ORDER.
+# LABELS ARE SHORT ON PURPOSE. Two hard constraints meet here and they pull opposite
+# ways: a label must fit INSIDE its box (a 30 px line is ~36 px tall, so three lines need
+# a 130 px box), and the boxes set the extent, which sets the fit zoom, which sets how
+# much ink the room sees. Measured on the render: at this geometry "FMCW" draws 17-21 px
+# of cap-height ink against acceptance check 17's 12 px. Long labels spend that margin
+# twice over -- once on the wider box and once on the smaller zoom -- so the detail goes
+# in the node's editor, where it can be read, not on the node.
 _CHAIN: List[tuple] = [
-    ("source", "Stored ray-traced\nchannel", "source",
+    ("source", "Stored\nchannel", "source",
      ["environment", "rt_environment", "corpus_environment"]),
-    ("waveform", "Waveform\nFMCW | OFDM | JSAC", "stage",
+    ("waveform", "Waveform\nFMCW", "stage",
      ["waveform", "tx_pa", "modulate"]),
-    ("interconnect", "Interconnect", "stage", ["interconnect"]),
-    ("dechirp", "Mixing block\n(dechirp)", "stage", ["dechirp"]),
-    ("rffe", "RF front end\n(RFFE)", "stage", ["rffe"]),
-    ("adc", "ADC\nfloor / impairments\nIF HPF / bits", "stage",
+    ("interconnect", "Inter-\nconnect", "stage", ["interconnect"]),
+    ("dechirp", "Mixing\n(dechirp)", "stage", ["dechirp"]),
+    ("rffe", "RF front\nend", "stage", ["rffe"]),
+    ("adc", "ADC\nchain", "stage",
      ["thermal_noise", "impairment", "if_hpf", "quantizer"]),
-    ("cube", "One cube\nrange transform\n+ AFE / subspace", "stage",
+    ("cube", "One cube\n+ AFE", "stage",
      ["afe", "subspace"]),
 ]
+
+#: Short diagram labels for the product nodes -- the registry's own labels ("Radar Cube
+#: (Range-Doppler)") are written for the editor's heading and are two to three times too
+#: long for a box. Same reason as the chain labels above.
+_PRODUCT_LABELS: Dict[str, str] = {
+    "fft": "FFT",
+    "range_az": "Range-Az",
+    "range_el": "Range-El",
+    "range_profile": "Range\nprofile",
+    "subspace_err": "Subspace\nerror",
+    "radar_cube": "Range-\nDoppler",
+    "detector": "Detector",
+    "sink": "Frame\nsink",
+    "comms": "Comms\nhead",
+}
 
 #: Which chain node each product TAPS -- the point on the one chain whose domain that
 #: product reads. This is the runtime fact (`Simulation`'s product taps), not a drawing
@@ -89,19 +111,20 @@ _BLOCK_TO_NODE: Dict[str, str] = {bid: nid
                                   for bid in members}
 
 #: Chain geometry. Node boxes are 160x76 (see CYTO_STYLESHEET), so a 170 px pitch leaves
-#: a 10 px gap and nothing overlaps. These numbers matter for ONE reason: the canvas fits
+#: a 15 px gap and nothing overlaps. These numbers matter for ONE reason: the canvas fits
 #: the whole extent, so the extent's WIDTH sets the fit zoom, and the fit zoom times the
-#: font size is how much label ink the room actually sees. 7 chain columns at 170 give an
-#: extent of 1180 px against the ~1032 px panel -- a fit zoom near 0.82, which is what
-#: puts the 30 px font in CYTO_STYLESHEET above the 12 px-of-ink threshold. Add a column
-#: here and that sum has to be recomputed, not assumed.
-_CHAIN_PITCH_X = 170
+#: font size is how much label ink the room actually sees. 7 chain columns at 215 give an
+#: extent of 1490 px against the ~1032 px panel -- a fit zoom near 0.67, which at the 30 px
+#: font in CYTO_STYLESHEET measured 13-17 px of cap-height ink on the rendered card
+#: (2026-09-24), against acceptance check 17's 12 px. Add a column, or lengthen a label so
+#: a box has to grow, and that margin has to be re-measured on a render, not re-argued.
+_CHAIN_PITCH_X = 215
 _CHAIN_Y = 40
 # 240 px pitch and five per row keeps the product block NARROWER than the 1180 px chain,
 # so the products never become the thing that sets the fit zoom (and therefore the label
 # ink -- see the font-size comment in CYTO_STYLESHEET).
 _PRODUCT_PITCH_X = 240
-_PRODUCT_ROW_Y = (210, 320)
+_PRODUCT_ROW_Y = (260, 410)
 _PRODUCTS_PER_ROW = 5
 
 _POSITIONS: Dict[str, tuple] = {}
@@ -167,10 +190,10 @@ def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]
     difference between a diagram and a wiring list."""
     if node_id == "source":
         src = active_source(block_state)
-        backend = {"environment": "precomputed .pkl",
-                   "rt_environment": "live ray tracing",
-                   "corpus_environment": "stored corpus"}.get(src, src)
-        return "Stored ray-traced\nchannel\n(%s)" % backend
+        backend = {"environment": ".pkl frames",
+                   "rt_environment": "live RT",
+                   "corpus_environment": "corpus"}.get(src, src)
+        return "Stored\nchannel\n(%s)" % backend
     if node_id == "waveform":
         kind = str(block_state.get("waveform", {}).get("params", {}).get("kind")
                    or "fmcw")
@@ -178,8 +201,8 @@ def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]
         # chirp the dechirp identity IS the modulation (contract section 1.2 row 3), so
         # `s_pars = H` is the FMCW case, not the absence of one. Say which it is rather
         # than dimming a block that is doing something.
-        tail = ("TX chain on" if block_state.get("waveform", {}).get("enabled", False)
-                else "dechirp identity")
+        tail = ("TX chain" if block_state.get("waveform", {}).get("enabled", False)
+                else "identity")
         return "Waveform\n%s\n(%s)" % (kind.upper(), tail)
     return label
 
@@ -218,9 +241,13 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "font-size": "30px",
             "font-weight": 600,
             "text-wrap": "wrap",
-            "text-max-width": "150px",
-            "width": "160px",
-            "height": "76px",
+            "text-max-width": "180px",
+            # 200x130 holds three 30 px lines (~36 px each) with padding. The previous
+            # 160x76 did not: at 30 px every multi-line label overflowed its own box and
+            # collided with its neighbours' -- visible on the 21:0x render, which is why
+            # the labels above are short and these numbers are not the old ones.
+            "width": "200px",
+            "height": "130px",
             "shape": "round-rectangle",
             "background-color": CATEGORY_COLORS["stage"],
             "border-width": 2,
@@ -317,20 +344,26 @@ def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
     for node_id, label, category, _members in _CHAIN:
         _add_node(node_id, label, category)
     for pid in _PRODUCT_TAP:
-        spec = BLOCKS_BY_ID.get(pid)
-        _add_node(pid, spec.label if spec is not None else pid, "product")
+        _add_node(pid, _PRODUCT_LABELS.get(pid, pid), "product")
 
-    def _add_edge(src: str, dst: str) -> None:
-        on = _node_active(block_state, src) and _node_active(block_state, dst)
+    def _add_edge(src: str, dst: str, active: bool) -> None:
         elements.append({
             "data": {"source": src, "target": dst, "id": f"{src}->{dst}"},
-            "classes": "" if on else "inactive",
+            "classes": "" if active else "inactive",
         })
 
+    # THE CHAIN'S EDGES ARE ALWAYS ACTIVE. The frame passes through every one of these
+    # points on every run; what a disabled stage means is that the stage APPLIES nothing
+    # there, which is what the dimmed NODE says. Dashing the edges too would draw a broken
+    # chain -- on Thrust 1, where the interconnect is off, it drew the one chain in three
+    # disconnected pieces (21:0x render), which is the picture this whole rewrite exists
+    # to stop drawing.
     for (src, _l, _c, _m), (dst, _l2, _c2, _m2) in zip(_CHAIN, _CHAIN[1:]):
-        _add_edge(src, dst)
+        _add_edge(src, dst, True)
+    # A product's edge, on the other hand, carries real information: this product did not
+    # run.
     for pid, tap in _PRODUCT_TAP.items():
-        _add_edge(tap, pid)
+        _add_edge(tap, pid, _node_active(block_state, pid))
     return elements
 
 

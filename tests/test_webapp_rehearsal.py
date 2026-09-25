@@ -113,7 +113,7 @@ def test_the_source_node_names_the_corpus_backend_when_corpus_replay_feeds_the_r
     elements = block_diagram.build_elements(state)
     src = next(e for e in elements if e["data"].get("id") == "source")
     assert "disabled" not in src["classes"].split()
-    assert "stored corpus" in src["data"]["label"]
+    assert "corpus" in src["data"]["label"]
     # ...and the editor opens on the backend actually in use, not on the .pkl source.
     assert src["data"]["block"] == "corpus_environment"
     assert not any(e["data"].get("id") == "environment" for e in elements)
@@ -128,7 +128,7 @@ def test_the_source_node_names_the_pkl_backend_by_default():
     elements = block_diagram.build_elements(state)
     src = next(e for e in elements if e["data"].get("id") == "source")
     assert "disabled" not in src["classes"].split()
-    assert "precomputed .pkl" in src["data"]["label"]
+    assert ".pkl" in src["data"]["label"]
 
 
 # ------------------------------------------------------------------------------------

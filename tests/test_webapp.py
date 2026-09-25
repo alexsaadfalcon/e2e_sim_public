@@ -496,9 +496,14 @@ def test_the_diagram_extent_leaves_enough_fit_zoom_for_legible_labels():
     # 1032 px, height 620 px) and the layout's own padding=20 on each side.
     panel_w, panel_h, pad = 1032.0, 620.0, 20.0
     zoom = min((panel_w - 2 * pad) / extent_w, (panel_h - 2 * pad) / extent_h, 1.0)
-    # Cap-height / em for the default sans stack, measured off the round-11 crops
-    # (20 px declared -> ~6 px ink at ~0.6 zoom => ~0.5).
-    ink = font * zoom * 0.5
+    # Cap-height / em for the default sans stack. MEASURED, not assumed: the rendered
+    # card of 2026-09-24 21:0x drew "FMCW" with row-runs of 17 and 21 px of ink at a
+    # 0.813 fit zoom and a 30 px font -> 17 / (30 * 0.813) = 0.70. (Hostile round 11 read
+    # ~6 px at 20 px/~0.6, i.e. ~0.5, from a crop of a wrapped two-line label where the
+    # rows it sampled were the x-height of "Sionna"/"Environment" rather than a cap; 0.70
+    # is the conservative-to-optimistic correction and this test is the upstream guard --
+    # the check that decides is still a measurement on a fresh render.)
+    ink = font * zoom * 0.70
     assert ink >= 12.0, (
         f"label ink {ink:.1f} px at fit zoom {zoom:.2f} (extent {extent_w:.0f}x"
         f"{extent_h:.0f}, font {font:.0f}px) -- acceptance check 17 wants >= 12 px")
