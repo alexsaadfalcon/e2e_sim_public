@@ -885,7 +885,7 @@ class _StoredADCGateBlock:
 
     def caption(self, frames_bits: Optional[int] = None) -> str:
         """The gate at ARM-CAPTION length, WITH its verdict (hostile round 14, J4):
-        "0 of 4096 LSB vs stored: bit-identical" / "1 of 8 LSB vs stored: differs
+        "max |diff| = 0 of 4096 LSB vs stored: bit-identical" / "max |diff| = 1 of 8 LSB vs stored: differs
         (this run's ADC 3-bit)". The verdict word is the one `note()` and `short()`
         use, from the same comparison, so the caption cannot disagree with Details.
         `frames_bits` (the depth the frames were WRITTEN at, when they record it) lets
@@ -896,7 +896,9 @@ class _StoredADCGateBlock:
         if self.quantizer_block is None:
             return ("live vs stored ADC: "
                     + ("bit-identical" if self.max_abs_diff == 0.0 else "differs"))
-        head = f"{self.max_lsb_diff} of {self.lsb_total} LSB vs stored: "
+        # "max |diff| = " (shard 3f, 2026-09-25): the bare "2815 of 4096 LSB vs
+        # stored" did not say what the 2815 IS -- a count, a code, a mean?
+        head = f"max |diff| = {self.max_lsb_diff} of {self.lsb_total} LSB vs stored: "
         if self.max_lsb_diff == 0:
             return head + "bit-identical"
         if frames_bits is not None and self.bits is not None and int(frames_bits) != self.bits:
@@ -3034,6 +3036,25 @@ _SUBSPACE_ERR_MIN_YMAX = 0.65
 #:     level" until 2026-09-25, which was a claim about a start condition the
 #:     measurement never had.
 _SUBSPACE_ERR_SETTLED_LEVEL = 0.08
+#: The static-scene settled level PER FIXED PASS COUNT (shard 3f, 2026-09-25). The
+#: 0.08 above is the 10-pass tracker's; the 5-pass tracker settles at about 0.16 on
+#: the same static scene (Thrust 3's card and runbook: "A about 0.55, B about 0.26 ...
+#: against 0.16 and 0.08 on the static scene"; the 0.16-0.17 reading from frame 5 is
+#: wave 12's, 2026-09-24, k=2 cold). Both Thrust 3 arms used to draw 0.08, so arm A's
+#: dashed line was the OTHER arm's static level. A run whose passes/frame is flat at
+#: a count listed here draws that count's level; anything else keeps 0.08.
+_SUBSPACE_ERR_STATIC_LEVEL_BY_PASSES = {5: 0.16, 10: _SUBSPACE_ERR_SETTLED_LEVEL}
+
+
+def _static_reference_level(n_refine_used) -> float:
+    """This run's own static-scene reference: the level for its passes/frame when
+    that count is flat over the run and measured, else `_SUBSPACE_ERR_SETTLED_LEVEL`."""
+    if n_refine_used:
+        counts = {int(n) for n in n_refine_used}
+        if len(counts) == 1:
+            return _SUBSPACE_ERR_STATIC_LEVEL_BY_PASSES.get(
+                counts.pop(), _SUBSPACE_ERR_SETTLED_LEVEL)
+    return _SUBSPACE_ERR_SETTLED_LEVEL
 #: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
 #: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
 #: max (A: 0-5, B: 0-10), so a real 2x difference in compute spent per frame rendered
@@ -3420,6 +3441,15 @@ def reach_floor_single_arm(figs: Dict[str, Any]) -> None:
             f"both arms."]
 
 
+def _fig_meta_get(fig, key: str):
+    """A raw `layout.meta` value off a `go.Figure` or its stored dict form, or None."""
+    if hasattr(fig, "layout"):
+        meta = dict(fig.layout.meta) if fig.layout.meta else {}
+    else:
+        meta = ((fig.get("layout") or {}).get("meta") or {})
+    return meta.get(key) if isinstance(meta, dict) else None
+
+
 def _meta_number(fig, key: str):
     """A numeric `layout.meta` value off a `go.Figure` or the stored dict form, or None.
     Never raises: a missing/garbled provenance value must not take a render down."""
@@ -3561,8 +3591,13 @@ def note_differing_y_extents(figs: Dict[str, Any], prev_figs: Dict[str, Any],
                         # in Details. Short -- this caption is one line of ~94
                         # characters and already carries units, rate and clip -- and
                         # made of the same three computed numbers as the sentence above.
+                        # TAGGED WITH ITS FRAME (shard 3f, 2026-09-25): the fold is
+                        # measured on the last frame, and it sat beside arm A's strip
+                        # reading "@ 72 m, frame 4 of 5" -- two frames, one sentence.
+                        _ftag = _fig_meta_get(fig, _BRIGHTEST_M + "_frame")
                         _fold = (f"{other_bright:.0f} m folds to {this_bright:.0f} m "
-                                 f"({this_m:.1f} m window)")
+                                 + (f"({_ftag}, {this_m:.1f} m window)" if _ftag
+                                    else f"({this_m:.1f} m window)"))
                         panel["caption"] = [
                             c for c in (panel.get("caption") or [])
                             if not (isinstance(c, str) and " folds to " in c)] + [_fold]
@@ -3951,6 +3986,11 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                     _bm = float(_tail.split(" at ", 1)[1].split(" m", 1)[0])
                     _meta2 = dict(fig.layout.meta or {}) if fig.layout.meta else {}
                     _meta2[_BRIGHTEST_M] = _bm
+                    # WHICH frame that brightest return is from (shard 3f): the last,
+                    # in the transport's words, so the fold clause can say so beside
+                    # a strip that may be parked on another frame.
+                    _meta2[_BRIGHTEST_M + "_frame"] = _frame_tag(
+                        len(direct_path_notes) - 1, len(direct_path_notes))
                     fig.update_layout(meta=_meta2)
                 except (IndexError, ValueError):
                     pass
@@ -4304,6 +4344,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         rd_above_is_quant = bool(
             _bits_now is not None and _bits_frames is not None
             and int(_bits_now) < int(_bits_frames))
+        # THE NEAR-RANGE SMEAR INSIDE THE CROP (shard 3f, 2026-09-25). On the 3-bit
+        # arm a smear at 0-5 m, -8 to -2 m/s shows inside the scoring crop. MEASURED
+        # 2026-09-25 on thrust5_detector_cfar, same 5 frames, same chain, only the bit
+        # depth moved (m7_3f.py in the shard-3e scratchpad): cells above the panel's
+        # own clip in that box per frame were 0,0,8,0,2 at 12 bits, 0,0,7,0,2 at 6 bits
+        # and 4,0,109,56,49 at 3 bits (of 208) -- the 3-bit converter's products, like
+        # the band above 40 m. Counted here per run, and only NAMED when the bit depth
+        # is what moved (`rd_above_is_quant`).
+        rd_near_smear_cells = 0
+        if rd_above_is_quant and rx.get("velocity_resolution_mps"):
+            _near = np.ix_(y <= 5.0, (x >= -8.0) & (x <= -2.0))
+            if _near[0].size and _near[1].size:
+                rd_near_smear_cells = max(int((d[_near] > rd_clip).sum())
+                                          for d in rd_frames)
         rd_above_clause = ""
         if rd_visible_above_crop:
             _where = f"above {scoring_max_r:g} m"
@@ -4312,6 +4366,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             if rd_above_is_quant:
                 rd_above_clause = (f"{_where}: {int(_bits_now)}-bit quantisation "
                                    f"floor, unscored")
+                # The 0-5 m smear (the same converter's products INSIDE the crop) is
+                # NOT added here: with the frames qualifier the combined clause runs
+                # past the ~86-character line. It is in Details and on the runbook's
+                # Say list (shard 3f, 2026-09-25).
             else:
                 rd_above_clause = f"{_where}: floor over the clip, unscored"
         # "sparse scene: mostly dark on purpose" ON THE DEFAULT SCREEN (hostile round
@@ -4366,6 +4424,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                        "converter's own quantisation products, spread like a risen "
                        "floor rather than a few discrete spurs."
                        if (rd_visible_above_crop and rd_above_is_quant) else ""),
+                      (f"The 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop: "
+                       f"up to {rd_near_smear_cells} cell(s) above the clip on this "
+                       f"run. Measured 2026-09-25 on the same 5 frames with only the "
+                       f"bit depth moved: 0-8 cells at 12 or 6 bits, 0-109 at 3 bits "
+                       f"-- the 3-bit converter's products, not a target."
+                       if (rd_near_smear_cells and rd_above_is_quant) else ""),
                       rd_clip_provenance + ": this panel's display clip is a "
                       "deliberate decision about what to hide, so sharing it across "
                       "arms only unifies the two clips instead of pushing the limit "
@@ -4382,6 +4446,20 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       "beside it, and it is the number that does not move when the "
                       "transport does.",
                   ] if _d], row=PANEL_ROW_MAP)
+        # EACH ARM'S ABSOLUTE PEAK, per frame, in dB of the cube's own power units
+        # (item 1, shard 3f, 2026-09-25). Every value on this panel is relative to the
+        # frame's own peak, so an A/B knob that lowers the PEAK (thrust5_detector_ml's
+        # 25 m IF corner attenuates the near-range return every dB is referenced to)
+        # makes the rest of the map read BRIGHTER on that arm. The cross-arm pass in
+        # app.py (`note_rd_peak_drop`) reads this to put the drop on arm B's caption.
+        def _abs_peak_db(cube):
+            if hasattr(cube, "detach"):
+                cube = cube.detach().cpu().numpy()
+            p = np.mean(np.abs(np.asarray(cube)) ** 2, axis=0)
+            return float(10 * np.log10(max(float(p.max()), 1e-30)))
+        fig.update_layout(meta={**dict(fig.layout.meta or {}),
+                                "rd_peak_abs_db": [_abs_peak_db(c)
+                                                   for c in outputs["radar_cube"]]})
         figs["radar_cube"] = _make_legible(_add_frame_animation(
             fig, rd_frames,
             frame_layouts=[dict(annotations=_stat_annotations(s, sub))
@@ -4694,6 +4772,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
 
     if outputs.get("subspace_err"):
         errs = [float(e) for e in outputs["subspace_err"]]
+        ref_level = _static_reference_level(outputs.get("n_refine_used"))
         # Frames are numbered 1..n, matching the heatmap animation slider (which
         # labels its steps 1-based); an implicit 0-based x autoticked at 0.5 on
         # short runs ("Frame 0.5" after a Cancel, rehearsal 2026-09-22).
@@ -4741,7 +4820,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         # warm-start settled level (reference run)") and the statistic strip's own
         # sub-line, which prints the level. The plot keeps the dashed line; the words
         # stay off the picture, which is the layout spec's rule (check 8).
-        fig.add_hline(y=_SUBSPACE_ERR_SETTLED_LEVEL, line_dash="dash",
+        fig.add_hline(y=ref_level, line_dash="dash",
                       line_color="#576574")
         fig.update_layout(
             xaxis_title="frame",
@@ -4758,7 +4837,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                           + _stat_annotations(
                               f"{errs[-1]:.2f} at {_frame_tag(len(errs) - 1, len(errs))}",
                               f"dashed = static-scene reference "
-                              f"{_SUBSPACE_ERR_SETTLED_LEVEL:g}"))
+                              f"{ref_level:g}"))
         # SHORT (measured on the rendered page, 2026-09-24): the caption renders on ONE
         # line with no wrap in a 746 px column at 16 px, which is ~86 characters -- the
         # spec's 110-character budget is the hard cap, not the fitting width, and a
@@ -4778,9 +4857,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       # the clause as it was written, not a re-punctuated version.
                       "unnormalised distance; grows ~sqrt(k), not a fraction.",
                       f"The dashed line is this tracker's settled level on the "
-                      f"STATIC scene ({_SUBSPACE_ERR_SETTLED_LEVEL:g}, reference), "
-                      "measured on two other arms of two other presets -- NOT this "
-                      "run's own level, and on a swept scene no arm reaches it.",
+                      f"STATIC scene ({ref_level:g}, reference) at this run's "
+                      "passes/frame (0.16 at 5, 0.08 at 10), measured on other runs "
+                      "-- NOT this run's own level, and on a swept scene no arm "
+                      "reaches it.",
                   ], row=PANEL_ROW_MAP)
         fig.update_yaxes(automargin=True)
         # Compute spent per frame (Thrust 3's cold-start-vs-refine-gate A/B, 2026-09-23):
@@ -4874,7 +4954,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             for i in range(len(errs)):
                 data = [{"type": "scatter", "y": errs[:i + 1]}]
                 traces = [0]
-                sub = f"dashed = warm-start reference {_SUBSPACE_ERR_SETTLED_LEVEL:g}"
+                sub = f"dashed = static-scene reference {ref_level:g}"
                 if _n_refine is not None:
                     data.append({"type": "scatter", "y": _n_refine[:i + 1]})
                     traces.append(1)
@@ -4887,6 +4967,10 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         _meta_h = dict(fig.layout.meta or {}) if fig.layout.meta else {}
         _meta_h[_HEADLINE_META] = (f"tracker error {errs[-1]:.2f}, "
                                    f"{_frame_tag(len(errs) - 1, len(errs))}")
+        # The passes actually spent per frame, for the arm caption's "did the gate
+        # escalate" clause (app.py `_arm_facts`) -- read off the run, never typed.
+        if _n_refine is not None:
+            _meta_h["n_refine_used"] = list(_n_refine)
         fig.update_layout(meta=_meta_h)
         figs["subspace_err"] = _make_legible(fig)
 

@@ -274,12 +274,12 @@ def test_gate_caption_verdicts():
     g = _StoredADCGateBlock([], quantizer_block=_Q())
     g.n_compared = 5
     g.max_lsb_diff = 0
-    assert g.caption(12) == "0 of 8 LSB vs stored: bit-identical"
+    assert g.caption(12) == "max |diff| = 0 of 8 LSB vs stored: bit-identical"
     g.max_lsb_diff = 1
-    assert g.caption(12) == "1 of 8 LSB vs stored: differs (this run's ADC 3-bit)"
+    assert g.caption(12) == "max |diff| = 1 of 8 LSB vs stored: differs (this run's ADC 3-bit)"
     # A difference NOT caused by the bit depth is not attributed to it.
-    assert g.caption(3) == "1 of 8 LSB vs stored: differs"
-    assert g.caption(None) == "1 of 8 LSB vs stored: differs"
+    assert g.caption(3) == "max |diff| = 1 of 8 LSB vs stored: differs"
+    assert g.caption(None) == "max |diff| = 1 of 8 LSB vs stored: differs"
     g.problem = "boom"
     assert "not compared" in g.caption(12)
 

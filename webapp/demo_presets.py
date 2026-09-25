@@ -1046,9 +1046,9 @@ PRESETS: List[DemoPreset] = [
             "this curve, not in Thrust 1's picture.",
             # wave 10 (2026-09-24, item 4.3, hostile round 9): prepared answer for
             # "why does one cold run hit the warm floor and the other never does?"
-            "Prepared answer -- the dashed line is this tracker's settled level on "
-            "the STATIC scene (0.08), from two other arms. Neither arm reaches it "
-            "here; that is the finding.",
+            "Prepared answer -- each arm's dashed line is its own pass count's "
+            "settled level on the STATIC scene (A 0.16 at 5, B 0.08 at 10). "
+            "Neither arm reaches it here; that is the finding.",
         ],
         do_not_say=[
             "Anything with an interferer: three confounders, and the sign of the "
@@ -1339,6 +1339,10 @@ PRESETS: List[DemoPreset] = [
             "How the cube becomes the map: Doppler sums away first (angle FFT) "
             "into a range-azimuth map; CA-CFAR's guard 2 / train 6 cells form "
             "one square annulus over range and azimuth, not two 1-D passes.",
+            # shard 3f (2026-09-25): measured, m7_3f.py -- only the bit depth moved.
+            "Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it "
+            "is 3-bit quantisation too: 0-109 cells over the clip per frame at 3 "
+            "bits, 0-8 at 12 or 6 bits, same frames.",
         ],
         do_not_say=[
             "That the two arms' hit counts measure 3-bit quantisation's cost: 5 "
@@ -1415,7 +1419,7 @@ PRESETS: List[DemoPreset] = [
             "loses to CFAR 0.105 vs 0.218, shown on purpose"),
         say=[
             "The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor "
-            "0.081. Say it first.",
+            "0.093. Say it first.",
             "B is not a plausible receiver -- a 25 m high-pass corner -- the "
             "point is a front-end setting reaches the detector at all: "
             "unmatched/frame and hits both fall.",
@@ -1566,6 +1570,10 @@ PRESETS: List[DemoPreset] = [
             "THE CAVEAT: one Ka seed exists. The seed spread 0.040 (F86, at "
             "77 GHz) exceeds this arm's CI half-width 0.032, so the lead rests "
             "on one training run, not the CI alone.",
+            # shard 3f (2026-09-25): measured, m7_3f.py -- only the bit depth moved.
+            "Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it "
+            "is 3-bit quantisation too: 0-109 cells over the clip per frame at 3 "
+            "bits, 0-8 at 12 or 6 bits, same frames.",
         ],
         do_not_say=[
             "'Beats CFAR', unqualified: the verified claim is in-distribution, on "

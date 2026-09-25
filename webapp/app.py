@@ -1040,6 +1040,18 @@ def _arm_facts(preset: Optional["DemoPreset"], arm: str, meta: Dict[str, Any],
                 # A bare number ("6") says nothing without its knob: use the chip's
                 # own label + value ("FP mantissa bits 6").
                 value = _ab_arm_chip(preset, arm).split(" — ", 1)[-1]
+        # WHAT THE ADAPTIVE GATE DID, from the run (shard 3f, 2026-09-25): on
+        # Thrust 3's swept scene the gate never escalates, so "adaptive gate" alone
+        # implied an adaptive story the run does not have. Computed from the passes
+        # the tracker actually spent (`n_refine_used`), never typed.
+        if (preset is not None and preset.ab and preset.ab[1] == "gap_response"
+                and str(preset.ab[2]) == "refine" and arm == "b"
+                and "subspace_err" in figs):
+            used = _fig_meta(figs["subspace_err"]).get("n_refine_used") or []
+            if used:
+                lo, hi = min(int(n) for n in used), max(int(n) for n in used)
+                value = (f"gate did not escalate ({hi} passes every frame)"
+                         if lo == hi else f"gate escalated ({lo}-{hi} passes/frame)")
         facts.append(f"{value}: {head}" if value else str(head))
     else:
         return []
@@ -1941,6 +1953,56 @@ def _mark_pr_identical_on_arm_a(figs: Dict[str, Any], prev_figs: Dict[str, Any])
         panel["caption"] = caption + [PR_IDENTICAL_CLAUSE]
 
 
+#: Below this many dB of peak drop an arm's own-peak normalisation does not visibly
+#: re-light the rest of its map, and the clause is not added.
+RD_PEAK_DROP_MIN_DB = 3.0
+
+
+def note_rd_peak_drop(figs: Dict[str, Any], prev_figs: Dict[str, Any]) -> None:
+    """Put on arm B's Range-Doppler caption how far its PEAK fell below arm A's.
+
+    Each arm's Range-Doppler map is normalised to its OWN peak (see pipeline_runner's
+    `_rd_db`). When the A/B knob lowers that peak -- thrust5_detector_ml's 25 m IF
+    corner attenuates the 10 m return every dB is referenced to -- the rest of arm B's
+    map reads BRIGHTER, the opposite of what its "attenuates" title says (item 1,
+    shard 3f, 2026-09-25). The drop is the median over the run's frames of A's
+    absolute peak minus B's, from `layout.meta.rd_peak_abs_db`, never typed.
+
+    It REPLACES the non-quantisation "above N m: floor over the clip" clause when both
+    will not fit the one-line budget: that clause's sentence is already in Details."""
+    key = "radar_cube"
+    if key not in figs or key not in prev_figs:
+        return
+
+    def _peaks(fig):
+        meta = (fig.get("layout") or {}).get("meta") or {}
+        return list(meta.get("rd_peak_abs_db") or []) if isinstance(meta, dict) else []
+
+    pa, pb = _peaks(figs[key]), _peaks(prev_figs[key])
+    n = min(len(pa), len(pb))
+    if not n:
+        return
+    drops = [float(pa[i]) - float(pb[i]) for i in range(n)]
+    drop = float(np.median(drops))
+    if drop < RD_PEAK_DROP_MIN_DB:
+        return
+    clause = f"own-peak scale: peak {drop:.0f} dB under A's (run median)"
+    panel = _panel_dict(prev_figs[key])
+    caption = [c for c in (panel.get("caption") or []) if c != clause]
+    if len(CAPTION_SEP.join(caption + [clause])) > ARM_CAPTION_FIT_CHARS:
+        caption = [c for c in caption if not c.endswith("floor over the clip, unscored")]
+    panel["caption"] = caption + [clause]
+    details = [d for d in (panel.get("details") or [])
+               if not d.startswith("Each arm's map is normalised to its own peak.")]
+    details.append(
+        "Each arm's map is normalised to its own peak. Arm B's peak is "
+        + ", ".join(f"{d:.1f}" for d in drops)
+        + f" dB below arm A's per frame (median {drop:.1f} dB), so everything else on "
+        "arm B's map sits that much higher on its colour scale: returns the knob "
+        "attenuates by less than the peak read BRIGHTER here, not dimmer.")
+    panel["details"] = details
+
+
 #: The key of the offline-scored precision-recall panel, and the label of the
 #: disclosure it now lives in.
 PR_PANEL_KEY = "detector_pr_stored"
@@ -2098,6 +2160,7 @@ def _render_results(results_data, active_tab):
             if _key.endswith("_scoreboard"):
                 _ds.fold_offline_rows_onto_arm_a(figs[_key], prev_figs[_key])
         _mark_pr_identical_on_arm_a(figs, prev_figs)
+        note_rd_peak_drop(figs, prev_figs)
 
     # The offline PR panel leaves the product rows and becomes a closed disclosure at
     # the foot of the page (acceptance check 14 -- see `_offline_benchmark_disclosure`).

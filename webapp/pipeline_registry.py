@@ -253,15 +253,18 @@ BLOCKS: List[BlockSpec] = [
             # PARAMS in e2e/blocks.py), PRESENTED units -- bounds and defaults come from
             # `_tessera_presented_range`, i.e. the surrogate's own recovered training
             # envelope divided by the Ka-band scale factor, never hand-typed here.
+            # step="any" (shard 3f, 2026-09-25): those bounds are recovered floats
+            # (height min 30.0104 um), so any finite step anchored at min put the
+            # preset's own arm values off the grid -- 50 rendered red as invalid.
             ParamSpec("tessera_radius_um", "Tessera: via radius (um)", "number",
-                      _tessera_presented_range("radius_um")[2], step=0.1,
+                      _tessera_presented_range("radius_um")[2], step="any",
                       min=_tessera_presented_range("radius_um")[0],
                       max=_tessera_presented_range("radius_um")[1],
                       help="TSV via radius. Only applied when source='tessera'; "
                            "presented range is the surrogate's training envelope / "
                            f"{_TESSERA_KA_SCALE:g} (the scale model's Ka-band factor)."),
             ParamSpec("tessera_pitch_um", "Tessera: via pitch (um)", "number",
-                      _tessera_presented_range("pitch_um")[2], step=0.5,
+                      _tessera_presented_range("pitch_um")[2], step="any",
                       min=_tessera_presented_range("pitch_um")[0],
                       max=_tessera_presented_range("pitch_um")[1],
                       help="Centre-to-centre via spacing. The public checkpoint's "
@@ -275,7 +278,7 @@ BLOCKS: List[BlockSpec] = [
             # is sub-milli-bin bulk DELAY, not distortion -- see that note before adding
             # a "watch the image change shape" claim to a card.
             ParamSpec("tessera_height_um", "Tessera: TSV height (um)", "number",
-                      _tessera_presented_range("height_um")[2], step=0.5,
+                      _tessera_presented_range("height_um")[2], step="any",
                       min=_tessera_presented_range("height_um")[0],
                       max=_tessera_presented_range("height_um")[1],
                       help="Through-silicon via height/depth. The largest single-knob "
@@ -283,12 +286,12 @@ BLOCKS: List[BlockSpec] = [
                            "2026-09-23); the movement is bulk delay (it shifts the "
                            "target), not an in-band shape change."),
             ParamSpec("tessera_liner_um", "Tessera: liner oxide thickness (um)", "number",
-                      _tessera_presented_range("liner_um")[2], step=0.05,
+                      _tessera_presented_range("liner_um")[2], step="any",
                       min=_tessera_presented_range("liner_um")[0],
                       max=_tessera_presented_range("liner_um")[1],
                       help="Oxide liner thickness around each via."),
             ParamSpec("tessera_temperature_k", "Tessera: temperature (K)", "number",
-                      _tessera_presented_range("temperature_k")[2], step=5.0,
+                      _tessera_presented_range("temperature_k")[2], step="any",
                       min=_tessera_presented_range("temperature_k")[0],
                       max=_tessera_presented_range("temperature_k")[1],
                       help="Die temperature. Not scaled by the geometric scale model "

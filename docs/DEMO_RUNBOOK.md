@@ -335,9 +335,9 @@ still.
   theta| ~0.90.
 - All 1024 elements share one front-end config; a spread would show up in this
   curve, not in Thrust 1's picture.
-- Prepared answer -- the dashed line is this tracker's settled level on the
-  STATIC scene (0.08), from two other arms. Neither arm reaches it here; that
-  is the finding.
+- Prepared answer -- each arm's dashed line is its own pass count's settled
+  level on the STATIC scene (A 0.16 at 5, B 0.08 at 10). Neither arm reaches it
+  here; that is the finding.
 
 ### Do NOT say
 - Anything with an interferer: three confounders, and the sign of the response
@@ -533,6 +533,9 @@ rows, not the crosses.
 - How the cube becomes the map: Doppler sums away first (angle FFT) into a
   range-azimuth map; CA-CFAR's guard 2 / train 6 cells form one square annulus
   over range and azimuth, not two 1-D passes.
+- Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it is
+  3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at
+  12 or 6 bits, same frames.
 
 ### Do NOT say
 - That the two arms' hit counts measure 3-bit quantisation's cost: 5 frames at
@@ -562,7 +565,7 @@ rows, not the crosses.
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** The learned detector LOSES to CFAR: 0.105 vs 0.218,
-  chance floor 0.081. Say it first.
+  chance floor 0.093. Say it first.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -608,7 +611,7 @@ m: unmatched/frame falls sharply, and hits with it. Threshold is pinned at
 recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 
 ### Say
-- The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor 0.081. Say
+- The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor 0.093. Say
   it first.
 - B is not a plausible receiver -- a 25 m high-pass corner -- the point is a
   front-end setting reaches the detector at all: unmatched/frame and hits both
@@ -739,6 +742,9 @@ unprompted.
 - THE CAVEAT: one Ka seed exists. The seed spread 0.040 (F86, at 77 GHz)
   exceeds this arm's CI half-width 0.032, so the lead rests on one training
   run, not the CI alone.
+- Arm B's 0-5 m smear at -8 to -2 m/s is INSIDE the scoring crop, and it is
+  3-bit quantisation too: 0-109 cells over the clip per frame at 3 bits, 0-8 at
+  12 or 6 bits, same frames.
 
 ### Do NOT say
 - 'Beats CFAR', unqualified: the verified claim is in-distribution, on CFAR's

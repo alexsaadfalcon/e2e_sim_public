@@ -266,12 +266,17 @@ def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]
     difference between a diagram and a wiring list."""
     if node_id == "source":
         src = active_source(block_state)
-        backend = {"environment": ".pkl frames",
+        # ".pkl", not ".pkl frames" (shard 3f, 2026-09-25): "Stored channel (.pkl
+        # frames)" wrapped to FOUR lines and overflowed its node on T1-T4 and T6.
+        backend = {"environment": ".pkl",
                    "rt_environment": "live RT",
                    "corpus_environment": "corpus"}.get(src, src)
         return "Stored\nchannel\n(%s)" % backend
     if node_id == "dechirp":
         return _MIXING_LABELS.get(waveform_kind(block_state), label)
+    if node_id == "comms" and waveform_kind(block_state) in ("ofdm", "jsac"):
+        # Same words the Results panels title it with (pipeline_runner `_head`).
+        return "%s\nreceiver" % waveform_kind(block_state).upper()
     if node_id == "waveform":
         kind = waveform_kind(block_state)
         # With the transmit tributary off there is still a waveform: for a unit-modulus
@@ -407,6 +412,11 @@ def _node_active(block_state, node_id: str) -> bool:
         # other two, absent here -- and drawing it lit would be the diagram claiming a
         # radar product this run cannot produce (the runner refuses those by name).
         return False
+    if node_id == "comms" and waveform_kind(block_state) in ("ofdm", "jsac"):
+        # The waveform class SUPPLIES its own receiver (OFDMReceiveBlock), which is
+        # what produces the EVM / constellation panels on these runs; drawing the node
+        # dimmed told the room the receiver was off beside its own results (shard 3f).
+        return True
     if node_id in _STRUCTURAL_NODES:
         return True
     return any(_block_active(block_state, bid)
@@ -589,7 +599,15 @@ def _block_controls(block_id: str, block_state: Dict[str, Dict[str, Any]],
     ordered = list(spec.params)
     if focus_param is not None:
         ordered.sort(key=lambda ps: 0 if ps.key == focus_param else 1)
+    # FIELDS THIS RUN IGNORES ARE NOT SHOWN (shard 3f, 2026-09-25): an OFDM/JSAC
+    # frame's span is the stored channel's own frequency grid, so Thrust 6's editor
+    # showed "Bandwidth (Hz) 1e9" against a 28.5-31.5 GHz band the run actually used.
+    hidden = set()
+    if block_id == "waveform" and waveform_kind(block_state) in ("ofdm", "jsac"):
+        hidden.add("bw")
     for ps in ordered:
+        if ps.key in hidden:
+            continue
         val = params.get(ps.key, ps.default)
         label_children: List[Any] = [ps.label]
         if focus_param is not None and ps.key == focus_param:
