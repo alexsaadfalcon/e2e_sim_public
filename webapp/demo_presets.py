@@ -512,9 +512,9 @@ PRESETS: List[DemoPreset] = [
             # 0.00->0.34, >2x its own settled level). k=4 is ALSO unstable on this file
             # (arm A: 0.00, 0.07, 0.07, 0.70, 0.51, 0.08 -- an 8-10x spike at frame 3,
             # reproduced across repeated runs). k=2 is the largest k with no spike (arm
-            # A stays 0.00-0.07 across all 6 frames) and the arms still clearly
-            # separate (A ~0.06 vs B ~0.32, both settled). See the preset's `say` list
-            # for the re-measured numbers.
+            # A stays 0.00-0.08 across all 6 frames) and the arms still clearly
+            # separate (re-measured 2026-09-24: A 0.0771-0.0829 and B 0.2999-0.3208 over
+            # frames 2-6, i.e. 3.8-4.2x). See the preset's `say` list.
             {"subspace": {"params": {"k": 2}}},
             _only_products("range_az", "range_el", "subspace_err"),
         ),
@@ -542,12 +542,12 @@ PRESETS: List[DemoPreset] = [
         # right" -- the A/B arms render side by side, not stacked.
         blurb=("Press Run once (A, left, mantissa 6 bit / B, right, 1 bit); the "
                "tracker panel plots a subspace-error curve against a dashed "
-               "0.06 reference line -- A settles on it, B sits about 5x above. "
+               "0.08 reference line -- A settles on it, B about 4x above. "
                "With the shared colour scale, compare the backgrounds; any "
                "difference at the ~0.1 dB run-to-run floor is not the knob. "
                "Manual: AFE mantissa 6 -> 1 bit."),
-        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.06 -> 0.32 at k=2)")],
-        # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.06 arm); run B drops
+        live_knobs=[("afe", "mantissa", "6 -> 1 bit (subspace_err 0.08 -> 0.32 at k=2)")],
+        # A/B (Change 1): as-loaded IS mantissa=6 (the settled 0.08 arm); run B drops
         # to 1 bit, the 0.32 arm the card's headline quotes.
         ab=("afe", "mantissa", 1),
         ab_label_a="6 bit", ab_label_b="1 bit",
@@ -571,21 +571,22 @@ PRESETS: List[DemoPreset] = [
         screen_note=("range-azimuth and range-elevation images barely move under the "
                      "shared colour scale (statistics printed on each; the range "
                      "calibration is on the panel); the tracker error moves "
-                     "about 5x; subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
+                     "about 4x (3.8-4.2x over frames 2-6, measured 2026-09-24); "
+                     "subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
                      "for k = 2; the tracker panel's red dotted trace (right axis) is "
                      "refinement passes/frame, fixed at 10 here -- the knob on this "
                      "screen is AFE precision, not the tracker. " + _ARRAY_DISCLOSURE),
         say=[
             # wave 9 (2026-09-24, item 1.5): frame 1 reads 0.00 on screen, frame 2
             # ~0.065 -- "by frame 1" was wrong by one frame.
-            "As loaded the curve starts near 0, settles at about 0.06 by frame 2; "
-            "the knob compares SETTLED levels, 0.06 vs 0.32.",
-            "Headline in ANGLES: 0.32 -> 0.06 is unnormalized, bounded by sqrt(k); "
-            "converted, principal angle goes 13.1 -> 2.6 deg.",
+            "As loaded the curve starts near 0, settles at about 0.08 by frame 2; "
+            "the knob compares SETTLED levels, 0.08 vs 0.32.",
+            "Headline in ANGLES: 0.32 -> 0.08 is unnormalized, bounded by sqrt(k); "
+            "as an angle, asin(err/sqrt(2)) goes 13.0 -> 3.3 deg.",
             "Both images move by only a few tenths of a dB -- read the two printed "
             "peak-median numbers on the screen; that is at the ~0.1 dB run-to-run "
-            "floor, so the image is not the story; the tracker curve is (about 5x "
-            "above the 0.06 reference on arm B).",
+            "floor, so the image is not the story; the tracker curve is (arm B "
+            "sits about 4x above the 0.08 reference).",
             "No detection metric is wired here; say so before asked what it means "
             "for P_d or false alarms.",
             # wave 10 (2026-09-24, item 1.7, hostile round 9): see Thrust 1's card
@@ -606,7 +607,7 @@ PRESETS: List[DemoPreset] = [
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
             "Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank "
-            "~3-4, F94) part of A's residual is rank mismatch; the 5x gap to B is "
+            "~3-4, F94) part of A's residual is rank mismatch; the 4x gap to B is "
             "the knob (interpretation).",
             # wave 9 (2026-09-24, item 3.12): the array-spread caveat lives on Thrust
             # 1's card; naming it here since the AFE/tracker story is what a
@@ -689,8 +690,8 @@ PRESETS: List[DemoPreset] = [
         # level on the same card; the screen settles at 0.16-0.17 from frame 5 --
         # one number now, stated once.
         blurb=("Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: "
-               "FIXED 5 passes/frame, never reaching B's ~0.06 "
-               "floor in 8 frames -- about 2.5x higher. Arm B: the shipped "
+               "FIXED 5 passes/frame, never reaching B's ~0.08 "
+               "floor in 8 frames -- about 2x higher. Arm B: the shipped "
                "adaptive gate, 10 passes/frame baseline (right axis 0-12; a "
                "small-gap file would climb to 60, not this one). Over 8 frames: A "
                "about 0.6 -> 0.31 -> settles about 0.16-0.17 from frame 5; B about "
@@ -721,7 +722,7 @@ PRESETS: List[DemoPreset] = [
             # the blurb on the same card. The A/B statistic is the settled FLOOR at
             # two fixed pass counts, not a race.
             "The A/B statistic is the settled floor at 5 vs 10 passes/frame -- A "
-            "never reaches B's, about 2.5x higher throughout.",
+            "never reaches B's: 0.164 vs 0.079, about 2x.",
             "This is 2:1 compression (m=512 of 1024). At 16:1/64:1 neither arm "
             "converges in this many frames -- why m is not a live knob here.",
             "There is deliberately no image here: the picture doesn't change during "

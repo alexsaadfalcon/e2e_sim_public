@@ -135,6 +135,14 @@ def _is_raddetnet_arm(arm_name) -> bool:
 #: applied blind to the RF (e2e.ml.compare_detectors.score_null's docstring,
 #: e2e/ml/compare_detectors.py:189-192). Display-only remap; the stored JSON name
 #: (and the JSON itself) is never edited.
+#: The arm whose legend entry may never be the one that gets clipped -- it is the
+#: panel's chance floor -- and which therefore never dims either. Split out of
+#: `_ARM_DISPLAY_NAMES` (seat's read of the 2026-09-24 renders, item 1e): that dict is
+#: now a display-name map with more than one entry in it, and using its membership as
+#: the null-arm test would have silently promoted the val-tuned CFAR baseline to
+#: "never dims" the moment it was given a short name.
+_NULL_ARM_NAMES = {"null (random-in-GT-box)"}
+
 _ARM_DISPLAY_NAMES = {
     # Shortened (Change, 2026-09-23 coordinator re-check): the original full sentence
     # was the single longest legend entry, and a right-hand vertical legend sized to
@@ -144,6 +152,14 @@ _ARM_DISPLAY_NAMES = {
     # column edge -- and this is the one entry that must never be the one that gets
     # cut, because it is the panel's chance floor. The full sentence is in Details.
     "null (random-in-GT-box)": "null (chance floor)",
+    # SEAT'S READ OF THE 2026-09-24 RENDERS, item 1e: at 48 characters
+    # "classical CFAR (val-tuned, cfar_first) (AP=0.326)" ran off the right edge of its
+    # half of the two-column legend on EVERY Thrust 5 screen -- measured on the rendered
+    # PR panels. `cfar_first` is the reduction this baseline was tuned with and it is
+    # named in the scoreboard table and in Details; the legend's job is to tell two CFAR
+    # curves apart, which "CFAR val-tuned" does in 14. The AP is not typed here -- the
+    # trace name appends it from the scoreboard file (`ap` above).
+    "classical CFAR (val-tuned, cfar_first)": "CFAR val-tuned",
 }
 
 #: The null arm's REAL definition, which its legend entry is now too short to carry.
@@ -873,7 +889,18 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # COUNT the hits on the frame in front of them and compare with a row about a
     # different frame. Naming which frame these rows are makes the two numbers stop
     # looking like a contradiction, at the cost of nothing.
-    _last_frame_label = (f"frame {n_total} of {n_total}" if n_total else "last frame")
+    # SEAT'S READ OF THE 2026-09-24 RENDERS, item 1f. "frame 5 of 5: TP" is the same
+    # sentence the transport prints ("frame 4 of 5") in the same words, so on a screen
+    # where the clock had stepped to any other frame the two read as a contradiction
+    # rather than as two different frames. The rows CANNOT follow the clock: the
+    # transport steps `Plotly.animate` over a figure's frames, and this panel is a
+    # Plotly Table -- so the label says WHICH frame it is and that it is the last one,
+    # in words the transport never uses. `test_scoreboard_rows_name_the_last_frame_the
+    # _transport_ends_on` pins the index against the transport's own maximum.
+    # (The "N of M" spelling costs a character too many against `_TABLE_COL_CHARS`,
+    # and it is the transport's own spelling -- which is the confusion being fixed.)
+    _last_frame_label = (f"last frame {n_total}/{n_total}" if n_total
+                         else "last frame")
     base_labels = [f"{_last_frame_label}: TP", f"{_last_frame_label}: unmatched (FP)",
                    f"{_last_frame_label}: FN",
                   "cumulative hits",
@@ -1301,7 +1328,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # honesty anchor on this panel visually disappear. `_ARM_DISPLAY_NAMES`'s
         # keys are exactly the arm names this module treats specially, so membership
         # in it is also the null-arm test.
-        is_null = name in _ARM_DISPLAY_NAMES
+        is_null = name in _NULL_ARM_NAMES
         opacity = 1.0 if (bold or is_null) else 0.45
         ap = a.get("AP", float("nan"))
         if bold:

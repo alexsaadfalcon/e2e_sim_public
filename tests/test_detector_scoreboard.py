@@ -149,14 +149,18 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     labels, values = table.cells.values
     row = dict(zip(labels, values))
     # Last frame (index 1) was a total miss: tp=0, fp=1, fn=1.
-    # The row NAMES that frame ("frame 2 of 2", shard 3, 2026-09-24) rather than saying
-    # "last frame" (hostile round 11, H3): a Plotly Table cannot animate, so these rows
-    # never follow the screen's transport while the objectness map beside them does --
-    # and once that map draws matched vs unmatched detections per frame, a viewer can
-    # count hits on the frame in front of them and compare against a row about another.
-    assert row["frame 2 of 2: TP"] == "0"
-    assert row["frame 2 of 2: unmatched (FP)"] == "1"
-    assert row["frame 2 of 2: FN"] == "1"
+    # The row NAMES that frame AND says it is the last one ("last frame 2/2", seat's
+    # read of the 2026-09-24 renders, item 1f). Two earlier spellings are retracted:
+    # "last frame" alone (round 11, H3: the map beside it draws matched vs unmatched
+    # detections per frame, so a viewer can count hits on the frame in front of them and
+    # compare against a row about another one), and "frame 2 of 2" (shard 3, same day),
+    # which is the TRANSPORT's own spelling -- on a screen whose clock had stepped to
+    # frame 4 the two read as a contradiction rather than as two different frames. A
+    # Plotly Table is not a frame-animated trace, so these rows cannot follow the clock;
+    # the label says which frame it is instead.
+    assert row["last frame 2/2: TP"] == "0"
+    assert row["last frame 2/2: unmatched (FP)"] == "1"
+    assert row["last frame 2/2: FN"] == "1"
     # Cumulative over both frames: 1 hit, 1 false alarm. The "N/N scored" qualifier
     # moved into the value (Change, 2026-09-23 coordinator re-check).
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
@@ -260,8 +264,8 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     # figure builder.
     labels, values = table.cells.values
     row = dict(zip(labels, values))
-    assert labels == ["frame 1 of 1: TP", "frame 1 of 1: unmatched (FP)",
-                      "frame 1 of 1: FN",
+    assert labels == ["last frame 1/1: TP", "last frame 1/1: unmatched (FP)",
+                      "last frame 1/1: FN",
                       "cumulative hits", "unmatched / frame, these 0 frames",
                       "recall (hits / GT), this run"]
     assert row["cumulative hits"] == "0 (0/1 scored)"
@@ -1175,3 +1179,46 @@ def test_stored_pr_figure_legend_is_below_the_plot_not_squeezing_it():
     domain = fig.layout.xaxis.domain
     assert domain is not None
     assert (domain[1] - domain[0]) >= 0.6
+
+
+def test_no_pr_legend_entry_overruns_its_half_of_the_two_column_strip():
+    """SEAT'S READ OF THE 2026-09-24 RENDERS, item 1e: on every Thrust 5 screen the
+    val-tuned CFAR entry read "classical CFAR (val-tuned, cfar_fir" and stopped at the
+    panel edge -- 48 characters in a legend whose entries get half of a 604 px plot at
+    17 px (`entrywidth=0.5`), i.e. ~34 characters, the same budget `_TABLE_COL_CHARS`
+    was calibrated to for the table beside it.
+
+    The AP in each entry is READ FROM the scoreboard file, never typed, so this bound
+    has to hold for whatever that file says; 34 characters leaves room for a 5-digit AP.
+    """
+    fig = ds.stored_pr_figure()
+    over = [tr.name for tr in fig.data if tr.name and len(tr.name) > 34]
+    assert not over, f"PR legend entries wider than their half-column: {over}"
+
+
+def test_scoreboard_rows_name_the_last_frame_the_transport_ends_on():
+    """SEAT'S READ OF THE 2026-09-24 RENDERS, item 1f. The three per-frame rows are
+    about the LAST frame scored, and the screen's transport is a clock that can be
+    parked anywhere -- so the rows used to print "frame 5 of 5" beside a transport
+    reading "frame 4 of 5", in the transport's own words, which reads as a
+    contradiction rather than as two different frames.
+
+    They cannot be made to follow the clock: `assets/results_clock.js` steps figures
+    through `Plotly.animate` over their frames, and this panel is a Plotly Table, which
+    `scoreboard_figure` builds with no frames at all. So the test that can be written is
+    the one that matters: the index the rows name is the LAST frame -- the one the
+    transport's own maximum (`n_total`, the frame count the clock wraps at) lands on --
+    and the wording is not the transport's."""
+    frames = [[], [], []]
+    gt = [[], [], []]
+    scores = ds.score_frames(frames, gt)
+    n_total = len(frames)
+    fig = ds.scoreboard_figure(scores, arm_name="classical CFAR", threshold=0.5,
+                               match_rule_text=ds.match_rule_text())
+    labels = _table(fig).cells.values[0]
+    per_frame = [l for l in labels if l.startswith("last frame")]
+    assert len(per_frame) == 3, labels
+    for label in per_frame:
+        assert label.startswith(f"last frame {n_total}/{n_total}:"), label
+        # The transport prints "frame i of n"; the rows must not.
+        assert " of " not in label, label

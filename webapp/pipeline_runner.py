@@ -2444,8 +2444,16 @@ _DIRECT_PATH_EXCLUSION_M = 2.0
 #: reaches ~0.63 and Thrust 3's cold start begins ~0.57 (webapp/demo_presets.py
 #: blurbs, measured 2026-09-22).
 _SUBSPACE_ERR_MIN_YMAX = 0.65
-#: The warm-started settled tracking floor the Thrust 2/3 cards quote.
-_SUBSPACE_ERR_SETTLED_LEVEL = 0.06
+#: The settled tracking floor the Thrust 2/3 cards quote, drawn as the dashed
+#: "settled level (reference)" line on every subspace-error panel.
+#: RE-MEASURED 2026-09-24 (seat's read of the renders, item 1g), munich Ka, k=2, through
+#: this runner: Thrust 2's A arm (AFE mantissa 6) settles at 0.0771-0.0829 over frames
+#: 2-6 and Thrust 3's B arm (the shipped adaptive gate) at 0.0785-0.0806 from frame 4 --
+#: two independent arms on the same floor. The old 0.06 predates the Ka retrace and the
+#: one-chain receiver; it drew the line a third BELOW the curve the cards said settled on
+#: it. Re-measure this whenever the frames or the receiver change; it is a measurement,
+#: not a constant of nature.
+_SUBSPACE_ERR_SETTLED_LEVEL = 0.08
 #: Minimum y-axis upper bound for the "refinement passes/frame" right-hand axis
 #: (wave 8, W3): the two Thrust 3 arms' right axes used to each autoscale to their own
 #: max (A: 0-5, B: 0-10), so a real 2x difference in compute spent per frame rendered
