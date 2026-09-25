@@ -840,15 +840,21 @@ PRESETS: List[DemoPreset] = [
             # convention -- and the panel's own axis now says "excess path (m)".
             "normalises to (0 dB); multipath: the strip names the brightest "
             "return's excess path per frame, a second family near twice it.",
+            # Re-anchored 2026-09-25 (hostile round 14): the "(rank 3-4, F94)" reason
+            # was the retracted low-rank attribution -- the shipped 5000-point files
+            # measure 17-40 modes above 1 % of the energy. The spike is measured; its
+            # cause is not claimed. No ledger ID on a card the audience can see.
             "Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the "
-            "Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
+            "Ka retrace; k=2 is the largest stable k. The scene is not low-rank: "
+            "17-40 modes carry over 1 % of the energy.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
             "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
-            "Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank "
-            "~3-4, F94) part of A's residual is rank mismatch; the 4x gap to B is "
+            "Prepared answer -- 'what is the 0.06 floor made of?': k=2 tracks two "
+            "of the 17-40 modes above 1 % these frames carry, so part of A's "
+            "residual is energy outside the tracked subspace; the 4x gap to B is "
             "the knob (interpretation).",
             # wave 9 (2026-09-24, item 3.12): the array-spread caveat lives on Thrust
             # 1's card; naming it here since the AFE/tracker story is what a
@@ -882,8 +888,8 @@ PRESETS: List[DemoPreset] = [
             "tracker see drift; observability drops at 16x.",
             "Peak-to-median dynamic range as evidence compression is good: it improves as "
             "compression worsens.",
-            "That k=8 still applies: degenerate here (F94); Thrust 2/3 both run "
-            "at k=2 now, so they compare.",
+            "That k=8 still applies: it spikes mid-run on these frames; Thrust 2/3 "
+            "both run at k=2 now, so they compare.",
         ],
     ),
     DemoPreset(
@@ -1162,7 +1168,10 @@ PRESETS: List[DemoPreset] = [
                      "shipped geometry) NEXT -30.3 / FEXT -34.5 dB -- the pitch "
                      "trend itself inverts above ~23 GHz on this public checkpoint "
                      "(F89), so these are fixed reference values for checker3x3, "
-                     "not numbers from this run."),
+                     # Hostile round 14 (low item): T4 was the one munich card whose
+                     # page foot lacked the array/scene provenance line; `_foot_note`
+                     # reserves its budget, so it survives the cut.
+                     "not numbers from this run. " + _ARRAY_DISCLOSURE),
         say=[
             # wave 12 (2026-09-24, item 1.7): folded in the one on-screen pointer
             # for "did arm B actually run?".
@@ -1173,9 +1182,12 @@ PRESETS: List[DemoPreset] = [
             # under the banner is spent on the TSV height VALUE instead, since the
             # arm chip itself overflows); that value IS the one place the height
             # shows without a click, so the two facts are now attributed correctly.
-            "LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale and "
-            "frequency in Details. Arm B's height shows without a click, "
-            f"in the caption under each banner: {_TESSERA_CANONICAL_HEIGHT_UM:g} vs "
+            # Re-read on the 2026-09-25 render (shard 3e): the chip now carries the
+            # height WHOLE and the caption under it carries the surrogate's scale and
+            # evaluation band -- the reverse of the wave-13 attribution above.
+            "LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); the caption "
+            "under each arm chip names its scale and evaluation band. The heights "
+            f"are on the chips: {_TESSERA_CANONICAL_HEIGHT_UM:g} vs "
             f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um.",
             # C3 (hostile round 11): the card asserted "3.53 dB" and the results screen
             # then retracted it in a foot note -- the screen existing partly to walk
@@ -1534,9 +1546,13 @@ PRESETS: List[DemoPreset] = [
             # kept under the 45-word RADDetNet bullet cap.
             "The counts on screen are 5 live frames, LAST shown -- a "
             "demonstration, not a re-measurement of AP; the recall row for this "
-            "run cannot reproduce recall-0.5. Detector, scoreboard and PR panels "
-            "hold that frame while Range-Doppler loops; pause it to discuss "
-            "one frame.",
+            # N6 residue (hostile round 14): "Detector, scoreboard and PR panels hold
+            # that frame while Range-Doppler loops" was the retracted claim -- the
+            # objectness map steps on the shared clock with Range-Doppler (round 11,
+            # H3), and the scoreboard rows are the run.
+            "run cannot reproduce recall-0.5. The objectness map loops with "
+            "Range-Doppler on one clock; the scoreboard is the run. Pause it to "
+            "discuss one frame.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
             "were scored too, best 0.326 -- above shipped CFAR (0.218), but still "
@@ -1685,9 +1701,16 @@ PRESETS: List[DemoPreset] = [
             # the return itself (hostile round 12, item 6: that digit moves frame to
             # frame and the panel prints it); the 62.4 m the fold is BY is the window,
             # which is computed and fixed for the arm.
-            "Each panel draws only its own window -- no wrapped copies. Past arm B's "
-            "62.4 m a return folds back by exactly that window: the strips name the "
-            "same echo at two positions 62.4 m apart.",
+            # M2 (hostile round 14): the old sentence ("the strips name the same echo
+            # at two positions 62.4 m apart") pointed at a disclosure the screen only
+            # carried in Details. Arm B's CAPTION now prints the fold with the three
+            # computed numbers (`note_differing_y_extents`), and this sentence quotes
+            # them as measured on the LAST frame -- the frame both strips show when the
+            # clock is parked at the end. Pinned against a live run by
+            # tests/test_demo_presets.py::test_thrust6_fold_sentence_matches_the_caption.
+            "Each panel draws only its own window -- no wrapped copies. Arm B's "
+            "caption names the fold: on the last frame, arm A's 71 m return folds to "
+            "9 m in arm B's 62.4 m window, the 9 m its strip prints.",
             "BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining "
             "SNR of 86-89 dB: a plumbing demonstration, not a link margin.",
             "Rates are UNCODED BURST rates over a 6.67 us frame; the average depends "

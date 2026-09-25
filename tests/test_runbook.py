@@ -553,3 +553,67 @@ def test_check_passes_on_committed_runbook():
         f"docs/DEMO_RUNBOOK.md is stale; regenerate with `python -m webapp.runbook`.\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Hostile round 14 (2026-09-25): M1 and the N6 residue
+# ---------------------------------------------------------------------------------------
+def _preset_section(doc: str, preset) -> str:
+    """The runbook section for `preset`, from its "## N. <label>" heading to the next."""
+    import re
+
+    start = re.search(r"^## \d+\. " + re.escape(preset.label) + r"\n", doc, re.M).start()
+    end = doc.find("\n## ", start + 1)
+    return doc[start:end if end > 0 else len(doc)]
+
+
+def _looking_at_titles(section: str):
+    """The bold-quoted panel titles in a section's "What you are looking at" list."""
+    import re
+
+    body = section.split("### What you are looking at", 1)[1].split("###", 1)[0]
+    return re.findall(r'\*\*"([^"]+)"\*\*', " ".join(body.split()))
+
+
+@pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error",
+                                 "thrust3_cold_start_acquisition",
+                                 "thrust4_interconnect_range_profile",
+                                 "thrust6_jsac_resource_split"])
+def test_runbook_panel_list_equals_the_rendered_panel_titles(pid):
+    """M1 (hostile round 14): the T6 section listed ONE panel while the screen drew
+    three -- the EVM and constellation come from the JSAC receiver, not from a product
+    toggle, so a list built from product blocks alone could not see them. Compared here
+    against a live one-frame run of the preset, title for title."""
+    pytest.importorskip("torch")
+    from webapp.demo_presets import PRESETS_BY_ID, apply_preset
+    from webapp.pipeline_runner import figures_from_outputs, panel_of, run_pipeline
+    from webapp.runbook import render
+
+    preset = PRESETS_BY_ID[pid]
+    try:
+        outputs = run_pipeline(apply_preset(preset), n_steps=1)
+    except FileNotFoundError as e:           # pragma: no cover - machine-dependent
+        pytest.skip(f"{pid}: frames not on this machine ({e})")
+    rendered = [panel_of(f).get("title") for f in figures_from_outputs(outputs).values()]
+    listed = _looking_at_titles(_preset_section(render([preset]), preset))
+    assert sorted(listed) == sorted(t for t in rendered if t), (listed, rendered)
+
+
+def test_no_say_bullet_says_a_stepping_panel_holds():
+    """N6 residue (hostile round 14): the RADDetNet §Say still read "Detector,
+    scoreboard and PR panels hold that frame while Range-Doppler loops" -- the claim
+    round 13 retracted everywhere else (the objectness map steps on the shared clock
+    since round 11, H3). The earlier guard read only the generated narrative, not the
+    §Say / §Do NOT say lists, which are the presenter's own words."""
+    import re
+
+    from webapp.demo_presets import PRESETS
+    from webapp.runbook import render
+
+    stepping = ("objectness", "detector", "range-doppler", "pr panel", "panels")
+    for p in PRESETS:
+        for bullet in list(p.say) + list(p.do_not_say):
+            low = bullet.lower()
+            if re.search(r"\bhold(s)?\b", low):
+                assert not any(w in low for w in stepping), (p.id, bullet)
+    assert "hold that frame" not in _flat(render(PRESETS)).lower()

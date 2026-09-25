@@ -236,6 +236,28 @@ _HEATMAP_PRODUCT_IDS = {"range_az", "range_el", "radar_cube", "detector"}
 _DETECTOR_PANEL_TITLES = {"cfar": "CFAR objectness", "ml": "Neural detector objectness"}
 
 
+#: Panels a WAVEFORM class renders on its own, with no product block enabled (hostile
+#: round 14, M1: the T6 runbook listed one panel of the three on screen, because the EVM
+#: and constellation come from the JSAC receiver, not from a product toggle). Hand-typed
+#: for the same reason as `_PANEL_TITLES` -- the true strings are f-strings in
+#: `pipeline_runner.py` -- and pinned against a LIVE render of every preset by
+#: tests/test_runbook.py::test_runbook_panel_list_equals_the_rendered_panel_titles.
+#: The BER panel is not listed: it renders only when some frame has a bit error, and
+#: at this preset's operating point none does (its number rides the EVM caption).
+_WAVEFORM_PANEL_TITLES = {
+    "jsac": ("JSAC receiver EVM per frame", "JSAC receiver constellation"),
+    "ofdm": ("OFDM receiver EVM per frame", "OFDM receiver constellation"),
+}
+
+
+def _waveform_panel_titles(state) -> Tuple[str, ...]:
+    """The receiver panels `state`'s waveform renders beside its product panels."""
+    wave = state.get("waveform") or {}
+    if not wave.get("enabled"):
+        return ()
+    return _WAVEFORM_PANEL_TITLES.get(str((wave.get("params") or {}).get("kind")), ())
+
+
 def _panel_title(bid: str, preset: DemoPreset) -> str:
     """The rendered panel title for product block `bid` under `preset` -- the
     constant from `_PANEL_TITLES`/`_DETECTOR_PANEL_TITLES`, falling back to the
@@ -375,7 +397,8 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
         has_heatmap = any(bid in _HEATMAP_PRODUCT_IDS for bid in enabled_bids)
         if enabled_bids:
-            titles = [_panel_title(bid, preset) for bid in enabled_bids]
+            titles = ([_panel_title(bid, preset) for bid in enabled_bids]
+                      + list(_waveform_panel_titles(state)))
             lines.append(_bullet("Product panel(s) this preset enables: "
                                  + ", ".join(f'**"{t}"**' for t in titles) + "."))
         else:

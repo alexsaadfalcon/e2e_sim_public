@@ -240,12 +240,13 @@ mantissa 6 -> 1 bit.
   (0 dB); multipath: the strip names the brightest return's excess path per
   frame, a second family near twice it.
 - Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
-  retrace (rank 3-4, F94); k=2 is the largest stable k.
+  retrace; k=2 is the largest stable k. The scene is not low-rank: 17-40 modes
+  carry over 1 % of the energy.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
-- Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank ~3-4, F94)
-  part of A's residual is rank mismatch; the 4x gap to B is the knob
-  (interpretation).
+- Prepared answer -- 'what is the 0.06 floor made of?': k=2 tracks two of the
+  17-40 modes above 1 % these frames carry, so part of A's residual is energy
+  outside the tracked subspace; the 4x gap to B is the knob (interpretation).
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the AFE weights/tracker curve, not the picture.
 - The 0 dB reference is a single range-0 gate too small to see; every dB on the
@@ -263,8 +264,8 @@ mantissa 6 -> 1 bit.
   see drift; observability drops at 16x.
 - Peak-to-median dynamic range as evidence compression is good: it improves as
   compression worsens.
-- That k=8 still applies: degenerate here (F94); Thrust 2/3 both run at k=2
-  now, so they compare.
+- That k=8 still applies: it spikes mid-run on these frames; Thrust 2/3 both
+  run at k=2 now, so they compare.
 
 ---
 
@@ -370,8 +371,8 @@ still.
    preflight timing pass; a Run takes roughly 15-30 s for both arms -- talk
    over it.
 - **While it runs, say:** LIVE public Tessera/UIC surrogate (checkpoint, not a
-  CSV); scale and frequency in Details. Arm B's height shows without a click,
-  in the caption under each banner: 50 vs 30 um.
+  CSV); the caption under each arm chip names its scale and evaluation band.
+  The heights are on the chips: 50 vs 30 um.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -401,9 +402,9 @@ presented low end: OFFLINE the biggest single-knob mover of the skirt, a BULK
 DELAY that sits below the printed median floor (number and scope: say list).
 
 ### Say
-- LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); scale and
-  frequency in Details. Arm B's height shows without a click, in the caption
-  under each banner: 50 vs 30 um.
+- LIVE public Tessera/UIC surrogate (checkpoint, not a CSV); the caption under
+  each arm chip names its scale and evaluation band. The heights are on the
+  chips: 50 vs 30 um.
 - The 3.53 dB skirt move (-53.90 -> -57.43 dB) is an OFFLINE flat-frame metric,
   not the statistic this panel prints; it sits below the printed median floor.
 - Credit UIC by name (Mohamed Gharib, Leonid Popryho, Inna Partin-Vaisband; doi
@@ -727,8 +728,8 @@ unprompted.
   +0.282]; +0.142 vs the best classical baseline (0.326).
 - The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
   re-measurement of AP; the recall row for this run cannot reproduce
-  recall-0.5. Detector, scoreboard and PR panels hold that frame while
-  Range-Doppler loops; pause it to discuss one frame.
+  recall-0.5. The objectness map loops with Range-Doppler on one clock; the
+  scoreboard is the run. Pause it to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.326 -- above shipped CFAR (0.218), but still behind
@@ -779,7 +780,8 @@ unprompted.
    the **Demo preset:** dropdown lives on **Block Diagram**).
 
 ### What you are looking at
-- Product panel(s) this preset enables: **"Range-azimuth power"**.
+- Product panel(s) this preset enables: **"Range-azimuth power"**, **"JSAC
+  receiver EVM per frame"**, **"JSAC receiver constellation"**.
 - Arm chips on screen: "A — Pilot spacing P = 2" (LEFT column, colour dot) / "B
   — Pilot spacing P = 8" (RIGHT column) -- each product renders once per
   column, on the same row, on shared colour limits. The full before/after
@@ -805,9 +807,9 @@ the run just used, and printed.
   Gb/s. Both are computed from the frame and printed.
 - At spacing 8 the comb aliases and the map's floor rises: peak-median
   71.9-72.6 dB (A) against 59.8-60.2 dB (B), measured over the 5 frames.
-- Each panel draws only its own window -- no wrapped copies. Past arm B's 62.4
-  m a return folds back by exactly that window: the strips name the same echo
-  at two positions 62.4 m apart.
+- Each panel draws only its own window -- no wrapped copies. Arm B's caption
+  names the fold: on the last frame, arm A's 71 m return folds to 9 m in arm
+  B's 62.4 m window, the 9 m its strip prints.
 - BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining SNR
   of 86-89 dB: a plumbing demonstration, not a link margin.
 - Rates are UNCODED BURST rates over a 6.67 us frame; the average depends on a
