@@ -569,3 +569,57 @@ def test_the_detector_panel_follows_the_same_clock_as_the_cube(detector_figs):
                     (detector_figs["cfar_detection"].layout.annotations or ()))
     assert "frame 1 of 1" in anns
     assert "(last)" not in anns
+
+
+def test_every_panel_declares_the_same_plot_background(tmp_path):
+    """ACCEPTANCE CHECK 13: "every panel has the same plot background colour".
+
+    Measured at the figure level and not on the PNG on purpose. `webapp.rehearse`'s
+    browser probe reads `.js-plotly-plot .cartesianlayer .bg`, and on these screens that
+    selector matches NOTHING (verified on the rendered T1/T2 geometry, 2026-09-24: every
+    page reports `plotBg: []`), because a heat-map panel has no cartesian background rect
+    and Plotly paints the scatter panels' from the layout instead. So the check the spec
+    means -- one background across the deck -- is the one asserted here: every figure any
+    screen can show declares `PLOT_BGCOLOR`, and none of them quietly keeps Plotly's
+    template default.
+    """
+    import numpy as np
+    import torch
+    import webapp.detector_scoreboard as ds
+    from webapp.pipeline_runner import PAPER_BGCOLOR, PLOT_BGCOLOR, figures_from_outputs
+
+    # One of every panel kind the presets can put on a Results page, built from the
+    # smallest outputs each one accepts (torch tensors, as the real products emit).
+    def _m(seed, shape):
+        g = torch.Generator().manual_seed(seed)
+        return torch.rand(shape, generator=g) + 1e-3
+
+    outputs = {
+        "fft": [_m(0, (8, 8))],
+        "range_az": [_m(1, (8, 8))],
+        "range_el": [_m(2, (8, 8))],
+        "range_profile_agg": [_m(3, (16,))],
+        "subspace_err": [0.5, 0.2, 0.08],
+        "radar_cube": [_m(4, (4, 8, 8))],
+        "ber": [0.01, 0.0],
+        "evm": [0.03, 0.02],
+        "comm_data_eq": [torch.tensor([0.7 + 0.7j, -0.7 - 0.7j], dtype=torch.complex64)],
+    }
+    figs = dict(figures_from_outputs(outputs))
+    figs["scoreboard"] = ds.scoreboard_figure(
+        ds.score_frames([[]], [[]]), arm_name="classical CFAR", threshold=0.5,
+        match_rule_text=ds.match_rule_text())
+    figs["pr"] = ds.stored_pr_figure()
+
+    offenders = []
+    for key, fig in figs.items():
+        layout = fig.layout if hasattr(fig, "layout") else (fig.get("layout") or {})
+        plot_bg = (layout.plot_bgcolor if hasattr(layout, "plot_bgcolor")
+                   else layout.get("plot_bgcolor"))
+        paper_bg = (layout.paper_bgcolor if hasattr(layout, "paper_bgcolor")
+                    else layout.get("paper_bgcolor"))
+        if plot_bg != PLOT_BGCOLOR or paper_bg != PAPER_BGCOLOR:
+            offenders.append((key, plot_bg, paper_bg))
+    assert not offenders, (
+        "panels whose background is not the deck's (%s on %s): %s"
+        % (PLOT_BGCOLOR, PAPER_BGCOLOR, offenders))

@@ -340,6 +340,17 @@ _TABLE_HEADER_HEIGHT = 40
 #: `FIGURE_HEIGHT[PANEL_ROW_TABLE]` -- at the table's max, 8 rows, this divides out
 #: to exactly 34 px/row with zero pixels left over (8*34 + 40 == 312).
 _TABLE_MAX_ROW_HEIGHT = 40
+#: Pixels held back from the row-height division, and the retired render-safety margin
+#: coming BACK because the render says it is still needed (seat's read of the 2026-09-24
+#: renders). At 8 rows the old arithmetic divided out to exactly 34 px/row with ZERO
+#: pixels left over (8*34 + 40 == 312) -- and on `thrust5_detector_cfar_results.png` arm
+#: A's eighth row was cut mid-glyph at the panel's bottom edge while arm B (6 rows, and
+#: therefore slack) rendered clean. Plotly's table lays its rows out a few pixels lower
+#: than this module's own sum, which is exactly the drift the previous comment here
+#: recorded as "no longer load-bearing". It is load-bearing whenever the division has no
+#: remainder. 16 px also buys acceptance check 11's "last row's bottom >= 24 px above the
+#: panel's bottom border" (16 here + the panel's 8 px of padding).
+_TABLE_RENDER_SAFETY_PX = 16
 #: Column widths (px, relative -- Plotly normalises `columnwidth`): 55/45,
 #: label-heavy (Change, 2026-09-24 layout redesign: was 50/50 -- the table now
 #: carries only its 8 highest-value rows, so the value side can give a little width
@@ -977,8 +988,8 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
         )
 
     row_height = min(_TABLE_MAX_ROW_HEIGHT,
-                     (_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_TABLE] - _TABLE_HEADER_HEIGHT)
-                     // n_rows)
+                     (_pr.FIGURE_HEIGHT[_pr.PANEL_ROW_TABLE] - _TABLE_HEADER_HEIGHT
+                      - _TABLE_RENDER_SAFETY_PX) // n_rows)
 
     fig = go.Figure(data=[go.Table(
         columnwidth=_TABLE_COL_WIDTHS,
