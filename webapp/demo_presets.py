@@ -845,17 +845,15 @@ PRESETS: List[DemoPreset] = [
             # measure 17-40 modes above 1 % of the energy. The spike is measured; its
             # cause is not claimed. No ledger ID on a card the audience can see.
             "Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the "
-            "Ka retrace; k=2 is the largest stable k. The scene is not low-rank: "
-            "17-40 modes carry over 1 % of the energy.",
+            "Ka retrace; k=2 is the largest stable k.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
             "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
             "Prepared answer -- 'what is the 0.06 floor made of?': k=2 tracks two "
-            "of the 17-40 modes above 1 % these frames carry, so part of A's "
-            "residual is energy outside the tracked subspace; the 4x gap to B is "
-            "the knob (interpretation).",
+            "of 17-40 modes above 1 %; part of A's residual is untracked; the 4x "
+            "gap to B is the knob (interpretation).",
             # wave 9 (2026-09-24, item 3.12): the array-spread caveat lives on Thrust
             # 1's card; naming it here since the AFE/tracker story is what a
             # per-element spread would actually change.
@@ -888,8 +886,8 @@ PRESETS: List[DemoPreset] = [
             "tracker see drift; observability drops at 16x.",
             "Peak-to-median dynamic range as evidence compression is good: it improves as "
             "compression worsens.",
-            "That k=8 still applies: it spikes mid-run on these frames; Thrust 2/3 "
-            "both run at k=2 now, so they compare.",
+            "That k=8 still applies: degenerate here; Thrust 2/3 both run at k=2 "
+            "now, so they compare.",
         ],
     ),
     DemoPreset(
@@ -1550,9 +1548,8 @@ PRESETS: List[DemoPreset] = [
             # that frame while Range-Doppler loops" was the retracted claim -- the
             # objectness map steps on the shared clock with Range-Doppler (round 11,
             # H3), and the scoreboard rows are the run.
-            "run cannot reproduce recall-0.5. The objectness map loops with "
-            "Range-Doppler on one clock; the scoreboard is the run. Pause it to "
-            "discuss one frame.",
+            "run cannot reproduce recall-0.5. Objectness loops with Range-Doppler; "
+            "the scoreboard is the run. Pause to discuss one frame.",
             "The controls are F83's, which the shipped nets FAILED (deranged-label "
             "retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines "
             "were scored too, best 0.326 -- above shipped CFAR (0.218), but still "

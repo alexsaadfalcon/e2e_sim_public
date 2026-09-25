@@ -408,10 +408,13 @@ def test_wave7_range_axis_calibration_is_not_typed_on_the_card(pid):
 
 
 def test_thrust2_tracker_k_repicked_for_the_ka_retrace():
-    """X4/X8 (F94): k=8, the pre-retrace default, is degenerate once real multipath is
-    restored (effective rank 3-4; arm A spikes hard mid-run). k=2 is the largest k
-    measured stable on both arms (2026-09-23, six repeated runs) -- see the preset's
-    own `overrides` comment for the numbers."""
+    """X4/X8: k=8, the pre-retrace default, is degenerate once real multipath is
+    restored (arm A spikes hard mid-run). k=2 is the largest k measured stable on both
+    arms (2026-09-23, six repeated runs) -- see the preset's own `overrides` comment for
+    the numbers. RETRACTED 2026-09-25 (hostile round 14): this docstring used to give
+    the cause as "effective rank 3-4" (F94); the shipped 5000-point files measure 17-40
+    modes above 1 % of the energy, so the spike is measured and its cause is not
+    claimed here or on the card."""
     st = apply_preset(PRESETS_BY_ID["thrust2_feature_reduction_error"])
     assert st["subspace"]["params"]["k"] == 2
     p = PRESETS_BY_ID["thrust2_feature_reduction_error"]

@@ -240,13 +240,12 @@ mantissa 6 -> 1 bit.
   (0 dB); multipath: the strip names the brightest return's excess path per
   frame, a second family near twice it.
 - Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the Ka
-  retrace; k=2 is the largest stable k. The scene is not low-rank: 17-40 modes
-  carry over 1 % of the energy.
+  retrace; k=2 is the largest stable k.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
-- Prepared answer -- 'what is the 0.06 floor made of?': k=2 tracks two of the
-  17-40 modes above 1 % these frames carry, so part of A's residual is energy
-  outside the tracked subspace; the 4x gap to B is the knob (interpretation).
+- Prepared answer -- 'what is the 0.06 floor made of?': k=2 tracks two of 17-40
+  modes above 1 %; part of A's residual is untracked; the 4x gap to B is the
+  knob (interpretation).
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the AFE weights/tracker curve, not the picture.
 - The 0 dB reference is a single range-0 gate too small to see; every dB on the
@@ -264,8 +263,8 @@ mantissa 6 -> 1 bit.
   see drift; observability drops at 16x.
 - Peak-to-median dynamic range as evidence compression is good: it improves as
   compression worsens.
-- That k=8 still applies: it spikes mid-run on these frames; Thrust 2/3 both
-  run at k=2 now, so they compare.
+- That k=8 still applies: degenerate here; Thrust 2/3 both run at k=2 now, so
+  they compare.
 
 ---
 
@@ -728,8 +727,8 @@ unprompted.
   +0.282]; +0.142 vs the best classical baseline (0.326).
 - The counts on screen are 5 live frames, LAST shown -- a demonstration, not a
   re-measurement of AP; the recall row for this run cannot reproduce
-  recall-0.5. The objectness map loops with Range-Doppler on one clock; the
-  scoreboard is the run. Pause it to discuss one frame.
+  recall-0.5. Objectness loops with Range-Doppler; the scoreboard is the run.
+  Pause to discuss one frame.
 - The controls are F83's, which the shipped nets FAILED (deranged-label
   retention 12%, CFAR 10%, shipped nets 48-51%); nine classical baselines were
   scored too, best 0.326 -- above shipped CFAR (0.218), but still behind
