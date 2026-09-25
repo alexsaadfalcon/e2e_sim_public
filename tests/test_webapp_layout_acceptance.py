@@ -365,8 +365,15 @@ OLD_SUBTITLE_CLAUSES = {
         "not a target",
         "m/gate",
         "native",
-        "display 0-",
-        "unambig (neg.-delay half cropped)",
+        # RETIRED 2026-09-24 (shard 3), with the pipeline they described: "display 0-N m
+        # of an M m unambig (neg.-delay half cropped)" was written when each product ran
+        # its own range FFT and this module cropped the fftshifted axis at display time.
+        # The spine's RangeTransformBlock crops before any product sees the cube, so
+        # there is no display-time crop left to disclose. The same two facts -- what is
+        # shown and out of what window -- are still on the caption, in the owner's
+        # bistatic convention: "0-249 m shown of a 500 m window, bistatic excess path".
+        "m shown of a",
+        "window, bistatic excess path",
         "0 dB cell at range 0 is one",
         "may show as a thin stripe at the bottom edge",
         "brightest visible return",
@@ -379,7 +386,8 @@ OLD_SUBTITLE_CLAUSES = {
         "(0 = earliest arrival)",
         "not a target",
         "m/gate",
-        "unambig (neg.-delay half cropped)",
+        # Retired with its range_az twin above, same reason, same replacement.
+        "m shown of a",
         "brightest visible return",
     ],
     "range_profile": [

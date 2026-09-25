@@ -693,9 +693,18 @@ def test_detection_markers_are_enlarged_for_podium_distance():
                        "detector": {"mode": "cfar", "threshold": 0.66, "label": "x"}},
     }
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    det_trace = next(t for t in fig.data if "detections" in (t.name or ""))
+    # H8 (hostile round 11): detections are split into "matched" (diamonds) and
+    # "unmatched" (crosses) by the scoreboard's own matcher, so the room can count hits
+    # by eye. The cross also came down 14 -> 10 px, because at the shipped panel geometry
+    # the +-2 m / +-0.06 sin-az tolerance box is ~36 x 27 px and a 14 px cross with 2 px
+    # arms reached its edge -- which is what made "inside the box" undecidable. Still
+    # well above the podium floor this test is about (the ground-truth dot is 6 px).
+    det_trace = next(t for t in fig.data if "unmatched" in (t.name or ""))
     gt_trace = next(t for t in fig.data if "ground truth" in (t.name or ""))
-    assert det_trace.marker.size == 14
+    assert det_trace.marker.size == 10
+    hit_trace = next(t for t in fig.data
+                     if "matched" in (t.name or "") and "unmatched" not in (t.name or ""))
+    assert hit_trace.marker.size >= 10
     # wave 2: ground truth is drawn as its match-tolerance box (a layout shape) with a small
     # centre dot, so the marker is deliberately small; the box carries the size.
     assert fig.layout.shapes, 'ground-truth tolerance boxes expected'

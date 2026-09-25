@@ -672,10 +672,14 @@ BLOCKS: List[BlockSpec] = [
                       help="ML mode only. Path to a best.pt written by e2e.ml.train, "
                            "e.g. e2e/ml/runs/b5_fftradnet_v3/best.pt. Checkpoints are "
                            "not tracked by git; the demo machine needs the file."),
-            # step 0.01: the presets pin each detector at its recall-0.5 operating
-            # point (0.66 / 0.22 / 0.44, from e2e/ml/runs/beat_cfar.json), which a
-            # 0.05 grid could not hold -- typing 0.44 became null, then 0.5.
-            ParamSpec("threshold", "Decode threshold", "number", 0.5, step=0.01,
+            # step 0.001: the presets pin each detector at its recall-0.5 operating
+            # point, read off the scoring file rather than rounded to a grid -- at Ka
+            # those are 0.6155 / 0.2203 / 0.4753 (e2e/ml/runs/beat_cfar_ka.json), and a
+            # 0.01 grid could not hold them (the preflight refuses an off-grid preset,
+            # correctly: a spinner that snaps a pinned operating point to a neighbouring
+            # value moves the number the card quotes). It was 0.01 for the 77 GHz trio
+            # (0.66 / 0.22 / 0.44), which happened to land on it; 0.05 before that.
+            ParamSpec("threshold", "Decode threshold", "number", 0.5, step=0.001,
                       min=0.0, max=1.0,
                       help="Objectness above which a local peak is reported as a "
                            "detection. This is an operating point, not the metric: AP "

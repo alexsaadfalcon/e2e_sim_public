@@ -76,15 +76,28 @@ def test_store_keeps_the_last_valid_value_when_an_input_reports_null():
 # The three Thrust 5 presets sit at their recall-0.5 operating points
 # ------------------------------------------------------------------------------------
 def test_thrust5_presets_share_the_recall_half_operating_point_convention():
-    """Cross counts on the three screens are compared against each other; they are
-    the false-alarm comparison only if every detector sits at the same recall
-    (`beat_cfar.json` operating_point.score_threshold: 0.661 / 0.222 / 0.440)."""
-    thr = {pid: apply_preset(PRESETS_BY_ID[pid])["detector"]["params"]["threshold"]
-           for pid in ("thrust5_detector_cfar", "thrust5_detector_ml",
-                       "thrust5_detector_raddetnet")}
-    assert thr == {"thrust5_detector_cfar": pytest.approx(0.66, abs=0.005),
-                   "thrust5_detector_ml": pytest.approx(0.22, abs=0.005),
-                   "thrust5_detector_raddetnet": pytest.approx(0.44, abs=0.005)}
+    """Cross counts on the three screens are compared against each other; they are the
+    false-alarm comparison only if every detector sits at the SAME recall.
+
+    READ FROM THE SCORING FILE, not typed (2026-09-24). The three thresholds moved with
+    the Ka switch (owner ballot 4A) -- 0.66/0.22/0.44 at 77 GHz, 0.6155/0.2203/0.4753 at
+    Ka -- and a test that pins the digits has to be edited every time the operating point
+    is re-derived, which is exactly the edit that would silently let a preset drift off
+    its own recall-0.5 point. Pinning the SOURCE instead makes that impossible."""
+    import json
+
+    from webapp.detector_scoreboard import DEFAULT_BEAT_CFAR_JSON
+
+    arms = {a["name"]: a for a in
+            json.loads(DEFAULT_BEAT_CFAR_JSON.read_text())["arms"]}
+    want = {"thrust5_detector_cfar": "classical CFAR",
+            "thrust5_detector_ml": "fftradnet_rd_b15",
+            "thrust5_detector_raddetnet": "raddetnet"}
+    for pid, arm in want.items():
+        thr = apply_preset(PRESETS_BY_ID[pid])["detector"]["params"]["threshold"]
+        scored = arms[arm]["operating_point"]["score_threshold"]
+        assert thr == pytest.approx(scored, abs=0.001), pid
+        assert arms[arm]["operating_point"]["target_recall"] == pytest.approx(0.5), arm
 
 
 @pytest.mark.parametrize("pid", ["thrust5_detector_cfar", "thrust5_detector_ml",
@@ -223,8 +236,17 @@ def test_detector_panel_names_detector_and_threshold_and_its_legend_is_readable(
     assert fig.layout.legend.font.size == 17
     gt = next(t for t in fig.data if "ground truth" in (t.name or ""))
     assert gt.marker.line.color == "#2d3436" and gt.marker.line.width == 1
+    # H8 (hostile round 11): matched and unmatched detections are different glyphs, so
+    # the legend now names both counts -- which is what makes the table's TP row
+    # checkable against the picture.
+    assert any("unmatched" in (t.name or "") for t in fig.data)
+    assert any("matched" in (t.name or "") and "unmatched" not in (t.name or "")
+               for t in fig.data)
     names = {t.name for t in fig.data}
-    assert any("detections (n=1)" in nm for nm in names)
+    # One detection, no ground truth within tolerance of it -> it is the unmatched trace
+    # that carries the count. The two counts together are still the panel's detection
+    # total, and the statistic strip above the plot prints that total.
+    assert any("unmatched (n=1)" in nm for nm in names)
     assert any("ground truth (n=1)" in nm for nm in names)
     # The match RULE moved to the caption: as a legend entry it was a 100-character
     # sentence inside that dark block (layout spec section 4, "Detector map").
@@ -331,6 +353,16 @@ def test_single_result_card_takes_one_fixed_width_panel_not_the_full_row():
 # Owner decision 1A (2026-09-22): range figures show the physical half of the axis
 # ------------------------------------------------------------------------------------
 def test_range_figures_show_only_nonnegative_range():
+    """Still the property; the CROP is somewhere else now.
+
+    It used to be this module's job: each product ran its own range FFT over all
+    `n_freqs` samples, the axis was fftshifted and negated, and `_nonnegative_range`
+    threw the negative-delay half away at display time -- which is why the axis came
+    back SHORTER than the map's own bin count. Under the one chain the spine's
+    `RangeTransformBlock` crops before any product sees the cube, so the axis is
+    ascending from zero and exactly as long as the data. What is pinned is the invariant
+    the old assertion was really about: no negative range reaches the screen, and the
+    axis matches the map it labels."""
     import numpy as np
 
     from webapp.pipeline_runner import figures_from_outputs
@@ -345,10 +377,11 @@ def test_range_figures_show_only_nonnegative_range():
                        "n_freqs": n_freqs, "freq_span_hz": span},
     })
     y = np.asarray(figs["range_az"].data[0].y)
-    assert y.min() >= 0 and len(y) < bins, "negative-range rows are cropped"
+    assert y.min() >= 0, "no negative range may reach the screen"
+    assert np.all(np.diff(y) > 0), "the axis ascends from zero excess delay"
     assert figs["range_az"].data[0].z.shape[0] == len(y)
     x = np.asarray(figs["range_profile"].data[0].x)
-    assert x.min() >= 0 and len(x) < bins
+    assert x.min() >= 0 and len(x) == prof.shape[0]
 
 
 def test_bin_index_range_axis_is_kept_whole():
