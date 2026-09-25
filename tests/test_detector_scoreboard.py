@@ -652,15 +652,25 @@ def test_stored_pr_figure_highlighted_arm_carries_its_delta_and_ci(beat_cfar_dat
     comp = next(c for c in ci_data["comparisons"] if c["arm"] == "raddetnet")
     arm = next(a for a in beat_cfar_data["arms"] if a["name"] == "raddetnet")
     fig = ds.stored_pr_figure(highlight_arm="raddetnet")
-    trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
+    # The trace NAME is the display name (the checkpoint directory) since 2026-09-25;
+    # `highlight_arm` still keys on the stored JSON name, which is the lookup key.
+    trace = next(tr for tr in fig.data
+                 if tr.name.startswith(ds._display_arm_name("raddetnet")))
     # SHORT form (hostile round 11, D3): "raddetnet 0.476 (+0.175)". At the previous
     # "raddetnet AP 0.476, +0.175 vs CFAR" the entry filled its half of the
     # two-column strip edge to edge and abutted the entry beside it with zero gap, so
     # the two read as one string and the delta looked like it was against THAT arm.
     # "AP" and "vs CFAR" are spelled out in the caption, with the interval.
-    assert f"{arm['AP']:.3f}" in trace.name
-    assert f"({comp['delta_AP']:+.3f})" in trace.name
-    assert len(trace.name) <= 30, trace.name
+    # The DELTA is the clause only this entry can carry, and it is always present. The AP
+    # is present when the whole entry still fits the measured 30-character half of the
+    # two-column strip -- since 2026-09-25 the arm names are the checkpoint directories
+    # (one name per screen), and "b14_raddetnet_ka 0.468 (+0.250)" is 31, so on this arm
+    # the AP gives way to the length budget. It is on the scoreboard's "AP, offline test
+    # split" row and in this panel's caption either way.
+    assert f"{comp['delta_AP']:+.3f}" in trace.name
+    assert len(trace.name) <= ds._PR_LEGEND_MAX_CHARS, trace.name
+    assert (f"{arm['AP']:.3f}" in trace.name
+            or f"{arm['AP']:.3f}" in panel_text(fig)), trace.name
     caption = panel_caption(fig)
     assert f"[{comp['ci_low']:+.3f}, {comp['ci_high']:+.3f}]" in caption
     # ONE line in a 746 px column at 16 px is ~86 characters; past that the browser
@@ -675,13 +685,16 @@ def test_stored_pr_figure_non_highlighted_arm_never_gets_a_ci_legend(beat_cfar_d
     import json
 
     fig = ds.stored_pr_figure(highlight_arm="classical CFAR")
-    trace = next(tr for tr in fig.data if tr.name.startswith("raddetnet"))
+    # The legend prints the DISPLAY name (the checkpoint directory, 2026-09-25); the
+    # stored JSON name stays the lookup key.
+    disp = ds._display_arm_name("raddetnet")
+    trace = next(tr for tr in fig.data if tr.name.startswith(disp))
     assert "vs CFAR" not in trace.name
     # AP read from the file the figure was built from, not typed: the default moved to
     # the Ka scoring (owner ballot 4A) where RADDetNet is 0.468, not 77 GHz's 0.476.
     ap = next(a["AP"] for a in json.loads(ds.DEFAULT_BEAT_CFAR_JSON.read_text())["arms"]
               if a["name"] == "raddetnet")
-    assert trace.name == f"raddetnet (AP={ap:.3f})"
+    assert trace.name == f"{disp} (AP={ap:.3f})"
 
 
 def test_stored_pr_figure_highlighted_arm_omits_ci_when_file_missing(tmp_path):
@@ -711,7 +724,19 @@ def test_display_arm_name_remaps_only_the_null_arm():
     moved to Details (see the test below)."""
     assert ds._display_arm_name("null (random-in-GT-box)") == "null (chance floor)"
     assert ds._display_arm_name("classical CFAR") == "classical CFAR"
-    assert ds._display_arm_name("raddetnet") == "raddetnet"
+    # ...and the CHECKPOINT arms read as the directory the rest of the screen names them
+    # by (2026-09-25, round-12 item 16 residue): the panel title, the scoreboard label
+    # and the Details line all said "b15_fftradnet_rd_ka" while the PR legend printed the
+    # scoring file's key "fftradnet_rd_b15" -- one checkpoint, two names, one screen.
+    # DERIVED from the file's own `checkpoint` paths, so this asserts the mapping, not a
+    # second hand-typed alias table.
+    import json
+    from pathlib import Path
+    data = json.loads(ds.DEFAULT_BEAT_CFAR_JSON.read_text())
+    ckpt_arms = [a for a in data["arms"] if a.get("checkpoint")]
+    assert ckpt_arms, "this test needs a scoring file with checkpoint arms"
+    for a in ckpt_arms:
+        assert ds._display_arm_name(a["name"]) == Path(a["checkpoint"]).parent.name
 
 
 def test_stored_pr_details_state_the_identical_on_both_arms_sentence():

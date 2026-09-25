@@ -615,12 +615,34 @@ def _ab_arm_chip(preset: "DemoPreset", arm: str) -> str:
 
 
 def _ab_arm_chip_overflow(preset: "DemoPreset", arm: str) -> str:
-    """The FULL knob value when `_ab_arm_chip` had to shorten it, or "" when the chip
-    already carries it whole. Rendered at the front of that arm's one-line caption, so
-    a value too long for a chip is MOVED, never lost -- on Thrust 4 it is what says
-    which Tessera geometry this arm actually ran (hostile round 10, section 1.7)."""
+    """WHAT THE CHIP DROPPED, or "" when the chip carries the value whole. Rendered at
+    the front of that arm's one-line caption, so a value too long for a chip is MOVED,
+    never lost -- on Thrust 4 it is what says which Tessera geometry this arm ran
+    (hostile round 10, section 1.7).
+
+    Only the part the chip does NOT already show (hostile round 12, item 16 residue,
+    closed 2026-09-25). It used to return the WHOLE value whenever the chip had shortened
+    it at all, so on Thrust 3 and Thrust 4 the 20 px chip read "A -- Gap response fixed
+    effort" and the caption 15 px below it read "fixed effort (5 passes/frame)" -- the
+    same words twice, in the two largest pieces of text on that arm, for nothing. Word
+    filtering rather than a prefix cut, because `_chip_value_forms`' shorter rungs are not
+    prefixes of the full value (rung 4 drops the prose in FRONT of the number)."""
     value = (preset.ab_label_a if arm == "a" else preset.ab_label_b) or "?"
-    return "" if _ab_arm_chip(preset, arm).endswith(value) else value
+    chip = _ab_arm_chip(preset, arm)
+    if chip.endswith(value):
+        return ""
+
+    def _norm(word: str) -> str:
+        return word.strip("().,;:-——").lower()
+
+    shown = {_norm(w) for w in chip.split()} - {""}
+    kept = [w for w in value.split() if _norm(w) not in shown]
+    rest = " ".join(kept).strip(" ,;")
+    # A ONE-WORD scrap is not a caption clause: "fixed", left over from "fixed effort
+    # (5 passes/frame)" once the chip showed the parenthetical, says nothing on its own
+    # and costs the line that carries the run's own fact. Nothing is lost -- the whole
+    # value is in that arm's Details, and in the card.
+    return rest if len(rest.split()) >= 2 else ""
 
 
 #: Longest run-identity line that fits ONE line at 18/600 across 1520 px of content

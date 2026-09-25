@@ -278,11 +278,11 @@ mantissa 6 -> 1 bit.
    3 - adaptive feature extraction: a direction that moves (Thrust 3, 8
    frames)" line is inside **▸ Presenter notes (Thrust 3)**, which is collapsed
    by default -- open it only if you want the card.
-2. Click **Run pipeline**. Both arms run in one click (A = fixed effort (5
-   passes/frame), B = adaptive gate (shipped default, 10 passes/frame
-   baseline)). Wall time: read the last rehearsal's
-   `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
+2. Click **Run pipeline**. Both arms run in one click (A = fixed, 5
+   passes/frame, B = adaptive gate, 10 passes/frame). Wall time: read the last
+   rehearsal's `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the
+   preflight timing pass; a Run takes roughly 15-30 s for both arms -- talk
+   over it.
 - **While it runs, say:** The scene sweeps: the line of sight moves about 2
   deg/frame, the tracked direction about 53 deg/frame. The rank does NOT
   change; the direction does.
@@ -293,12 +293,12 @@ mantissa 6 -> 1 bit.
 
 ### What you are looking at
 - Product panel(s) this preset enables: **"Subspace error per frame"**.
-- Arm chips on screen: "A — Refinement effort 5 passes/frame" (LEFT column,
-  colour dot) / "B — Refinement effort 10 passes/frame baseline" (RIGHT column)
-  -- each product renders once per column, on the same row (no heat map here,
-  so no shared colour scale). The full before/after sentence, plus provenance,
-  band and clip, is one click away behind that arm's own **▸ Details
-  (provenance, band, clip)**.
+- Arm chips on screen: "A — Refinement effort fixed, 5 passes/frame" (LEFT
+  column, colour dot) / "B — Refinement effort adaptive gate, 10 passes/frame"
+  (RIGHT column) -- each product renders once per column, on the same row (no
+  heat map here, so no shared colour scale). The full before/after sentence,
+  plus provenance, band and clip, is one click away behind that arm's own **▸
+  Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **AdaOja Subspace** -> **Tracker initialisation** (choices ['warm', 'cold'],
@@ -364,11 +364,11 @@ still.
    interconnect, on the range profile (Thrust 4, 3 frames)" line is inside **▸
    Presenter notes (Thrust 4)**, which is collapsed by default -- open it only
    if you want the card.
-2. Click **Run pipeline**. Both arms run in one click (A = canonical Tessera
-   geometry (50 um presented), B = TSV height -> 30 um presented (largest skirt
-   mover)). Wall time: read the last rehearsal's
-   `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
-   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
+2. Click **Run pipeline**. Both arms run in one click (A = 50 um presented
+   (canonical), B = 30 um presented (low end)). Wall time: read the last
+   rehearsal's `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the
+   preflight timing pass; a Run takes roughly 15-30 s for both arms -- talk
+   over it.
 - **While it runs, say:** LIVE public Tessera/UIC surrogate (checkpoint, not a
   CSV); scale and frequency in Details. Arm B's height shows without a click,
   in the caption under each banner: 50 vs 30 um.
@@ -380,11 +380,12 @@ still.
 ### What you are looking at
 - Product panel(s) this preset enables: **"Range-azimuth power"**, **"Range
   profile"**.
-- Arm chips on screen: "A — Tessera: TSV height 50 um presented" (LEFT column,
-  colour dot) / "B — Tessera: TSV height 30 um presented" (RIGHT column) --
-  each product renders once per column, on the same row, on shared colour
-  limits. The full before/after sentence, plus provenance, band and clip, is
-  one click away behind that arm's own **▸ Details (provenance, band, clip)**.
+- Arm chips on screen: "A — Tessera: TSV height 50 um presented (canonical)"
+  (LEFT column, colour dot) / "B — Tessera: TSV height 30 um presented (low
+  end)" (RIGHT column) -- each product renders once per column, on the same
+  row, on shared colour limits. The full before/after sentence, plus
+  provenance, band and clip, is one click away behind that arm's own **▸
+  Details (provenance, band, clip)**.
 
 ### Second knob (optional)
 - **Interconnect** -> **Source** (choices ['default', 'tessera'], default
@@ -613,8 +614,8 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   front-end setting reaches the detector at all: unmatched/frame and hits both
   fall.
 - At A's operating point, offline expects ~29 crosses/frame = 26.4 FA + 3.0
-  hits (beat_cfar_ka.json); these 5 live frames give their own unmatched/frame
-  -- same regime, not the same number.
+  hits (beat_cfar_ka.json); these 5 frames give their own unmatched/frame, same
+  regime.
 - Both ported networks emit a near-separable f(range)*g(azimuth) map: rank-1
   energy 0.89/0.76 vs 0.31 for ground truth. Under azimuth-only matching they
   score no better than a constant map.
@@ -632,9 +633,11 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
   with it.
 - This detector sits at its 172-frame recall-0.5 threshold, and the
   scoreboard's recall row for this run reads something else -- 5 frames cannot
-  reproduce a recall. Detector, scoreboard and PR panels hold that frame while
-  Range-Doppler loops; pause it to discuss one frame.
-- The PR legend's 'fftradnet_rd_b15' is this checkpoint (b15_fftradnet_rd_ka).
+  reproduce a recall. The objectness map and Range-Doppler loop together; pause
+  before discussing one frame, and read that frame's counts off the map's own
+  strip.
+- One name on screen: b15_fftradnet_rd_ka (beat_cfar_ka.json keys it
+  'fftradnet_rd_b15').
 - At Ka this arm scores 0.105 against a 0.093 chance floor -- +0.012 [+0.001,
   +0.026] above chance. It does not merely lose to CFAR; it barely beats
   random.

@@ -160,7 +160,41 @@ _ARM_DISPLAY_NAMES = {
     # curves apart, which "CFAR val-tuned" does in 14. The AP is not typed here -- the
     # trace name appends it from the scoreboard file (`ap` above).
     "classical CFAR (val-tuned, cfar_first)": "CFAR val-tuned",
+    # ONE CHECKPOINT, ONE NAME PER SCREEN (hostile round 12, item 16 residue, closed
+    # 2026-09-25). A learned arm had TWO names on one screen: the panel title, the
+    # scoreboard's arm label and the Details line all use the checkpoint's parent
+    # DIRECTORY (`b15_fftradnet_rd_ka`, `b14_raddetnet_ka`) while the PR legend printed
+    # the scoring file's own arm key (`fftradnet_rd_b15`, `raddetnet`). The legend now
+    # reads the directory name too. DERIVED, not typed: the map is built from the scoring
+    # file's own `checkpoint` paths, so a regenerated file cannot leave a stale alias
+    # behind -- and the stored JSON is never edited (its keys are how the arms are looked
+    # up).
 }
+
+
+def _checkpoint_dir_display_names(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON):
+    """`{arm name: checkpoint parent directory}` for every arm of the scoring file that
+    HAS a checkpoint -- the name the rest of the screen calls that arm by
+    (`arm_name_for_detector` matches on exactly this directory). Never raises: an
+    unreadable file simply yields no renames."""
+    try:
+        data = _load_beat_cfar(beat_cfar_json_path)
+        out = {}
+        for arm in data["arms"]:
+            ckpt = arm.get("checkpoint")
+            name = arm.get("name")
+            if ckpt and name:
+                out[name] = Path(ckpt).parent.name
+        return out
+    except Exception:
+        return {}
+
+#: How many characters one entry of the PR panel's two-column legend can carry before it
+#: overruns its half of the strip and draws through the entry beside it. MEASURED on the
+#: rendered page (hostile round 11, D3), and asserted in
+#: `tests/test_detector_scoreboard.py::test_stored_pr_figure_highlighted_arm_carries_its_
+#: delta_and_ci`.
+_PR_LEGEND_MAX_CHARS = 30
 
 #: The null arm's REAL definition, which its legend entry is now too short to carry.
 #: Stated in `stored_pr_figure`'s Details instead -- the stored JSON name reads as
@@ -173,10 +207,13 @@ NULL_ARM_DEFINITION = (
     "once and applied blind to the RF"
 )
 
-def _display_arm_name(name: str) -> str:
-    """`name` as it should read on screen -- see `_ARM_DISPLAY_NAMES`. Passthrough for
-    every arm this module has no reason to rename."""
-    return _ARM_DISPLAY_NAMES.get(name, name)
+def _display_arm_name(name: str, beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON) -> str:
+    """`name` as it should read on screen -- see `_ARM_DISPLAY_NAMES` for the hand-picked
+    short forms and `_checkpoint_dir_display_names` for the checkpoint arms, which read
+    as the directory the rest of the screen names them by. Passthrough otherwise."""
+    if name in _ARM_DISPLAY_NAMES:
+        return _ARM_DISPLAY_NAMES[name]
+    return _checkpoint_dir_display_names(beat_cfar_json_path).get(name, name)
 
 
 def match_rule_text(criterion=None) -> str:
@@ -1367,7 +1404,7 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
         # INSIDE the ground-truth boxes" (cheating); see `_ARM_DISPLAY_NAMES` for the
         # actual definition. `name` (the stored JSON value) is still what every lookup
         # below (bold/CI matching) keys on.
-        disp_name = _display_arm_name(name)
+        disp_name = _display_arm_name(name, beat_cfar_json_path)
         bold = highlight_arm is not None and name == highlight_arm
         # The null/chance-floor arm never dims (see this function's docstring): a
         # viewer looking at some OTHER highlighted arm must still see where "chance"
@@ -1397,7 +1434,19 @@ def stored_pr_figure(beat_cfar_json_path=DEFAULT_BEAT_CFAR_JSON, *,
                 # headline entry read as one run-on string and the delta looked like
                 # it was against fftradnet. "vs CFAR" is what the caption below
                 # spells out, in full, with the interval.
+                # The AP goes only in the SHORT form when it fits the 30-character half
+                # of the two-column legend strip (measured on the rendered page, hostile
+                # round 11 D3). It stopped fitting on 2026-09-25, when the arm names
+                # became the checkpoint directories so that one checkpoint has ONE name
+                # on the screen (round-12 item 16 residue): "b14_raddetnet_ka 0.468
+                # (+0.250)" is 31. The DELTA is what only this entry can carry -- the AP
+                # itself is also on the scoreboard's "AP, offline test split" row and in
+                # this panel's caption, so it is the clause that gives way.
                 trace_name = f"{disp_name} {ap:.3f} ({ci['delta_AP']:+.3f})"
+                if len(trace_name) > _PR_LEGEND_MAX_CHARS:
+                    trace_name = f"{disp_name} ({ci['delta_AP']:+.3f} vs CFAR)"
+                if len(trace_name) > _PR_LEGEND_MAX_CHARS:
+                    trace_name = f"{disp_name} ({ci['delta_AP']:+.3f})"
                 highlight_ci = ci
             else:
                 trace_name = f"{disp_name} (AP={ap:.3f})"

@@ -1580,33 +1580,6 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             # hand-edited per-element config table (`FrontEndBlock.from_rffe`).
             front_end_block = FrontEndBlock.from_rffe(circuit_block, adc_cfg)
             spine_stages.append(front_end_block)
-        # THE DRIVE IS A DISPLAY CHOICE, and the screen says so in its own words rather
-        # than a card quoting a level (seat's read of the 2026-09-24 renders, item 1d).
-        # Emitted where the front end actually JOINS the spine, so an ADC-replay run
-        # (which skips the front end entirely) does not describe a stage it never ran.
-        # The note is COMPUTED from the run: it names the drive this run used and the
-        # source's own absolute-scale metadata, so it cannot drift from either.
-        # Measured 2026-09-24 on the Thrust 1 preset, munich Ka: the source reports
-        # physical_scale=False, and forcing scale_mode='physical' on it does not make the
-        # level physical -- it feeds a unitless channel response to the LNA, and the A/B
-        # INVERTS (8 mA minus 0.5 mA = -3.0 to -3.6 dB over the preset's 5 frames,
-        # against +11.69 to +11.71 dB in legacy at 3e-5). That is why the preset stays
-        # in legacy and why no card may read the drive as an input level.
-        if circuit_block is not None and not rffe_physical:
-            _drive = float(_p_positive(state, "rffe", "signal_scaling"))
-            _src_abs = getattr(environment_block, "physical_scale", None)
-            run_notes.append(
-                f"Front-end drive {_drive:.3g} is a DISPLAY choice, not a measured "
-                "input level: legacy scale mode renormalises every frame to that mean "
-                "|beat| before the circuit cascade, because these frames carry no "
-                f"absolute volts (this source reports physical_scale={_src_abs!r}). "
-                "Forcing 'physical' would not make the number physical -- it would feed "
-                "a unitless channel response to the LNA. What the drive decides is "
-                "where the picture sits between the front end's own noise floor and its "
-                "clamp, and every A/B on this screen is measured at the drive it ran "
-                "with."
-            )
-
         # Stage order mirrors e2e.ml.chain_generate.build_chain_simulation exactly:
         # Dechirp -> ThermalNoise -> Impairment -> IFHighPass -> Quantizer (D6 parity;
         # each stage's position is load-bearing -- see the corpus builder's comments).
@@ -1994,6 +1967,38 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     # the note below and the placement test cannot drift from whichever of the three
     # spine-composing branches above ran (see `_composition_record`).
     composition_record = _composition_record(sim.serial_stages)
+
+    # THE DRIVE IS A DISPLAY CHOICE, and the screen says so in its own words rather than
+    # a card quoting a level (seat's read of the 2026-09-24 renders, item 1d).
+    #
+    # EMITTED HERE, on every chain that HAS a front end (hostile round 13, round-12 item
+    # 15a): it used to be emitted inside the branch that composes its own `serial_stages`,
+    # i.e. only on a corpus replay -- so on Thrust 1, the screen whose entire subject is
+    # that drive, it never appeared at all, and the disclosure existed only in the runbook
+    # and in Details. The arm caption is the headline of the run's first note, which is
+    # why the first clause is short and ends at a " -- ": `webapp.app._note_headline` cuts
+    # there, and a clause cut mid-sentence would print a truncation mark (acceptance
+    # check 12 forbids one in visible text).
+    #
+    # Measured 2026-09-24 on the Thrust 1 preset, munich Ka: the source reports
+    # physical_scale=False, and forcing scale_mode='physical' on it does not make the
+    # level physical -- it feeds a unitless channel response to the LNA, and the A/B
+    # INVERTS (8 mA minus 0.5 mA = -3.0 to -3.6 dB over the preset's 5 frames, against
+    # +11.69 to +11.71 dB at 3e-5 in legacy scale mode). That is why the preset stays in
+    # legacy scale mode and why no card may read the drive as an input level.
+    if circuit_block is not None and not rffe_physical:
+        _drive = float(_p_positive(state, "rffe", "signal_scaling"))
+        _src_abs = getattr(environment_block, "physical_scale", None)
+        run_notes.append(
+            f"Front-end drive {_drive:.3g} is a DISPLAY choice, not a measured input "
+            "level -- legacy scale mode renormalises every frame to that mean |signal| "
+            "before the circuit cascade, because these frames carry no absolute volts "
+            f"(this source reports physical_scale={_src_abs!r}). Forcing 'physical' "
+            "would not make the number physical: it would feed a unitless channel "
+            "response to the LNA. What the drive decides is where the picture sits "
+            "between the front end's own noise floor and its clamp, and every A/B on "
+            "this screen is measured at the drive it ran with.")
+
     run_notes.append(_composition_note(composition_record))
 
     try:
@@ -2240,6 +2245,12 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
 # Output -> Plotly figure helpers. Kept torch-tolerant: they only import torch
 # when actually given tensors, and accept the outputs dict produced above.
 # --------------------------------------------------------------------------------
+
+def _to_float_array(t) -> np.ndarray:
+    """A torch tensor or array-like as a plain float ndarray, on the CPU."""
+    t = t.detach().cpu().numpy() if hasattr(t, "detach") else t
+    return np.asarray(t, dtype=float)
+
 
 def _to_numpy_abs_db(tensor):
     import torch
@@ -3537,14 +3548,51 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     _rmeta = meta if meta.get("range_m_per_bin") else (
         _range_meta_from_grid(n_freqs, freq_span_hz) if (n_freqs and freq_span_hz) else None)
     _rmeta = _rmeta or None
-    if outputs.get("range_profile_agg") and _rmeta:
+    #: The range profile's frames as plain arrays, and how many of its display gates
+    #: actually CARRY DATA. Computed here, before the extent below, because both panels
+    #: in that column have to be pinned to the same number.
+    #:
+    #: THE LAST-BIN PLUNGE (hostile round 13, N13), measured on
+    #: `thrust4_interconnect_range_profile` at HEAD before writing a word about it: the
+    #: profile's last six gates read -120 dB (clamped to the panel's -60 dB floor) beside
+    #: a -34 dB median, which read on screen as a ~30 dB cliff at the window edge -- a
+    #: physical-looking feature. It is not one. `e2e.blocks._power_bin` groups the cube's
+    #: 2500 native range bins into the requested 256 display gates by CEIL division
+    #: (per = 10) and zero-pads the remainder, so 2560 - 2500 = 60 padded bins fill the
+    #: last 6 gates with exact zeros. Those gates are not scene, and not window edge:
+    #: they are arithmetic. Dropped, and the drop is stated in Details.
+    _prof_all = [_to_float_array(t) for t in (outputs.get("range_profile_agg") or [])]
+    _prof_gates_padded = 0
+    if _prof_all:
+        _rows = int(_prof_all[0].shape[0])
+        #: FULLY-FILLED gates only. Two artefacts, one cause: the all-zero gates at the
+        #: end (exact zeros -> the dB floor) and, just before them, ONE gate holding a
+        #: single native bin of ten, i.e. a tenth of a gate's power -- measured -43.8 dB
+        #: against a -34.0 dB median on the Thrust 4 preset, a 10 dB dip that is the fill
+        #: fraction and nothing else. Computed from the cube's own native bin count when
+        #: the run recorded one; the exact-zero scan is the fallback for a hand-built
+        #: outputs dict that has no `range_n_bins`.
+        _keep = _rows
+        _native = (_rmeta or {}).get("range_n_bins")
+        if _native and _rows:
+            _per = -(-int(_native) // _rows)          # `_power_bin`'s ceil division
+            _keep = min(_rows, int(_native) // _per)   # gates with all `_per` bins real
+        else:
+            _keep = max((int(np.max(np.nonzero(a)[0])) + 1 if np.any(a) else 0)
+                        for a in _prof_all)
+        if 0 < _keep < _rows:
+            _prof_gates_padded = _rows - _keep
+            _prof_all = [a[:_keep] for a in _prof_all]
+    if _prof_all and _rmeta:
         _bins_rp_for_extent = meta.get("range_profile_bins")
         if _bins_rp_for_extent:
             _axis_for_extent, _ = _display_range_axis(_bins_rp_for_extent, _rmeta)
             # Conformed to the profile's OWN row count, exactly as the profile panel
             # below does it -- otherwise the heatmap is pinned to an extent the profile
             # never draws, which is the mismatch this shared extent exists to remove.
-            _prof_rows = int(outputs["range_profile_agg"][-1].shape[0])
+            # The row count is the CROPPED one (see `_prof_gates_padded`): pinning the
+            # map to gates the profile no longer draws would re-create that mismatch.
+            _prof_rows = int(_prof_all[-1].shape[0])
             _axis_for_extent = _conform_range_axis(_axis_for_extent, _prof_rows)
             if _axis_for_extent.size:
                 range_az_yaxis_extent = float(_axis_for_extent.max())
@@ -3864,12 +3912,8 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             figs[key] = _make_legible(_add_frame_animation(fig, frames_db,
                                                            frame_layouts=frame_layouts))
 
-    if outputs.get("range_profile_agg"):
-        def _prof_np(t):
-            t = t.detach().cpu().numpy() if hasattr(t, "detach") else t
-            return np.asarray(t, dtype=float)
-
-        prof_all = [_prof_np(t) for t in outputs["range_profile_agg"]]
+    if _prof_all:
+        prof_all = _prof_all          # already converted and padding-cropped, above
         prof = prof_all[-1]
         bins_rp = meta.get("range_profile_bins") or prof.shape[0]
         if _rmeta:
@@ -3951,6 +3995,15 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                       "Steps with the same clock as the range-azimuth map above it, "
                       "so the two panels in this column always show the same frame; "
                       "each frame is normalised to its own peak.",
+                      # N13: say what was dropped, so the shorter axis is not itself a
+                      # silent edit. Only when something WAS dropped.
+                      (f"{_prof_gates_padded} trailing display gate(s) are not drawn: "
+                       f"the cube's native range bins do not divide evenly into the "
+                       f"{bins_rp} gates requested, so `_power_bin`'s last groups are "
+                       f"part-filled or zero-padded and carry a fraction of a gate's "
+                       f"power. On the dB scale that reads as a cliff at the window "
+                       f"edge; it is the fill fraction, not the scene."
+                       if _prof_gates_padded else ""),
                   ], row=PANEL_ROW_MAP)
         figs["range_profile"] = _make_legible(_add_frame_animation(
             fig, prof_db_all, key="y", trace_type="scatter",

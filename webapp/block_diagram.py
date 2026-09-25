@@ -775,13 +775,24 @@ def layout() -> Any:
                            "backgroundColor": "#eb3b5a", "color": "white",
                            "border": "none", "borderRadius": "4px",
                            "cursor": "pointer"}),
-        html.Span(id="run-status", style={"marginLeft": "12px", "fontSize": "16px",
-                                          "color": "#576574", "overflow": "hidden",
-                                          "textOverflow": "ellipsis", "whiteSpace": "nowrap",
-                                          "minWidth": "0", "flex": "1 1 auto"}),
     ], className="control-bar",
        style={"display": "flex", "alignItems": "center",
               "flexWrap": "nowrap", "padding": "0 12px", "overflowX": "auto"})
+
+    # THE STATUS LINE GETS ITS OWN ROW (hostile round 13, N15). It used to be the last
+    # flex item in the bar above, with `text-overflow: ellipsis` and `white-space:
+    # nowrap`, absorbing whatever width the fixed-width controls left over -- which on
+    # every rendered card was not enough: the line read "Preset loaded: T..." and the
+    # sentence that tells the operator WHAT to press next ("Press Run pipeline.") was the
+    # part that got cut. It is also where a PipelineError's message lands, so truncating
+    # it truncates error messages (acceptance check 12: no truncation marks in visible
+    # text). On its own full-width row it wraps instead of eliding, and the bar above
+    # keeps its one-line geometry and its fixed-width buttons exactly as round 11's D11
+    # fix left them.
+    status_row = html.Div(
+        html.Span(id="run-status", style={"fontSize": "16px", "color": "#576574"}),
+        style={"padding": "6px 12px 0 12px", "minHeight": "24px",
+               "lineHeight": "1.35"})
 
     legend = html.Div([
         _legend_swatch(CATEGORY_COLORS["source"], "source"),
@@ -834,6 +845,7 @@ def layout() -> Any:
 
     return html.Div([
         control_bar,
+        status_row,
         html.H3("Pipeline Block Diagram", style={"marginTop": "12px", "marginBottom": "4px"}),
         html.P("Click a block to edit its parameters or toggle it on/off. "
                "Dashed edges feed a disabled block.",

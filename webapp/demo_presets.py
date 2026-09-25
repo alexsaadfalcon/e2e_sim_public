@@ -973,8 +973,16 @@ PRESETS: List[DemoPreset] = [
         live_knobs=[("subspace", "warm_start",
                      "manual: cold -> warm (perturbed truth; not part of this A/B)")],
         ab=("subspace", "gap_response", "refine"),
-        ab_label_a="fixed effort (5 passes/frame)",
-        ab_label_b="adaptive gate (shipped default, 10 passes/frame baseline)",
+        # SHORT ENOUGH FOR THE CHIP WHOLE (hostile round 12, item 16 residue, closed
+        # 2026-09-25). At "fixed effort (5 passes/frame)" the value did not fit
+        # `ARM_CHIP_MAX_CHARS` beside the param's own label ("Refinement effort", which
+        # already says "effort"), so the chip showed a shortened rung and the caption 15 px
+        # below repeated the value in full -- the same words twice, in the two largest
+        # pieces of text on the arm. Both arms now fit whole and the caption carries a
+        # RUN fact instead. "(shipped default)" is dropped from the chip only; the card's
+        # own `ab_label` prose, blurb and live_knobs still say which arm ships.
+        ab_label_a="fixed, 5 passes/frame",
+        ab_label_b="adaptive gate, 10 passes/frame",
         screen_note=("Swept scene: the array pans each frame, so the line of sight "
                      "walks about 2 deg/frame (57 deg over the file's 30 frames) while "
                      "the ray-traced paths stay put -- the direction moves, the rank "
@@ -1090,8 +1098,12 @@ PRESETS: List[DemoPreset] = [
                      "manual third option, not part of the A/B: source='default' + "
                      "case='default' selects the old SYNTHETIC 11-tap boxcar placeholder")],
         ab=("interconnect", "tessera_height_um", _TESSERA_ARM_B_HEIGHT_UM),
-        ab_label_a=f"canonical Tessera geometry ({_TESSERA_CANONICAL_HEIGHT_UM:g} um presented)",
-        ab_label_b=f"TSV height -> {_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um presented (largest skirt mover)",
+        # Same fix as Thrust 3's above: the chip's param label is already
+        # "Tessera: TSV height", so "canonical Tessera geometry (...)" and "TSV height ->
+        # ..." both said it twice and neither fitted the chip whole, which pushed the full
+        # value into the caption verbatim. Value first, qualifier in the parenthetical.
+        ab_label_a=f"{_TESSERA_CANONICAL_HEIGHT_UM:g} um presented (canonical)",
+        ab_label_b=f"{_TESSERA_ARM_B_HEIGHT_DISPLAY:g} um presented (low end)",
         # wave 10 (2026-09-24, item 1.8, hostile round 9): RETRACTED "sits ~50 dB
         # below this display's real noise floor" -- the range-profile axis runs 0 to
         # -60 dB and prints its own median floor at -50.3; the quoted offline skirt
@@ -1382,8 +1394,8 @@ PRESETS: List[DemoPreset] = [
             "point is a front-end setting reaches the detector at all: "
             "unmatched/frame and hits both fall.",
             "At A's operating point, offline expects ~29 crosses/frame = 26.4 FA "
-            "+ 3.0 hits (beat_cfar_ka.json); these 5 live frames give their own "
-            "unmatched/frame -- same regime, not the same number.",
+            "+ 3.0 hits (beat_cfar_ka.json); these 5 frames give their own "
+            "unmatched/frame, same regime.",
             "Both ported networks emit a near-separable f(range)*g(azimuth) map: "
             "rank-1 energy 0.89/0.76 vs 0.31 for ground truth. Under azimuth-only "
             "matching they score no better than a constant map.",
@@ -1410,13 +1422,17 @@ PRESETS: List[DemoPreset] = [
             # last frame regardless.
             "This detector sits at its 172-frame recall-0.5 threshold, and the "
             "scoreboard's recall row for this run reads something else -- 5 "
-            "frames cannot reproduce a recall. Detector, scoreboard and PR panels "
-            "hold that frame while Range-Doppler loops; pause it to discuss "
-            "one frame.",
+            "frames cannot reproduce a recall. The objectness map and Range-Doppler "
+            "loop together; pause before discussing one frame, and read that frame's "
+            "counts off the map's own strip.",
             # wave 10 (2026-09-24, item 3.7, hostile round 9): one name for the
-            # detector, not three.
-            "The PR legend's 'fftradnet_rd_b15' is this checkpoint "
-            "(b15_fftradnet_rd_ka).",
+            # detector, not three. CLOSED IN THE FIGURE (2026-09-25, round-12 item 16
+            # residue): the PR legend reads the checkpoint directory now, like the panel
+            # title and the scoreboard, so the alias is not on screen to explain. The
+            # bullet keeps the OLD name, because the scoring file still keys on it and
+            # someone reading beat_cfar_ka.json will meet it there.
+            "One name on screen: b15_fftradnet_rd_ka (beat_cfar_ka.json keys it "
+            "'fftradnet_rd_b15').",
             # RETIRED (shard 3, 2026-09-24, F95 addendum): this bullet existed for a
             # scoreboard row that no longer appears on THIS screen. The seed spread
             # 0.040 is a RADDetNet measurement (seeds 42 vs 43, 77 GHz, F86) and the
