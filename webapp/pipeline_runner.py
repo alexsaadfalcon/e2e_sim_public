@@ -84,6 +84,101 @@ def _enabled(state: Dict[str, Dict[str, Any]], block_id: str) -> bool:
     return bool(state.get(block_id, {}).get("enabled", False))
 
 
+class _OFDMTxCfg:
+    """The single-TX radar config the OFDM/JSAC mixing block reads.
+
+    `SymbolDivisionBlock` needs exactly two things off a cfg -- the MIMO scheme and the
+    transmit-element count -- because its tail IS `e2e.chain.dechirp`'s (`beat_from_cfr`
+    + `mimo_combine`, imported rather than reimplemented, which is what makes the FMCW
+    parity oracle bit-exact). The stored munich frames are single-TX, and a chirp/frame
+    TIMING preset means nothing to a waveform whose symbol duration comes from the
+    subcarrier spacing instead, so a full `RadarConfig` here would be four numbers that
+    are never read and could drift.
+    """
+
+    mimo = "single"
+    n_tx = 1
+
+
+#: Products whose frames carry one image PER SYMBOL on a JSAC run.
+_SYMBOL_IMAGE_PRODUCTS = ("fft", "range_az", "range_el")
+
+
+def _display_symbol_for(spec) -> int:
+    """WHICH symbol's image the screen shows, and it is not a free choice.
+
+    `sensing_source="preamble"`: symbol 0. It is the all-pilot symbol -- the one whose
+    transmitted grid is identically 1 -- so its image is the FMCW bit-parity point
+    (oracle O2) rather than an arbitrary pick, and every other symbol's sensing
+    reference is masked to zero, i.e. their cubes are empty by construction.
+
+    `sensing_source="pilots_only"`: symbol 1, THE FIRST DATA SYMBOL, and this is the
+    whole demonstration. Measured 2026-09-24, and it is what a first pass gets wrong:
+    under this source `OFDMFrame.reference_grid` keeps symbol 0 as the FULL all-pilot
+    preamble and puts the comb on symbols 1..M-1 only. So symbol 0's image is the full
+    499.55 m window WHATEVER the pilot spacing is -- showing it makes the resource-split
+    A/B render two IDENTICAL pictures (both arms measured 72.86-72.88 dB peak-median,
+    to the digit). The split lives on the data symbols, so that is the symbol to show.
+    """
+    frame = getattr(spec, "frame", None)
+    source = getattr(frame, "sensing_source", "preamble")
+    n_symbols = int(getattr(frame, "n_symbols", 1) or 1)
+    return 1 if (source == "pilots_only" and n_symbols > 1) else 0
+
+
+def _waveform_run_notes(spec) -> List[str]:
+    """What the OFDM/JSAC chain COMPUTED, in the run notes, from `ChainSpec.notes`.
+
+    Every number here is derived from the source's own frequency plan by
+    `e2e.comms.ofdm_isac` -- subcarrier spacing from the plan's endpoint-inclusive step,
+    sample rate from `N * delta_f`, the sensing window from `c / (P * delta_f)`, the data
+    rate from the comb the frame actually carries. None of it is typed into a preset,
+    which is the point: the resource-split knob moves the window and the rate in opposite
+    directions and the screen reads both off the frame it just ran.
+    """
+    n = dict(spec.notes or {})
+    notes: List[str] = []
+    bits = {2: "QPSK", 4: "16-QAM", 6: "64-QAM"}.get(int(n.get("bits_per_symbol", 0)),
+                                                     "%s b/symbol"
+                                                     % n.get("bits_per_symbol"))
+    head = ("%s waveform: %s subcarriers at %.1f kHz spacing, %s symbols, %s, "
+            "pilot spacing %s (%s)."
+            % (spec.kind.upper(), n.get("n_fast"), float(n.get("delta_f_hz", 0)) / 1e3,
+               n.get("n_slow"), bits, n.get("pilot_spacing"),
+               n.get("sensing_source")))
+    notes.append(head)
+    rate = n.get("data_rate_bps")
+    dur = n.get("frame_duration_s")
+    if rate is not None and dur is not None:
+        notes.append(
+            "Burst data rate %.3f Gb/s over a %.3f us frame -- uncoded, and it is a "
+            "BURST rate: the average depends on a duty cycle this run does not define."
+            % (float(rate) / 1e9, float(dur) * 1e6))
+    if spec.sensing and n.get("sensing_window_m") is not None:
+        shown = _display_symbol_for(spec)
+        which = ("symbol %d, the all-pilot preamble -- the symbol whose transmitted "
+                 "grid is identically 1, which is also the FMCW bit-parity point"
+                 % shown) if shown == 0 else (
+            "symbol %d, the first DATA symbol -- the one carrying the sensing comb, "
+            "which is where the resource split actually is (symbol 0 stays an all-pilot "
+            "preamble at every pilot spacing, so its image would not move with the knob)"
+            % shown)
+        notes.append(
+            "Sensing window %.2f m of excess path (c / (pilot spacing x subcarrier "
+            "spacing)); the image is %s. Its range-Doppler is deliberately absent: an "
+            "FFT over OFDM symbols of one time-invariant stored channel is a delta at "
+            "bin 0 dressed up as a velocity."
+            % (float(n["sensing_window_m"]), which))
+    rise = n.get("qam_noise_rise_db")
+    if rise is not None and float(rise[0]) > 0.01:
+        notes.append(
+            "Symbol division amplifies noise by 1/|X|^2 where the transmitted symbol is "
+            "not constant-modulus: %.2f dB mean / %.2f dB worst-subcarrier rise in the "
+            "cube's floor at this constellation (closed form, from the constellation "
+            "this run transmits)." % (float(rise[0]), float(rise[1])))
+    return notes
+
+
 def _resolve_physical_scale(mode: str, env_block: Any) -> bool:
     """Map the rffe scale_mode param to RFFEBlock's physical_scale bool.
 
@@ -1120,7 +1215,119 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
     #: Stages on `spine_stages` whose returns are products (passed to Simulation as
     #: `product_taps=`), in the order they tap the chain.
     product_taps: List[Any] = []
-    if corpus_mode and not corpus_live_cfr:
+    #: Set by the OFDM/JSAC branch below: the `ChainSpec` this run's waveform class
+    #: contributed. None on an FMCW run.
+    wave_spec = None
+    #: THE WAVEFORM CLASS. `fmcw` is the chain every preset before this one ran: on a
+    #: unit-modulus chirp the dechirp identity IS the modulation, so a stored CFR needs
+    #: no transmit tributary at all. `ofdm` and `jsac` are the other two rows of
+    #: `e2e.comms.ofdm_isac.waveform_chain_spec` -- READ from there rather than
+    #: re-decided here, so the dropdown, the diagram's one branch point and the products
+    #: a screen shows cannot disagree about what a class is.
+    wave_kind = (str(_p(state, "waveform", "kind")) if _enabled(state, "waveform")
+                 else "fmcw")
+    if wave_kind in ("ofdm", "jsac"):
+        if corpus_mode:
+            raise PipelineError(
+                "The %r waveform class transmits a grid onto the stored CHANNEL, and "
+                "Corpus Replay serves frames that are already past that point. Use the "
+                "Sionna Environment source, or set the waveform back to 'fmcw'."
+                % wave_kind)
+        if _enabled(state, "dechirp"):
+            raise PipelineError(
+                "The %r waveform class brings its own mixing block, so the Dechirp "
+                "bridge must be off. Turn off 'Dechirp (channel -> ADC)', or set the "
+                "waveform back to 'fmcw'." % wave_kind)
+        try:
+            from e2e.chain.receive import RangeTransformBlock
+            from e2e.comms.blocks import BERBlock
+            from e2e.comms.ofdm_isac import waveform_chain_spec
+        except ImportError as e:
+            raise PipelineError(
+                "Could not import the OFDM/JSAC waveform backend (e2e.comms.ofdm_isac "
+                "/ e2e.chain.receive). Underlying error: " + str(e))
+        freq_plan = getattr(environment_block, "freq_plan", None)
+        if not freq_plan:
+            raise PipelineError(
+                "The %r waveform places its subcarriers ON the stored channel's own "
+                "frequency grid, so the source must carry a freq_plan (a v2 .pkl). "
+                "This scenario's frames do not." % wave_kind)
+        try:
+            wave_spec = waveform_chain_spec(
+                wave_kind, _OFDMTxCfg(), freq_plan=freq_plan,
+                n_symbols=int(_p_positive(state, "waveform", "n_symbols")),
+                pilot_spacing=int(_p_positive(state, "waveform", "pilot_spacing")),
+                bits_per_symbol=int(_p_positive(state, "waveform", "bits_per_symbol")),
+                sensing_source=str(_p(state, "waveform", "sensing_source")),
+                combining=str(_p(state, "waveform", "combining")),
+            )
+        except (ValueError, TypeError) as e:
+            raise PipelineError("%s waveform: %s" % (wave_kind, e))
+        # THE SPINE, in the contract's order. The only thing the waveform class changes
+        # is the mixing block and which half of the products exists -- everything else
+        # is the same list every other preset runs.
+        spine_stages = []
+        spine_stages.extend(wave_spec.tributary_stages())      # Y = H . X
+        if interconnect_block is not None:
+            spine_stages.append(InterconnectStage(interconnect_block))
+        if circuit_block is not None:
+            # THE FRONT END IS IN THE FREQUENCY DOMAIN ON THIS PATH, and that is the
+            # physics rather than a workaround (see `OFDMReceiveBlock`'s docstring):
+            # `ifft(s_pars)` of a RECEIVED OFDM grid IS the received time-domain symbol,
+            # the signal a real amplifier sees -- which is what makes `RFFEBlock`'s
+            # round trip correct here and wrong on an FMCW CFR (F96). Placed here it
+            # runs BEFORE the comms head, so its floor reaches the constellation AND the
+            # image: one knob, both products, one frame.
+            spine_stages.append(CircuitStage(circuit_block))
+        ber_block = BERBlock()
+        spine_stages.extend([wave_spec.receive_block, ber_block])
+        product_taps.extend([wave_spec.receive_block, ber_block])
+        if wave_spec.sensing:
+            spine_stages.append(wave_spec.mixing_block)
+            # The imaging identity point, the same one `Simulation._build_spine` uses
+            # for the frequency-domain presets (window="none", dc_removal=False): the
+            # munich trace is generated with normalize_delays=True, so the
+            # line-of-sight path sits AT bin 0 and a fast-time mean subtraction would
+            # zero it.
+            spine_stages.append(RangeTransformBlock(None, window="none",
+                                                    dc_removal=False))
+        else:
+            # `ofdm` is `jsac` with the mixer omitted: no cube, so no sensing product
+            # can exist. Refusing by name beats rendering an empty panel.
+            unsupported = [bid for bid in ("fft", "range_az", "range_el",
+                                           "range_profile", "subspace_err")
+                           if _enabled(state, bid)]
+            if unsupported:
+                raise PipelineError(
+                    "The 'ofdm' waveform class is comms only -- a comms receiver "
+                    "equalises the grid and never forms a cube -- so it cannot produce "
+                    + ", ".join(unsupported) + ". Switch the waveform to 'jsac' (same "
+                    "frame, one extra block, and the image appears), or turn those "
+                    "products off.")
+        # v1.1 SCOPE, stated rather than discovered live (the JSAC build spec's section
+        # 3.9, option (c)): the AFE compressor, the subspace tracker and the range
+        # profile read one snapshot per chirp and reject an M-symbol frame by name.
+        # They are FMCW-arm products on this release, and the preset's card says so.
+        symbol_rejecting = [bid for bid in ("range_profile", "subspace_err")
+                            if _enabled(state, bid)]
+        if wave_spec.sensing and symbol_rejecting:
+            raise PipelineError(
+                "The adaptive front end, the subspace tracker and the range profile "
+                "read one snapshot per chirp and reject a multi-SYMBOL frame, so they "
+                "are FMCW-arm products in v1.1: turn off "
+                + ", ".join(symbol_rejecting) + " on a jsac run.")
+        downstream_blocks = [b for b in downstream_blocks
+                             if type(b).__name__ in ("FFTBlock", "RangeAzBlock",
+                                                     "RangeElBlock")]
+        run_notes.extend(_waveform_run_notes(wave_spec))
+        if _enabled(state, "comms"):
+            run_notes.append(
+                "The Comms Head block is ignored on this run: the %r class brings its "
+                "own receiver (OFDMReceiveBlock), which reads the chain's OWN received "
+                "grid and injects no noise of its own -- the legacy head synthesises a "
+                "channel and a floor of its own, which would count the noise twice."
+                % wave_kind)
+    elif corpus_mode and not corpus_live_cfr:
         # The stored ADC replay ENTERS the one chain after the quantiser: the corpus
         # frame was generated by this very chain (dechirp -> thermal floor ->
         # impairments -> IF HPF -> quantizer) and stored AFTER it, so re-running any of
@@ -1651,6 +1858,21 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         raise PipelineError(f"Pipeline run failed: ValueError: {e}")
     except Exception as e:  # surface anything else cleanly to the UI
         raise PipelineError(f"Pipeline run failed: {type(e).__name__}: {e}")
+
+    # ONE SYMBOL ON SCREEN. A JSAC frame carries M symbols, and the image products are
+    # CHIRP_BROADCAST, so they emit one image per symbol ([M, bins, gates]). The panels
+    # draw a 2-D map, so the run shows symbol 0 -- the all-pilot preamble, the parity
+    # point -- and the run note above says so. Sliced HERE rather than inside the product
+    # so that the products keep emitting what they computed, and so an FMCW run (one
+    # slow index, already 2-D) is untouched.
+    if wave_spec is not None and wave_spec.sensing:
+        shown = _display_symbol_for(wave_spec)
+        for key in _SYMBOL_IMAGE_PRODUCTS:
+            frames_list = outputs.get(key)
+            if not frames_list:
+                continue
+            outputs[key] = [(f[shown] if getattr(f, "ndim", 2) == 3 else f)
+                            for f in frames_list]
 
     # Stash the axis metadata figures_from_outputs needs to label heatmaps physically
     # (bins used per product + the raw frame's frequency-sample count/span) alongside

@@ -64,6 +64,7 @@ Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 5. Thrust 5 - live chain from the stored channel: classical CFAR
 6. Thrust 5 - live chain, ported network (the arm that LOSES, shown on purpose)
 7. Thrust 5 (LEAD) - RADDetNet vs CFAR at Ka: AP 0.468 vs 0.218 (val-tuned 0.326), in-distribution
+8. Thrust 6 - JSAC: one waveform, an image and a constellation
 
 General click mechanics that apply to every preset below (from `webapp/app.py`,
 `webapp/block_diagram.py`):
@@ -89,7 +90,7 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
   sentence, are collapsed behind that arm's own **▸ Details (provenance, band,
   clip)**, directly under its one-line caption on the **Results** tab; click it
   to open.
-- Every one of the 7 presets below sets `ab`, so one click on **Run pipeline**
+- Every one of the 8 presets below sets `ab`, so one click on **Run pipeline**
   runs BOTH arms A and B and renders both on the Results tab SIDE BY SIDE: one
   row per product, arm A in the left column, arm B in the right, each column
   under its own banner (no divider line, no label) -- there is no second Run
@@ -133,35 +134,35 @@ General click mechanics that apply to every preset below (from `webapp/app.py`,
 
 Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) share one
 colour scale down to the deeper floor, so arm B's background reads visibly
-brighter, about twelve dB by the printed numbers; streaks match. Manual second
-knob: IF bandwidth 15 -> 50 MHz.
+brighter -- ~12 dB by the printed numbers; streaks match. Second knob, manual:
+IF bandwidth 15 -> 50 MHz.
 
 ### Say
 - With the shared colour scale, arm B's background reads about twelve dB
   brighter than arm A's (+-0.6-0.9 dB); streaks match.
-- Drive it harder and these knobs stop mattering: the A/B is 0.96 dB at 1e-3
-  and 0.08 dB at 1e-2, against 11.7 dB at 3e-5 (2026-09-24).
-- Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB leaves
-  the attenuator (4->8 mA: +1.6 dB).
+- Drive it harder and these knobs stop mattering: the A/B is 11.7 dB at 3e-5,
+  0.96 dB at 1e-3, 0.08 dB at 1e-2 (2026-09-24).
+- Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the 12 dB leaves the
+  attenuator (4->8 mA: +1.6 dB).
 - No trade-off today: nothing clips; the IF filter only sets noise variance (1
-  MHz = 1 ms sweep vs 20 us at 50 MHz).
+  MHz = 1 ms sweep, 20 us at 50 MHz).
 - Excess path 0-4 m is not a target: it is the direct path the display
-  normalises to (0 dB); multipath: the ~74 m return the panel names (74.2 m;
+  normalises to (0 dB). Multipath: the ~74 m return the panel names (74.2 m;
   F94's 37.1 m at c*tau/2) and 136 m.
-- Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB validates the
-  mechanism and this knob's AFE/tracker/detector effect. Absolute dBm is NOT
-  quotable: input level is free.
+- Noise figure IS quotable: Friis 11.97 vs measured 11.80 dB validates the
+  mechanism and this knob's downstream effect. Absolute dBm is NOT: the input
+  level is free.
 - Channel mismatch: all 1024 elements share one config; mismatch is
   structurally zero; a per-element spread is a small change.
-- Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
-  |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
-- Peak-to-median dynamic range measures how empty the map is (median set by
-  empty gates), not target SNR; it moves with the noise floor this knob
-  changes.
-- The 0 dB reference is a single range-0 gate too small to see; every dB on the
-  map is relative to the direct path.
-- Thrust 1 runs at signal_scaling 3e-5 (legacy mode): peak-median ~58 dB is ~11
-  dB below Thrust 2's ~77 dB -- a different operating point.
+- Spacing: lambda/2 at 30 GHz (0.525 at 31.5) -- grating lobes beyond |sin
+  theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
+- Peak-to-median measures how empty the map is (median = empty gates), not
+  target SNR; it moves with the noise floor this knob changes.
+- The 0 dB reference is a single range-0 gate too small to see; every dB is
+  relative to the direct path.
+- Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median ~58 dB, ~11 dB
+  below Thrust 2's ~77 dB -- a different operating point. That drive is a
+  DISPLAY choice, not an input level (Details).
 - The printed statistics update per frame while the panels loop; pause before
   reading one.
 - Shared-scale direction flips by screen (munich: deeper floor; Thrust 5
@@ -194,7 +195,7 @@ knob: IF bandwidth 15 -> 50 MHz.
    `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
    pass; a Run takes roughly 15-30 s for both arms -- talk over it.
 - **While it runs, say:** As loaded the curve starts near 0, settles at about
-  0.06 by frame 2; the knob compares SETTLED levels, 0.06 vs 0.32.
+  0.08 by frame 2; the knob compares SETTLED levels, 0.08 vs 0.32.
 3. The app switches to the **Results** tab automatically.
 4. Before loading the next preset: click the **Block Diagram** tab to return to
    the preset picker (the app auto-switched to **Results** in the step above;
@@ -214,20 +215,20 @@ knob: IF bandwidth 15 -> 50 MHz.
   A/B already turns; nothing further to change manually before re-running.
 
 Press Run once (A, left, mantissa 6 bit / B, right, 1 bit); the tracker panel
-plots a subspace-error curve against a dashed 0.06 reference line -- A settles
-on it, B sits about 5x above. With the shared colour scale, compare the
-backgrounds; any difference at the ~0.1 dB run-to-run floor is not the knob.
-Manual: AFE mantissa 6 -> 1 bit.
+plots a subspace-error curve against a dashed 0.08 reference line -- A settles
+on it, B about 4x above. With the shared colour scale, compare the backgrounds;
+any difference at the ~0.1 dB run-to-run floor is not the knob. Manual: AFE
+mantissa 6 -> 1 bit.
 
 ### Say
-- As loaded the curve starts near 0, settles at about 0.06 by frame 2; the knob
-  compares SETTLED levels, 0.06 vs 0.32.
-- Headline in ANGLES: 0.32 -> 0.06 is unnormalized, bounded by sqrt(k);
-  converted, principal angle goes 13.1 -> 2.6 deg.
+- As loaded the curve starts near 0, settles at about 0.08 by frame 2; the knob
+  compares SETTLED levels, 0.08 vs 0.32.
+- Headline in ANGLES: 0.32 -> 0.08 is unnormalized, bounded by sqrt(k); as an
+  angle, asin(err/sqrt(2)) goes 13.0 -> 3.3 deg.
 - Both images move by only a few tenths of a dB -- read the two printed
   peak-median numbers on the screen; that is at the ~0.1 dB run-to-run floor,
-  so the image is not the story; the tracker curve is (about 5x above the 0.06
-  reference on arm B).
+  so the image is not the story; the tracker curve is (arm B sits about 4x
+  above the 0.08 reference).
 - No detection metric is wired here; say so before asked what it means for P_d
   or false alarms.
 - Range 0-2 m is not a target: it is the direct path the display normalises to
@@ -238,7 +239,7 @@ Manual: AFE mantissa 6 -> 1 bit.
 - Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes beyond
   |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m gates.
 - Prepared answer -- 'what is the 0.06 floor made of?': at k=2 (rank ~3-4, F94)
-  part of A's residual is rank mismatch; the 5x gap to B is the knob
+  part of A's residual is rank mismatch; the 4x gap to B is the knob
   (interpretation).
 - All 1024 elements share one front-end config (Thrust 1); a spread would show
   up in the AFE weights/tracker curve, not the picture.
@@ -297,7 +298,7 @@ Manual: AFE mantissa 6 -> 1 bit.
   default 'warm'): manual: cold -> warm (perturbed truth; not part of this A/B)
 
 Cold start on BOTH arms, k=2 (k=4 spikes ~0.98, see say). Arm A: FIXED 5
-passes/frame, never reaching B's ~0.06 floor in 8 frames -- about 2.5x higher.
+passes/frame, never reaching B's ~0.08 floor in 8 frames -- about 2x higher.
 Arm B: the shipped adaptive gate, 10 passes/frame baseline (right axis 0-12; a
 small-gap file would climb to 60, not this one). Over 8 frames: A about 0.6 ->
 0.31 -> settles about 0.16-0.17 from frame 5; B about 0.30 -> 0.09 by frame 2,
@@ -308,7 +309,7 @@ settled from frame 3. It never escalates here: k=2's gap stays well clear of
 - Cold start, k=2 (largest spike-free rank, F94), measured over 8 frames. Quote
   'about' -- nondeterministic at ~5e-3, never the third decimal.
 - The A/B statistic is the settled floor at 5 vs 10 passes/frame -- A never
-  reaches B's, about 2.5x higher throughout.
+  reaches B's: 0.164 vs 0.079, about 2x.
 - This is 2:1 compression (m=512 of 1024). At 16:1/64:1 neither arm converges
   in this many frames -- why m is not a live knob here.
 - There is deliberately no image here: the picture doesn't change during
@@ -713,6 +714,79 @@ seed-dependent (F86); say so unprompted.
 - That the model converged: val AP peaks at epoch 14 of 40 and decays to
   0.35-0.41 while train loss keeps falling (F85 addendum); early stopping on
   val is load-bearing.
+
+---
+
+## 8. Thrust 6 - JSAC: one waveform, an image and a constellation
+
+### Click sequence
+1. Open **Demo preset:**, select "Thrust 6 - JSAC: one waveform, an image and a
+   constellation", click **Load preset**. The param editor opens on **TX
+   Waveform** (first knob: **Pilot spacing P**); the operator card shows
+   "Loaded: Thrust 6 - JSAC: one waveform, an image and a constellation (Thrust
+   6, 5 frames)".
+2. Click **Run pipeline**. Both arms run in one click (A = pilot spacing 2, B =
+   pilot spacing 8). Wall time: read the last rehearsal's
+   `e2e/main/figures/rehearsal/summary.json` (`wall_s`) or the preflight timing
+   pass; a Run takes roughly 15-30 s for both arms -- talk over it.
+- **While it runs, say:** One frame, one waveform, two products: the image
+  comes from the sensing comb, the constellation from the data subcarriers
+  beside it.
+3. The app switches to the **Results** tab automatically.
+4. Before loading the next preset: click the **Block Diagram** tab to return to
+   the preset picker (the app auto-switched to **Results** in the step above;
+   the **Demo preset:** dropdown lives on **Block Diagram**).
+
+### What you are looking at
+- Product panel(s) this preset enables: **"Range-azimuth power"**.
+- Arm chips on screen: "A — Pilot spacing P pilot spacing 2" (LEFT column,
+  colour dot) / "B — Pilot spacing P pilot spacing 8" (RIGHT column) -- each
+  product renders once per column, on the same row, on shared colour limits.
+  The full before/after sentence, plus provenance, band and clip, is one click
+  away behind that arm's own **▸ Details (provenance, band, clip)**.
+
+### Second knob (optional)
+- None: the only `live_knobs` entry for this preset is the knob the built-in
+  A/B already turns; nothing further to change manually before re-running.
+
+Press Run once (A, left, pilot spacing 2 / B, right, 8). ONE waveform on ONE
+frame produces both panels: a range-azimuth image from the sensing comb and a
+constellation + BER from the data subcarriers. The knob is the resource split,
+and it moves the two products in OPPOSITE directions -- the image's unambiguous
+window is c/(P x subcarrier spacing), so it shrinks 249.8 -> 62.4 m while the
+burst rate rises 2.25 -> 3.94 Gb/s. Both numbers are computed from the frame
+the run just used, and printed.
+
+### Say
+- One frame, one waveform, two products: the image comes from the sensing comb,
+  the constellation from the data subcarriers beside it.
+- The knob IS the trade: window 249.8 -> 62.4 m against burst rate 2.25 -> 3.94
+  Gb/s. Both are computed from the frame and printed.
+- At spacing 8 the comb aliases and the map's floor rises: peak-median
+  72.1-72.8 dB (A) against 60.2-60.6 dB (B), measured over the 5 frames.
+- BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining SNR
+  of 86-89 dB: a plumbing demonstration, not a link margin.
+- Rates are UNCODED BURST rates over a 6.67 us frame; the average depends on a
+  duty cycle this demo does not define. Say 'burst'.
+- MRC array gain 30.10 dB = 10log10(1024) exactly -- the ideal-weights figure,
+  from a noiseless preamble; the estimation loss is unmeasured.
+- No AFE, no subspace tracker, no range profile here: all three read one
+  snapshot per chirp and reject a multi-symbol frame. FMCW-arm in v1.1.
+- The FMCW parity oracle is bit-exact, not a tolerance: with the all-pilot
+  symbol the division is the identity and both classes share one tail.
+- PAPR at the LNA runs BACKWARDS: 36.67 dB for the shipped FMCW preset against
+  23.68 dB for this frame (the preamble symbol is 36.67 dB, bit-identical to
+  FMCW's input).
+
+### Do NOT say
+- That OFDM's PAPR drives the front end into its clamp: measured at this
+  preset's own operating point it runs BACKWARDS (see the card's numbers).
+- Any Doppler or velocity claim: the stored channel is time-invariant within a
+  frame, so the symbol axis carries no motion.
+- That the BER is a link-budget result: the chain's only noise source is the
+  front end, and at this drive the measured SNR is ~86 dB.
+- That the array gain is what a real receiver would realise: the weights come
+  from a noiseless preamble snapshot (ideal-weights figure).
 
 ---
 

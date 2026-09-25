@@ -1240,6 +1240,118 @@ PRESETS: List[DemoPreset] = [
             "on val is load-bearing.",
         ],
     ),
+    # ================================================================================
+    # THRUST 6 -- JSAC. The deliverable the owner asked for in his own three words:
+    # "Sensing (FMCW), comms (OFDM), and JSAC (hybrid)". The first two are the FMCW
+    # presets above and the `ofdm` entry in the waveform dropdown; this screen is the
+    # third, and it exists to answer ONE question with a picture instead of a paragraph:
+    # is JSAC just OFDM relabelled? Select `ofdm` -> constellation and BER. Select
+    # `jsac` -> constellation and BER AND a radar image, from the SAME frame, the same
+    # front end, one extra block. Everything else on the chain is the same list every
+    # other preset runs.
+    #
+    # WHAT IS NOT ON THIS SCREEN, and why it is said on the card rather than discovered
+    # live (JSAC build spec section 3.9, option (c) -- the recommended v1.1 scope):
+    #   * the AFE compressor, the subspace tracker and the range profile read ONE
+    #     snapshot per chirp and reject a multi-SYMBOL frame by name. FMCW-arm products
+    #     in v1.1; the runner refuses them with that sentence rather than a shape error.
+    #   * range-Doppler. `RadarCubeBlock` refuses a symbol-slow cube, and it is right to:
+    #     a Doppler FFT over OFDM symbols of ONE time-invariant stored channel is a delta
+    #     at bin 0 dressed up as a velocity. The FMCW arm on these same single-chirp
+    #     munich frames has exactly the same degenerate Doppler axis -- a property of the
+    #     corpus, not of JSAC. Say it that way from the floor.
+    DemoPreset(
+        id="thrust6_jsac_resource_split",
+        label="Thrust 6 - JSAC: one waveform, an image and a constellation",
+        thrust=6,
+        n_steps=5,
+        overrides=_merge(
+            # THE WAVEFORM CLASS IS THE ONLY BRANCH. `sensing_source="pilots_only"` is
+            # what makes the pilot-spacing knob a real resource split rather than a
+            # relabelling: the image is formed from the DATA symbols' pilot comb, so the
+            # subcarriers it does not get are the ones carrying bits.
+            {"waveform": {"enabled": True, "params": {
+                "kind": "jsac", "n_symbols": 4, "pilot_spacing": 2,
+                "bits_per_symbol": 2, "sensing_source": "pilots_only",
+                "combining": "mrc"}}},
+            # The transmit tributary's OTHER two blocks belong to the FMCW path (a chirp
+            # through a power amplifier); an OFDM/JSAC frame's transmitted grid is built
+            # by the waveform class itself and applied by its own channel block.
+            {"tx_pa": {"enabled": False}, "modulate": {"enabled": False}},
+            # The front end at Thrust 1's own operating point, so the two screens are
+            # comparable; on THIS path it sits in the frequency domain, which is where
+            # the physics puts it for an OFDM grid (`OFDMReceiveBlock`'s docstring) and
+            # is why its floor reaches the constellation and the image together.
+            {"rffe": {"enabled": True, "params": {
+                "scale_mode": "legacy", "signal_scaling": 3e-5,
+                "lna_bias_ma": 8.0, "if_bw_mhz": 15.0}}},
+            {"interconnect": {"enabled": False}},
+            {"afe": {"enabled": False}, "subspace": {"enabled": False}},
+            _only_products("range_az"),
+        ),
+        blurb=("Press Run once (A, left, pilot spacing 2 / B, right, 8). ONE waveform "
+               "on ONE frame produces both panels: a range-azimuth image from the "
+               "sensing comb and a constellation + BER from the data subcarriers. The "
+               "knob is the resource split, and it moves the two products in OPPOSITE "
+               "directions -- the image's unambiguous window is c/(P x subcarrier "
+               "spacing), so it shrinks 249.8 -> 62.4 m while the burst rate rises "
+               "2.25 -> 3.94 Gb/s. Both numbers are computed from the frame the run "
+               "just used, and printed."),
+        live_knobs=[("waveform", "pilot_spacing",
+                     "2 -> 8 (window 249.8 -> 62.4 m; rate 2.25 -> 3.94 Gb/s)")],
+        ab=("waveform", "pilot_spacing", 8),
+        ab_label_a="pilot spacing 2",
+        ab_label_b="pilot spacing 8",
+        screen_note=("One OFDM-ISAC frame per step: 5000 subcarriers on the stored "
+                     "channel's own grid (600.1 kHz spacing), 4 symbols, QPSK. Symbol 0 "
+                     "is the all-pilot preamble -- the sensing reference, the channel "
+                     "estimate the MRC weights come from, and the FMCW bit-parity "
+                     "point; the image shown is that symbol. No range-Doppler: a "
+                     "Doppler FFT over symbols of one time-invariant stored channel is "
+                     "a delta at bin 0, which is a property of these frames, not of "
+                     "JSAC. " + _ARRAY_DISCLOSURE),
+        say=[
+            "One frame, one waveform, two products: the image comes from the sensing "
+            "comb, the constellation from the data subcarriers beside it.",
+            "The knob IS the trade: window 249.8 -> 62.4 m against burst rate "
+            "2.25 -> 3.94 Gb/s. Both are computed from the frame and printed.",
+            "At spacing 8 the comb aliases and the map's floor rises: peak-median "
+            "72.1-72.8 dB (A) against 60.2-60.6 dB (B), measured over the 5 frames.",
+            "BER 0.0 on both arms, EVM 1.1e-3 to 3.0e-3, at a MEASURED post-combining "
+            "SNR of 86-89 dB: a plumbing demonstration, not a link margin.",
+            "Rates are UNCODED BURST rates over a 6.67 us frame; the average depends "
+            "on a duty cycle this demo does not define. Say 'burst'.",
+            "MRC array gain 30.10 dB = 10log10(1024) exactly -- the ideal-weights "
+            "figure, from a noiseless preamble; the estimation loss is unmeasured.",
+            "No AFE, no subspace tracker, no range profile here: all three read one "
+            "snapshot per chirp and reject a multi-symbol frame. FMCW-arm in v1.1.",
+            "The FMCW parity oracle is bit-exact, not a tolerance: with the all-pilot "
+            "symbol the division is the identity and both classes share one tail.",
+            # THE PAPR SENTENCE, and it is on the card ONLY because it was measured at
+            # this preset's own operating point (JSAC spec 3.7.1, F98). Mean per-element
+            # PAPR of ifft(s_pars) -- the tensor RFFEBlock normalises by, so the tensor
+            # whose peak-to-mean decides whether the clamp engages -- on munich Ka frame
+            # 0, 2026-09-24: FMCW as shipped 36.67 dB; this JSAC frame 23.68 dB at
+            # spacing 8 and 32.22 dB at spacing 2; the preamble symbol alone 36.67 dB,
+            # bit-identical to the FMCW preset's own LNA input. The LoS tap carries ~93%
+            # of the PDP energy, so ifft(H) is a spike and the DECHIRPED case is the
+            # peaky one. The headline "OFDM makes the front end clip" is false here by
+            # 13 dB, in the wrong direction.
+            "PAPR at the LNA runs BACKWARDS: 36.67 dB for the shipped FMCW preset "
+            "against 23.68 dB for this frame (the preamble symbol is 36.67 dB, "
+            "bit-identical to FMCW's input).",
+        ],
+        do_not_say=[
+            "That OFDM's PAPR drives the front end into its clamp: measured at this "
+            "preset's own operating point it runs BACKWARDS (see the card's numbers).",
+            "Any Doppler or velocity claim: the stored channel is time-invariant "
+            "within a frame, so the symbol axis carries no motion.",
+            "That the BER is a link-budget result: the chain's only noise source is "
+            "the front end, and at this drive the measured SNR is ~86 dB.",
+            "That the array gain is what a real receiver would realise: the weights "
+            "come from a noiseless preamble snapshot (ideal-weights figure).",
+        ],
+    ),
 ]
 
 PRESETS_BY_ID: Dict[str, DemoPreset] = {p.id: p for p in PRESETS}

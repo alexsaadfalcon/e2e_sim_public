@@ -507,16 +507,74 @@ BLOCKS: List[BlockSpec] = [
         enabled_default=False,
         category="source",
         params=[
+            # THE THREE CLASSES, and they are the owner's own three: sensing (FMCW),
+            # comms (OFDM), JSAC (hybrid). A class is the triple (source waveform,
+            # mixing mode, product set) -- `e2e.comms.ofdm_isac.waveform_chain_spec`
+            # holds that table and the runner reads it, so this dropdown is a choice of
+            # ROW rather than a fourth place the classes are described:
+            #   fmcw   dechirp           sensing only
+            #   ofdm   none              comms only (a comms receiver never forms a cube)
+            #   jsac   symbol division   both, from ONE frame, with a resource split
+            # `wideband` is the legacy random-wideband source and stays reachable; it is
+            # not one of the three classes.
             ParamSpec("kind", "Waveform kind", "choice", "fmcw",
-                      choices=["fmcw", "wideband"],
-                      help="Shape of the synthesized transmitted signal."),
+                      choices=["fmcw", "ofdm", "jsac", "wideband"],
+                      help="Which waveform CLASS this run transmits. 'fmcw' = chirp, "
+                           "dechirp mixing, sensing products. 'ofdm' = OFDM grid, no "
+                           "mixing block, comms products only. 'jsac' = the same grid "
+                           "with a symbol-division mixer: image AND constellation from "
+                           "one frame. 'wideband' is the legacy random-wideband source."),
             ParamSpec("bw", "Bandwidth (Hz)", "number", 1e9, step=1e7,
-                      help="Swept bandwidth of the transmitted waveform."),
+                      help="Swept bandwidth of the transmitted waveform (fmcw / "
+                           "wideband only; an OFDM/JSAC frame's span is the stored "
+                           "channel's own frequency grid)."),
             ParamSpec("sample_rate", "Sample rate (Hz)", "number", 3e9, step=1e8),
             ParamSpec("chirp_duration", "Chirp duration (s)", "number", 1e-6, step=1e-7),
+            # --- OFDM / JSAC only. Ignored by the fmcw and wideband classes. ---------
+            ParamSpec("n_symbols", "OFDM symbols per frame", "int", 4, step=1, min=2,
+                      max=16,
+                      help="Symbols in an OFDM/JSAC frame. Symbol 0 is the ALL-PILOT "
+                           "preamble (transmitted grid identically 1): the sensing "
+                           "reference, the per-element channel estimate the beamformer "
+                           "weights come from, and the FMCW bit-parity point. At least "
+                           "one data symbol must follow it, so the floor is 2."),
+            ParamSpec("pilot_spacing", "Pilot spacing P", "int", 8, step=1, min=1,
+                      max=64,
+                      help="THE RESOURCE SPLIT, when Sensing source is 'pilots_only': "
+                           "one subcarrier in P is a deterministic sensing pilot and the "
+                           "other P-1 carry data, so turning this knob moves both "
+                           "products in OPPOSITE directions -- the image's unambiguous "
+                           "window is c/(P x subcarrier spacing) and shrinks by P while "
+                           "the data rate rises. The screen prints both, computed from "
+                           "the frame it ran."),
+            ParamSpec("bits_per_symbol", "Bits per symbol", "choice", 2,
+                      choices=[2, 4, 6],
+                      help="QPSK (2) / 16-QAM (4) / 64-QAM (6). Higher orders raise the "
+                           "data rate and raise the CUBE's noise floor, because symbol "
+                           "division amplifies noise by 1/|X|^2 wherever the "
+                           "transmitted symbol is not constant-modulus -- a closed-form "
+                           "rise the run note quotes for the constellation in use."),
+            ParamSpec("sensing_source", "Sensing source", "choice", "preamble",
+                      choices=["preamble", "pilots_only"],
+                      help="Which subcarriers the JSAC image is formed from. "
+                           "'preamble' = the all-pilot symbol, so the full window and "
+                           "no resource split. 'pilots_only' = the data symbols' pilot "
+                           "comb, which is what makes 'Pilot spacing P' a real "
+                           "sensing-versus-comms trade on one frame."),
+            ParamSpec("combining", "Comms combining", "choice", "mrc",
+                      choices=["mrc", "egc", "element0"],
+                      help="How the 1024 elements are combined before demodulation. "
+                           "'subspace' is deliberately absent here: it would read the "
+                           "tracker's basis, and the tracker sits downstream of the "
+                           "mixing block, so on this path the weights would come from "
+                           "another frame or from nothing."),
         ],
-        blurb=("Synthesizes the actual transmitted waveform (e.g. an FMCW chirp) "
-               "instead of assuming an ideal, distortion-free transmitter."),
+        blurb=("Synthesizes the actual transmitted waveform instead of assuming an "
+               "ideal, distortion-free transmitter -- and it is the ONE branch point on "
+               "the chain: the waveform CLASS decides the mixing block and which half "
+               "of the products exists (see 'Waveform kind'). Everything downstream of "
+               "it -- interconnect, front end, ADC, the one cube -- is the same list on "
+               "all three classes."),
     ),
     BlockSpec(
         id="tx_pa",

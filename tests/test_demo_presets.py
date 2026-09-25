@@ -25,10 +25,13 @@ def test_every_preset_validates():
     validate_all()
 
 
-def test_preset_ids_unique_and_cover_all_five_thrusts():
+def test_preset_ids_unique_and_cover_every_thrust():
+    """Thrust 6 is the JSAC screen (shard 3b, 2026-09-24): the campaign's five thrusts
+    plus the waveform-classes deliverable, which is a sixth screen and not a variant of
+    any of them -- it is the only preset whose mixing block is not a dechirp."""
     ids = [p.id for p in PRESETS]
     assert len(ids) == len(set(ids))
-    assert {p.thrust for p in PRESETS} == {1, 2, 3, 4, 5}
+    assert {p.thrust for p in PRESETS} == {1, 2, 3, 4, 5, 6}
 
 
 @pytest.mark.parametrize("preset", PRESETS, ids=[p.id for p in PRESETS])

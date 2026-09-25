@@ -355,7 +355,19 @@ class BERBlock:
 
     Reads `comm_tx_bits`, `comm_rx_bits`, `comm_data_eq` from the state dict
     (which a `ModemBlock` will have populated) and returns the metrics.
+
+    It reads NO frame -- only those `comm_*` keys -- so it declares the same
+    capabilities as the head that feeds it rather than falling back to
+    `DEFAULT_CAPABILITIES` (single chirp, no MIMO). Without this declaration the block
+    refused an OFDM/JSAC frame by name ("multiple chirps not supported yet ... got
+    shape (1024, 1, 4, 5000)") on a tensor it never touches, which is what it did on
+    the first end-to-end JSAC run (2026-09-24). Declarative only: on every
+    single-symbol chain the check it replaces passed anyway, so no existing number
+    moves.
     """
+
+    frame_capabilities = FrameCapabilities(
+        domain=frames.DOMAIN_CFR, accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
 
     def apply(self, state_dict):
         tx_bits = state_dict["comm_tx_bits"]
