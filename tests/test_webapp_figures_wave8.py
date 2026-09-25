@@ -50,7 +50,7 @@ import pytest
 
 from webapp.pipeline_runner import (
     _C, _SUBSPACE_ERR_MIN_YMAX, _SUBSPACE_ERR_SETTLED_LEVEL, _REFINE_AXIS_MIN_YMAX,
-    _native_range_resolution_m, _range_per_gate_m,
+    _display_range_axis, _range_meta_from_grid,
     figures_from_outputs, panel_text,
 )
 
@@ -100,7 +100,7 @@ def test_range_profile_subline_states_direct_path():
     text = panel_text(fig)
     assert "0 dB = direct path at range 0, not a target" in text
     # The xlabel keeps its own, separately-pinned wording (test_webapp_figures_wave3.py).
-    assert fig.layout.xaxis.title.text == "range (m; 0 = earliest arrival)"
+    assert fig.layout.xaxis.title.text == "excess path (m; 0 = earliest arrival)"
 
 
 def test_range_profile_no_direct_path_note_without_axis_metadata():
@@ -136,26 +136,31 @@ def test_range_az_subline_states_native_resolution_and_ratio():
     })["range_az"]
     text = panel_text(fig)
 
-    gate = _range_per_gate_m(8, 3e9, 64)
-    native = _native_range_resolution_m(3e9)
+    rmeta = _range_meta_from_grid(64, 3e9)
+    _, gate = _display_range_axis(8, rmeta)
+    native = float(rmeta["range_m_per_bin"])
     ratio = gate / native
-    full_window = 64 * native
-    half_window = full_window / 2.0
 
     # "m/gate" substring pinned by this module's own wave-7 tests (and, in webapp/
     # demo_presets.py's screen notes, by test_demo_presets.py -- an unowned file).
     assert f"{gate:.2f} m/gate" in text
-    # New, wave-8 content: native resolution in cm and the display/native ratio.
-    assert f"{native * 100:.0f} cm native" in text
+    # Wave-8 content: native resolution in cm and the display/native ratio. One decimal
+    # now, because the native bin is 9.99 cm on the shipped munich grid and "10 cm" would
+    # be the nominal-B number F97d retracts.
+    assert f"{native * 100:.1f} cm native" in text
     assert f"{ratio:.0f}:1" in text
-    # F96 (wave 11): "unambig N m" read as a physical ceiling; it is half of the
-    # frame's own N-point FFT period, the other half cropped as negative delay.
-    assert f"display 0-{half_window:.0f} m of {full_window:.0f} m unambig " \
-           "(neg.-delay half cropped)" in text
+    # F96/F97d: the window is the frame's own FULL FFT period; the panel shows the
+    # non-negative half the spine keeps, in the bistatic excess-path convention.
+    assert (f"0-{rmeta['range_displayed_m']:.0f} m shown of a "
+            f"{rmeta['range_window_m']:.0f} m window, bistatic excess path") in text
 
 
-def test_native_range_resolution_m_matches_direct_computation():
-    assert _native_range_resolution_m(3e9) == pytest.approx(_C / (2.0 * 3e9))
+def test_the_native_bin_is_c_tau_on_the_endpoint_inclusive_grid():
+    """The old `_native_range_resolution_m` was `c/(2B)` on a NOMINAL B. Both halves of
+    that are retracted: the convention is bistatic (c*tau, ballot 2B) and the grid is
+    endpoint-inclusive (F97d, `B/(N-1)`)."""
+    rmeta = _range_meta_from_grid(64, 3e9)
+    assert rmeta["range_m_per_bin"] == pytest.approx(_C / (64 * (3e9 / 63)))
 
 
 # --------------------------------------------------------------------------------

@@ -48,7 +48,7 @@ import numpy as np
 import pytest
 
 from webapp.pipeline_runner import (
-    _native_unambiguous_range_m, _radar_cube_clip_db, _range_per_gate_m, figures_from_outputs,
+    _display_range_axis, _radar_cube_clip_db, _range_meta_from_grid, figures_from_outputs,
     panel_text,
 )
 
@@ -60,17 +60,44 @@ def _munich_axis_meta(**bins):
 # --------------------------------------------------------------------------------
 # X6/X7: gate calibration is computed, not hand-typed
 # --------------------------------------------------------------------------------
-def test_range_per_gate_m_matches_direct_computation():
-    # n_freqs=64, bins=8 -> per=8, C/(2*3e9)*8
-    C = 2.99792458e8
-    expected = 8 * C / (2.0 * 3e9)
-    assert _range_per_gate_m(8, 3e9, 64) == pytest.approx(expected)
+# REPOINTED 2026-09-24 (one-chain integration). These tests were written against this
+# module's own range calibration (`_range_per_gate_m` / `_native_unambiguous_range_m` /
+# `_native_range_resolution_m` / `_range_axis`), which assumed each product ran its own
+# range FFT over `n_freqs` samples, fftshifted it and displayed the non-negative half.
+# The spine's `RangeTransformBlock` now does that transform once in front of every
+# product and crops the negative half itself, so those six helpers are deleted and the
+# calibration comes from `e2e.chain.receive.range_axis_m` via `_range_meta_from_grid` /
+# `_display_range_axis`. The ASSERTIONS are unchanged in intent -- the panel still states
+# metres per gate, the native resolution, the ratio and the window -- but their expected
+# values are recomputed from the new (single) authority, and the window is now stated in
+# the owner's bistatic excess-path convention (ballot 2B), where every metre is twice the
+# v1.0 number.
 
 
-def test_native_unambiguous_range_m_matches_direct_computation():
+def test_display_gate_matches_the_spines_own_bin_size():
+    """A display gate is `per` of the SPINE's range bins, and the spine's bin is
+    `c*tau` at `tau = 1/(N*df)` on the endpoint-inclusive grid (F97d). Written against
+    `N*df`, never against a nominal `B`, so the `N/(N-1)` factor cannot be baked in."""
     C = 2.99792458e8
-    expected = (64 // 2) * C / (2.0 * 3e9)
-    assert _native_unambiguous_range_m(3e9, 64) == pytest.approx(expected)
+    n_fft, span, bins = 64, 3e9, 8
+    df = span / (n_fft - 1)
+    m_per_bin = C / (n_fft * df)                    # bistatic: c*tau, not c*tau/2
+    rmeta = _range_meta_from_grid(n_fft, span)
+    assert rmeta["range_m_per_bin"] == pytest.approx(m_per_bin)
+    assert rmeta["range_n_bins"] == n_fft // 2 + 1  # the non-negative half, kept once
+    _, gate = _display_range_axis(bins, rmeta)
+    per = -(-rmeta["range_n_bins"] // bins)
+    assert gate == pytest.approx(per * m_per_bin)
+
+
+def test_the_window_is_the_full_fft_period_and_the_display_is_its_kept_half():
+    """F96/F97d: the window is N bins of the transform (not N/2), and what the panel
+    shows is the half the spine keeps -- so the two numbers on the card are a window
+    and a display range, not a limit and a ceiling."""
+    rmeta = _range_meta_from_grid(64, 3e9)
+    assert rmeta["range_window_m"] == pytest.approx(64 * rmeta["range_m_per_bin"])
+    assert rmeta["range_displayed_m"] == pytest.approx(
+        (rmeta["range_n_bins"] - 1) * rmeta["range_m_per_bin"])
 
 
 def test_range_az_subline_states_metres_per_gate_and_unambiguous_range():
@@ -81,15 +108,13 @@ def test_range_az_subline_states_metres_per_gate_and_unambiguous_range():
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
     text = panel_text(fig)
-    expected_gate = _range_per_gate_m(8, 3e9, 64)
-    C = 2.99792458e8
-    expected_full = 64 * C / (2.0 * 3e9)      # N * c/(2B): the full FFT period
-    expected_half = expected_full / 2.0        # the physical half the display shows
+    rmeta = _range_meta_from_grid(64, 3e9)
+    _, expected_gate = _display_range_axis(8, rmeta)
     assert f"{expected_gate:.2f} m/gate" in text
-    # F96: "unambig N m" read as a physical ceiling; it is half of the frame's own
-    # N-point FFT period, the other half cropped as negative delay.
-    assert f"display 0-{expected_half:.0f} m of {expected_full:.0f} m unambig " \
-           "(neg.-delay half cropped)" in text
+    # F96/F97d: the window is the frame's own FULL FFT period, and the panel shows the
+    # non-negative half of it -- in the owner's bistatic excess-path convention.
+    assert (f"0-{rmeta['range_displayed_m']:.0f} m shown of a "
+            f"{rmeta['range_window_m']:.0f} m window, bistatic excess path") in text
 
 
 def test_range_el_subline_states_metres_per_gate_too():
@@ -100,7 +125,7 @@ def test_range_el_subline_states_metres_per_gate_too():
         "range_el": [re_], "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
     text = panel_text(fig)
-    expected_gate = _range_per_gate_m(8, 3e9, 64)
+    _, expected_gate = _display_range_axis(8, _range_meta_from_grid(64, 3e9))
     assert f"{expected_gate:.2f} m/gate" in text
 
 
@@ -126,7 +151,10 @@ def test_range_az_yaxis_title_stays_short_the_calibration_lives_in_the_subline()
     fig = figures_from_outputs({
         "range_az": [ra], "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    assert fig.layout.yaxis.title.text == "range (m)"
+    # "excess path (m)" since the bistatic convention landed (owner ballot 2B); what
+    # this test is about is that the axis title stays SHORT -- the calibration lives in
+    # the caption.
+    assert fig.layout.yaxis.title.text == "excess path (m)"
 
 
 # --------------------------------------------------------------------------------

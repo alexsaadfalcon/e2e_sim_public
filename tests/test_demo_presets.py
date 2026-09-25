@@ -210,9 +210,15 @@ def test_raddetnet_card_discloses_all_four_screened_arms():
 # The specific promises the review extracted
 # ------------------------------------------------------------------------------------
 def test_thrust1_sits_at_the_weak_signal_operating_point():
+    """RE-PICKED on the unified receiver (2026-09-24): the front end normalises by
+    `mean|beat|` where the v1.0 placement normalised by `mean|ifft(CFR)|`, ~2.5 decades
+    apart on this trace, so the shipped 1e-7 rendered BOTH arms as noise (6.7 / 1.0 dB).
+    3e-5 restores the screen's claim (58.3 / 46.6 dB, an 11.7 dB A/B) while staying two
+    decades below where F97b measured the baseband clamp breaking the commutation
+    identity the placement rests on. The sweep is in the preset's own comment."""
     st = apply_preset(PRESETS_BY_ID["thrust1_circuit_knobs"])
     assert st["rffe"]["params"]["scale_mode"] == "legacy"
-    assert st["rffe"]["params"]["signal_scaling"] == pytest.approx(1e-7)
+    assert st["rffe"]["params"]["signal_scaling"] == pytest.approx(3e-5)
     assert st["rffe"]["params"]["lna_bias_ma"] == 8.0 and st["rffe"]["params"]["if_bw_mhz"] == 15.0
 
 
@@ -236,10 +242,13 @@ def test_thrust1_and_2_multipath_number_matches_the_panel():
     wave-10 fix pinned the wrong digit. The card no longer asserts a specific
     digit at all, only that it names the panel's own return alongside the true
     37.1 m delay (F94)."""
+    # BISTATIC (owner ballot 2B, 2026-09-24): the same return is 74.2 m of EXCESS PATH.
+    # F94's 37.1 m is kept beside it, named as the old c*tau/2 convention, so the two
+    # numbers can never be read as two different returns.
     for pid in ("thrust1_circuit_knobs", "thrust2_feature_reduction_error"):
         p = PRESETS_BY_ID[pid]
-        assert any("the ~37 m return the panel names" in s and "37.1 m" in s
-                  for s in p.say), pid
+        assert any("the ~74 m return the panel names" in s and "74.2 m" in s
+                   and "37.1 m" in s for s in p.say), pid
         assert not any("~36 m" in s for s in p.say), pid
 
 
@@ -249,7 +258,7 @@ def test_thrust1_names_the_operating_point_difference_from_thrust2():
     the cause is T1's deliberate legacy signal_scaling, not a different scene --
     name it before the room asks."""
     p = PRESETS_BY_ID["thrust1_circuit_knobs"]
-    assert any("signal_scaling 1e-7" in s and "operating point" in s.lower()
+    assert any("signal_scaling 3e-5" in s and "operating point" in s.lower()
               for s in p.say)
 
 
@@ -301,9 +310,15 @@ def test_munich_cards_disclose_the_cropped_negative_delay_half():
     half is cropped, not absent. Thrust 1's screen note must say so; Thrust 4's
     old "skirt wrapping at the window edge" line for the 120-125 m rise
     (actually the crop edge, not a wrap) is retracted."""
+    # MOVED OFF THE CARD (shard 3, 2026-09-24): the window was TYPED on the screen note,
+    # and by today it was wrong twice -- the convention is bistatic excess path (every
+    # metre doubles) and the grid is endpoint-inclusive (F97d). The panel's caption
+    # computes it from the frame's own freq_plan, which is the only copy there should be;
+    # what is pinned here is that the card no longer carries a second, typed one. The
+    # panel-level pin is tests/test_webapp_figures_wave7.py.
     t1 = PRESETS_BY_ID["thrust1_circuit_knobs"]
-    assert "0-125 m of a 250 m" in t1.screen_note
-    assert "negative-delay half cropped" in t1.screen_note
+    assert "0-125 m of a 250 m" not in t1.screen_note
+    assert "m/gate" not in t1.screen_note
     t4 = PRESETS_BY_ID["thrust4_interconnect_range_profile"]
     assert any("negative-delay side at the crop edge" in s and "f96" in s.lower()
               for s in t4.say)
@@ -336,18 +351,25 @@ def test_wave7_stale_stripe_claim_is_gone(pid):
     p = PRESETS_BY_ID[pid]
     for text in [p.blurb, p.screen_note, *p.say, *p.do_not_say]:
         assert "20-22 m" not in text
-    assert any("37" in s and "68" in s for s in p.say), \
-        f"{pid}: expected the true multipath ranges (37 m / 68 m family) on the card"
+    assert any("74" in s and "136" in s for s in p.say), (
+        f"{pid}: expected the true multipath families on the card, in the bistatic "
+        f"excess-path convention (74.2 m / 136 m = F94's 37.1 m / 68 m at c*tau/2)")
 
 
 @pytest.mark.parametrize("pid", ["thrust1_circuit_knobs", "thrust2_feature_reduction_error"])
-def test_wave7_range_axis_calibration_is_on_the_screen_note(pid):
-    """X6/X7: metres-per-gate and the unambiguous range, computed from the frame's own
-    freq_plan (pipeline_runner._range_per_gate_m / _native_unambiguous_range_m), not
-    hand-typed -- see tests/test_webapp_figures_wave7.py for the panel-level pin."""
+def test_wave7_range_axis_calibration_is_not_typed_on_the_card(pid):
+    """X6/X7 INVERTED (shard 3, 2026-09-24). The requirement was that metres-per-gate and
+    the window be COMPUTED from the frame's own freq_plan rather than hand-typed; the
+    screen note satisfied it by quoting numbers a human had copied out of the panel,
+    which is the same thing one refresh later -- and by today both copies were wrong
+    (bistatic convention, endpoint-inclusive grid). Both live on the panel caption now,
+    which computes them (`pipeline_runner._spine_range_meta`; panel-level pin in
+    tests/test_webapp_figures_wave7.py). What this pins is the ABSENCE of the copy: the
+    failure mode is a card saying 1.00 m/gate over a 250 m window above a panel that says
+    something else."""
     p = PRESETS_BY_ID[pid]
-    assert "m/gate" in p.screen_note or "m per gate" in p.screen_note
-    assert "125 m" in p.screen_note or "unambiguous" in p.screen_note.lower()
+    assert "m/gate" not in p.screen_note and "m per gate" not in p.screen_note
+    assert "125 m" not in p.screen_note
 
 
 def test_thrust2_tracker_k_repicked_for_the_ka_retrace():

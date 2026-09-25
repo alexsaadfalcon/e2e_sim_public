@@ -43,8 +43,8 @@ import pytest
 from webapp import pipeline_runner as pr
 from webapp.pipeline_runner import (_LEGIBLE_COLORBAR_TICK_SIZE, _LEGIBLE_COLORBAR_TITLE_SIZE,
                                     _LEGIBLE_FONT_SIZE, _LEGIBLE_TICK_SIZE,
-                                    _cropped_nonneg_range_axis, _heatmap, _make_legible,
-                                    figures_from_outputs)
+                                    _display_range_axis, _heatmap, _make_legible,
+                                    _range_meta_from_grid, figures_from_outputs)
 
 # --------------------------------------------------------------------------------
 # Item 3: range-Doppler adaptive-clip provenance survives, unclipped, off the title
@@ -112,13 +112,16 @@ def test_range_az_details_states_earliest_arrival_not_bare_range():
         "range_az": [ra],
         "_axis_meta": _munich_axis_meta(range_az_bins=8),
     })["range_az"]
-    assert fig.layout.yaxis.title.text == "range (m)"
+    # "excess path (m)", not "range (m)": the munich link is bistatic and the axis is
+    # excess path length over the line of sight (owner ballot 2B). A bare "range" label
+    # invited both readings of a number that has since doubled.
+    assert fig.layout.yaxis.title.text == "excess path (m)"
     assert "0 = earliest arrival" in pr.panel_text(fig)
 
 
 def test_range_el_details_states_earliest_arrival_too():
     """range_el shares the exact same delay-normalised axis (see the loop in
-    figures_from_outputs building both from one `_range_axis` call per key) -- the
+    figures_from_outputs building both from one `_display_range_axis` call per key) -- the
     caveat is not range-azimuth-specific."""
     torch = pytest.importorskip("torch")
 
@@ -127,7 +130,7 @@ def test_range_el_details_states_earliest_arrival_too():
         "range_el": [re_],
         "_axis_meta": _munich_axis_meta(range_el_bins=8),
     })["range_el"]
-    assert fig.layout.yaxis.title.text == "range (m)"
+    assert fig.layout.yaxis.title.text == "excess path (m)"
     assert "0 = earliest arrival" in pr.panel_text(fig)
 
 
@@ -151,7 +154,7 @@ def test_range_profile_xlabel_states_earliest_arrival_not_bare_range():
         "range_profile_agg": [prof],
         "_axis_meta": _munich_axis_meta(range_profile_bins=8),
     })["range_profile"]
-    assert fig.layout.xaxis.title.text == "range (m; 0 = earliest arrival)"
+    assert fig.layout.xaxis.title.text == "excess path (m; 0 = earliest arrival)"
 
 
 def test_corpus_replay_detector_panel_range_axis_is_not_relabelled():
@@ -187,7 +190,10 @@ def test_range_az_and_range_profile_share_the_same_extent_when_both_present():
     }
     figs = figures_from_outputs(outputs)
 
-    expected = float(_cropped_nonneg_range_axis(8, 3e9, 64).max())
+    # The profile panel is the reference the heatmap is pinned to, and both are
+    # conformed to their own data length (8 rows here) before the extent is read.
+    expected = float(pr._conform_range_axis(
+        _display_range_axis(8, _range_meta_from_grid(64, 3e9))[0], 8).max())
     az_range = figs["range_az"].layout.yaxis.range
     profile_range = figs["range_profile"].layout.xaxis.range
     assert az_range is not None and profile_range is not None

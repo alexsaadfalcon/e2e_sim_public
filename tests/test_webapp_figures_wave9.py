@@ -533,22 +533,26 @@ def test_range_az_states_direct_path_is_invisible_and_the_brightest_visible_retu
     torch = pytest.importorskip("torch")
     import numpy as np
 
-    from webapp.pipeline_runner import _nonnegative_range, _range_axis, _range_per_gate_m
+    from webapp.pipeline_runner import (_conform_range_axis, _display_range_axis,
+                                        _range_meta_from_grid)
 
     # A frame whose peak sits at range 0 (the direct path) and a single, weaker,
     # genuinely resolved return further out -- so "brightest visible" must name
     # something other than the peak itself. freq_span_hz picked (not the wave-8
     # tests' 3e9) so this tiny 8-bin test axis actually extends past
     # `_DIRECT_PATH_EXCLUSION_M`.
+    #
+    # REPOINTED (one-chain integration): the spine's range transform already keeps only
+    # the non-negative half and hands the products an axis ascending from 0, so there is
+    # no fftshifted full axis to crop here any more -- row 0 IS range 0.
     n_freqs, freq_span_hz, bins = 64, 3e8, 8
-    y_full = _range_axis(bins, freq_span_hz, n_freqs)
-    keep = _nonnegative_range(y_full)
-    y_cropped = y_full[keep]
-    orig_rows = np.where(keep)[0]
-    zero_row = orig_rows[int(np.argmin(np.abs(y_cropped)))]
-    beyond = np.where(y_cropped >= _DIRECT_PATH_EXCLUSION_M)[0]
+    rmeta = _range_meta_from_grid(n_freqs, freq_span_hz)
+    y, gate_m = _display_range_axis(bins, rmeta)
+    y = _conform_range_axis(y, bins)
+    zero_row = 0
+    beyond = np.where(y >= _DIRECT_PATH_EXCLUSION_M)[0]
     assert beyond.size, "test geometry must reach past the exclusion band"
-    bright_row = orig_rows[beyond[0]]
+    bright_row = int(beyond[0])
 
     # `_to_numpy_abs_db` transposes before returning (see its own `.T`), so a value
     # placed to land at DISPLAY row `r` after that transpose goes at `z[:, r]`.
@@ -566,7 +570,6 @@ def test_range_az_states_direct_path_is_invisible_and_the_brightest_visible_retu
     # 2026-09-24: a first version divided this module's own declared plot-domain
     # constant by the bin count, which is not the browser's actual rendered pixel
     # height and printed a wrong number against the real PNG).
-    gate_m = _range_per_gate_m(bins, freq_span_hz, n_freqs)
     assert f"0 dB cell at range 0 is one {gate_m:.2g} m gate" in text
     # RETRACTED (wave 9, second hostile-expert read, 2026-09-24, item 4): "not
     # visible" was itself unverifiable and measurably false on some frames
@@ -578,7 +581,7 @@ def test_range_az_states_direct_path_is_invisible_and_the_brightest_visible_retu
     assert "not visible" not in text
     assert " px" not in text
     expected_db = 10 * np.log10(0.1 / 1.0)
-    expected_range = float(y_cropped[beyond[0]])
+    expected_range = float(y[beyond[0]])
     assert (f"brightest visible return: {expected_db:.1f} dB at "
            f"{expected_range:.0f} m") in text
 

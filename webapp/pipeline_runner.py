@@ -1648,6 +1648,11 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         freq_span_hz = (
             float(_p_positive(state, "rffe", "freq_span_hz")) if _enabled(state, "rffe") else 3e9
         )
+    # The spine's own range calibration (see `_spine_range_meta`): read off the
+    # `RangeTransformBlock` that actually ran, never re-derived here.
+    _range_transform = next(
+        (st for st in sim.serial_stages
+         if type(st).__name__ == "RangeTransformBlock"), None)
     outputs["_axis_meta"] = {
         "fft_bins": fft_bins,
         "range_az_bins": range_az_bins,
@@ -1658,6 +1663,7 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
         # True when the values above came from the frames' own v2 metadata (env
         # block freq_plan), not from UI params/fallbacks -- lets the UI say so.
         "from_meta": bool(getattr(environment_block, "freq_plan", None)),
+        **_spine_range_meta(environment_block, _range_transform),
     }
     # How many frames actually ran, and whether the run was cut short by Cancel, so
     # the UI labels partial results as partial.
@@ -1813,85 +1819,165 @@ def _sin_angle_axis(n_bins: int):
     return (np.arange(n_bins) - n_bins // 2) / (n_bins / 2)
 
 
-def _nonnegative_range(axis) -> np.ndarray:
-    """Boolean mask selecting the physical (range >= 0) half of an fftshifted range
-    axis. The delay profile of a causal channel has no negative-delay content; what
-    sits there is sidelobe leakage (measured on munich frame 0, 2026-09-22: 4% of the
-    energy). A signed axis put half of every heatmap on a non-physical range and drew
-    the question "why negative range?" at every screen (owner decision 1A, 2026-09-22).
-    Display only: the products themselves are untouched. A bin-index axis (no
-    metadata) is kept whole."""
-    axis = np.asarray(axis, dtype=float)
-    if axis.size and axis.min() < 0:
-        return axis >= 0
-    return np.ones(axis.shape, dtype=bool)
+def _spine_range_meta(env_block, range_transform):
+    """The ONE range calibration, read off the spine that actually ran.
 
+    THIS REPLACES the six helpers deleted below, which were this module's own
+    re-derivation of an axis the products no longer produce: they assumed each product
+    range-compressed `n_freqs` samples itself, fftshifted, negated and displayed the
+    non-negative half. Under the one-chain contract the spine's `RangeTransformBlock` does
+    the transform ONCE in front of every product and crops the negative-delay half itself,
+    so the old fftshift/negate/crop was applied to an already-cropped cube and the numbers
+    on the card ("1.00 m/gate; display 0-125 m of a 250 m window") described a pipeline
+    that no longer runs.
 
-def _cropped_nonneg_range_axis(n_bins: int, freq_span_hz: float, n_freqs: int) -> np.ndarray:
-    """`_range_axis` restricted to its physical (range >= 0) half, exactly as the
-    range-azimuth/range-elevation/range-profile panels below each crop it -- factored
-    out so those panels can share ONE computed extent (see `range_az_yaxis_extent` in
-    `figures_from_outputs`) instead of each independently computing and cropping the
-    same numbers and then relying on Plotly to autorange them identically (it does
-    not -- see that variable's comment)."""
-    axis = _range_axis(n_bins, freq_span_hz, n_freqs)
-    return axis[_nonnegative_range(axis)]
+    Two things move with it, and both are the owner's calls:
+      * the convention is `bistatic_path` (2026-09-24, ballot 2B: "if bistatic, math
+        should be correct") -- excess path length c*tau, so every metre DOUBLES against
+        the v1.0 c*tau/2 numbers;
+      * the grid spacing is the frame's own endpoint-inclusive `(stop-start)/(N-1)`
+        (F97d), not `B/N` -- 0.02 %, ~0.45 m at the far end of the munich window.
 
-
-def _range_per_gate_m(n_bins: int, freq_span_hz: float, n_freqs: int) -> float:
-    """Physical range (m) spanned by ONE display gate -- the same `per = ceil(n_freqs
-    / n_bins)` grouping `_range_axis` uses, factored out so a card/subline can quote
-    "X m per gate" without re-deriving `_range_axis`'s own math (wave 7, X6/X7: no
-    panel stated this, so a screen's on-screen features had no stated calibration)."""
-    per = -(-n_freqs // n_bins)               # ceil(n_freqs / n_bins); matches _power_bin
-    return per * _C / (2.0 * freq_span_hz)
-
-
-def _native_unambiguous_range_m(freq_span_hz: float, n_freqs: int) -> float:
-    """One-sided unambiguous range (m) of the frame's OWN frequency sampling --
-    independent of the display bin count, unlike `_range_per_gate_m`. This is
-    `(n_freqs // 2)` native (per=1) range steps, matching the generator's own stored
-    `meta['unambiguous_range_m']` exactly for the munich Ka trace (n_freqs=5000,
-    freq_span_hz=3e9 -> 124.9135 m, F94) -- verified against that field rather than
-    re-derived from a radar-equation reference, since `_range_axis` already fixes the
-    zero-gate/fftshift convention this must agree with."""
-    return (n_freqs // 2) * _C / (2.0 * freq_span_hz)
-
-
-def _native_range_resolution_m(freq_span_hz: float) -> float:
-    """Native (un-binned) round-trip range resolution (m): c / (2*B) -- what ONE raw
-    frequency sample is worth in range, i.e. `_range_per_gate_m` at `per=1`, before
-    display binning groups `per` of them into a gate (wave 8, W13: nothing on screen
-    stated the ratio between a display gate and the frame's own native resolution)."""
-    return _C / (2.0 * freq_span_hz)
-
-
-def _range_axis(n_bins: int, freq_span_hz: float, n_freqs: int):
-    """fftshifted range DISPLAY-gate index -> physical range (meters).
-
-    The range blocks compress over the FULL frequency band (all n_freqs samples
-    spanning bandwidth freq_span_hz = B, sample spacing df = B / n_freqs, so the
-    native round-trip range-per-bin is c / (2*B)), then power-bin the n_freqs
-    fftshifted native range bins down to n_bins display gates. This calibration MUST
-    mirror e2e.blocks._power_bin exactly: it groups per = ceil(n_freqs / n_bins)
-    native bins into each gate, so range-per-gate is per * c / (2*B), NOT the
-    exact-ratio c*n_freqs / (2*B*n_bins) (they differ whenever n_bins does not divide
-    n_freqs -- the production case n_freqs~5000, n_bins=256 has per=20 vs 19.53).
-
-    Zero range: the block fftshifts the native range axis (zero-delay DC bin -> index
-    n_freqs // 2) BEFORE power-binning (which pads at the high-index end), so the
-    zero-range gate is (n_freqs // 2) // per, which is n_bins // 2 only when n_bins
-    divides n_freqs. Deriving both from `per` keeps the axis aligned in every case.
-
-    Sign: the range blocks take a FORWARD fft over frequency, so a physical delay
-    +tau (a target at +R) lands on the NEGATIVE side of the fftshifted axis; the
-    axis is negated here so physical targets read at positive range.
+    Computed by the SAME functions the spine uses (`delta_f_from_freq_plan` /
+    `range_axis_m`), so there is one authority for the number and this module reads it.
+    Returns {} for a frame with no plan; the caller then falls back to
+    `_range_meta_from_grid` or to bin indices, rather than quoting metres off an
+    invented grid.
     """
-    per = -(-n_freqs // n_bins)               # ceil(n_freqs / n_bins); matches _power_bin
-    range_per_gate = _range_per_gate_m(n_bins, freq_span_hz, n_freqs)
-    zero_gate = (n_freqs // 2) // per
-    return -(np.arange(n_bins) - zero_gate) * range_per_gate
+    try:
+        from e2e.chain.receive import delta_f_from_freq_plan, range_axis_m
+    except ImportError:
+        return {}
+    plan = getattr(env_block, "freq_plan", None)
+    if not plan:
+        return {}
+    try:
+        delta_f = float(delta_f_from_freq_plan(plan))
+        n_fft = int(plan["num_freqs"])
+    except Exception:
+        return {}
+    convention = getattr(range_transform, "convention", None) or "bistatic_path"
+    cropped = bool(getattr(range_transform, "crop_negative_delay", True))
+    n_keep = n_fft // 2 + 1 if cropped else n_fft
+    axis = range_axis_m(n_keep, delta_f, n_fft, convention)
+    if axis is None or len(axis) < 2:
+        return {}
+    per_bin = float(axis[1] - axis[0])
+    return {
+        "range_m_per_bin": per_bin,
+        "range_convention": convention,
+        "range_cropped": cropped,
+        "range_n_fft": n_fft,
+        "range_n_bins": int(n_keep),
+        "range_delta_f_hz": delta_f,
+        # The FULL unambiguous window in this convention (N bins of the uncropped
+        # transform) and the part of it the cropped cube actually shows.
+        "range_window_m": float(per_bin * n_fft),
+        "range_displayed_m": float(per_bin * (n_keep - 1)),
+    }
 
+
+def _range_meta_from_grid(n_freqs, freq_span_hz, convention="bistatic_path",
+                          cropped=True):
+    """`_spine_range_meta`'s numbers from a bare (band, sample count) pair.
+
+    For a caller with no `freq_plan` to read -- a legacy pkl, or a hand-built outputs dict
+    in a test. The grid is taken as ENDPOINT-INCLUSIVE, `span/(N-1)`, because that is what
+    the generator writes (F97d): two different spacings for one frame is exactly the
+    0.02 % error that finding is about.
+    """
+    try:
+        from e2e.chain.receive import range_axis_m
+    except ImportError:
+        return {}
+    try:
+        n_fft = int(n_freqs)
+        span = float(freq_span_hz)
+    except (TypeError, ValueError):
+        return {}
+    if n_fft < 2 or not span > 0:
+        return {}
+    delta_f = span / (n_fft - 1)
+    n_keep = n_fft // 2 + 1 if cropped else n_fft
+    axis = range_axis_m(n_keep, delta_f, n_fft, convention)
+    if axis is None or len(axis) < 2:
+        return {}
+    per_bin = float(axis[1] - axis[0])
+    return {
+        "range_m_per_bin": per_bin,
+        "range_convention": convention,
+        "range_cropped": bool(cropped),
+        "range_n_fft": n_fft,
+        "range_n_bins": int(n_keep),
+        "range_delta_f_hz": delta_f,
+        "range_window_m": float(per_bin * n_fft),
+        "range_displayed_m": float(per_bin * (n_keep - 1)),
+    }
+
+
+def _conform_range_axis(axis, n_rows):
+    """Make a display axis exactly `n_rows` long, extending at its own step if short.
+
+    `_power_bin` returns `ceil(n_range / per)` gates, which is `n_bins` only when `per`
+    divides evenly -- and a hand-built outputs dict in a test need not match either. The
+    axis is uniform by construction, so extending it is arithmetic, not interpolation of
+    data. Loud only in the sense that it never silently pairs a 7-gate axis with an
+    8-row map: it conforms, which is what every caller then relies on.
+    """
+    axis = np.asarray(axis, dtype=float)
+    n_rows = int(n_rows)
+    if axis.size == n_rows:
+        return axis
+    if axis.size > n_rows:
+        return axis[:n_rows]
+    step = float(axis[1] - axis[0]) if axis.size > 1 else 1.0
+    start = float(axis[0]) if axis.size else 0.0
+    return start + step * np.arange(n_rows)
+
+
+def _display_range_axis(n_bins, rmeta):
+    """Display-gate index -> metres, for a product that power-binned the SPINE's cube.
+
+    `e2e.blocks._power_bin` groups `per = ceil(n_range / n_bins)` native bins into each
+    gate and pads at the high-index end, and the spine's cube starts at bin 0 = zero
+    excess delay with no fftshift -- so the axis is simply `gate * per * m_per_bin`,
+    ascending, with no negative half to crop. Returns (axis, metres_per_gate).
+    """
+    native = int(rmeta["range_n_bins"])
+    per = -(-native // max(1, int(n_bins)))
+    m_per_gate = per * float(rmeta["range_m_per_bin"])
+    n = min(int(n_bins), -(-native // per))
+    return np.arange(n) * m_per_gate, m_per_gate
+
+
+# SUPERSEDED AND DELETED (2026-09-24, one-chain integration): `_nonnegative_range`,
+# `_cropped_nonneg_range_axis`, `_range_per_gate_m`, `_native_unambiguous_range_m`,
+# `_native_range_resolution_m` and `_range_axis`. Together they were this module's own
+# range calibration, written when each product ran its OWN range FFT over `n_freqs`
+# samples, fftshifted, negated and displayed the non-negative half. The spine's
+# `RangeTransformBlock` now does the transform once in front of every product and crops
+# the negative-delay half itself, so all six described a pipeline that no longer runs --
+# and `_native_unambiguous_range_m`'s `B/n_freqs` carried the F97d off-by-one besides.
+# `_spine_range_meta` / `_range_meta_from_grid` / `_display_range_axis` replace them, and
+# the metres come from `e2e.chain.receive.range_axis_m`, which is the one authority.
+
+#: How the y/x axis of a range panel is labelled, per convention. The owner's 2026-09-24
+#: ballot answer 2B ("if bistatic, math should be correct") makes `bistatic_path` the
+#: default, and the label has to SAY so: the munich link is bistatic (TX at [8.5,21,27],
+#: RX array at [45,90,1.5], ~82 m apart) with `normalize_delays=True`, so what the axis
+#: measures is EXCESS PATH LENGTH c*tau over the line of sight -- not a monostatic range,
+#: and not a distance from the array. An axis labelled just "range (m)" invites both
+#: readings, and every metre on it is twice the v1.0 number.
+_RANGE_AXIS_LABEL = {
+    "bistatic_path": "excess path (m)",
+    "monostatic": "range (m)",
+}
+
+#: The one-clause version of the same fact, for a panel caption.
+_RANGE_CONVENTION_PHRASE = {
+    "bistatic_path": "bistatic excess path (c*tau)",
+    "monostatic": "equivalent monostatic range (c*tau/2)",
+}
 
 #: Podium-distance legibility floor (fresh-context review, 2026-09-22: every figure's
 #: browser-default 12-13 px text reads fine on a laptop and fails at the ~2 m a demo
@@ -2694,13 +2780,22 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
     # profile panel is not part of this run or axis metadata is unavailable: there is
     # then no extent to share.
     range_az_yaxis_extent = None
-    if outputs.get("range_profile_agg") and n_freqs and freq_span_hz:
+    # The spine's calibration when the run recorded one; otherwise derived from whatever
+    # band/point count the caller does have (a legacy pkl, a hand-built outputs dict).
+    _rmeta = meta if meta.get("range_m_per_bin") else (
+        _range_meta_from_grid(n_freqs, freq_span_hz) if (n_freqs and freq_span_hz) else None)
+    _rmeta = _rmeta or None
+    if outputs.get("range_profile_agg") and _rmeta:
         _bins_rp_for_extent = meta.get("range_profile_bins")
         if _bins_rp_for_extent:
-            _cropped_for_extent = _cropped_nonneg_range_axis(
-                _bins_rp_for_extent, freq_span_hz, n_freqs)
-            if _cropped_for_extent.size:
-                range_az_yaxis_extent = float(_cropped_for_extent.max())
+            _axis_for_extent, _ = _display_range_axis(_bins_rp_for_extent, _rmeta)
+            # Conformed to the profile's OWN row count, exactly as the profile panel
+            # below does it -- otherwise the heatmap is pinned to an extent the profile
+            # never draws, which is the mismatch this shared extent exists to remove.
+            _prof_rows = int(outputs["range_profile_agg"][-1].shape[0])
+            _axis_for_extent = _conform_range_axis(_axis_for_extent, _prof_rows)
+            if _axis_for_extent.size:
+                range_az_yaxis_extent = float(_axis_for_extent.max())
 
     for key, title, qualifier, aperture_label in [
         ("range_az", "Range-azimuth power", "non-coherent over elevation", "azimuth sin(θ)"),
@@ -2709,12 +2804,12 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         if outputs.get(key):
             bins = meta.get(f"{key}_bins") or outputs[key][-1].shape[0]
             x = _sin_angle_axis(bins)
-            if n_freqs and freq_span_hz:
+            if _rmeta:
                 # Full-band range compression + power-binning to `bins` gates means
                 # the physical range axis is well-defined for any bins (see
                 # _range_axis); only needs the frame's band + freq-sample count.
-                y = _range_axis(bins, freq_span_hz, n_freqs)
-                ylabel = "range (m)"
+                y, _gate_m = _display_range_axis(bins, _rmeta)
+                ylabel = _RANGE_AXIS_LABEL[_rmeta["range_convention"]]
                 # 0 is not "no range" here: the .pkl frames these two panels ever run
                 # on (the plain frequency-domain path -- see CLAUDE.md's classic-
                 # products/corpus-mode split) were generated with Sionna's
@@ -2747,8 +2842,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # frame's own NATIVE frequency-sampling resolution, or how far the axis
                 # can go before it wraps. Computed from this frame's own freq_plan +
                 # display bin count, never hand-typed.
-                _native_m = _native_range_resolution_m(freq_span_hz)
-                _gate_m = _range_per_gate_m(bins, freq_span_hz, n_freqs)
+                _native_m = float(_rmeta["range_m_per_bin"])
                 _ratio = _gate_m / _native_m if _native_m > 0 else float("nan")
                 # F96 (notes/ESTABLISHED_FACTS.md): the old "unambig 125 m" wording read
                 # as a physical range limit, but it is HALF of the frame's own N-point
@@ -2759,12 +2853,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
                 # frame's own freq_plan, never typed: the full period is N*c/(2B) (the
                 # native per-bin resolution above times the frame's own n_freqs), and the
                 # displayed half is exactly that divided by 2.
-                _full_window_m = n_freqs * _native_m
-                _half_window_m = _full_window_m / 2.0
+                _full_window_m = float(_rmeta["range_window_m"])
+                _displayed_m = float(_rmeta["range_displayed_m"])
                 gate_note = (
-                    f"; {_gate_m:.2f} m/gate ({_native_m * 100:.0f} cm native, "
-                    f"{_ratio:.0f}:1); display 0-{_half_window_m:.0f} m of "
-                    f"{_full_window_m:.0f} m unambig (neg.-delay half cropped)")
+                    f"; {_gate_m:.2f} m/gate ({_native_m * 100:.1f} cm native, "
+                    f"{_ratio:.0f}:1); 0-{_displayed_m:.0f} m shown of a "
+                    f"{_full_window_m:.0f} m window, "
+                    f"{_RANGE_CONVENTION_PHRASE[_rmeta['range_convention']]}")
             else:
                 # Metadata unavailable (e.g. a hand-built outputs dict): fall back
                 # to raw display-gate indices.
@@ -2781,10 +2876,14 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             dyn_range_db = [_peak_minus_median_db(d) for d in
                             (_to_numpy_abs_db(f) for f in outputs[key])]
             frames_db = [_to_numpy_abs_db(f) for f in outputs[key]]
-            keep = _nonnegative_range(y)
-            if frames_db[-1].shape[0] == keep.size:
-                frames_db = [f[keep] for f in frames_db]
-                y = y[keep]
+            # NO CROP HERE ANY MORE. The spine's range transform already keeps only the
+            # non-negative-delay half (`crop_negative_delay`), so the axis this module
+            # builds is ascending from 0 and every gate on it is physical. The old
+            # fftshift-then-crop was the second half of a calibration the products stopped
+            # doing (see `_spine_range_meta`); applying it to an already-cropped cube threw
+            # away the far half of the window a second time.
+            if y.size and frames_db:
+                y = _conform_range_axis(y, frames_db[-1].shape[0])
             # Item 7 (coordinator addendum, wave 9, 2026-09-23, measured on
             # thrust1_circuit_knobs frame 5): the 0 dB reference cell (range 0, the
             # direct-path/leakage gate the caption above already names) renders as
@@ -2796,7 +2895,7 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             # exactly like `earliest_arrival_note` above (a physical range axis
             # only): this never fires on the corpus-replay radar_cube/detector
             # panels, which use a different, absolute range axis.
-            if n_freqs and freq_span_hz and y.size:
+            if _rmeta and y.size:
                 _beyond_direct_path = y >= _DIRECT_PATH_EXCLUSION_M
                 # RETRACTED (coordinator re-check, same wave, 2026-09-24): this used
                 # to also quote a "~N px" figure from `_HEATMAP_PLOT_DOMAIN_HEIGHT /
@@ -2909,12 +3008,13 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
             prof = prof.detach().cpu().numpy()
         prof = np.asarray(prof, dtype=float)
         bins_rp = meta.get("range_profile_bins") or prof.shape[0]
-        if n_freqs and freq_span_hz:
-            x = _range_axis(bins_rp, freq_span_hz, n_freqs)
+        if _rmeta:
+            x, _ = _display_range_axis(bins_rp, _rmeta)
             # Same "0 = earliest arrival" caveat as the range-azimuth/range-elevation
             # panels above (see that loop's comment) -- this panel only ever runs on
             # the same delay-normalised munich frames, never a corpus-replay frame.
-            xlabel = "range (m; 0 = earliest arrival)"
+            xlabel = (_RANGE_AXIS_LABEL[_rmeta["range_convention"]]
+                      .replace("(m", "(m; 0 = earliest arrival", 1))
             # Wave 8, W2: state the SAME 0 dB = direct-path caveat the range-azimuth/
             # range-elevation sublines now carry (see that loop) -- this panel's own
             # 0 dB point (range 0) is exactly that leakage band.
@@ -2926,9 +3026,9 @@ def figures_from_outputs(outputs: Dict[str, Any]) -> Dict[str, go.Figure]:
         peak = max(float(prof.max()), 1e-12)
         prof_db = 10 * np.log10(prof / peak + 1e-12)
         x = np.asarray(x)
-        keep = _nonnegative_range(x)
-        if prof_db.shape[0] == keep.size:
-            x, prof_db = x[keep], prof_db[keep]
+        # Already the non-negative half -- see the range_az loop's note.
+        if x.size:
+            x = _conform_range_axis(x, prof_db.shape[0])
         fig = go.Figure(data=go.Scatter(x=x, y=prof_db, mode="lines"))
         if x.size:
             # Explicit, rather than Scatter's own autorange padding -- this panel IS

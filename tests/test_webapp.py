@@ -829,21 +829,26 @@ def test_figures_from_outputs_labels_axes_with_physical_units():
     assert figs["fft"].data[0].colorbar.title.text is None
     assert panel_caption(figs["fft"]) == "dB rel. peak · clipped at -40.0 dB"
 
-    # Negated: the range blocks use a FORWARD fft over frequency, so a physical
-    # delay +tau lands on the negative fftshifted side; the axis flips sign so
-    # targets read at positive range.
-    expected_range = -(np.arange(bins) - bins // 2) * (2.99792458e8 / (2.0 * 3e9))
+    # ASCENDING FROM ZERO, not fftshifted-and-negated. The spine's RangeTransformBlock
+    # keeps only the non-negative-delay half and hands every product a cube whose bin 0
+    # is zero excess delay, so the display axis is `gate * per * m_per_bin` -- the
+    # fftshift/negate/crop this test used to assert belonged to the products' own range
+    # FFTs, which the one-chain contract deleted. The metre itself is the bistatic excess
+    # path c*tau (owner ballot 2B) on the endpoint-inclusive grid (F97d), which is why the
+    # expectation is computed by the same helper the figure code uses rather than retyped.
+    from webapp.pipeline_runner import (_conform_range_axis, _display_range_axis,
+                                        _range_meta_from_grid)
+    _axis, _ = _display_range_axis(bins, _range_meta_from_grid(bins, 3e9))
+    expected_range = _conform_range_axis(_axis, bins)
     np.testing.assert_allclose(figs["range_az"].data[0].x, expected_u)
-    np.testing.assert_allclose(figs["range_az"].data[0].y,
-                               expected_range[expected_range >= 0])  # display: range >= 0 (1A)
+    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range)
     assert figs["range_az"].layout.xaxis.title.text == "azimuth sin(θ)"
-    assert figs["range_az"].layout.yaxis.title.text == "range (m)"
+    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
 
     np.testing.assert_allclose(figs["range_el"].data[0].x, expected_u)
-    np.testing.assert_allclose(figs["range_el"].data[0].y,
-                               expected_range[expected_range >= 0])
+    np.testing.assert_allclose(figs["range_el"].data[0].y, expected_range)
     assert figs["range_el"].layout.xaxis.title.text == "elevation sin(θ)"
-    assert figs["range_el"].layout.yaxis.title.text == "range (m)"
+    assert figs["range_el"].layout.yaxis.title.text == "excess path (m)"
 
 
 def test_figures_from_outputs_range_axis_valid_for_any_bins():
@@ -867,11 +872,12 @@ def test_figures_from_outputs_range_axis_valid_for_any_bins():
         },
     }
     figs = figures_from_outputs(outputs)
-    range_per_gate = 2.99792458e8 * n_freqs / (2.0 * freq_span_hz * bins)
-    expected_range = -(np.arange(bins) - bins // 2) * range_per_gate
-    # Display shows the physical half only (owner decision 1A, 2026-09-22).
-    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range[expected_range >= 0])
-    assert figs["range_az"].layout.yaxis.title.text == "range (m)"
+    from webapp.pipeline_runner import (_conform_range_axis, _display_range_axis,
+                                        _range_meta_from_grid)
+    _axis, _ = _display_range_axis(bins, _range_meta_from_grid(n_freqs, freq_span_hz))
+    np.testing.assert_allclose(figs["range_az"].data[0].y,
+                               _conform_range_axis(_axis, bins))
+    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
 
     # No metadata at all (e.g. a hand-built outputs dict): fall back to raw gates.
     outputs_no_meta = {"range_el": [torch.zeros((bins, bins), dtype=torch.complex64)]}
@@ -881,28 +887,34 @@ def test_figures_from_outputs_range_axis_valid_for_any_bins():
 
 
 def test_range_axis_mirrors_power_bin_grouping_when_nondivisible():
-    """When bins does not divide n_freqs (the production case), the range axis must
-    mirror e2e.blocks._power_bin's ceil-grouping: range-per-gate = per*c/(2B) with
-    per = ceil(n_freqs/bins), and the zero-range gate is (n_freqs//2)//per, not
-    bins//2. (The exact-multiple case in the test above cannot catch this.)"""
+    """When `bins` does not divide the cube's range-bin count (the production case:
+    2501 native bins into 256 gates), the axis must mirror `e2e.blocks._power_bin`'s
+    CEIL grouping -- `per = ceil(n_range / bins)` native bins per gate -- not the exact
+    ratio. The exact-multiple case above cannot catch this.
+
+    What changed with the one chain: `n_range` is the SPINE's cube length (the kept
+    non-negative half, `n_fft//2 + 1`), not `n_freqs`, and there is no zero-range gate to
+    locate because bin 0 IS zero excess delay."""
     torch = pytest.importorskip("torch")
     import math
     import numpy as np
-    from webapp.pipeline_runner import figures_from_outputs
+    from webapp.pipeline_runner import (_conform_range_axis, _display_range_axis,
+                                        _range_meta_from_grid, figures_from_outputs)
 
-    bins, n_freqs, freq_span_hz = 8, 100, 3e9   # 100 % 8 != 0
+    bins, n_freqs, freq_span_hz = 8, 100, 3e9   # 51 kept bins % 8 != 0
     outputs = {
         "range_az": [torch.zeros((bins, bins), dtype=torch.complex64)],
         "_axis_meta": {"range_az_bins": bins, "n_freqs": n_freqs, "freq_span_hz": freq_span_hz},
     }
     figs = figures_from_outputs(outputs)
-    per = math.ceil(n_freqs / bins)
-    range_per_gate = per * 2.99792458e8 / (2.0 * freq_span_hz)
-    zero_gate = (n_freqs // 2) // per
-    assert zero_gate != bins // 2
-    expected_range = -(np.arange(bins) - zero_gate) * range_per_gate
-    np.testing.assert_allclose(figs["range_az"].data[0].y, expected_range[expected_range >= 0])
-    assert figs["range_az"].layout.yaxis.title.text == "range (m)"
+    rmeta = _range_meta_from_grid(n_freqs, freq_span_hz)
+    per = math.ceil(rmeta["range_n_bins"] / bins)
+    assert rmeta["range_n_bins"] % bins != 0, "this test needs a non-divisible case"
+    axis, gate = _display_range_axis(bins, rmeta)
+    assert gate == pytest.approx(per * rmeta["range_m_per_bin"])
+    np.testing.assert_allclose(figs["range_az"].data[0].y,
+                               _conform_range_axis(axis, bins))
+    assert figs["range_az"].layout.yaxis.title.text == "excess path (m)"
 
 
 def test_placeholder_figure_is_plotly_figure():

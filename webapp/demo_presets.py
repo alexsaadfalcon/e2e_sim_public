@@ -283,8 +283,26 @@ PRESETS: List[DemoPreset] = [
         thrust=1,
         n_steps=5,
         overrides=_merge(
+            # DRIVE LEVEL RE-PICKED ON THE UNIFIED RECEIVER (2026-09-24, shard 3).
+            # The front end now acts on the SAMPLED BEAT RECORD and normalises by
+            # `mean|beat|`, where the v1.0 placement normalised by `mean|ifft(CFR)|`.
+            # On a trace whose line-of-sight tap carries ~93 % of the PDP energy those
+            # two references differ by ~2.5 decades, so the shipped 1e-7 put the signal
+            # far below the front end's own floor and BOTH arms rendered as noise
+            # (measured: peak-median 6.7 dB / 1.0 dB, a 5.7 dB A/B -- the screen's whole
+            # claim gone). Measured sweep on munich_ka frame 0, arms 8 mA / 0.5 mA:
+            #   1e-7  6.65 / 0.98  (delta 5.67)      1e-4  67.06 / 56.88 (10.18)
+            #   1e-6 29.07 / 17.03 (12.04)           3e-4  70.57 / 65.38 ( 5.19)
+            #   1e-5 49.04 / 37.13 (11.91)           1e-3  71.23 / 70.27 ( 0.96)
+            #   3e-5 58.33 / 46.64 (11.69)           1e-2  71.39 / 71.31 ( 0.08)
+            # 3e-5 is the pick: the A/B is still "about twelve dB" (11.69), the map has
+            # 58 dB of dynamic range to show it in, and the drive sits two decades below
+            # where F97b measured the baseband clamp starting to break the commutation
+            # identity this placement rests on (1e-4 -> 1.3e-5 relative error; 1e-2 ->
+            # 0.14). Over the preset's 5 frames the pair is 58.31-58.34 / 46.60-46.64 dB,
+            # i.e. stable to +-0.02 dB, so it is not a run-to-run drifting statistic.
             {"rffe": {"enabled": True, "params": {
-                "scale_mode": "legacy", "signal_scaling": 1e-7,
+                "scale_mode": "legacy", "signal_scaling": 3e-5,
                 "lna_bias_ma": 8.0, "if_bw_mhz": 15.0}}},
             {"interconnect": {"enabled": False}},
             _only_products("range_az"),
@@ -306,9 +324,7 @@ PRESETS: List[DemoPreset] = [
         blurb=("Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) "
                "share one colour scale down to the deeper floor, so arm B's "
                "background reads visibly brighter, about twelve dB by the "
-               "printed numbers; streaks match. Signal sits "
-               "just below input-referred noise (1e-7 vs 1.36e-7 V; "
-               "SNR recovered by coherent gain). Manual second knob: IF "
+               "printed numbers; streaks match. Manual second knob: IF "
                "bandwidth 15 -> 50 MHz."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
@@ -344,10 +360,16 @@ PRESETS: List[DemoPreset] = [
                      "when two arms run, they share one colour scale down to the "
                      "deeper arm's floor (the printed zmin), and the 0.5 mA arm's "
                      "background reads visibly brighter than the 8 mA arm's, about "
-                     "twelve dB by the printed numbers, streaks matching; range "
-                     "(m; 0 = earliest arrival; 1.00 m/gate; display 0-125 m of a 250 m "
-                     "unambiguous window, the negative-delay half cropped); all 1024 "
+                     "twelve dB by the printed numbers, streaks matching; all 1024 "
                      "elements share one front-end config; " + _ARRAY_DISCLOSURE),
+        # THE RANGE CLAUSE IS GONE FROM HERE, deliberately (shard 3, 2026-09-24). It
+        # used to read "1.00 m/gate; display 0-125 m of a 250 m unambiguous window" --
+        # typed, and by today wrong twice: the convention is the owner's bistatic excess
+        # path (ballot 2B), which doubles the window to 499.6 m with 249.8 m shown, and
+        # the grid is endpoint-inclusive (F97d). The panel's own caption COMPUTES all of
+        # it from the frame's freq_plan (`pipeline_runner._spine_range_meta`), so this
+        # card now has no second, typed copy to drift from it. One authority per
+        # question -- and a metre on a card is exactly the kind of number that drifts.
         say=[
             # wave 11 (2026-09-24): runbook.py's "While it runs, say" line is
             # preset.say[0] -- it must carry the shared-colour-scale story, not
@@ -356,8 +378,16 @@ PRESETS: List[DemoPreset] = [
             # budget).
             "With the shared colour scale, arm B's background reads about "
             "twelve dB brighter than arm A's (+-0.6-0.9 dB); streaks match.",
-            "At default signal level (1e-5) these knobs do nothing (0.5 dB, under "
-            "the 40 dB floor).",
+            # RETRACTED as written (shard 3, 2026-09-24): "default signal level (1e-5)"
+            # named a drive that is no longer the default and no longer means the same
+            # thing -- on the beat-record placement 1e-5 is a WORKING point (49.0 /
+            # 37.1 dB, an 11.9 dB A/B), not a level where the knobs do nothing. What is
+            # still true, and is the point the bullet was making, is that the knobs go
+            # quiet once the drive is far enough above the front end's own floor:
+            # measured on this preset, the A/B collapses to 0.96 dB at 1e-3 and 0.08 dB
+            # at 1e-2.
+            "Drive it harder and these knobs stop mattering: the A/B is 0.96 dB "
+            "at 1e-3 and 0.08 dB at 1e-2, against 11.7 dB at 3e-5 (2026-09-24).",
             "Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB "
             "leaves the attenuator (4->8 mA: +1.6 dB).",
             "No trade-off today: nothing clips; the IF filter only sets noise "
@@ -372,9 +402,14 @@ PRESETS: List[DemoPreset] = [
             # wave 12 (2026-09-24, item 1.4): "~36 m on the panel" read as "the
             # panel prints 36" when it prints 37 -- reworded to name what the
             # panel actually shows without asserting a specific digit.
-            "Range 0-2 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); multipath: the ~37 m return the panel names "
-            "(37.1 m true delay, F94) and 68 m.",
+            # BISTATIC METRES (owner ballot 2B, 2026-09-24): the munich link is
+            # bistatic and the axis is EXCESS PATH LENGTH c*tau, so F94's 37.1 m and
+            # 68 m families read 74.2 m and 136 m of excess path. Same returns, same
+            # delays, one convention -- and the panel's axis now says "excess path (m)"
+            # so the card and the screen cannot disagree about which quantity it is.
+            "Excess path 0-4 m is not a target: it is the direct path the display "
+            "normalises to (0 dB); multipath: the ~74 m return the panel names "
+            "(74.2 m; F94's 37.1 m at c*tau/2) and 136 m.",
             # wave 10 (2026-09-24): merged the old "noise figure" and "what
             # end-to-end buys over Friis" bullets -- both turned on the same 0.17 dB
             # agreement figure.
@@ -384,8 +419,14 @@ PRESETS: List[DemoPreset] = [
             "effect. Absolute dBm is NOT quotable: input level is free.",
             "Channel mismatch: all 1024 elements share one config; mismatch is "
             "structurally zero; a per-element spread is a small change.",
+            # Re-derived on the unified receiver: the spine's cube bin is 9.99 cm of
+            # EXCESS PATH (c*tau on the endpoint-inclusive grid, F97d -- not the 10 cm a
+            # nominal 3 GHz would give), and the display bins 2501 of them 10:1 into
+            # 1.00 m gates. The old line said "5 cm, binned 20:1" -- the same physical
+            # resolution stated in the other convention over the uncropped 5000-bin
+            # transform.
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; range resolution 5 cm, binned 20:1 to 1 m "
+            "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24): peak-to-median caveat (also on Thrust 2's card) --
             # applies here too, since this is exactly the statistic the LNA-bias knob
@@ -405,7 +446,7 @@ PRESETS: List[DemoPreset] = [
             # wave 10 (2026-09-24, item 4.1, hostile round 9): the noise floor
             # moves 11 dB between this slide and the next; name the cause before
             # the room asks.
-            "Thrust 1 runs at signal_scaling 1e-7 (legacy mode): peak-median ~66 "
+            "Thrust 1 runs at signal_scaling 3e-5 (legacy mode): peak-median ~58 "
             "dB is ~11 dB below Thrust 2's ~77 dB -- a different operating "
             "point.",
             # wave 12 (2026-09-24, item 1.5): the panel subtitle and its
@@ -510,8 +551,8 @@ PRESETS: List[DemoPreset] = [
         # wave 12 (2026-09-24, item 1.6): the note still named the pre-wave-11
         # per-arm adaptive clip; the panels now share one colour scale instead.
         screen_note=("range-azimuth and range-elevation images barely move under the "
-                     "shared colour scale (statistics printed on each; range m/gate "
-                     "and unambiguous range on the panel); the tracker error moves "
+                     "shared colour scale (statistics printed on each; the range "
+                     "calibration is on the panel); the tracker error moves "
                      "about 5x; subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
                      "for k = 2; the tracker panel's red dotted trace (right axis) is "
                      "refinement passes/frame, fixed at 10 here -- the knob on this "
@@ -533,12 +574,16 @@ PRESETS: List[DemoPreset] = [
             # for the same fix -- the panel prints "36 m" (37.1 m true delay, F94).
             # wave 12 (2026-09-24, item 1.4): same reword as Thrust 1's card.
             "Range 0-2 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); multipath: the ~37 m return the panel names "
-            "(37.1 m true delay, F94) and 68 m.",
+            # BISTATIC METRES (owner ballot 2B, 2026-09-24): the axis is EXCESS
+            # PATH LENGTH c*tau over the line of sight, so F94's 37.1 m and 68 m
+            # families read 74.2 m and 136 m. Same returns, same delays, one
+            # convention -- and the panel's own axis now says "excess path (m)".
+            "normalises to (0 dB); multipath: the ~74 m return the panel names "
+            "(74.2 m; F94's 37.1 m at c*tau/2) and 136 m.",
             "Tracker k re-picked: k=8 (old default) and k=4 spike mid-run on the "
             "Ka retrace (rank 3-4, F94); k=2 is the largest stable k.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; range resolution 5 cm, binned to 1 m "
+            "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24, item 3.3): prepared answer for "what is the 0.06
             # floor made of?" -- an interpretation, not a re-measurement.
@@ -671,8 +716,8 @@ PRESETS: List[DemoPreset] = [
             "The run is not faster than a full SVD: scoring runs the full SVD every "
             "frame. The 45x microbenchmark is real, the run time is not.",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; native range resolution 5 cm, binned 20:1 to "
-            "1 m gates.",
+            "beyond |sin theta| ~0.90; 9.99 cm excess-path bins (F97d), 10:1 to "
+            "1.00 m gates.",
             # wave 9 (2026-09-24, item 3.12): see the same note on Thrust 2's card.
             "All 1024 elements share one front-end config (Thrust 1); a spread would "
             "show up in the tracker's acquisition curve here, not Thrust 1's "
@@ -829,13 +874,13 @@ PRESETS: List[DemoPreset] = [
             # not a "wrap".
             "Range 0-2 m is not a target: range 0 = earliest arrival "
             "(normalize_delays=True). Peaks near 37-113 m are multipath; the "
-            "120-125 m rise is the range-0 skirt's negative-delay side at "
-            "the crop edge (F96).",
+            "rise at the window's top is the range-0 skirt's negative-delay side "
+            "at the crop edge (F96).",
             "Skin depth goes as f^-1/2, not f^-1: conductor loss under-estimated "
             "by sqrt(2) (~0.2 dB of 0.5 dB loss), substrate coupling up to 2x; "
             "trends/shape exact (F91).",
             "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
-            "beyond |sin theta| ~0.90; range resolution 5 cm, binned to 1 m "
+            "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24, orchestrator course-correction): same line as
             # Thrust 1/2 -- see Thrust 1's comment for the measurement it stands
@@ -905,7 +950,7 @@ PRESETS: List[DemoPreset] = [
         ab_label_b="3-bit ADC (same frames)",
         screen_note=_T5_SCREEN_NOTE,
         say=[
-            "SAY FIRST: the frames change -- Thrusts 1-4 ran munich (125 m, "
+            "SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m, "
             "range-azimuth); this is the benchmark corpus (100 m, "
             "range-Doppler). STORED is the ray-traced channel; everything after "
             "runs live, so the ADC knob reaches the detector.",
