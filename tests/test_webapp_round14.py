@@ -292,3 +292,18 @@ def test_frame_tag_is_one_based_like_the_transport():
     assert _n_frames_phrase([3, 4, 5]) == "frames 3-5"
     assert _n_frames_phrase([1]) == "frame 1"
     assert _n_frames_phrase([1, 3]) == "frames 1, 3"
+
+
+def test_the_drive_foot_line_says_both_arms_only_when_both_ran():
+    """Read on the 2026-09-25 cancel render: the one-arm cancelled screen printed
+    "(both arms; ...)" because its payload still carries the A/B flag."""
+    from webapp.app import _both_arms_ran, _drive_foot_line
+
+    note = ["Front-end drive 3e-05 is a DISPLAY choice, not a measured input level -- x"]
+    assert _both_arms_ran({"_ab": True})
+    assert not _both_arms_ran({"_ab": True, "_cancelled_chip":
+                               "CANCELLED -- 2 of 20 frames; arm B did not run"})
+    assert _both_arms_ran({"_ab": True, "_cancelled_chip": "CANCELLED -- arm B ran 2 of 5 frames"})
+    assert "both arms" in _drive_foot_line(note, two_arms=True)
+    assert "both arms" not in _drive_foot_line(note, two_arms=False)
+    assert _drive_foot_line(["Environment 'x'"], two_arms=True) == ""

@@ -1068,6 +1068,13 @@ def _parallel_arm_facts(data_a: Dict[str, Any], data_b: Dict[str, Any]) -> None:
     data_b["_arm_facts"] = fb[:-1]
 
 
+def _both_arms_ran(results_data: Dict[str, Any]) -> bool:
+    """True when the screen shows an A/B pair: an A/B run whose arm B was not cancelled
+    before it started (the cancel journey's one-arm screen carries `_ab` too)."""
+    return bool(results_data.get("_ab")) and "did not run" not in str(
+        results_data.get("_cancelled_chip") or "")
+
+
 def _drive_foot_line(notes: List[str], *, two_arms: bool) -> str:
     """The drive caveat's headline, once, for the page foot -- "" when the run carried
     none (J3). The full note stays in each arm's Details."""
@@ -2159,8 +2166,11 @@ def _render_results(results_data, active_tab):
         # THE DRIVE CAVEAT, ONCE (hostile round 14, J3): it is preset-wide and used
         # to fill BOTH arms' one-line captions, the line reserved for the fact the arm
         # adds. It is stated here, on the same foot as the preset's other caveats.
-        _drive = _drive_foot_line(results_data.get("_notes") or [],
-                                  two_arms=bool(results_data.get("_ab")))
+        _drive = _drive_foot_line(
+            results_data.get("_notes") or [],
+            # Not on the cancel journey's one-arm screen: "both arms" was false there
+            # (read on the 2026-09-25 cancel render).
+            two_arms=_both_arms_ran(results_data))
         children.append(html.Div(
             ([html.Div(_drive)] if _drive else []) + [html.Div(_foot_note(screen_note))],
             className="page-foot-note"))
