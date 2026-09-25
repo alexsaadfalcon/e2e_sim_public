@@ -114,34 +114,121 @@ def fake_env(grid, torch_device):
 # Composition: RFFE/interconnect really are on the path by default
 # --------------------------------------------------------------------------------
 def test_rffe_and_interconnect_present_in_default_composition(tmp_path, fake_env):
+    """The DEFAULT composition is the one-chain contract's order (section 1.2).
+
+    REWRITTEN 2026-09-24. This test used to assert the v1.0 order -- `CircuitStage`
+    before the dechirp -- which is now `composition="legacy_impulse"` and is asserted
+    in `test_the_legacy_composition_is_the_v1_0_order` below. The front end has MOVED,
+    onto the beat record after the dechirp; the assertions that survive unchanged are
+    the two that are about the composition doing its job rather than about the order:
+    the interconnect is still a frequency-domain stage before the dechirp, and the
+    front end is still sized to the radar's own receive-channel count.
+    """
+    from e2e.chain.frontend import FrontEndBlock
+    from e2e.chain.link_budget import ThermalNoiseBlock, TxPowerStage
+    from e2e.chain.receive import RangeTransformBlock
+
     sim = chain_generate.build_chain_simulation(
         scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
     )
     stage_types = [type(s) for s in sim.serial_stages]
-    assert CircuitStage in stage_types
-    assert InterconnectStage in stage_types
-    assert DechirpBlock in stage_types
-    assert QuantizerBlock in stage_types
+    for expected in (TxPowerStage, InterconnectStage, DechirpBlock, FrontEndBlock,
+                     ThermalNoiseBlock, QuantizerBlock, RangeTransformBlock):
+        assert expected in stage_types, f"{expected.__name__} missing from the spine"
+    assert CircuitStage not in stage_types, (
+        "the FULL composition puts the front end on the beat record; a CircuitStage "
+        "here means the v1.0 impulse placement is back")
 
-    circuit_stage = next(s for s in sim.serial_stages if isinstance(s, CircuitStage))
-    assert isinstance(circuit_stage.rffe_block, RFFEBlock)
+    front = next(s for s in sim.serial_stages if isinstance(s, FrontEndBlock))
     # RFFEBlock defaults to the imaging array's element count -- the composition MUST
-    # override it to the radar's actual receive-channel count, or apply_circuit's
-    # view() raises on the very first frame (see build_chain_simulation's docstring).
-    assert circuit_stage.rffe_block.n == _CFG.n_rx
+    # override it to the radar's actual receive-channel count, or the per-element
+    # config table does not line up with the frame (see build_chain_simulation).
+    assert front.n == _CFG.n_rx
+    assert front.placement == "beat"
 
     interconnect_stage = next(s for s in sim.serial_stages if isinstance(s, InterconnectStage))
     assert isinstance(interconnect_stage.interconnect_block, InterconnectBlock)
 
-    # Ordering: RFFE and interconnect precede the dechirp bridge (they operate in the
-    # frequency domain, before the chain crosses into RX time).
+    # Ordering, as the contract's table reads it: transmit power at the SOURCE; the
+    # interconnect in the frequency domain before the dechirp; the front end and the
+    # one thermal injection on the beat record after it; the range transform last,
+    # because it is what crosses into the cube domain the products consume.
+    i = stage_types.index
+    assert i(TxPowerStage) < i(InterconnectStage) < i(DechirpBlock)
+    assert i(DechirpBlock) < i(FrontEndBlock) < i(ThermalNoiseBlock)
+    assert i(ThermalNoiseBlock) < i(QuantizerBlock) < i(RangeTransformBlock)
+    assert i(RangeTransformBlock) == len(stage_types) - 1
+
+    # ONE thermal injection: the floor block runs in "once" mode, which adds nothing
+    # when the front end already injected. Two floors is F81.
+    floor = next(s for s in sim.serial_stages if isinstance(s, ThermalNoiseBlock))
+    assert floor.mode == "once"
+
+
+def test_the_legacy_composition_is_the_v1_0_order(tmp_path, fake_env):
+    """The order the stored corpora were generated under, asserted where it can be
+    read -- this is the assertion the test above carried until 2026-09-24.
+
+    It exists for the bit-parity gates (`tests/test_ml_store_cfr.py`,
+    `tests/test_webapp_live_chain.py`, max |diff| = 0 CODES) and for nothing else; see
+    `chain_generate.COMPOSITION_LEGACY`. Keeping the old assertions alive on the arm
+    they are still true of is what stops "the composition changed" from being
+    indistinguishable from "the corpora stopped reproducing".
+    """
+    from e2e.chain.frontend import FrontEndBlock
+    from e2e.chain.link_budget import ThermalNoiseBlock, TxPowerStage
+
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+        composition="legacy_impulse",
+    )
+    stage_types = [type(s) for s in sim.serial_stages]
+    assert CircuitStage in stage_types
+    assert FrontEndBlock not in stage_types
+    assert TxPowerStage not in stage_types, (
+        "under the legacy order sqrt(P_tx) lives inside ThermalNoiseBlock -- a "
+        "TxPowerStage here would apply it twice")
+
+    circuit_stage = next(s for s in sim.serial_stages if isinstance(s, CircuitStage))
+    assert isinstance(circuit_stage.rffe_block, RFFEBlock)
+    assert circuit_stage.rffe_block.n == _CFG.n_rx
+
     dechirp_idx = stage_types.index(DechirpBlock)
     assert stage_types.index(CircuitStage) < dechirp_idx
     assert stage_types.index(InterconnectStage) < dechirp_idx
+    floor = next(s for s in sim.serial_stages if isinstance(s, ThermalNoiseBlock))
+    assert floor.mode == "legacy"
 
-    downstream_types = [type(b) for b in sim.downstream_blocks]
-    assert RadarCubeBlock in downstream_types
-    assert SinkBlock in downstream_types
+
+def test_an_unknown_composition_is_refused_by_name(tmp_path, fake_env):
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="unknown composition"):
+        chain_generate.build_chain_simulation(
+            scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+            composition="beat",
+        )
+
+
+def test_the_sink_runs_where_the_record_it_persists_still_exists(tmp_path, fake_env):
+    """MOVED 2026-09-24 from `downstream_blocks` into the SERIAL list, deliberately.
+
+    A corpus sample stores the DIGITISED BEAT RECORD. The range transform that now
+    ends the spine crosses into the cube domain, and `Simulation` drops the previous
+    domain's payload at a crossing (it must -- a stale `adc` outliving the crossing is
+    how a block computes silently on pre-transform data). So the sink has to run before
+    it. `SinkBlock` is documented as working in either position and returns `{}` from
+    both, so nothing about what it writes changed.
+    """
+    sim = chain_generate.build_chain_simulation(
+        scenario=None, cfg=_CFG, out_dir=tmp_path, environment_block=fake_env,
+    )
+    from e2e.chain.receive import RangeTransformBlock
+
+    stage_types = [type(s) for s in sim.serial_stages]
+    assert SinkBlock in stage_types
+    assert stage_types.index(SinkBlock) < stage_types.index(RangeTransformBlock)
+    assert [type(b) for b in sim.downstream_blocks] == [RadarCubeBlock]
 
 
 def test_rffe_and_interconnect_are_config_gated_off(tmp_path, fake_env):
@@ -589,3 +676,54 @@ def test_chain_flags_reflect_a_non_default_composition(tmp_path, fake_env):
     assert meta["use_interconnect"] is True
     assert meta["use_link_budget"] is False
     assert meta["quant_bits"] == 6
+
+
+def test_the_ka_interconnect_is_a_clamped_constant():
+    """A KNOWN DEFECT, pinned so nobody fixes it into a corpus-parity break.
+
+    `DEFAULT_INTERCONNECT_CSV` covers 70-90 GHz. `_interconnect_band_hz` hands a Ka
+    config 27-33 GHz, entirely below that range, and `InterconnectBlock` clamps
+    out-of-range grid points to the CSV's endpoints -- so at Ka the interconnect is a
+    CONSTANT complex gain rather than a filter, and `use_interconnect=True` on a Ka
+    corpus bought a scalar.
+
+    MEASURED 2026-09-24 on a `benchmark_v1_ka` frame (512 samples): |S21| ripple
+    0.000000 dB and phase span 0.000000 deg (every grid point bit-identical at
+    -0.4861 dB / +1.2946 deg), against 0.0336 dB / 0.089 deg for `benchmark_v1` at
+    77 GHz where the CSV actually lives.
+
+    A constant complex gain changes no measurable quantity downstream, so the stored Ka
+    corpora are not wrong -- but any claim that they carry a MODELLED interconnect at Ka
+    is, and a Ka card must not say the interconnect shapes the band on this path.
+
+    THE FIX IS A CORPUS DECISION, NOT A QUIET EDIT: a Ka-band S21, or
+    `InterconnectBlock(source="tessera")` whose geometric scale model (F91) exists to
+    evaluate the surrogate at a non-77 GHz carrier. Either changes what
+    `use_interconnect=True` computes and regenerates every Ka corpus, breaking the
+    bit-parity gates that read max |diff| = 0 codes. This test failing means someone
+    made that change -- which may well be right, but it must be a decision.
+    """
+    from e2e.blocks import InterconnectBlock
+    from e2e.ml.chain_generate import DEFAULT_INTERCONNECT_CSV, _interconnect_band_hz
+    from e2e.radar_config import PRESETS
+
+    def response(cfg_name):
+        cfg = PRESETS[cfg_name]
+        block = InterconnectBlock(transfer_csv=str(DEFAULT_INTERCONNECT_CSV),
+                                  band_hz=_interconnect_band_hz(cfg))
+        ones = torch.ones(1, 1, 1, cfg.n_samples, dtype=torch.complex64)
+        return block.apply_interconnect(ones).reshape(-1)
+
+    ka = response("benchmark_v1_ka")
+    assert torch.equal(ka, ka[0].expand_as(ka)), (
+        "the Ka interconnect response is no longer a clamped constant -- someone gave "
+        "this path a real Ka-band S21. That is probably the right thing to do, but it "
+        "regenerates every Ka corpus: check the bit-parity gates before landing it.")
+
+    # ...and the 77 GHz path, where the CSV lives, is NOT constant -- so the test is
+    # pinning a band-specific defect and not an inert code path.
+    mm = response("benchmark_v1").abs()
+    ripple_db = float(20 * torch.log10(mm.max() / mm.min()))
+    assert ripple_db == pytest.approx(0.0336, abs=0.002), (
+        f"the 77 GHz in-band ripple is {ripple_db:.4f} dB, not the 0.034 dB "
+        f"`build_chain_simulation` quotes")

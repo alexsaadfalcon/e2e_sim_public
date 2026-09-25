@@ -48,9 +48,23 @@ def small_adc(torch_device):
 # --------------------------------------------------------------------------- domain contract
 
 def test_blocks_declare_rx_time_domain():
-    blocks = [ImpairmentBlock(_CFG), QuantizerBlock(), RadarCubeBlock(_CFG)]
+    blocks = [ImpairmentBlock(_CFG), QuantizerBlock()]
     for block in blocks:
         assert frames.capabilities_of(block).domain == frames.DOMAIN_RX_TIME
+
+
+def test_radar_cube_block_declares_the_cube_domain():
+    """MOVED OUT of `test_blocks_declare_rx_time_domain` 2026-09-24, not deleted.
+
+    `RadarCubeBlock` used to read `adc` and run its own range FFT -- the second range
+    transform the one-chain contract exists to delete (section 1.2 row 11). It now
+    reads the spine's `cube` and applies only the Doppler half, so the domain it
+    declares is the cube domain, and a chain that hands it an RX-time frame is told to
+    insert a `RangeTransformBlock` rather than quietly compressing range twice.
+    """
+    assert frames.capabilities_of(RadarCubeBlock(_CFG)).domain == frames.DOMAIN_CUBE
+    with pytest.raises(frames.FrameContractError, match="RangeTransformBlock"):
+        frames.require_domain(frames.DOMAIN_RX_TIME, RadarCubeBlock(_CFG))
 
 
 def test_blocks_reject_frequency_domain():
@@ -191,16 +205,61 @@ def test_quantizer_block_clipped_fraction_rises_with_overrange(small_adc):
 # --------------------------------------------------------------------------- RadarCubeBlock
 
 def test_radar_cube_block_shape_and_no_mutation(small_adc):
+    """UPDATED 2026-09-24: the block consumes the spine's `cube`, not `adc`.
+
+    The chain under test is the same chain -- `range_transform_for(cfg)` is exactly the
+    range half this block used to run inline -- so the product is bit-for-bit what it
+    was; what changed is WHO computes it. `test_radar_cube_block_is_adc_to_rd` pins
+    that equality.
+    """
+    from e2e.chain.transforms import range_transform_for
+
     adc = small_adc()
     original = adc.clone()
     state = {"adc": adc}
+    state.update(range_transform_for(_CFG).apply(state))
+    cube_before = state["cube"].clone()
 
     out = RadarCubeBlock(_CFG).apply(state)
 
     assert out["radar_cube"].shape == (_CFG.n_rx, _CFG.n_samples, _CFG.n_chirps)
     assert out["radar_cube"].dtype == torch.complex64
-    assert "adc" not in out
-    assert torch.equal(state["adc"], original)  # the block must not mutate adc
+    assert "cube" not in out
+    assert torch.equal(state["cube"], cube_before)  # the block must not mutate the cube
+    assert torch.equal(adc, original)
+
+
+def test_radar_cube_block_is_adc_to_rd(small_adc):
+    """The refactor's parity pin: range transform + Doppler half == `adc_to_rd`,
+    BIT-FOR-BIT. Not `allclose` -- this is the same three operations on the same
+    tensors in the same order, and F85/F95's stored-vs-live gates read max |diff| = 0
+    codes against corpora compressed by the old inline copy.
+    """
+    from e2e.chain.transforms import adc_to_rd, range_transform_for
+
+    adc = small_adc()
+    state = {"adc": adc}
+    state.update(range_transform_for(_CFG).apply(state))
+    assert torch.equal(RadarCubeBlock(_CFG).apply(state)["radar_cube"],
+                       adc_to_rd(_CFG, adc))
+
+
+def test_radar_cube_block_refuses_a_cube_off_the_scored_protocol(small_adc):
+    """A LOUD failure, because the silent version is a wrong answer that renders.
+
+    The imaging spine builds its range transform at the identity point
+    (`window="none"`, `dc_removal=False`) and crops to the non-negative half. Feeding
+    that cube to the Doppler half yields a range-Doppler map on an unlabelled protocol
+    with half the range bins -- which a detector scored on the hann/DC-removed protocol
+    would read as a difference in the detector.
+    """
+    from e2e.chain.receive import RangeTransformBlock
+
+    adc = small_adc()
+    state = {"adc": adc}
+    state.update(RangeTransformBlock(_CFG, window="none", dc_removal=False).apply(state))
+    with pytest.raises(frames.FrameContractError, match="RD_RANGE_PROTOCOL"):
+        RadarCubeBlock(_CFG).apply(state)
 
 
 def test_quantizer_is_uniform_and_matches_the_textbook_adc_snr():

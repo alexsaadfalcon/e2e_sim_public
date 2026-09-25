@@ -225,6 +225,51 @@ def mmse_estimate(rx_pilots, tx_pilots, pilot_idx, fft_size, snr_db):
 # --------------------------------------------------------------------------------
 # Equalization
 # --------------------------------------------------------------------------------
+def estimate_snr_db(rx_pilots, tx_pilots):
+    """MEASURE the post-combining SNR from the pilot residual, or None.
+
+    Why this exists (JSAC review, R-new-2): on the one chain the ONLY noise source is
+    the front end's own Friis cascade, injected in the time-domain record. Nothing
+    downstream knows what SNR that produced, and `ModemBlock`'s constructor `snr_db` is
+    a number typed into a preset -- handing it to `mmse_equalize` and then putting the
+    resulting BER on a card states a measurement that was never made.
+
+    The estimator is the one `mmse_estimate` already computes internally and throws
+    away: with several OFDM symbols, each pilot subcarrier gives several noisy LS
+    observations `H_obs = rx/tx` of the same channel, so their variance ACROSS SYMBOLS
+    is the noise power of one observation, pooled over every pilot for a low-variance
+    frame-wide figure, and their mean power is signal-plus-noise.
+
+        SNR = (E|H_mean|^2 - sigma_n^2 / n_sym) / sigma_n^2
+
+    Returns None -- not a guess -- when there is only ONE symbol to pool across (there
+    is then no residual to measure) or when the estimate is non-positive (a frame at or
+    below 0 dB, where a shrinkage factor built on it would be noise). The caller's
+    documented answer to None is `zf_equalize`, which needs no SNR; unbiased MMSE and
+    ZF make the same hard decision, so uncoded BER is identical and only EVM differs.
+
+    NOTE THE SCOPE: this measures the noise on the PILOT subcarriers of the combined
+    stream, which is the quantity the equaliser wants. It is not the cube's SNR, not
+    the pre-combining per-element SNR, and not a link budget.
+    """
+    rx_pilots = torch.as_tensor(rx_pilots, dtype=torch.complex64, device=device)
+    tx_pilots = torch.as_tensor(tx_pilots, dtype=torch.complex64, device=device)
+    H_obs = rx_pilots / tx_pilots                              # [n_symbols, n_pilots]
+    n_sym = H_obs.shape[0]
+    if n_sym < 2:
+        return None
+    H_mean = H_obs.mean(dim=0)
+    sigma_n2_obs = float(torch.mean(
+        torch.mean(torch.abs(H_obs - H_mean[None, :]) ** 2, dim=0)))
+    if not sigma_n2_obs > 0:
+        return float("inf")
+    mean_pow = float(torch.mean(torch.abs(H_mean) ** 2))
+    sigma_H2 = mean_pow - sigma_n2_obs / n_sym
+    if not sigma_H2 > 0:
+        return None
+    return 10.0 * float(np.log10(sigma_H2 / sigma_n2_obs))
+
+
 def zf_equalize(rx_freq, H_est):
     """Zero-forcing equalizer: divide received symbols by the channel estimate."""
     rx_freq = torch.as_tensor(rx_freq, dtype=torch.complex64, device=device)

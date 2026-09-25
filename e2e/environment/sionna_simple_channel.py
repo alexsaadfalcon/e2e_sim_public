@@ -57,26 +57,47 @@ def _git_head():
 
 
 def unambiguous_range_m(num_freqs: int, band_hz) -> float:
-    """The USABLE (non-negative-range) unambiguous range window for a band of width
-    `B = stop - start` Hz sampled at `num_freqs` complex points.
+    """The DISPLAYED HALF of the unambiguous range window -- `num_freqs * c / (4B)`.
 
-    An `num_freqs`-point IFFT of the complex CFR gives a range profile with sample
-    spacing `c / (2B)` and a FULL symmetric span of `num_freqs * c / (2B)` (from
-    `-span/2` to `+span/2`, via `torch.fft.fftshift` -- see `e2e.blocks.RangeAzBlock`).
-    Only the non-negative half is physically meaningful (range can't be negative) and is
-    what downstream display/cropping (`_nonneg_range` in `webapp/pipeline_runner.py`)
-    keeps, so the window a target can actually be unambiguously placed in is HALF the
-    full span: `num_freqs * c / (4B)`.
+    RETRACTION (2026-09-24, F96, contract section 3.6). This function used to be
+    documented as "the USABLE (non-negative-range) unambiguous range window", on the
+    reasoning that an `num_freqs`-point transform spans `-span/2 .. +span/2` and only
+    the non-negative half is physical. **That reasoning is wrong.** The CFR is sampled
+    with complex (IQ) values, so beat frequencies `0..fs` map to delays `0..1/df` and
+    the WHOLE FFT period is physical delay; the repo's own
+    `RadarConfig.max_range_m` uses the full span, and
+    `e2e.chain.receive.RangeTransformBlock` now computes that one axis. The "negative
+    range" the v1.0 screens showed was an artifact of fftshifting and then negating an
+    axis that had no negative half -- the upper bins are real delay, cropped for
+    display (owner decision 1A, 2026-09-22, which is a DISPLAY choice, not physics).
 
-    Verified empirically (`munich_physics` investigation, 2026-09-23): 1000 points over
-    3 GHz gives 25.0 m -- this scene's 37 m non-LoS return exceeds that window and is
-    cropped, and its 68 m family aliases into the window at 15-18 m; the NAIVE
-    `num_freqs*c/(2B)` reading (50.0 m here) is too large to explain either observation
-    (37 m would neither crop nor alias within a 50 m window).
+    The NUMBER this function returns is unchanged, and so is the stored
+    `meta["unambiguous_range_m"]`, deliberately: it is the half-window every card and
+    every downstream consumer has quoted since the files were written, and changing
+    the value under them would be a silent break. What changed is its NAME in prose --
+    it is the display half of a `num_freqs * c / (2B)` period, not the limit of what
+    can be unambiguously measured.
+
+    The 2026-09-23 `munich_physics` observations that motivated the old reading stand
+    as observations (1000 points over 3 GHz: a 37 m family cropped, a 68 m family
+    appearing at 15-18 m) but they are explained by the DISPLAY crop at 25.0 m plus
+    aliasing at the 50.0 m period, not by a 25.0 m measurement limit.
     """
     start_hz, stop_hz = band_hz
     bandwidth_hz = float(stop_hz) - float(start_hz)
     return float(num_freqs) * _C / (4.0 * bandwidth_hz)
+
+
+def full_unambiguous_range_m(num_freqs: int, band_hz) -> float:
+    """The FULL unambiguous range period, `num_freqs * c / (2B)` metres under the
+    equivalent-monostatic (c*tau/2) convention -- 250.0 m for the shipped munich Ka
+    file (5000 points over 3 GHz). Every bin in it is physical delay; see
+    `unambiguous_range_m` for the retraction that makes this the primary number and
+    `e2e.chain.receive.range_axis_m` for the axis the spine actually computes (which
+    uses the grid's own `num_freqs * df`, not a nominal `B`)."""
+    start_hz, stop_hz = band_hz
+    bandwidth_hz = float(stop_hz) - float(start_hz)
+    return float(num_freqs) * _C / (2.0 * bandwidth_hz)
 
 
 def _rotation_matrix(alpha, beta, gamma):
@@ -374,8 +395,10 @@ def generate(args) -> tuple[np.ndarray, dict]:
         sionna_version = getattr(sys.modules.get("sionna"), "__version__", None)
 
     unambig_range_m = unambiguous_range_m(args.num_freqs, args.band_hz)
-    print(f"unambiguous range = {unambig_range_m:.3f} m "
-         f"({args.num_freqs} points over {args.band_hz[1] - args.band_hz[0]:.3e} Hz)")
+    full_range_m = full_unambiguous_range_m(args.num_freqs, args.band_hz)
+    print(f"unambiguous range period = {full_range_m:.3f} m (c*tau/2); display half "
+          f"= {unambig_range_m:.3f} m "
+          f"({args.num_freqs} points over {args.band_hz[1] - args.band_hz[0]:.3e} Hz)")
 
     meta = {
         "version": 2,
@@ -388,7 +411,12 @@ def generate(args) -> tuple[np.ndarray, dict]:
             "stop_hz": float(args.band_hz[1]),
             "num_freqs": int(args.num_freqs),
         },
+        # The DISPLAY half (num_freqs*c/4B). Kept under its historical name and value
+        # so existing readers do not silently break; `unambiguous_range_full_m` beside
+        # it is the whole physical period. See `unambiguous_range_m`'s retraction note
+        # (F96, 2026-09-24) -- every bin of the full period is real delay.
         "unambiguous_range_m": unambig_range_m,
+        "unambiguous_range_full_m": full_range_m,
         "rx_spacing_m": float(rx_spacing_m),
         "aperture_m": float(aperture_m),
         "normalize": normalize,

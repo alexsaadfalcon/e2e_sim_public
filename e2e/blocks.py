@@ -25,6 +25,43 @@ _ELEMENTWISE = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE)
 _PER_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_BROADCAST)
 # SINGLE_CHIRP: the historical contract -- no MIMO, one chirp.
 _SINGLE_CHIRP = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_SINGLE)
+# SNAPSHOT_STACK: the compressor's real contract. The sensing matrix acts on the
+# ELEMENT axis alone, so every (slow index, range bin) column of the cube is one more
+# snapshot and the slow axis may be as long as it likes. No MIMO, because a TX axis
+# would change what the element index means. This replaces _SINGLE_CHIRP on the AFE and
+# the tracker (2026-09-24): the OFDM/JSAC waveform classes hand them M symbols, and the
+# restriction to one was a property of `cube.view(-1, n_range)`, not of the algorithm.
+_SNAPSHOT_STACK = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_NATIVE)
+# CUBE: consumes the ONE range-compressed cube the spine's RangeTransformBlock emits
+# (`e2e/chain/receive.py`). Every range product declares this, which is what makes
+# "ask for a product without the spine" a named FrameContractError naming
+# RangeTransformBlock rather than a KeyError on 's_pars'.
+# The cube is 3-D, so frames.check_capabilities skips the 4-D axis checks for it; a
+# block that genuinely needs one chirp says so itself (see MeasurementStage.apply).
+_CUBE = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                          domain=frames.DOMAIN_CUBE)
+
+
+def _aperture_shape_for(state, fallback, who):
+    """The (rx_x, rx_y) grid the cube's element axis factors into.
+
+    The v1.0 products were handed a frame `GridStage` had ALREADY reshaped, so the
+    geometry arrived implicitly in the tensor. On the one spine the cube stays
+    `[n_rx, n_chirp, n_range]` all the way to the products (the compressor in between
+    works on the element axis and would have to undo any aperture view), so the
+    geometry travels in state under `aperture_shape` instead -- seeded by `Simulation`
+    from its own `array_shape`, and re-declared by `MeasurementStage` when it
+    compresses. `fallback` is the block's own constructor kwarg, for direct callers.
+    """
+    shape = state.get("aperture_shape") or fallback
+    if shape is None:
+        raise frames.FrameContractError(
+            f"{who}: needs the receive-array geometry to view the cube as an aperture, "
+            f"but the chain carries no 'aperture_shape' and the block was built without "
+            f"an array_shape= . Simulation seeds it from its array_shape; a direct "
+            f"caller must pass array_shape=(rx_x, rx_y)."
+        )
+    return tuple(int(v) for v in shape)
 
 
 class SionnaEnvironmentBlock:
@@ -88,7 +125,7 @@ class RFFEBlock:
 
     def __init__(self, n=None, freq_span_hz=3e9, signal_scaling=1e-5, if_filter=False,
                  physical_scale=False, chirp_dur=None, lna_bias_ma=None, if_bw_mhz=None,
-                 seed=None):
+                 seed=None, inject_noise=True):
         # chirp_dur: legacy kwarg accepted (and ignored) so existing call sites that
         # still pass it don't break.
         # fs (= freq_span_hz) is the complex-baseband buffer's true sample rate (the
@@ -125,6 +162,13 @@ class RFFEBlock:
         # same seed -> bit-identical noise across repeated runs; different seed/frame
         # -> a fresh draw.
         self.seed = seed
+        # False runs the cascade with NO thermal draw (band -> 0, so the variance is
+        # zero and the draw contributes nothing). It exists for ORACLES that need the
+        # nonlinearity alone -- notably the front-end placement parity measurement,
+        # where the two placements deliberately have different noise references and
+        # leaving the floor in would report the floor difference as a signal
+        # difference. Default True: every production caller is unchanged.
+        self.inject_noise = bool(inject_noise)
         self._frame_idx = 0
 
     def reset(self):
@@ -147,16 +191,19 @@ class RFFEBlock:
         # physical_scale=True: skip the normalization above -- the frame is already
         # in volts at the LNA input (the generation layer produces volts via
         # sqrt(N*P_tx*Z0) scaling; see e2e/environment/scenario_runner.py).
+        noise_kwargs = {} if self.inject_noise else {"noise_band_hz": 0.0}
         if self.seed is None:
             frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
-                                                  if_filter=self.if_filter)
+                                                  if_filter=self.if_filter,
+                                                  **noise_kwargs)
         else:
             generator = torch.Generator(device=frame.device)
             generator.manual_seed(int(self.seed) + self._frame_idx)
             self._frame_idx += 1
             frame_dist, PRX = circuit_model_batch(self.rx_config, frame, self.fs,
                                                   if_filter=self.if_filter,
-                                                  generator=generator)
+                                                  generator=generator,
+                                                  **noise_kwargs)
         s_pars_dist = torch.fft.fft(frame_dist, dim=-1)
         s_pars_dist = s_pars_dist.view(s_pars_shape)
         return s_pars_dist, PRX
@@ -602,9 +649,13 @@ class AFEBlock:
     second implementation.
     """
 
-    # The measurement matrix A is drawn for ONE frame's flattened aperture, so the
-    # compressed measurement is defined for a single chirp of a single-TX frame.
-    frame_capabilities = _SINGLE_CHIRP
+    # The measurement matrix A acts on the ELEMENT axis only (`A V` never indexes the
+    # last axis), so it is defined for ANY number of snapshot columns -- one per
+    # (slow index, range bin) pair. CHIRP_SINGLE lifted 2026-09-24 for the OFDM/JSAC
+    # waveform classes, whose frames carry M symbols on the slow axis; `M == 1` takes
+    # the identical code path with the identical tensor, so no FMCW number moves.
+    # `accepts_mimo=False` stays: a TX axis would change what the element index means.
+    frame_capabilities = _SNAPSHOT_STACK
 
     def __init__(self, exp=5, mantissa=6):
         self.exp = exp
@@ -649,12 +700,15 @@ class AdaOjaBlock:
     information about the drift magnitude, so it barely rotates the subspace and does
     not track fast drift. See ROADMAP.md.
 
-    The tracker's state is a d-dimensional basis for ONE aperture snapshot, so it
-    declares the single-chirp/no-MIMO contract: a multi-chirp or MIMO frame would
-    silently change what `d` indexes.
+    The tracker's state is a d-dimensional basis for the APERTURE, and `d` indexes
+    elements. Snapshots are columns: one per (slow index, range bin) pair, so a
+    multi-chirp or multi-symbol frame supplies more of them rather than changing what
+    `d` means. A MIMO frame WOULD change it, so `accepts_mimo=False` stays.
+    (CHIRP_SINGLE lifted 2026-09-24 with the OFDM/JSAC waveform classes; see
+    `MeasurementStage.apply` for the snapshot stacking and why `M == 1` is unchanged.)
     """
 
-    frame_capabilities = _SINGLE_CHIRP
+    frame_capabilities = _SNAPSHOT_STACK
 
     _GAP_RESPONSES = ("none", "refine", "coast")
     #: Recognised `method` values -- anything else used to fall through to the legacy path.
@@ -834,6 +888,21 @@ class CircuitStage:
 
     def apply(self, state):
         s_pars, PRX = self.rffe_block.apply_circuit(state["s_pars"])
+        # THE SEAM that makes "one noise source" true on the FREQUENCY-DOMAIN side of
+        # the chain, mirroring the one `FrontEndBlock` stamps on the beat record
+        # (contract section 1.4). Added 2026-09-24, and it matters for exactly one
+        # configuration: an OFDM/JSAC chain, where the front end belongs HERE rather
+        # than after a dechirp, because `ifft(s_pars)` of a received OFDM grid IS the
+        # received time-domain symbol -- the signal a real amplifier sees. A comms head
+        # tapped downstream of this stage reads the key and does not draw a second,
+        # uncorrelated floor of its own (`ModemBlock.noise_enabled`,
+        # `OFDMReceiveBlock`).
+        #
+        # It is NOT stamped when the block's own noise draw is off: `inject_noise=False`
+        # runs the cascade with no thermal term at all, so claiming an injection would
+        # make a downstream head suppress the only floor the chain has.
+        extra = ({"noise_injected_by": "frontend"}
+                 if getattr(self.rffe_block, "inject_noise", True) else {})
         # Advertise WHICH amplitude scale the frame is now on. `RFFEBlock` with
         # physical_scale=False divides the frame by its own mean magnitude, erasing the
         # absolute level; anything downstream that installs an ABSOLUTE reference (the
@@ -843,16 +912,25 @@ class CircuitStage:
         # above forfeits the scale.
         absolute = bool(getattr(self.rffe_block, "physical_scale", True))
         return {"s_pars": s_pars, "PRX": PRX,
-                "amplitude_scale": "absolute" if absolute else "normalised"}
+                "amplitude_scale": "absolute" if absolute else "normalised",
+                **extra}
 
 
 class GridStage:
-    """Reshapes the frame onto the physical receive-array grid.
+    """Reshapes the CFR frame onto the physical receive-array grid.
 
     The aperture view is receive-only, so this stage cannot express a TX axis (no
     MIMO); the chirp axis rides along untouched ([rx_x, rx_y, n_chirp, n_freqs]), and
     from here on dim 1 is ELEVATION, not TX -- which is why it also flips the state's
     frame layout to LAYOUT_APERTURE for the validation downstream of it.
+
+    NOT on the one spine any more (2026-09-24, contract section 1.2). The aperture
+    products now read the range-compressed cube, whose element axis must stay flat for
+    the compressor sitting between the range transform and the images, so the aperture
+    view happens inside each product via `frames.cube_to_aperture_grid` and the
+    geometry travels in `state['aperture_shape']`. The class is kept because it is a
+    valid, tested CFR-domain reshape a caller can still compose explicitly; nothing in
+    the default chain builds one.
     """
 
     frame_capabilities = FrameCapabilities(accepts_mimo=False, chirps=frames.CHIRP_NATIVE)
@@ -885,13 +963,24 @@ class InterconnectStage:
 
 
 class MeasurementStage:
-    """Adaptive compression (optional AFE) + online subspace tracking.
+    """Adaptive compression (optional AFE) + online subspace tracking -- a SERIAL stage
+    on the one spine, sitting BETWEEN the range transform and the images.
+
+    It consumes and rewrites `cube` (`[n_rx, n_chirp, n_range]`, DOMAIN_CUBE): the
+    tracker's snapshots are the cube's RANGE BINS, one column per bin, exactly as they
+    used to be the frame's frequency bins. That substitution is why the compressor can
+    stay in series without moving a number: the sensing matrix `A` acts on the ELEMENT
+    axis only (`A V` never indexes the last axis), and the DFT along range is
+    scaled-unitary, so `A (V F) = (A V) F` and the column space `V` spans is the same
+    object before and after range compression (exactly, for any rank, at
+    `window="none"`). Hann reweights the top-k truncation only -- which is why the
+    imaging/tracker presets run at `window="none"` (contract sections 1.2 row 12, 5.4).
 
     With an AFE block: quantized measurement matrix, quantized matmul, subspace
-    update, then -- if `reconstruct=True` -- reconstruction, with the reconstructed grid
-    replacing 's_pars'.
+    update, then -- if `reconstruct=True` -- reconstruction, with the reconstructed cube
+    replacing `cube`.
     Without an AFE block: the subspace tracker is fed the full-precision compressed
-    measurements directly (same A-generation, no quantization); 's_pars' is left
+    measurements directly (same A-generation, no quantization); `cube` is left
     unchanged.
 
     `reconstruct` (default True, the historical behaviour) decides whether the chain
@@ -901,14 +990,14 @@ class MeasurementStage:
     downstream then works in the measurement space. Reconstructing immediately -- which
     this stage used to do unconditionally -- throws that away, pays a lossy pseudo-inverse
     for M < N, and hides the choice. Set `reconstruct=False` to keep the measurements:
-    's_pars' stays `[M, 1, n_chirp, n_freqs]`, `state['signal_dimension']` becomes
+    `cube` stays `[M, n_chirp, n_range]`, `state['signal_dimension']` becomes
     `DIMENSION_REDUCED`, and blocks that index physical antennas will be stopped by the
     frame contract rather than quietly imaging random projections. The subspace tracker
     itself is content either way -- estimating a subspace from projections is the entire
     premise of the AFE.
     """
 
-    frame_capabilities = _SINGLE_CHIRP
+    frame_capabilities = _CUBE
 
     def __init__(self, afe_block, subspace_block, reconstruct: bool = True):
         self.afe_block = afe_block
@@ -927,9 +1016,9 @@ class MeasurementStage:
             # crosses it, depending on configuration, so the capability cannot be a
             # class attribute the way a fixed-behaviour block's can.
             self.frame_capabilities = frames.FrameCapabilities(
-                accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
-                chirps=_SINGLE_CHIRP.chirps,
-                domain=_SINGLE_CHIRP.domain,
+                accepts_mimo=_CUBE.accepts_mimo,
+                chirps=_CUBE.chirps,
+                domain=_CUBE.domain,
                 emits_dimension=frames.DIMENSION_REDUCED,
             )
         # The stage's own math (one A per frame, flatten the aperture to [d, n_freqs])
@@ -941,7 +1030,18 @@ class MeasurementStage:
             self.frame_contract_name = f"MeasurementStage[{names}]"
 
     def apply(self, state):
-        s_pars = state["s_pars"]
+        cube = state["cube"]
+        # The cube is 3-D, so `frames.check_capabilities`'s chirp-axis check (which
+        # describes the 4-D CFR frame) cannot protect this stage. Say it here instead:
+        # `V = cube.view(-1, n_range)` would fold chirps INTO the element axis on a
+        # multi-chirp cube and track a subspace of a tensor that is not an aperture.
+        # Per-chirp snapshot selection is the v1.2 `snapshot_bins` knob (contract 5.4).
+        if cube.dim() != 3:
+            raise frames.FrameContractError(
+                f"{frames.component_name(self)}: expects a cube "
+                f"[n_rx, n_chirp, n_range], got shape {tuple(cube.shape)}"
+            )
+        frames.require_cube_axes(state, self, slow=None)
         # Refine the subspace estimate n_refine times: each pass re-draws the sensing
         # matrix from the CURRENT estimate and re-estimates, so A's anchor rows converge
         # onto this frame's subspace (a stale anchor from the previous frame otherwise
@@ -956,8 +1056,19 @@ class MeasurementStage:
             n_refine = get_n_refine(state.get("sv_gap_norm"))
         else:
             n_refine = getattr(self.subspace_block, "n_refine", 1)
+        # The snapshots: one column per (SLOW INDEX, RANGE BIN) pair (contract 5.4 --
+        # "all range-bin snapshots of the cube per chirp"), one row per element.
+        #
+        # `reshape(n_el, -1)` and NOT the old `view(-1, n_range)`: on a single-chirp
+        # cube those are the same tensor, bit for bit, which is why no FMCW number
+        # moves -- but on a multi-slow cube the old form folds the SLOW axis into the
+        # ELEMENT axis and tracks the subspace of something that is not an aperture.
+        # That silent-wrong-answer shape is exactly why the chirp axis was pinned to 1
+        # here; with the fold fixed the pin is unnecessary, and lifting it is what lets
+        # an M-symbol OFDM/JSAC frame through the compressor (2026-09-24).
+        n_el, n_slow, n_range = cube.shape
+        V = cube.reshape(n_el, n_slow * n_range)
         if self.afe_block:
-            V = s_pars.view(-1, s_pars.shape[-1])
             for _ in range(n_refine):
                 A = self.subspace_block.gen_A_ada()
                 Aq, X = self.afe_block.apply_mat_mul(A, V)
@@ -968,24 +1079,22 @@ class MeasurementStage:
             if not self.reconstruct:
                 # Stay in the measurement space: dim 0 now counts MEASUREMENTS, not
                 # antennas, and the contract says so for everything downstream.
-                n_chirp, n_freqs = s_pars.shape[2], s_pars.shape[3]
                 return {
-                    "s_pars": X.view(X.shape[0], 1, n_chirp, n_freqs),
+                    "cube": X.reshape(X.shape[0], n_slow, n_range),
                     "U": self.subspace_block.oja.U,
                     "sensing_matrix": Aq,
-                    "aperture_shape": (s_pars.shape[0], s_pars.shape[1]),
+                    "aperture_shape": state.get("aperture_shape"),
                     "signal_dimension": frames.DIMENSION_REDUCED,
                     "n_refine_used": n_refine,
                 }
             Xt = self.afe_block.reconstruct(Aq, X)
-            s_pars = Xt.view(s_pars.shape)
-            return {"s_pars": s_pars, "U": self.subspace_block.oja.U,
+            cube = Xt.reshape(cube.shape)
+            return {"cube": cube, "U": self.subspace_block.oja.U,
                     "n_refine_used": n_refine}
         else:
             # No AFE: feed the subspace tracker the full-precision compressed
             # measurements directly (same A-generation as the AFE branch, but
             # without quantization).
-            V = s_pars.view(-1, s_pars.shape[-1])
             for _ in range(n_refine):
                 A = self.subspace_block.gen_A_ada()
                 X = A @ V
@@ -1052,54 +1161,76 @@ def _power_bin(power, n_bins, dim):
     return power.movedim(-1, dim)
 
 
-class FFTBlock:
-    """Azimuth-elevation power map: coherent 2D aperture FFT + full-band range
-    compression, with non-coherent (power) integration over range.
+#: Every aperture product below reads the ONE range-compressed cube
+#: (`e2e.chain.receive.RangeTransformBlock`) and owns only its ANGLE transform. Each
+#: used to run its own range FFT over the CFR's frequency axis -- three independent
+#: copies of one convention, beside the ML chain's fourth inside
+#: `transforms.adc_to_rd`. Deleting them is the point of the one-chain consolidation
+#: (owner directive 2026-09-24; notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 5.1
+#: item 1). The products are numerically unchanged: an angle FFT over the element
+#: axis and a range FFT over the fast axis commute, so moving the range half upstream
+#: of the compressor reorders two transforms that act on different axes.
+#: The index map between the cube's range axis and the v1.0 products' own fftshifted
+#: one is documented and pinned in tests/test_one_chain_spine.py
+#: (`v10_range_reorder`): the dechirp's conjugate negates the range axis
+#: (`k -> (-k) mod N`) and the v1.0 display fftshifted it.
 
-    ``bins`` sizes ONLY the azimuth/elevation (aperture) FFTs. The range transform
-    always spans the FULL frequency band (all ``n_freqs`` samples). Earlier code
-    passed ``bins`` as the range-FFT length too, which TRUNCATED the frequency axis
-    to its first ``bins`` samples -- discarding most of the swept band (both range
-    resolution and ~10*log10(n_freqs/bins) dB of coherent integration gain). Because
-    range is integrated away in this product, we range-compress over the full band,
-    aperture-FFT each range bin (chunked to bound memory), and power-sum over range,
-    so a target at ANY range appears at full SNR.
+class FFTBlock:
+    """Azimuth-elevation power map: coherent 2D aperture FFT of the cube, with
+    non-coherent (power) integration over the cube's range axis.
+
+    ``bins`` sizes the azimuth/elevation (aperture) FFTs. Range compression is NOT
+    done here any more -- it happened once, upstream, in
+    `e2e.chain.receive.RangeTransformBlock`; this block aperture-FFTs each range bin
+    (chunked to bound memory) and power-sums over range, so a target at ANY range
+    appears at full SNR.
 
     ``window`` optionally tapers the aperture (angle) axes for sidelobe control
-    (None / 'hann' / 'hamming'); it never touches the range axis. The default None
-    is the untapered map (numbers unchanged from the uniform-aperture case).
+    (None / 'hann' / 'hamming'); it never touches the range axis (that window is the
+    range transform's `window=` knob). The default None is the untapered map.
 
-    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'fft' is
+    ``array_shape`` is the (rx_x, rx_y) grid the cube's element axis factors into;
+    normally supplied by `Simulation` through `state['aperture_shape']` and only
+    needed by direct callers (see `_aperture_shape_for`).
+
+    Multi-chirp cubes are handled per chirp (CHIRP_BROADCAST): 'fft' is
     ``[bins, bins]`` for the single-chirp frames the pipeline has always produced, and
     ``[n_chirp, bins, bins]`` ONLY when n_chirp > 1.
     """
 
-    frame_capabilities = _PER_CHIRP
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=False, chirps=frames.CHIRP_BROADCAST, domain=frames.DOMAIN_CUBE)
 
-    def __init__(self, bins=256, window=None):
+    def __init__(self, bins=256, window=None, array_shape=None):
         self.bins = bins
         self.window = window
+        self.array_shape = array_shape
 
     def apply(self, state_dict):
-        return {'fft': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
+        shape = _aperture_shape_for(state_dict, self.array_shape, 'FFTBlock')
+        grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
+        return {'fft': frames.broadcast_over_chirps(grid, self._map)}
 
     def _map(self, data):
-        # data: one chirp's aperture slab [az, el, n_freqs]
-        n_az, n_el, n_freqs = data.shape
-        # Full-band range compression (freq -> range); NOT truncated to `bins`.
-        range_full = torch.fft.fft(data, dim=2)     # [az, el, n_freqs]
+        # data: one chirp's aperture slab [az, el, n_range] -- already range-compressed
+        n_az, n_el, n_range = data.shape
         w_az = _aperture_window(self.window, n_az, data.device)
         w_el = _aperture_window(self.window, n_el, data.device)
         if w_az is not None:
-            range_full = range_full * w_az.view(n_az, 1, 1)
+            data = data * w_az.view(n_az, 1, 1)
         if w_el is not None:
-            range_full = range_full * w_el.view(1, n_el, 1)
+            data = data * w_el.view(1, n_el, 1)
         # Aperture FFT per range bin, power-integrated over range, chunked over the
-        # range axis so we never materialize a [bins, bins, n_freqs] tensor.
+        # range axis so we never materialize a [bins, bins, n_range] tensor.
         acc = torch.zeros(self.bins, self.bins, dtype=torch.float32, device=data.device)
         chunk = 256
-        for r0 in range(0, n_freqs, chunk):
-            blk = range_full[:, :, r0:r0 + chunk]
+        for r0 in range(0, n_range, chunk):
+            blk = data[:, :, r0:r0 + chunk]
             ap = torch.fft.fft(torch.fft.fft(blk, self.bins, 0), self.bins, 1)
             ap = torch.fft.fftshift(torch.fft.fftshift(ap, 0), 1)
             acc = acc + torch.sum(torch.abs(ap) ** 2, dim=2)
@@ -1107,108 +1238,123 @@ class FFTBlock:
 
 
 class RangeAzBlock:
-    """Range-azimuth power map: coherent azimuth FFT + full-band range
-    compression, non-coherent (power) integration across the collapsed
-    elevation axis.
+    """Range-azimuth power map: coherent azimuth FFT of the cube, non-coherent (power)
+    integration across the collapsed elevation axis.
 
-    As in FFTBlock, ``bins`` sizes only the azimuth (aperture) FFT and the range
-    DISPLAY axis; the range compression spans the full frequency band (all
-    ``n_freqs`` samples) rather than truncating to the first ``bins``. The full-band
-    range profile is power-binned down to ``bins`` display gates (energy- and
-    extent-preserving), and elevation is integrated non-coherently (power) so a
-    target off broadside in elevation survives -- previously elevation was collapsed
-    by a COHERENT sum (an implicit broadside beam) that nulled off-broadside targets.
+    ``bins`` sizes the azimuth (aperture) FFT and the range DISPLAY axis. Range
+    compression is NOT done here any more: the cube arrives already compressed from
+    `e2e.chain.receive.RangeTransformBlock`, which owns the one range FFT, the one
+    fast-time window, and the one range axis (bin k = delay k/(N*df), no fftshift, no
+    negation). This block power-bins the cube's ``n_range`` native bins down to
+    ``bins`` display gates (energy- and extent-preserving), and integrates elevation
+    non-coherently (power) so a target off broadside in elevation survives.
 
     ``window`` optionally tapers the azimuth aperture (None / 'hann' / 'hamming').
+    ``array_shape`` is the (rx_x, rx_y) grid the cube's element axis factors into;
+    normally supplied by `Simulation` through `state['aperture_shape']`.
 
-    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_az' is
-    ``[bins, n_range]`` for single-chirp frames and ``[n_chirp, bins, n_range]`` ONLY
-    when n_chirp > 1, where ``n_range = min(bins, n_freqs)``.
+    Multi-chirp cubes are handled per chirp (CHIRP_BROADCAST): 'range_az' is
+    ``[bins, n_gates]`` for single-chirp frames and ``[n_chirp, bins, n_gates]`` ONLY
+    when n_chirp > 1.
 
-    **``n_range`` is ``bins`` only when the band actually has that many samples.**
-    The range axis is produced by power-BINNING the full-band profile DOWN to ``bins``
-    display gates, which is only possible when ``n_freqs >= bins``; with a shorter band
-    there is nothing to bin down and the block returns the ``n_freqs`` gates it really
-    measured. It does NOT pad or interpolate up to ``bins``, and that is deliberate --
-    zero-padding would manufacture range gates, and their sidelobes, that the band never
-    resolved. This docstring previously promised ``[bins, bins]`` unconditionally, which
-    was wrong for any short band and is reachable from a shipped scenario:
-    ``e2e/environment/scenarios/canyon_radar.json`` sets ``num_freqs: 128`` while
-    ``e2e/main/main_sionna_blocks.py`` constructs this block at the default ``bins=256``.
-    A warning is emitted in that case, since a caller who slices assuming a square map
-    would otherwise fail somewhere far away from the cause.
+    **``n_gates`` is ``bins`` only when the cube actually has that many range bins.**
+    The display axis is produced by power-BINNING the cube's range axis DOWN to
+    ``bins`` gates, which is only possible when ``n_range >= bins``; with a shorter
+    cube there is nothing to bin down and the block returns the ``n_range`` gates it
+    really measured. It does NOT pad or interpolate up to ``bins``, and that is
+    deliberate -- zero-padding would manufacture range gates, and their sidelobes,
+    that the band never resolved. A warning is emitted in that case (reachable from a
+    shipped scenario: ``e2e/environment/scenarios/canyon_radar.json`` sets
+    ``num_freqs: 128`` while ``e2e/main/main_sionna_blocks.py`` builds this block at
+    the default ``bins=256``), since a caller slicing on a square map would otherwise
+    fail far away from the cause.
     """
 
-    frame_capabilities = _PER_CHIRP
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=False, chirps=frames.CHIRP_BROADCAST, domain=frames.DOMAIN_CUBE)
 
-    def __init__(self, bins=256, window=None):
+    def __init__(self, bins=256, window=None, array_shape=None):
         self.bins = bins
         self.window = window
+        self.array_shape = array_shape
 
     def apply(self, state_dict):
-        return {'range_az': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
+        shape = _aperture_shape_for(state_dict, self.array_shape, 'RangeAzBlock')
+        grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
+        return {'range_az': frames.broadcast_over_chirps(grid, self._map)}
 
     def _map(self, data):
-        # data: one chirp's aperture slab [az, el, n_freqs]
-        n_az, n_el, n_freqs = data.shape
+        # data: one chirp's aperture slab [az, el, n_range] -- already range-compressed
+        n_az, n_el, n_range = data.shape
         w_az = _aperture_window(self.window, n_az, data.device)
         # Accumulate power over the collapsed (elevation) axis one element at a
-        # time -- bounds memory to a single [bins, n_freqs] slab regardless of
-        # aperture size or band length.
-        power = torch.zeros(self.bins, n_freqs, dtype=torch.float32, device=data.device)
+        # time -- bounds memory to a single [bins, n_range] slab regardless of
+        # aperture size or cube length.
+        power = torch.zeros(self.bins, n_range, dtype=torch.float32, device=data.device)
         for e in range(n_el):
-            col = data[:, e, :]                      # [az, n_freqs]
+            col = data[:, e, :]                      # [az, n_range]
             if w_az is not None:
                 col = col * w_az.view(n_az, 1)       # taper before the aperture FFT
-            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
-            r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
-            power = power + torch.abs(r) ** 2
-        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
+            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_range]
+            power = power + torch.abs(a) ** 2
+        return _power_bin(power, self.bins, dim=1)   # n_range cube bins -> bins gates
 
 
 class RangeElBlock:
-    """Range-elevation power map: coherent elevation FFT + full-band range
-    compression, non-coherent (power) integration across the collapsed azimuth
-    axis. See RangeAzBlock for the rationale (azimuth/elevation swapped): ``bins``
-    sizes only the elevation aperture FFT and the range display axis; range
-    compression uses the full band and is power-binned to ``bins`` gates.
+    """Range-elevation power map: coherent elevation FFT of the cube, non-coherent
+    (power) integration across the collapsed azimuth axis. See RangeAzBlock for the
+    rationale (azimuth/elevation swapped) and for why the range FFT no longer lives
+    here.
 
     ``window`` optionally tapers the elevation aperture (None / 'hann' / 'hamming').
 
-    Multi-chirp frames are handled per chirp (CHIRP_BROADCAST): 'range_el' is
-    ``[bins, n_range]`` for single-chirp frames and ``[n_chirp, bins, n_range]`` ONLY
-    when n_chirp > 1, where ``n_range = min(bins, n_freqs)`` -- see ``RangeAzBlock`` for
-    why a short band is reported at its own resolution rather than padded up to ``bins``.
+    Multi-chirp cubes are handled per chirp (CHIRP_BROADCAST): 'range_el' is
+    ``[bins, n_gates]`` for single-chirp frames and ``[n_chirp, bins, n_gates]`` ONLY
+    when n_chirp > 1 -- see ``RangeAzBlock`` for why a short cube is reported at its
+    own resolution rather than padded up to ``bins``.
     """
 
-    frame_capabilities = _PER_CHIRP
+    frame_capabilities = FrameCapabilities(
+        accepts_mimo=False, chirps=frames.CHIRP_BROADCAST, domain=frames.DOMAIN_CUBE)
 
-    def __init__(self, bins=256, window=None):
+    def __init__(self, bins=256, window=None, array_shape=None):
         self.bins = bins
         self.window = window
+        self.array_shape = array_shape
 
     def apply(self, state_dict):
-        return {'range_el': frames.broadcast_over_chirps(state_dict['s_pars'], self._map)}
+        # slow=None: this product broadcasts over the slow axis and reads only the
+        # fast one, so a JSAC cube's SYMBOL axis is as meaningful to it as a chirp
+        # axis. See `frames.require_cube_axes` for why RadarCubeBlock does not get
+        # the same latitude.
+        frames.require_cube_axes(state_dict, self, slow=None)
+        shape = _aperture_shape_for(state_dict, self.array_shape, 'RangeElBlock')
+        grid = frames.cube_to_aperture_grid(state_dict['cube'], shape)
+        return {'range_el': frames.broadcast_over_chirps(grid, self._map)}
 
     def _map(self, data):
-        # data: one chirp's aperture slab [az, el, n_freqs]
-        n_az, n_el, n_freqs = data.shape
+        # data: one chirp's aperture slab [az, el, n_range] -- already range-compressed
+        n_az, n_el, n_range = data.shape
         w_el = _aperture_window(self.window, n_el, data.device)
         # Accumulate power over the collapsed (azimuth) axis one element at a time.
-        power = torch.zeros(self.bins, n_freqs, dtype=torch.float32, device=data.device)
+        power = torch.zeros(self.bins, n_range, dtype=torch.float32, device=data.device)
         for m in range(n_az):
-            col = data[m, :, :]                      # [el, n_freqs]
+            col = data[m, :, :]                      # [el, n_range]
             if w_el is not None:
                 col = col * w_el.view(n_el, 1)       # taper before the aperture FFT
-            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_freqs]
-            r = torch.fft.fftshift(torch.fft.fft(a, dim=1), 1)            # full-band range
-            power = power + torch.abs(r) ** 2
-        return _power_bin(power, self.bins, dim=1)   # n_freqs range bins -> bins gates
+            a = torch.fft.fftshift(torch.fft.fft(col, self.bins, 0), 0)   # [bins, n_range]
+            power = power + torch.abs(a) ** 2
+        return _power_bin(power, self.bins, dim=1)   # n_range cube bins -> bins gates
 
 
 class RangeProfileBlock:
-    """Per-measurement-channel range profile: a windowless FFT along the FREQUENCY
-    axis only -- no aperture transform. The first COMPRESSED-DOMAIN downstream product.
+    """Per-measurement-channel range profile: the cube's own range axis in power, no
+    aperture transform at all. The first COMPRESSED-DOMAIN downstream product.
 
     THE ASYMMETRY THIS BLOCK EXISTS TO SHOW. Compression measures ``y = A x``, and
     `A` mixes only the APERTURE axis -- each measurement is a linear combination of
@@ -1227,13 +1373,12 @@ class RangeProfileBlock:
     whether dim 0 counts elements or measurements is irrelevant to a per-channel range
     transform.
 
-    Range compression matches RangeAzBlock/RangeElBlock's convention exactly: the
-    full frequency band is FFT'd (never truncated to `bins`), fftshifted, and turned
-    into power (`|.|**2`, non-coherent) -- no window on the range axis
-    (`_aperture_window` tapers only aperture/angle axes and is never applied here),
-    and no dB conversion (that is a display-layer choice made downstream, e.g.
-    `webapp/pipeline_runner.py`'s dB helper). `bins` sizes only the DISPLAY range
-    axis, via the same energy-preserving `_power_bin` RangeAzBlock/RangeElBlock use.
+    On the one spine the range FFT itself happens upstream, once, in
+    `e2e.chain.receive.RangeTransformBlock` -- this block only squares and bins. It
+    deliberately does NOT fftshift (the cube's bin 0 IS zero delay, the transform's own
+    convention) and does no dB conversion (a display-layer choice made downstream, e.g.
+    `webapp/pipeline_runner.py`'s dB helper). `bins` sizes only the DISPLAY range axis,
+    via the same energy-preserving `_power_bin` RangeAzBlock/RangeElBlock use.
 
     Outputs `'range_profile'` -- per-channel power, `[n_channels, bins]` -- and
     `'range_profile_agg'` -- the non-coherent (power) MEAN over channels, `[bins]` --
@@ -1241,45 +1386,64 @@ class RangeProfileBlock:
     RangeAzBlock's elevation integration).
     """
 
-    # Single-chirp/no-MIMO like the other range products, but DIMENSION_ANY: this
-    # block only ever indexes the frequency axis, so whether the aperture has been
-    # compressed is none of its business (see SubspaceErrorBlock for the same pattern).
+    # Consumes the cube, but DIMENSION_ANY: this block only ever indexes the range
+    # axis, so whether the aperture has been compressed is none of its business (see
+    # SubspaceErrorBlock for the same pattern).
     frame_capabilities = frames.FrameCapabilities(
-        accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
-        chirps=_SINGLE_CHIRP.chirps,
-        domain=_SINGLE_CHIRP.domain,
+        accepts_mimo=True,
+        chirps=frames.CHIRP_NATIVE,
+        domain=frames.DOMAIN_CUBE,
         dimension=frames.DIMENSION_ANY,
     )
 
-    def __init__(self, bins=256):
+    def __init__(self, bins=256, slow_index=None):
         self.bins = bins
+        # WHICH slow index to profile, or None (the default) to integrate them
+        # NON-COHERENTLY in power -- the same convention RangeAzBlock uses for the
+        # collapsed elevation axis. On a single-chirp cube the mean over one element is
+        # the identity, so every FMCW number is unchanged (2026-09-24, with the
+        # CHIRP_SINGLE lift). `slow_index=0` is what a JSAC preset wants: symbol 0 is
+        # the all-pilot preamble and therefore the FMCW-parity point, while the data
+        # symbols carry the division's `1/|X|^2` noise amplification.
+        self.slow_index = slow_index
 
     def apply(self, state_dict):
-        data = frames.chirp0(state_dict['s_pars'])    # [dim0, dim1, n_freqs]
-        n_freqs = data.shape[-1]
-        channels = data.reshape(-1, n_freqs)           # [n_channels, n_freqs]
-        r = torch.fft.fftshift(torch.fft.fft(channels, dim=1), 1)   # full-band range
-        power = torch.abs(r) ** 2
-        power = _power_bin(power, self.bins, dim=1)    # n_freqs range bins -> bins gates
+        frames.require_cube_axes(state_dict, self, slow=None)
+        cube = state_dict['cube']                      # [n_channels, n_slow, n_range]
+        if cube.dim() != 3:
+            raise frames.FrameContractError(
+                f"RangeProfileBlock: expects a cube [n_ch, n_slow, n_range], got "
+                f"shape {tuple(cube.shape)}"
+            )
+        if self.slow_index is not None:
+            if not 0 <= self.slow_index < cube.shape[1]:
+                raise frames.FrameContractError(
+                    f"RangeProfileBlock(slow_index={self.slow_index}) but the cube's "
+                    f"slow axis has {cube.shape[1]} entries"
+                )
+            power = torch.abs(cube[:, self.slow_index, :]) ** 2
+        else:
+            power = torch.mean(torch.abs(cube) ** 2, dim=1)   # [n_channels, n_range]
+        power = _power_bin(power, self.bins, dim=1)    # n_range cube bins -> bins gates
         agg = torch.mean(power, dim=0)                  # non-coherent combine over channels
         return {'range_profile': power, 'range_profile_agg': agg}
 
 
 class SubspaceErrorBlock:
-    # Reads the tracker's basis (state['U'] / state['U_true']), not the frame, but it is
-    # only meaningful alongside the single-chirp/no-MIMO subspace path, so it declares
-    # that contract for the frame AXES.
+    # Reads the tracker's basis (state['U'] / state['U_true']), not the frame at all.
     #
-    # DIMENSION_ANY, though, and deliberately: this block never touches `s_pars`, so
-    # whether the aperture has been compressed is none of its business. Declaring
-    # full-dimension (the default) made it reject the very configuration
-    # `MeasurementStage(reconstruct=False)` exists to enable -- tracking a subspace from
-    # compressed measurements and then measuring the error -- which would have forced a
-    # pointless, lossy DecompressBlock in front of a block that reads no frame at all.
+    # DOMAIN_ANY and DIMENSION_ANY, both deliberately. It used to declare DOMAIN_CFR,
+    # which was already a fiction (it reads no payload) and became a wrong one on the
+    # one spine, where the chain is in the cube domain by the time the tracker has a
+    # basis to score. Declaring full-dimension likewise made it reject the very
+    # configuration `MeasurementStage(reconstruct=False)` exists to enable -- tracking
+    # a subspace from compressed measurements and then measuring the error -- which
+    # would have forced a pointless, lossy DecompressBlock in front of a block that
+    # reads no frame at all.
     frame_capabilities = frames.FrameCapabilities(
-        accepts_mimo=_SINGLE_CHIRP.accepts_mimo,
-        chirps=_SINGLE_CHIRP.chirps,
-        domain=_SINGLE_CHIRP.domain,
+        accepts_mimo=True,
+        chirps=frames.CHIRP_NATIVE,
+        domain=frames.DOMAIN_ANY,
         dimension=frames.DIMENSION_ANY,
     )
 

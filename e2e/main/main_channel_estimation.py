@@ -2,9 +2,12 @@
 Pilot-based channel-estimation example.
 
 Sends OFDM pilots through a frequency-domain channel (precomputed Sionna frame if
-available, else synthetic multipath), estimates the channel with LS and MMSE from
-the pilots, compares estimated vs true channel, and sweeps SNR to show estimation
-MSE vs SNR.
+available, else synthetic multipath -- `ch.load_or_synthesize_cfr` -- run through the
+ONE chain's own `InterconnectBlock`, see `_chain_cfr`, so this is not a second,
+chain-free channel path), estimates the channel with LS and MMSE from the pilots,
+compares estimated vs true channel, and sweeps SNR to show estimation MSE vs SNR. The
+SNR sweep's own AWGN stays explicit (`ch.apply_channel`, added below) -- it is the
+example's swept variable, not something to source from a front end.
 
 The MMSE estimate is a diagonal Wiener shrinkage whose signal/noise-power prior
 is pooled over every pilot subcarrier AND every OFDM symbol in the frame (the
@@ -41,6 +44,41 @@ from e2e.viz import fig_dir
 FIG_DIR = fig_dir(__file__)
 
 
+def _chain_cfr(scenario_name, freqs, frame=0, rng=None):
+    """The propagation channel (real munich.pkl frame, or the Sionna-free synthetic
+    fallback -- `ch.load_or_synthesize_cfr`, UNCHANGED) run through the ONE chain's own
+    `e2e.blocks.InterconnectBlock`, rather than handed to the estimator as a bare
+    analytic draw. See `e2e.main.main_comms_link._chain_cfr` for the identical helper
+    and the reasoning: the front end is excluded because it acts on the beat record, a
+    domain this dense CFR never reaches; the interconnect is the corpus generator's
+    OWN configuration (`chain_generate.DEFAULT_INTERCONNECT_CSV`, a real S21(f)) and not
+    `InterconnectBlock`'s 11-tap boxcar placeholder; and `normalize_gain=True` strips
+    its DC gain so the estimator's SNR sweep still lands on the same `snr_db` axis.
+
+    Returns (cfr_dense, source_str) -- same shape/contract as `load_or_synthesize_cfr`.
+    """
+    from e2e.blocks import InterconnectBlock
+    from e2e.ml.chain_generate import DEFAULT_INTERCONNECT_CSV
+
+    cfr_dense, source = ch.load_or_synthesize_cfr(scenario_name, freqs, frame=frame, rng=rng)
+    # NO `band_hz=`, and that is a decision rather than an omission. The shipped CSV is a
+    # 77 GHz part (70-90 GHz); this scene is Ka (28.5-31.5 GHz). Passing the real band
+    # puts every grid point outside the CSV's range, where `InterconnectBlock` clamps to
+    # an endpoint -- measured 2026-09-24: |S21| ripple 0.000000 dB, i.e. a CONSTANT, an
+    # interconnect that models nothing while reporting that it ran. (That is exactly what
+    # the Ka ML corpora got; see `chain_generate._interconnect_band_hz`'s "KNOWN DEFECT
+    # AT KA".) Omitting `band_hz` selects the block's band-agnostic mode, which maps the
+    # CSV's own span across the frame's samples: the real response SHAPE, on a nominal
+    # frequency mapping. Say which of the two you have; do not let a constant pass for a
+    # filter. A genuinely Ka-band S21 -- a CSV for this band, or
+    # `InterconnectBlock(source="tessera")` and its geometric scale model -- is the real
+    # answer and is not this example's to make.
+    interconnect = InterconnectBlock(transfer_csv=str(DEFAULT_INTERCONNECT_CSV),
+                                     normalize_gain=True)
+    filtered = interconnect.apply_interconnect(cfr_dense.view(1, 1, 1, -1)).view(-1)
+    return filtered, source
+
+
 def main():
     rng = np.random.default_rng(2)
 
@@ -55,8 +93,10 @@ def main():
     subcarrier_spacing = 240e3
     n_symbols = 16
 
-    cfr_dense, source = ch.load_or_synthesize_cfr("munich", freqs, rng=rng)
-    print(f"[chanest] channel source: {source}")
+    # sourced via the chain's own InterconnectBlock (see `_chain_cfr`) rather than a
+    # bare analytic draw -- this is not a second, chain-free channel path.
+    cfr_dense, source = _chain_cfr("munich", freqs, rng=rng)
+    print(f"[chanest] channel source: {source} (+ chain interconnect)")
     H_true = ch.cfr_to_subcarriers(cfr_dense, freqs, modem.fft_size, carrier, subcarrier_spacing)
 
     tx_pilots = modem.pilot_grid(n_symbols)

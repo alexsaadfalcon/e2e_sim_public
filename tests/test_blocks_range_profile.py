@@ -12,24 +12,43 @@ torch = pytest.importorskip("torch")
 
 from e2e import frames
 from e2e.blocks import AFEBlock, MeasurementStage, RangeAzBlock, RangeProfileBlock
+from e2e.chain.dechirp import DechirpBlock
+from e2e.chain.receive import RangeTransformBlock
 from e2e.frames import DIMENSION_FULL, DIMENSION_REDUCED, FrameContractError
 from e2e.subspace.algorithms import Oja, gen_A_ada
 
 
-def _delay_frame(n_elements, n_freqs, k0, dev, seed=0):
-    """A synthetic full-dimension frame `[n_elements, 1, 1, n_freqs]` where every
-    element carries the SAME range delay (a pure complex exponential at bin `k0`)
-    but an element-dependent complex amplitude: element `n`'s trace is
-    `s[n] * exp(2j*pi*k0*f/n_freqs)`. A per-channel FFT along the frequency axis
-    (torch.fft.fft) then puts every channel's peak at the exact same range bin --
-    the orthogonality of complex exponentials makes this exact, not approximate.
+class _SingleTxCfg:
+    mimo = "single"
+    n_tx = 1
+
+
+def _delay_cube(n_elements, n_freqs, k0, dev, seed=0):
+    """A synthetic single-chirp CUBE `[n_elements, 1, n_freqs]` in which every element
+    carries the SAME range delay but an element-dependent complex amplitude.
+
+    Built by running the two spine stages (dechirp, then the range transform at the
+    identity point) on a CFR whose element `n` is `s[n] * exp(-2j*pi*k0*f/n_freqs)` --
+    a delay, i.e. a NEGATIVE phase ramp in frequency. The dechirp's conjugate flips
+    that to a positive ramp, so the forward range FFT puts every channel's peak at
+    cube bin `k0` exactly (orthogonality of complex exponentials; exact, not
+    approximate). The cube's bin 0 is zero delay -- no fftshift, no negation -- which
+    is why `_expected_bin` is now `k0` itself rather than an fftshifted index.
+
+    UPDATED 2026-09-24 for the one spine: `RangeProfileBlock` no longer runs a range
+    FFT of its own (the products' three private copies of it were deleted; see
+    notes/ONE_CHAIN_CONTRACT_2026-09-24.md section 5.1 item 1), so the fixture has to
+    produce the range-compressed object the block actually consumes.
     """
     g = torch.Generator(device="cpu").manual_seed(seed)
     s = torch.complex(torch.randn(n_elements, generator=g), torch.randn(n_elements, generator=g))
     f = torch.arange(n_freqs, dtype=torch.float32)
-    phase = torch.exp(2j * np.pi * k0 * f / n_freqs)
+    phase = torch.exp(-2j * np.pi * k0 * f / n_freqs)
     v = s.view(n_elements, 1).to(torch.complex64) * phase.view(1, n_freqs).to(torch.complex64)
-    return v.to(device=dev).view(n_elements, 1, 1, n_freqs)
+    s_pars = v.to(device=dev).view(n_elements, 1, 1, n_freqs)
+    adc = DechirpBlock(_SingleTxCfg()).apply({"s_pars": s_pars})["adc"]
+    return RangeTransformBlock(window="none", dc_removal=False,
+                               crop_negative_delay=False).apply({"adc": adc})["cube"]
 
 
 class _StubTracker:
@@ -51,10 +70,9 @@ class _StubTracker:
 
 
 def _expected_bin(k0, n_freqs):
-    """The bin a pure complex exponential exp(2j*pi*k0*f/n_freqs) lands at after
-    torch.fft.fft + torch.fft.fftshift (even n_freqs): fftshift maps raw index k0
-    to (k0 + n_freqs // 2) % n_freqs."""
-    return (k0 + n_freqs // 2) % n_freqs
+    """Cube bin of a delay-`k0` target: `k0`. The spine's range transform does not
+    fftshift, so the bin index IS the delay index (see `_delay_cube`)."""
+    return k0
 
 
 # --------------------------------------------------------------------------------
@@ -64,11 +82,11 @@ def test_range_profile_peak_bin_matches_full_vs_reduced(torch_device):
     n_elements, n_freqs, k0, k_sub, m = 64, 64, 10, 4, 16
     bins = n_freqs  # >= n_freqs -> _power_bin is identity, no binning offset to track
 
-    full = _delay_frame(n_elements, n_freqs, k0, torch_device)
+    full = _delay_cube(n_elements, n_freqs, k0, torch_device)
     expected_bin = _expected_bin(k0, n_freqs)
 
     # Full-dimension range profile.
-    out_full = RangeProfileBlock(bins=bins).apply({"s_pars": full})
+    out_full = RangeProfileBlock(bins=bins).apply({"cube": full})
     per_channel_full = out_full["range_profile"]
     agg_full = out_full["range_profile_agg"]
     assert per_channel_full.shape == (n_elements, bins)
@@ -80,9 +98,9 @@ def test_range_profile_peak_bin_matches_full_vs_reduced(torch_device):
     tracker = _StubTracker(d=n_elements, k=k_sub, m=m)
     stage = MeasurementStage(AFEBlock(), tracker, reconstruct=False)
     assert stage.frame_capabilities.emits_dimension == DIMENSION_REDUCED
-    state = {"s_pars": full}
+    state = {"cube": full, "aperture_shape": (8, 8)}
     state.update(stage.apply(state))
-    assert state["s_pars"].shape == (m, 1, 1, n_freqs)
+    assert state["cube"].shape == (m, 1, n_freqs)
 
     out_reduced = RangeProfileBlock(bins=bins).apply(state)
     per_channel_reduced = out_reduced["range_profile"]
@@ -112,21 +130,26 @@ def test_range_profile_declares_dimension_any():
 
 
 def test_range_profile_accepts_reduced_dimension_where_range_az_is_refused(torch_device):
-    reduced = torch.randn(6, 1, 1, 16, dtype=torch.cfloat, device=torch_device)
+    reduced = torch.randn(6, 1, 16, dtype=torch.cfloat, device=torch_device)
 
-    # DIMENSION_ANY: no error.
-    frames.check_capabilities(reduced, RangeProfileBlock(), dimension=DIMENSION_REDUCED)
-    RangeProfileBlock().apply({"s_pars": reduced})  # actually runs, no reconstruction needed
+    # DIMENSION_ANY: no error. The frame AXIS checks are skipped outside DOMAIN_CFR
+    # (the cube is 3-D and carries no TX axis), so what is exercised here is the
+    # DIMENSION half of the contract, which is the half this test is about.
+    frames.check_capabilities(reduced, RangeProfileBlock(), dimension=DIMENSION_REDUCED,
+                              domain=frames.DOMAIN_CUBE)
+    RangeProfileBlock().apply({"cube": reduced})  # runs, no reconstruction needed
 
     # RangeAzBlock declares the historical full-dimension contract (default): refused.
     with pytest.raises(FrameContractError, match="DecompressBlock"):
-        frames.check_capabilities(reduced, RangeAzBlock(), dimension=DIMENSION_REDUCED)
+        frames.check_capabilities(reduced, RangeAzBlock(), dimension=DIMENSION_REDUCED,
+                                  domain=frames.DOMAIN_CUBE)
 
 
 def test_range_profile_also_runs_on_full_dimension(torch_device):
-    full = torch.randn(8, 1, 1, 16, dtype=torch.cfloat, device=torch_device)
-    frames.check_capabilities(full, RangeProfileBlock(), dimension=DIMENSION_FULL)
-    out = RangeProfileBlock(bins=16).apply({"s_pars": full})
+    full = torch.randn(8, 1, 16, dtype=torch.cfloat, device=torch_device)
+    frames.check_capabilities(full, RangeProfileBlock(), dimension=DIMENSION_FULL,
+                              domain=frames.DOMAIN_CUBE)
+    out = RangeProfileBlock(bins=16).apply({"cube": full})
     assert out["range_profile"].shape == (8, 16)
     assert out["range_profile_agg"].shape == (16,)
 
@@ -136,8 +159,8 @@ def test_range_profile_also_runs_on_full_dimension(torch_device):
 # --------------------------------------------------------------------------------
 def test_range_profile_output_keys_and_shapes(torch_device):
     n_elements, n_freqs, bins = 12, 20, 8
-    s_pars = torch.randn(n_elements, 1, 1, n_freqs, dtype=torch.cfloat, device=torch_device)
-    out = RangeProfileBlock(bins=bins).apply({"s_pars": s_pars})
+    cube = torch.randn(n_elements, 1, n_freqs, dtype=torch.cfloat, device=torch_device)
+    out = RangeProfileBlock(bins=bins).apply({"cube": cube})
 
     assert set(out) == {"range_profile", "range_profile_agg"}
     assert out["range_profile"].shape == (n_elements, bins)
@@ -155,6 +178,5 @@ def test_range_profile_output_keys_and_shapes(torch_device):
 def test_range_profile_reserved_keys_do_not_collide():
     """RangeProfileBlock's output keys must not be in Simulation's reserved set
     (e2e/simulation.py feed_forward), or a real pipeline run would raise."""
-    reserved = {"U", "U_true", "s_pars", "PRX", "frame_layout", "signal_domain",
-                "signal_dimension", "sensing_matrix", "aperture_shape", "tx_wave", "adc"}
-    assert not ({"range_profile", "range_profile_agg"} & reserved)
+    from e2e.simulation import _RESERVED_STATE_KEYS
+    assert not ({"range_profile", "range_profile_agg"} & _RESERVED_STATE_KEYS)

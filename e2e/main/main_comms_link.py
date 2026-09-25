@@ -3,8 +3,12 @@ End-to-end OFDM communications link example.
 
 Transmits random bits over an OFDM modem, pushes them through a frequency-domain
 channel (a precomputed Sionna frame if available, otherwise a synthetic multipath
-fallback), estimates the channel from pilots, equalizes, demaps, and sweeps SNR to
-produce a BER-vs-SNR curve plus a received constellation.
+fallback -- `ch.load_or_synthesize_cfr` -- run through the ONE chain's own
+`InterconnectBlock`, see `_chain_cfr`, so the propagation half of this link is not a
+second pipeline), estimates the channel from pilots, equalizes, demaps, and sweeps SNR
+to produce a BER-vs-SNR curve plus a received constellation. The SNR sweep's own AWGN
+stays explicit (added below by `ch.apply_channel`, not by the chain) -- it is the
+example's swept variable, not something to source from a front end.
 
 For uncoded per-subcarrier hard decisions, unbiased scalar MMSE and ZF are
 *algebraically identical* (both reduce to rx/H) -- so BER(ZF) ~= BER(MMSE) here,
@@ -40,6 +44,62 @@ from e2e.viz import fig_dir
 FIG_DIR = fig_dir(__file__)
 
 
+def _chain_cfr(scenario_name, freqs, frame=0, rng=None):
+    """The propagation channel (real munich.pkl frame, or the Sionna-free synthetic
+    fallback -- `ch.load_or_synthesize_cfr`, UNCHANGED) run through the ONE chain's own
+    `e2e.blocks.InterconnectBlock`, rather than handed to the OFDM link as a bare
+    analytic draw. That block, not a filter reimplemented here, is "the chain" this
+    script is re-pointed at.
+
+    The front end (RFFE) is deliberately NOT in this path: on the one spine (see
+    `e2e.simulation.Simulation._build_spine`) the front end acts on the SAMPLED BEAT
+    RECORD, after the dechirp -- a domain this script's dense CFR never reaches -- so
+    it has nothing to contribute to a frequency-domain channel. The interconnect is the
+    one chain stage that acts on the CFR itself, before the dechirp, which is exactly
+    where a comms link taps in (see `e2e.comms.blocks.ModemBlock`'s docstring).
+
+    WHICH interconnect, and why not the block's default. `InterconnectBlock`'s own
+    default is an 11-tap boxcar placeholder that `e2e.ml.chain_generate` documents as
+    smearing a point target across 11 bins with 0 dB sidelobes -- the corpus generator
+    measured it and replaced it with a real simulated interconnect for exactly that
+    reason. Shipping an example through the placeholder would satisfy the letter of
+    "route it through the chain" while modelling nothing, so this uses the SAME
+    configuration the corpus generator uses: `chain_generate.DEFAULT_INTERCONNECT_CSV`
+    (a real S21(f); 0.51-0.55 dB passive loss and 0.034 dB in-band ripple AT 77 GHz,
+    which is where that CSV lives). Importing the constant rather than copying the path
+    is deliberate: two copies of an interconnect configuration is two answers to one
+    question. How the CSV is mapped onto THIS scene's band is the subtle part -- see the
+    comment at the call below.
+
+    `normalize_gain=True` removes the filter's DC gain so this script's SNR sweep still
+    lands on the SAME `snr_db` axis it always has -- the sweep's own noise is referred
+    to the post-filter signal power either way, so this is a readability choice, not a
+    correctness one. Only the channel's frequency-selective ripple is new.
+
+    Returns (cfr_dense, source_str) -- same shape/contract as `load_or_synthesize_cfr`.
+    """
+    from e2e.blocks import InterconnectBlock
+    from e2e.ml.chain_generate import DEFAULT_INTERCONNECT_CSV
+
+    cfr_dense, source = ch.load_or_synthesize_cfr(scenario_name, freqs, frame=frame, rng=rng)
+    # NO `band_hz=`, and that is a decision rather than an omission. The shipped CSV is a
+    # 77 GHz part (70-90 GHz); this scene is Ka (28.5-31.5 GHz). Passing the real band
+    # puts every grid point outside the CSV's range, where `InterconnectBlock` clamps to
+    # an endpoint -- measured 2026-09-24: |S21| ripple 0.000000 dB, i.e. a CONSTANT, an
+    # interconnect that models nothing while reporting that it ran. (That is exactly what
+    # the Ka ML corpora got; see `chain_generate._interconnect_band_hz`'s "KNOWN DEFECT
+    # AT KA".) Omitting `band_hz` selects the block's band-agnostic mode, which maps the
+    # CSV's own span across the frame's samples: the real response SHAPE, on a nominal
+    # frequency mapping. Say which of the two you have; do not let a constant pass for a
+    # filter. A genuinely Ka-band S21 -- a CSV for this band, or
+    # `InterconnectBlock(source="tessera")` and its geometric scale model -- is the real
+    # answer and is not this example's to make.
+    interconnect = InterconnectBlock(transfer_csv=str(DEFAULT_INTERCONNECT_CSV),
+                                     normalize_gain=True)
+    filtered = interconnect.apply_interconnect(cfr_dense.view(1, 1, 1, -1)).view(-1)
+    return filtered, source
+
+
 def main():
     rng = np.random.default_rng(0)
 
@@ -59,9 +119,11 @@ def main():
     # wildly frequency-selective response onto a handful of tones.)
     subcarrier_spacing = 240e3
 
-    # source the channel: real Sionna frame if present, else synthetic
-    cfr_dense, source = ch.load_or_synthesize_cfr("munich", freqs, rng=rng)
-    print(f"[comms_link] channel source: {source}")
+    # source the channel: real Sionna frame if present, else synthetic -- then filtered
+    # through the chain's own InterconnectBlock (see `_chain_cfr`), so this is the
+    # channel the pipeline's comms head would see, not a second, chain-free path.
+    cfr_dense, source = _chain_cfr("munich", freqs, rng=rng)
+    print(f"[comms_link] channel source: {source} (+ chain interconnect)")
     H_sc = ch.cfr_to_subcarriers(cfr_dense, freqs, modem.fft_size, carrier, subcarrier_spacing)
 
     # ---- SNR sweep -> BER ------------------------------------------------

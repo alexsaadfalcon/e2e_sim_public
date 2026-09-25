@@ -20,6 +20,7 @@ from e2e.blocks import \
     RangeAzBlock, \
     RangeElBlock, \
     SubspaceErrorBlock
+from e2e.chain.waveform import fmcw_plan_from_freq_plan
 from e2e.viz import to_db
 
 
@@ -38,9 +39,19 @@ FIG_DIR = os.path.join(os.path.dirname(__file__), "figures")
 
 
 def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=False):
-    """Run the full radar pipeline (environment -> RFFE -> interconnect -> AFE ->
-    AdaOja subspace tracking -> FFT/RangeAz/RangeEl/SubspaceError) and, if `show`,
-    save the subspace-error and az/el-map figures to FIG_DIR.
+    """Run the ONE spine and, if `show`, save the subspace-error and az/el-map figures
+    to FIG_DIR.
+
+    The spine `Simulation` builds from the blocks passed below is, in order:
+    environment -> interconnect -> dechirp -> front end (on the BEAT RECORD) ->
+    range transform -> AFE + AdaOja (MeasurementStage) -> the product fan-out
+    (FFT / RangeAz / RangeEl / SubspaceError). There is no second path: the products
+    read the one range-compressed cube rather than each running a range FFT of its own
+    (owner directive 2026-09-24; notes/ONE_CHAIN_CONTRACT_2026-09-24.md).
+
+    The `RFFEBlock` built below is TRANSLATED onto the beat placement by
+    `FrontEndBlock.from_rffe` -- the knobs are unchanged, the node it acts at is not.
+    Pass `composition="legacy_impulse"` to `Simulation` to get the v1.0 order back.
 
     `environment_block`, if given, is used as-is (e.g. a synthetic drop-in for
     tests); otherwise a `SionnaEnvironmentBlock(scenario_name)` is constructed,
@@ -86,6 +97,18 @@ def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=Fa
     interconnect_block1 = InterconnectBlock(case='case3')
     interconnect_block2 = InterconnectBlock(case='synthetic')
 
+    # The chirp plan the spine's dechirp, front end and range axis are built from.
+    # DERIVED from the frames' own frequency grid rather than typed, because the grid
+    # is what decides the chirp that can consume it (S/fs must equal the grid's own
+    # endpoint-inclusive spacing -- `fmcw_plan_from_freq_plan`). A legacy pkl carries
+    # no plan, so this script falls back to the band it has always assumed, stated in
+    # one place at the top of the file.
+    freq_plan = getattr(environment_block, 'freq_plan', None) or {
+        "start_hz": float(freqs[0]), "stop_hz": float(freqs[-1]),
+        "num_freqs": int(N_FREQS),
+    }
+    radar_cfg = fmcw_plan_from_freq_plan(freq_plan, n_rx=N_RX)
+
     afe_block = AFEBlock()
     # Track at the signal's spectral elbow (rank ~8, where the top-k subspace is well
     # defined) with enough measurements (m=512) to observe the scene's subspace drift; the
@@ -100,6 +123,7 @@ def main(scenario_name="munich", environment_block=None, n_steps=2, k=8, show=Fa
         interconnect_block1,
         afe_block,
         subspace_block,
+        radar_cfg=radar_cfg,
     )
     outputs = sim.run(n_steps=n_steps)
 

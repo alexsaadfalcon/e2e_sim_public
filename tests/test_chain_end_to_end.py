@@ -24,6 +24,7 @@ torch = pytest.importorskip("torch")
 from e2e import frames
 from e2e.chain.dechirp import DechirpBlock
 from e2e.chain.receive import ImpairmentBlock, QuantizerBlock, RadarCubeBlock
+from e2e.chain.transforms import range_transform_for
 from e2e.chain.waveform import ModulateBlock, TxPABlock, WaveformBlock
 from e2e.circuit.tx_pa import TxPA, TxPAConfig
 from e2e.radar_config import PRESETS
@@ -73,6 +74,13 @@ def _full_chain(with_transmit=True):
         DechirpBlock(CFG),
         ImpairmentBlock(CFG, seed=1),
         QuantizerBlock(bits=12),
+        # THE range transform (one-chain contract section 1.2 row 11). Added
+        # 2026-09-24: `RadarCubeBlock` no longer runs a range FFT of its own -- it
+        # reads the spine's `cube` and applies only the Doppler half -- so a chain
+        # that wants a range-Doppler product must carry the transform that makes one.
+        # Build it through `range_transform_for`, which pins the SCORED protocol the
+        # Doppler half is written against.
+        range_transform_for(CFG),
     ]
     return Simulation(_StubEnvironment(), [RadarCubeBlock(CFG)], k=4,
                       serial_stages=stages)

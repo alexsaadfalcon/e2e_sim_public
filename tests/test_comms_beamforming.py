@@ -428,9 +428,10 @@ def test_full_pipeline_subspace_combining_runs_green(make_env_block):
                        combining="subspace")
     sim = Simulation(
         env,
-        [modem, BERBlock()],
+        [],
         k=16,
         subspace_block=AdaOjaBlock(1024, 16),
+        comms_head=[modem, BERBlock()],
     )
     out = sim.run(n_steps=2)
     assert len(out["ber"]) == 2

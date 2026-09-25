@@ -60,7 +60,8 @@ def get_RX_config(nRx):
     return RX_config
 
 
-def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False, generator=None):
+def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False, generator=None,
+                            noise_band_hz=None, noise_divisor=None):
     '''
         Input values - V_bias_BB +- V1
         V1 --> 10^-5 t0 10^-6
@@ -73,6 +74,21 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False, generator=Non
                global RNG, so every existing caller is bit-for-bit unchanged; passing
                a seeded generator makes the draw reproducible without altering its
                statistics (still iid standard normal, same variance).
+
+        noise_band_hz, noise_divisor --> the two knobs that say WHERE this cascade's
+               thermal noise is being injected. Both default to None = the legacy
+               (v1.0) stepped-frequency placement, bit-for-bit: band = the BW config
+               column (the IF bandwidth), variance pre-divided by `nt` to compensate
+               the caller's unnormalised forward FFT (see the long comment at the
+               injection site).
+
+               `RFFEBlock` (front end on `ifft(CFR)`) leaves both None. The v1.2
+               `FrontEndBlock` (front end on the SAMPLED BEAT RECORD,
+               `e2e/chain/frontend.py`) passes `noise_band_hz = min(if_bw, fs)` and
+               `noise_divisor = 1.0`, because there is no FFT round trip on that path
+               and the samples really are sampled at `fs`. Added 2026-09-24 for the
+               FULL one-chain contract; the defaults exist so the corpus parity gate
+               can still run the legacy placement by name.
     '''
 
     '''
@@ -221,20 +237,96 @@ def circuit_model_bb_approx(RX_config, bb_IQ, fs, if_filter=False, generator=Non
     # frequency bin instead of the intended NBB*BW -- so the per-sample variance
     # injected here must be pre-divided by nt.
     nt = orig_shape[-1]
+    # See `noise_band_hz` / `noise_divisor` in the signature docstring. None/None is
+    # the legacy placement, and is what every pre-2026-09-24 caller gets.
+    noise_bw = BW if noise_band_hz is None else noise_band_hz
+    divisor = nt if noise_divisor is None else noise_divisor
     if generator is None:
         noise_i = torch.randn_like(RBBI)
         noise_q = torch.randn_like(RBBQ)
     else:
         noise_i = torch.randn(RBBI.shape, generator=generator, dtype=RBBI.dtype, device=RBBI.device)
         noise_q = torch.randn(RBBQ.shape, generator=generator, dtype=RBBQ.dtype, device=RBBQ.device)
-    RBBI += noise_i * torch.sqrt(NBB * BW / nt)
-    RBBQ += noise_q * torch.sqrt(NBB * BW / nt)
+    RBBI += noise_i * torch.sqrt(NBB * noise_bw / divisor)
+    RBBQ += noise_q * torch.sqrt(NBB * noise_bw / divisor)
     PRX = Pdclna + Plo + PdcBB
     RxBB = RBBI + 1j * RBBQ
 
     return RxBB.reshape(orig_shape), PRX
 
-def circuit_model_batch(rx_config, input_signals, fs, if_filter=False, generator=None):
+# --------------------------------------------------------------------------------
+# The NOISE half of the cascade, written out on its own.
+# --------------------------------------------------------------------------------
+def noise_cascade(RX_config):
+    """The three-stage Friis noise cascade of `circuit_model_bb_approx`, as numbers.
+
+    Returns a dict of per-element tensors:
+      `f_lna`, `f_mix`, `f_bb`   -- the per-stage noise factors (linear, not dB);
+      `av_lna`, `av_mix`, `av_bb`, `av_total` -- the per-stage voltage gains;
+      `n_out_psd`               -- NBB, the OUTPUT-referred noise voltage PSD (V^2/Hz);
+      `f_total`                 -- the cascade noise factor, `NBB / (Av^2 * 4kT*Rs)`;
+      `n_in_psd`                -- the INPUT-referred PSD, `4kT*Rs*f_total`.
+
+    Why it exists: the floor the receiver actually injects was only observable by
+    running the full model and measuring the output, which makes "is the floor right?"
+    unanswerable except by the code under test. This is the same algebra, evaluated on
+    its own, so a test can check the injected floor against Friis rather than against
+    itself. `tests/test_full_chain_frontend.py::test_noise_floor_matches_the_analytic_
+    friis_cascade` pins the two together (measured 2026-09-24, agreement well inside
+    0.2 dB); if they ever disagree, one of the two is wrong and the test says so.
+
+    It is a DUPLICATE of the noise lines inside `circuit_model_bb_approx`, deliberately:
+    folding the model to call this would change the signal path's evaluation order and
+    risk moving numbers that every stored corpus depends on. The duplication is held
+    honest by that test, which is the point of an oracle.
+
+    Per-sample noise POWER over a band `B` is `n_out_psd * B` per quadrature, i.e.
+    `2 * n_out_psd * B` for the complex sample.
+    """
+    Rs = SYSTEM_IMPEDANCE_OHMS
+    gammalna = 3
+    RoLNA = 50
+    Plomax = 0.02
+    Vodmax = 0.6
+    Gsw0 = 0.06
+    Kn = 8
+    gammabb = 1
+
+    Ibias_LNA = RX_config[..., 0]
+    Vbias_LNA = RX_config[..., 1]
+    Plo = RX_config[..., 2]
+    Ibias_BB = RX_config[..., 3]
+    Vbias_BB = RX_config[..., 4]
+    Av = RX_config[..., 5]
+
+    GmLNA = 1.5 * Ibias_LNA / Vbias_LNA
+    AvLNA = GmLNA * RoLNA
+    FLNA = 1 + gammalna / GmLNA / Rs + 1 / Av**2
+    Nlna = (Rs * FOURKT) * FLNA * AvLNA**2
+
+    Vod = Vodmax * torch.sqrt(Plo / Plomax)
+    Gsw = Gsw0 * Vod / Vodmax
+    rho = 1 / (Gsw * RoLNA)
+    Avmix = rho * Kn / (1 + rho * (1 + Kn))
+    Fmix = (1 + rho) * (1 + (rho + 1) / (rho * Kn))
+    Nmix = (Nlna + (RoLNA * FOURKT) * (Fmix - 1)) * Avmix**2
+
+    GmBB = 1.5 * Ibias_BB / Vbias_BB
+    AvBB = Av / (AvLNA * Avmix)
+    FBB = 1 + gammabb / GmBB / RoLNA
+    NBB = (Nmix + (RoLNA * FOURKT) * (FBB - 1)) * AvBB**2
+
+    av_total = AvLNA * Avmix * AvBB
+    f_total = NBB / (av_total**2 * Rs * FOURKT)
+    return {
+        "f_lna": FLNA, "f_mix": Fmix, "f_bb": FBB,
+        "av_lna": AvLNA, "av_mix": Avmix, "av_bb": AvBB, "av_total": av_total,
+        "n_out_psd": NBB, "f_total": f_total, "n_in_psd": (Rs * FOURKT) * f_total,
+    }
+
+
+def circuit_model_batch(rx_config, input_signals, fs, if_filter=False, generator=None,
+                        noise_band_hz=None, noise_divisor=None):
     '''
         Vectorized replacement for the old nrx*ntx*ns Python loop: every (rx,tx,s)
         slice is elementwise-independent in circuit_model_bb_approx (the only
@@ -245,6 +337,9 @@ def circuit_model_batch(rx_config, input_signals, fs, if_filter=False, generator
 
         generator --> optional torch.Generator, forwarded to circuit_model_bb_approx's
                thermal-noise draw; see that function for the reproducibility contract.
+
+        noise_band_hz, noise_divisor --> forwarded unchanged; see
+               circuit_model_bb_approx. None/None is the legacy placement.
     '''
     device = input_signals.device
     assert len(input_signals.shape) == 4, 'Input signals must have 4 dimensions'
@@ -260,7 +355,9 @@ def circuit_model_batch(rx_config, input_signals, fs, if_filter=False, generator
 
     sig_flat = input_signals.reshape(batch, nt)
     out_flat, PRX_flat = circuit_model_bb_approx(cfg_batch, sig_flat, fs, if_filter=if_filter,
-                                                 generator=generator)
+                                                 generator=generator,
+                                                 noise_band_hz=noise_band_hz,
+                                                 noise_divisor=noise_divisor)
     input_signals_circuit = out_flat.reshape(nrx, ntx, ns, nt)
 
     # PRX (Pdclna + Plo + PdcBB) depends only on RX_config, not on the signal or s/t,

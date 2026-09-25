@@ -489,6 +489,13 @@ def test_measurement_stage_can_stay_in_reduced_dimension(make_env_block):
         def update(self, X, A):
             pass
 
+    from e2e.chain.dechirp import DechirpBlock
+    from e2e.chain.receive import RangeTransformBlock
+
+    class _Cfg:
+        mimo = "single"
+        n_tx = 1
+
     env = make_env_block(n_frames=1, n_freqs=16)
     s = env.get_S_pars()
     tracker = Tracker(s.shape[0] * s.shape[1], 2)
@@ -498,15 +505,21 @@ def test_measurement_stage_can_stay_in_reduced_dimension(make_env_block):
     seen = {}
 
     class Recorder:
+        # DOMAIN_CUBE since 2026-09-24: the compressor sits on the one spine, between
+        # the range transform and the images, so the reduced payload it hands on is a
+        # `cube` -- [M, n_chirp, n_range] -- not an S-parameter frame.
         frame_capabilities = FrameCapabilities(accepts_mimo=True, chirps=frames.CHIRP_NATIVE,
+                                                domain=frames.DOMAIN_CUBE,
                                                 dimension=DIMENSION_REDUCED)
         def apply(self, state):
-            seen["shape"] = tuple(state["s_pars"].shape)
+            seen["shape"] = tuple(state["cube"].shape)
             seen["dim"] = state.get("signal_dimension")
             return {}
 
     sim = Simulation(env, [], 2)
-    sim.serial_stages = [stage, Recorder()]
+    sim.serial_stages = [DechirpBlock(_Cfg()),
+                         RangeTransformBlock(window="none", dc_removal=False),
+                         stage, Recorder()]
     sim.run(n_steps=1)
 
     assert seen["dim"] == DIMENSION_REDUCED

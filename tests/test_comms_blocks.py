@@ -109,11 +109,17 @@ def test_comms_blocks_compose_inside_simulation(make_env_block):
     freqs = _freqs(n_freqs)
     modem = ModemBlock(freqs, n_symbols=4, fft_size=64, cp_len=16, n_active=52,
                        pilot_spacing=8, bits_per_symbol=2, snr_db=30.0, seed=0)
+    # The comms head is a TAP off the frequency-domain side of the spine, so it
+    # travels in `comms_head=` rather than in `downstream_blocks` (2026-09-24): the
+    # downstream blocks run after the whole spine, by which point the chain is in the
+    # cube domain and `s_pars` has been dropped at the crossing. The radar products
+    # stay downstream, which is the point -- both heads, one chain, no exclusion rule.
     sim = Simulation(
         env,
-        [FFTBlock(), modem, BERBlock(), SubspaceErrorBlock()],
+        [FFTBlock(), SubspaceErrorBlock()],
         k=16,
         subspace_block=AdaOjaBlock(1024, 16),
+        comms_head=[modem, BERBlock()],
     )
     out = sim.run(n_steps=2)
     # comm products accumulated over both steps, alongside the radar products
@@ -212,3 +218,138 @@ def test_modem_block_reads_dict_shaped_freq_plan(state_dict, n_freqs, combining)
     assert "comm_rx_bits" in out
     if combining != "element0":
         assert "comm_array_gain_db" in out
+
+
+# --------------------------------------------------------------------------------
+# The comms head as a CONSUMER of the chain (one-chain contract section 1.4)
+# --------------------------------------------------------------------------------
+def test_modem_auto_disables_its_own_awgn_when_the_chain_injected_noise(state_dict,
+                                                                        n_freqs):
+    """ONE noise source per chain. `ModemBlock` used to inject its own AWGN
+    unconditionally -- a THIRD floor beside the front end's Friis cascade and the link
+    budget's kTBF (the contract's own count). On the one spine that makes every "turn
+    this knob and watch both products move" claim false, because half the comms floor
+    is a constructor argument that no knob touches.
+
+    `add_noise=None` (the default) reads `state['noise_injected_by']`, the seam the
+    front end stamps when it draws. The test is STRUCTURAL rather than a power
+    comparison: with the draw off, two applies of the same frame are bit-identical,
+    which a quieter-but-still-present noise source would not be.
+    """
+    modem = ModemBlock(_freqs(n_freqs), n_symbols=4, fft_size=64, snr_db=10.0, seed=0)
+
+    chain_noisy = dict(state_dict)
+    chain_noisy["noise_injected_by"] = "frontend"
+    assert modem.noise_enabled(chain_noisy) is False
+    assert modem.noise_enabled(dict(state_dict)) is True
+
+    modem.reset()
+    a = modem.apply(dict(chain_noisy))
+    modem.reset()
+    b = modem.apply(dict(chain_noisy))
+    assert torch.equal(a["comm_data_eq"], b["comm_data_eq"]), (
+        "two applies of the same frame differ, so something is still drawing noise")
+    assert a["comm_noise_source"] == "frontend"
+
+    # ...and with the chain silent, the block is its own link simulator as before:
+    # the per-frame counter makes consecutive frames draw independently.
+    modem.reset()
+    c = modem.apply(dict(state_dict))
+    d = modem.apply(dict(state_dict))
+    assert not torch.equal(c["comm_data_eq"], d["comm_data_eq"])
+    assert c["comm_noise_source"] == "modem"
+
+
+def test_modem_measures_the_equaliser_snr_when_the_chain_is_the_noise_source(
+        state_dict, n_freqs):
+    """The reported SNR must be a MEASUREMENT on that path, not the constructor value.
+
+    When this block draws its own noise it knows the SNR exactly and reports what it
+    used. When the CHAIN drew it, nothing in the pipeline knows the post-combining
+    SNR, so it is estimated from the pilot residual -- and a number typed into a preset
+    must not be able to reach a card as if it had been measured.
+    """
+    modem = ModemBlock(_freqs(n_freqs), n_symbols=8, fft_size=64, snr_db=7.0, seed=0)
+    own = modem.apply(dict(state_dict))
+    assert own["comm_snr_db"] == pytest.approx(7.0)
+
+    chain = dict(state_dict)
+    chain["noise_injected_by"] = "frontend"
+    measured = modem.apply(chain)["comm_snr_db"]
+    # A clean chain frame: the measured SNR must NOT come back as the configured 7 dB.
+    assert not (measured == pytest.approx(7.0, abs=1e-6)), (
+        "the reported SNR is the constructor's, so it was not measured")
+
+
+# --------------------------------------------------------------------------------
+# The coupling, through a REAL Simulation -- which side of the tap the front end lands
+# --------------------------------------------------------------------------------
+def _sim_with_front_end(make_env_block, n_freqs, *, composition, **kw):
+    """A real `Simulation` with a front end, a link budget and a comms-head tap."""
+    from e2e.blocks import RFFEBlock
+    from e2e.chain.waveform import fmcw_plan_from_freq_plan
+    from e2e.simulation import Simulation
+
+    env = make_env_block(n_frames=1, n_freqs=n_freqs)
+    plan = {"start_hz": 28.5e9, "stop_hz": 31.5e9, "num_freqs": n_freqs}
+    cfg = fmcw_plan_from_freq_plan(plan, n_rx=1024)
+    modem = ModemBlock(_freqs(n_freqs), n_symbols=4, fft_size=64, snr_db=11.0,
+                       seed=0, **kw)
+    sim = Simulation(
+        env, [], k=2, circuit_block=RFFEBlock(n=1024, seed=0, physical_scale=True),
+        radar_cfg=cfg, link_budget=False, composition=composition,
+        comms_head=[modem, BERBlock()],
+    )
+    sim.run(n_steps=1)
+    return sim.get_outputs()
+
+
+def test_the_noise_coupling_is_real_on_a_frequency_domain_front_end(make_env_block):
+    """The "one knob moves both products" configuration, asserted through the REAL
+    pipeline rather than through a hand-built state dict.
+
+    An OFDM/JSAC chain puts the front end in the FREQUENCY domain
+    (`CircuitStage(RFFEBlock)`), which is where it belongs for that waveform --
+    `ifft(s_pars)` of a received OFDM grid IS the received time-domain symbol. It then
+    runs BEFORE the comms tap, stamps `noise_injected_by`, and this head must suppress
+    its own draw and report the chain as the source.
+
+    WHY THIS TEST AND NOT THE STATE-DICT ONES ABOVE: those set
+    `state['noise_injected_by']` by hand and so test the boolean in isolation. They
+    cannot see which SIDE of the tap a stage ends up on, and an adversarial review found
+    exactly that gap -- a chain can be fully configured with a front end and a link
+    budget and still hand the tap a state dict in which the key has not been written
+    yet. Only building the chain shows it.
+    """
+    out = _sim_with_front_end(make_env_block, 64, composition="legacy_impulse")
+    assert out["comm_noise_source"] == ["frontend"], (
+        "the front end ran before the tap but the head still drew its own noise -- "
+        "that is two uncorrelated floors on one chain, and the front-end knobs then "
+        "move the image without moving the BER")
+    # ...and the SNR it equalised with is MEASURED, not the configured 11.0 dB.
+    assert out["comm_snr_db"][0] != pytest.approx(11.0, abs=1e-6)
+
+
+def test_a_beat_placement_front_end_cannot_reach_a_cfr_tap(make_env_block):
+    """The other half of the scope, and it is a STRUCTURAL fact, not a bug.
+
+    Under the FULL composition the front end acts on the beat record, after the
+    dechirp -- strictly after this tap, on a tensor (`adc`) that does not exist yet and
+    in a domain this head does not read. No stage ordering can make its noise reach a
+    channel-frequency-response tap, because the two live in different domains. So the
+    head is correctly its own noise source here, and SAYS SO.
+
+    The consequence belongs on a card rather than in a footnote: on an FMCW chain the
+    front-end knobs move the image and do NOT move the comms BER. The coupling is real
+    only where the front end is on the tap's own side of the chain, which is the
+    OFDM/JSAC placement the test above covers.
+    """
+    out = _sim_with_front_end(make_env_block, 64, composition="full")
+    assert out["comm_noise_source"] == ["modem"]
+    assert out["comm_snr_db"] == [pytest.approx(11.0)]
+
+    # And the honest alternative is reachable and refuses to invent a floor: told
+    # explicitly not to add noise on a chain that cannot give it any, the head equalises
+    # a clean grid and reports that nothing injected.
+    out = _sim_with_front_end(make_env_block, 64, composition="full", add_noise=False)
+    assert out["comm_noise_source"] == ["none"]
