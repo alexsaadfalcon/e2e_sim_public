@@ -267,9 +267,16 @@ def _render_diagram(block_state, last_sig):
     State("block-state-store", "data"),
 )
 def _show_param_editor(node_data, block_state):
-    """Show the parameter editor for the tapped block."""
+    """Show the parameter editor for the tapped diagram NODE.
+
+    A node can stand for several registry blocks (the one-chain diagram collapses the
+    three sources, the transmit tributary and the ADC sub-chain), so it carries the block
+    the editor should open on in `data["block"]` and `param_editor` renders every member
+    from there. `data["id"]` is the fallback for a node that is one block.
+    """
     block_state = block_state or default_block_state()
-    block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
+    data = node_data or {}
+    block_id = data.get("block") or data.get("id") or PRODUCT_IDS[0]
     return block_diagram.param_editor(block_id, block_state)
 
 
@@ -1265,16 +1272,25 @@ def _load_preset(n_clicks, preset_id, node_data):
             prewarm_tessera_interconnect(apply_preset(preset, arm="b"))
         except PresetError:
             pass
-    # Open the editor on the block whose knob the card says to turn, so the operator
-    # is one click from the live demo; fall back to the tapped node.
-    if preset.live_knobs:
-        block_id = preset.live_knobs[0][0]
+    # Open the editor on the block whose knob the card says to turn, so the operator is
+    # one click from the live demo; fall back to the tapped node. `focus` additionally
+    # HOISTS that knob to the top of the column and chips it -- hostile round 11 D4: on
+    # Thrusts 3 and 4 the A/B knob rendered below the container's bottom edge, so
+    # "diagram, the knob and Run on the first screen" was not met.
+    focus = None
+    if preset.ab is not None:
+        focus = (preset.ab[0], preset.ab[1])
+    elif preset.live_knobs:
+        focus = (preset.live_knobs[0][0], preset.live_knobs[0][1])
+    if focus is not None:
+        block_id = focus[0]
     else:
-        block_id = (node_data or {}).get("id", PRODUCT_IDS[0])
+        data = node_data or {}
+        block_id = data.get("block") or data.get("id") or PRODUCT_IDS[0]
     # The Results tab is cleared: its figures came from another preset, and the
     # before/after section would otherwise pair a Thrust 5 run with a Thrust 2 one.
     return (state, preset.n_steps, block_diagram.preset_notes(preset),
-            block_diagram.param_editor(block_id, state),
+            block_diagram.param_editor(block_id, state, focus=focus),
             html.Span(f"Preset loaded: {preset.label}. Press Run pipeline.",
                       style={"color": "#3867d6"}),
             None)

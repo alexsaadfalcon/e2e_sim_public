@@ -15,106 +15,174 @@ from dash import dcc, html
 
 from webapp.demo_presets import PRESETS, DemoPreset
 from webapp.pipeline_registry import (
-    BLOCKS, BLOCKS_BY_ID, EDGES, MAX_N_STEPS, PRODUCT_IDS, normalize_edge,
+    BLOCKS, BLOCKS_BY_ID, MAX_N_STEPS, PRODUCT_IDS,
 )
 
-# Manual positions so the graph reads left-to-right as a pipeline. Every id in
-# webapp.pipeline_registry.BLOCKS must appear here (see test_webapp.py), or it
-# falls back to the origin and overlaps other nodes. Product column keeps a
-# consistent 100px pitch; the ADC-cube tributary gets its own band (y=580-740)
-# well clear of the main chain and product column (node boxes are 160x60, see
-# CYTO_STYLESHEET, so anything closer than 100px on a shared axis can touch).
-_POSITIONS = {
-    # Main radar/subspace chain: environment -> rffe -> interconnect -> afe ->
-    # subspace -> products (fanned out on the right).
-    "environment": (0, 160),
-    "rffe": (200, 160),
-    "interconnect": (400, 160),
-    "afe": (600, 160),
-    "subspace": (800, 160),
-    "fft": (1020, 20),
-    "range_az": (1020, 120),
-    "range_el": (1020, 220),
-    "range_profile": (1020, 320),
-    "subspace_err": (1020, 420),
-    "comms": (1020, 520),
+# THE ONE CHAIN ---------------------------------------------------------------------
+# The owner, 2026-09-24: "the block diagram shown is still very confusing from the fact
+# that there are two pipelines. I've been complaining about this for ages. Needs to be
+# fixed immediately from the ground up." What used to be here drew four compound REGIONS
+# (a TX-time tributary, a main chain, a frequency-domain product column and an "ADC-cube
+# chain - mutually exclusive with the products above" band) joined by dotted salmon
+# "alternative source path" edges. That was a picture of two pipelines, and an accurate
+# picture of the code at the time.
+#
+# It is not the code any more (notes/ONE_CHAIN_CONTRACT_2026-09-24.md): there is ONE
+# serial spine, replay is a start index into it, and every product is a TAP on it. So the
+# diagram is ONE ROW, in the spine's own order, with the products fanning out beneath it
+# -- Justin's shape, relayed by the owner: stored channel, waveform, front end,
+# interconnect, one mixing block with a mode, AFE/ADC, one cube, and the split at the
+# application level. The waveform CLASS is the only branch, and it is a choice inside one
+# block rather than a fork in the graph.
+#
+# A DIAGRAM NODE IS NOT ALWAYS ONE REGISTRY BLOCK. Three collapses, each for a reason:
+#   * the three source blocks are one node, because only one of them ever feeds a run
+#     (the runner ignores the others) -- which is what the dotted "alt" edges were
+#     apologising for;
+#   * the transmit tributary (waveform / TX PA / modulate) is one node, because it is one
+#     decision: which waveform class this run transmits;
+#   * the ADC sub-chain (thermal floor / impairments / IF high-pass / quantiser) is one
+#     node -- hostile round 11's D2 fix: the graph has to be narrow enough that the fit
+#     zoom leaves >= 12 px of rendered label ink (acceptance check 17), and five separate
+#     boxes there bought nothing the presenter clicks separately.
+# Every collapsed block stays reachable: a node's parameter editor renders every member
+# block's controls (see `param_editor`), so no knob became unreachable.
+#
+#: (node_id, label, category, member registry block ids). ORDER IS THE SPINE'S ORDER.
+_CHAIN: List[tuple] = [
+    ("source", "Stored ray-traced\nchannel", "source",
+     ["environment", "rt_environment", "corpus_environment"]),
+    ("waveform", "Waveform\nFMCW | OFDM | JSAC", "stage",
+     ["waveform", "tx_pa", "modulate"]),
+    ("interconnect", "Interconnect", "stage", ["interconnect"]),
+    ("dechirp", "Mixing block\n(dechirp)", "stage", ["dechirp"]),
+    ("rffe", "RF front end\n(RFFE)", "stage", ["rffe"]),
+    ("adc", "ADC\nfloor / impairments\nIF HPF / bits", "stage",
+     ["thermal_noise", "impairment", "if_hpf", "quantizer"]),
+    ("cube", "One cube\nrange transform\n+ AFE / subspace", "stage",
+     ["afe", "subspace"]),
+]
 
-    # TX-time tributary (above the main chain): waveform -> PA -> modulate,
-    # which bridges back into the main chain at rffe. Pitch bumped 150 -> 170
-    # (deviation from the original untouched values): at 150 the 160px-wide
-    # boxes actually overlapped by 10px -- caught by the new geometric-overlap
-    # test in (E), not the original tuple-equality one.
-    "waveform": (0, 40),
-    "tx_pa": (170, 40),
-    "modulate": (340, 40),
-
-    # Live-ray-tracing source, an alternative to "environment" (below the main
-    # chain); it also feeds modulate and rffe directly.
-    "rt_environment": (0, 280),
-
-    # RX-time ADC-cube tributary, on its own band well below everything else,
-    # branching off interconnect: dechirp -> impairment -> quantizer -> products.
-    # y bumped +120 (2026-08-16): `comms` is the last row of grp_products, and that
-    # compound box plus its padding reached y~568 while grp_adc's box started at ~532 --
-    # the two REGION boxes overlapped even though no two NODES did, which is exactly the
-    # gap the old node-only overlap test could not see.
-    # (2026-08-24, D6 parity) the chain now shows every corpus-generator stage:
-    # dechirp -> thermal_noise -> impairment -> if_hpf -> quantizer -> products.
-    # x pitch 170: node boxes are 160 wide, so anything tighter overlaps.
-    "dechirp": (600, 740),
-    "thermal_noise": (770, 740),
-    "impairment": (940, 740),
-    "if_hpf": (1110, 740),
-    "quantizer": (1280, 740),
-    "radar_cube": (1460, 700),
-    "detector": (1460, 780),
-    "sink": (1460, 860),
-    # Corpus replay: a source that enters the chain already digitized, so it sits on
-    # the ADC band and feeds only the RX-time products (one row below quantizer).
-    "corpus_environment": (1110, 860),
+#: Which chain node each product TAPS -- the point on the one chain whose domain that
+#: product reads. This is the runtime fact (`Simulation`'s product taps), not a drawing
+#: convention: the scored detectors read the digitised beat record at the ADC, the
+#: range-Doppler product reads the cube, the images read the cube after the compressor,
+#: and the comms head reads the channel response at the mixing block's input.
+_PRODUCT_TAP: Dict[str, str] = {
+    "fft": "cube",
+    "range_az": "cube",
+    "range_el": "cube",
+    "range_profile": "cube",
+    "subspace_err": "cube",
+    "radar_cube": "cube",
+    "detector": "adc",
+    "sink": "adc",
+    "comms": "interconnect",
 }
 
-# Compound region groups (Cytoscape native `data.parent`; see build_elements).
-# Parent/container nodes get no explicit position -- Cytoscape auto-computes
-# the compound box from the children's preset positions above.
-_GROUPS: Dict[str, Dict[str, Any]] = {
-    "grp_txtime": {
-        "members": ["waveform", "tx_pa", "modulate"],
-        "label": "TX-time waveform tributary (opt-in)",
-    },
-    "grp_main": {
-        "members": ["environment", "rt_environment", "rffe", "interconnect",
-                    "afe", "subspace"],
-        "label": "Main radar/subspace chain",
-    },
-    "grp_products": {
-        "members": ["fft", "range_az", "range_el", "range_profile",
-                    "subspace_err", "comms"],
-        "label": "Frequency-domain products",
-    },
-    "grp_adc": {
-        "members": ["dechirp", "thermal_noise", "impairment", "if_hpf",
-                    "quantizer", "radar_cube",
-                    "detector", "sink", "corpus_environment"],
-        "label": "ADC-cube chain - mutually exclusive with the products above",
-    },
-}
+#: Members of each diagram node, and the reverse map.
+_NODE_MEMBERS: Dict[str, List[str]] = {nid: list(members)
+                                       for nid, _, _, members in _CHAIN}
+_NODE_MEMBERS.update({pid: [pid] for pid in _PRODUCT_TAP})
+_BLOCK_TO_NODE: Dict[str, str] = {bid: nid
+                                  for nid, members in _NODE_MEMBERS.items()
+                                  for bid in members}
 
-_BLOCK_TO_GROUP: Dict[str, str] = {
-    bid: gid for gid, spec in _GROUPS.items() for bid in spec["members"]
-}
+#: Chain geometry. Node boxes are 160x76 (see CYTO_STYLESHEET), so a 170 px pitch leaves
+#: a 10 px gap and nothing overlaps. These numbers matter for ONE reason: the canvas fits
+#: the whole extent, so the extent's WIDTH sets the fit zoom, and the fit zoom times the
+#: font size is how much label ink the room actually sees. 7 chain columns at 170 give an
+#: extent of 1180 px against the ~1032 px panel -- a fit zoom near 0.82, which is what
+#: puts the 30 px font in CYTO_STYLESHEET above the 12 px-of-ink threshold. Add a column
+#: here and that sum has to be recomputed, not assumed.
+_CHAIN_PITCH_X = 170
+_CHAIN_Y = 40
+# 240 px pitch and five per row keeps the product block NARROWER than the 1180 px chain,
+# so the products never become the thing that sets the fit zoom (and therefore the label
+# ink -- see the font-size comment in CYTO_STYLESHEET).
+_PRODUCT_PITCH_X = 240
+_PRODUCT_ROW_Y = (210, 320)
+_PRODUCTS_PER_ROW = 5
 
-# Entry points into the diagram: a "start here" affordance for the two source
-# blocks that begin the two mutually-exclusive main-chain paths.
-_ENTRY_IDS = {"environment", "rt_environment"}
+_POSITIONS: Dict[str, tuple] = {}
+for _i, (_nid, _lbl, _cat, _members) in enumerate(_CHAIN):
+    _POSITIONS[_nid] = (_i * _CHAIN_PITCH_X, _CHAIN_Y)
+for _i, _pid in enumerate(_PRODUCT_TAP):
+    _POSITIONS[_pid] = ((_i % _PRODUCTS_PER_ROW) * _PRODUCT_PITCH_X,
+                        _PRODUCT_ROW_Y[_i // _PRODUCTS_PER_ROW])
 
-# Diagram-only label overrides for clean line breaks. Deliberately local to
-# this module -- webapp.pipeline_registry.BlockSpec.label is also used by the
-# param editor, which should keep the single-line label.
-_DIAGRAM_LABEL_OVERRIDES: Dict[str, str] = {
-    "rt_environment": "RT Environment\n(live ray tracing)",
-    "modulate": "Modulate\n(TX -> channel)",
-}
+# Entry point: the ONE source. There is no second "start here", because there is no
+# second path to start on.
+_ENTRY_IDS = {"source"}
+
+#: Nodes that are ALWAYS on the chain, whatever the checkboxes say, because
+#: `Simulation._build_spine` always builds them (one-chain contract section 1.2: "the
+#: dechirp and the range transform are always present, because they are what make the
+#: chain one chain"). Drawing them dimmed would be the diagram's own version of the
+#: two-pipeline picture: it would say the chain stops here on a Thrust 1 run, and it does
+#: not -- the mixing block and the range transform run on every run, and the images are
+#: computed from THAT cube.
+#:
+#: A consequence worth stating where it can be read: the `dechirp` checkbox no longer
+#: switches the mixing block on and off. It switches the RECEIVE SEGMENT after it (floor,
+#: impairments, IF high-pass, quantiser and their products) -- see the block's own blurb
+#: in `webapp/pipeline_registry.py`.
+_STRUCTURAL_NODES = {"source", "waveform", "dechirp", "cube"}
+
+#: Source backends, most specific first: which registry source a run actually uses when
+#: several are enabled. Mirrors `webapp.pipeline_runner.run_pipeline`'s own precedence --
+#: the corpus source wins, then live ray tracing, then the precomputed .pkl frames.
+_SOURCE_PRECEDENCE = ("corpus_environment", "rt_environment", "environment")
+
+
+def active_source(block_state: Dict[str, Dict[str, Any]]) -> str:
+    """Which source block this run reads -- the one the `source` node stands for."""
+    for bid in _SOURCE_PRECEDENCE[:-1]:
+        if block_state.get(bid, {}).get("enabled", False):
+            return bid
+    return "environment"
+
+
+def node_members(node_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[str]:
+    """The registry blocks a diagram node stands for, in editor order.
+
+    The source node resolves to the ONE backend in use rather than listing all three:
+    offering the operator a manifest path for a corpus this run is not reading is how a
+    knob gets turned on the wrong block in front of an audience.
+    """
+    if node_id == "source":
+        return [active_source(block_state)]
+    return list(_NODE_MEMBERS.get(node_id, [node_id]))
+
+
+def resolve_node(block_or_node_id: str) -> str:
+    """The diagram node a registry block id belongs to (identity for a node id)."""
+    if block_or_node_id in _NODE_MEMBERS:
+        return block_or_node_id
+    return _BLOCK_TO_NODE.get(block_or_node_id, block_or_node_id)
+
+
+def _node_label(node_id: str, label: str, block_state: Dict[str, Dict[str, Any]]) -> str:
+    """The label as rendered: what the node IS DOING on this run, which is the
+    difference between a diagram and a wiring list."""
+    if node_id == "source":
+        src = active_source(block_state)
+        backend = {"environment": "precomputed .pkl",
+                   "rt_environment": "live ray tracing",
+                   "corpus_environment": "stored corpus"}.get(src, src)
+        return "Stored ray-traced\nchannel\n(%s)" % backend
+    if node_id == "waveform":
+        kind = str(block_state.get("waveform", {}).get("params", {}).get("kind")
+                   or "fmcw")
+        # With the transmit tributary off there is still a waveform: for a unit-modulus
+        # chirp the dechirp identity IS the modulation (contract section 1.2 row 3), so
+        # `s_pars = H` is the FMCW case, not the absence of one. Say which it is rather
+        # than dimming a block that is doing something.
+        tail = ("TX chain on" if block_state.get("waveform", {}).get("enabled", False)
+                else "dechirp identity")
+        return "Waveform\n%s\n(%s)" % (kind.upper(), tail)
+    return label
+
 
 # Category colors, shared by the cytoscape stylesheet below AND the legend in
 # layout() -- keep these two in sync when changing either.
@@ -136,13 +204,18 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
             "text-valign": "center",
             "text-halign": "center",
             "color": "#fff",
-            # 20px CSS x ~0.6 fit zoom (width-bound -- see the minZoom-removal
-            # comment on block-cytoscape below) ~= 12px of rendered ink, the
-            # acceptance threshold. This arithmetic holds at the diagram panel's
-            # CURRENT column width (~1032px) and the CURRENT _POSITIONS pitches --
-            # widen the panel or retune positions and the fit zoom (and this sum)
-            # must be recomputed, not assumed.
-            "font-size": "20px",
+            # HOSTILE ROUND 11, D2 (a BLOCKER): the previous 20 px at the then
+            # ~0.6 width-bound fit zoom measured ~6 px of rendered cap-height ink on
+            # `thrust1_circuit_knobs_card.png` -- half of acceptance check 17's 12 px,
+            # and the same as the pre-redesign state the spec diagnosed. Two changes
+            # together, because neither is enough alone: the graph lost six columns and
+            # four compound regions (see _CHAIN above), which lifts the width-bound fit
+            # zoom from ~0.6 to ~0.82 on the ~1032 px panel, and the font goes to 30 px.
+            # 30 x 0.82 x ~0.5 (cap-height / em) ~= 12.3 px of ink. BOTH factors are
+            # load-bearing: add a chain column, widen a label so the extent grows, or
+            # shrink the panel, and this product has to be re-measured on a render, not
+            # re-argued here.
+            "font-size": "30px",
             "font-weight": 600,
             "text-wrap": "wrap",
             "text-max-width": "150px",
@@ -167,45 +240,10 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
     },
     {"selector": "node.entry", "style": {"border-color": "#20bf6b", "border-width": 5,
                                          "border-style": "solid"}},
-    # Compound group containers (see _GROUPS / build_elements): a faint labeled
-    # box behind their children, drawn from Cytoscape's native :parent pseudo-class.
-    {
-        "selector": "node:parent",
-        "style": {
-            "background-opacity": 0.06,
-            "border-style": "dashed",
-            "border-width": 1,
-            "border-color": "#576574",
-            "text-valign": "top",
-            "text-halign": "left",
-            "font-size": "11px",
-            "font-weight": "bold",
-            "color": "#576574",
-            "padding": "18px",
-            # The generic "node" selector above sets text-wrap: wrap + a
-            # 130px text-max-width for the small 160px block boxes; ":parent"
-            # only overrides SOME of those properties, so group headers were
-            # inheriting that narrow wrap width too. Cytoscape auto-grows a
-            # compound box to fit its (top-aligned) label, but that auto-grow
-            # under-counts a *wrapped, multi-line* label's real rendered
-            # height -- grp_adc's longest label wrapped to 3 lines and
-            # visibly poked out above its own box, into the gap above it
-            # (comms/grp_products). Turning wrap off for group headers lets
-            # cytoscape auto-size the box to the label's single-line width
-            # instead (which it measures accurately), removing the
-            # under-counted-height failure mode instead of papering over it
-            # with a bigger guessed padding number.
-            "text-wrap": "none",
-        },
-    },
-    # grp_adc's label calls out a real constraint (mutually exclusive with the
-    # frequency-domain products), not just a region name like the other three
-    # group labels -- give it the same amber the app already uses for :selected
-    # emphasis, so it reads as a warning rather than blending in as grey chrome.
-    {
-        "selector": "#grp_adc",
-        "style": {"color": "#f7b731", "font-weight": "bold"},
-    },
+    # The compound-region styles that used to sit here are gone with the regions
+    # themselves (see _CHAIN): four labelled boxes around a graph that has one path are
+    # four statements that it has four. Their captions were also the least legible ink
+    # on the card (hostile round 11, D2: ~5-6 px).
     {
         "selector": "edge",
         "style": {
@@ -221,68 +259,78 @@ CYTO_STYLESHEET: List[Dict[str, Any]] = [
                                             "target-arrow-color": "#d1d8e0",
                                             "line-style": "dashed",
                                             "width": 2}},
-    {"selector": "edge.alt-path", "style": {"line-color": "#e17055",
-                                            "target-arrow-color": "#e17055",
-                                            "line-style": "dotted",
-                                            "width": 1,
-                                            "opacity": 0.3}},
 ]
 
 
-_ALT_SOURCES = ("rt_environment", "corpus_environment")
-
-
-def _block_active(block_state: Dict[str, Dict[str, Any]], block_id: str) -> bool:
-    """Whether a block takes part in the run the diagram describes. The .pkl source
-    ("environment") is not toggleable, but the runner ignores it whenever an
-    alternative source is enabled -- so it is drawn inactive then, instead of lit
-    beside Corpus Replay as if both fed the run (rehearsal 2026-09-22)."""
+def _block_active(block_state, block_id: str) -> bool:
+    """Whether a REGISTRY BLOCK takes part in the run the diagram describes."""
     spec = BLOCKS_BY_ID.get(block_id)
     default = spec.enabled_default if spec is not None else True
-    if block_id == "environment":
-        return not any(block_state.get(a, {}).get("enabled", False) for a in _ALT_SOURCES)
+    if block_id in _SOURCE_PRECEDENCE:
+        # Only one source feeds a run, whatever the checkboxes say -- so the one the
+        # runner would actually read is the active one, and the others are not drawn at
+        # all any more (they were the dotted "alternative source path" edges).
+        return block_id == active_source(block_state)
     if spec is not None and not spec.toggleable:
         return True
     return bool(block_state.get(block_id, {}).get("enabled", default))
 
 
+def _node_active(block_state, node_id: str) -> bool:
+    """A collapsed node is ACTIVE if any block it stands for is.
+
+    "Any" and not "all", on purpose: the ADC node stands for four optional stages, and a
+    run with the quantiser on and the impairments off is still a run whose ADC stage does
+    something. What each member is doing is in the node's editor, one click away; what
+    the graph carries is whether the chain passes through here.
+    """
+    if node_id in _STRUCTURAL_NODES:
+        return True
+    return any(_block_active(block_state, bid)
+               for bid in node_members(node_id, block_state))
+
+
 def build_elements(block_state: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Build cytoscape elements (nodes + edges) reflecting enabled/disabled state."""
+    """Cytoscape elements for THE ONE CHAIN: seven chain nodes in the spine's order, the
+    products fanned out beneath, one edge per real dataflow. No compound regions, no
+    "alt" edges, no second path -- see _CHAIN.
+    """
     elements: List[Dict[str, Any]] = []
 
-    # Compound region containers first (see _GROUPS). No "position" -- Cytoscape
-    # auto-computes the compound box from the children's preset positions.
-    for gid, spec in _GROUPS.items():
-        elements.append({"data": {"id": gid, "label": spec["label"]}, "classes": "group"})
-
-    for b in BLOCKS:
-        enabled = _block_active(block_state, b.id)
-        classes = [b.category]
-        if not enabled:
+    def _add_node(node_id: str, label: str, category: str) -> None:
+        classes = [category]
+        if not _node_active(block_state, node_id):
             classes.append("disabled")
-        if b.id in _ENTRY_IDS:
+        if node_id in _ENTRY_IDS:
             classes.append("entry")
-        x, y = _POSITIONS.get(b.id, (0, 0))
-        data = {"id": b.id, "label": _DIAGRAM_LABEL_OVERRIDES.get(b.id, b.label)}
-        if b.id in _BLOCK_TO_GROUP:
-            data["parent"] = _BLOCK_TO_GROUP[b.id]
+        x, y = _POSITIONS.get(node_id, (0, 0))
         elements.append({
-            "data": data,
+            "data": {"id": node_id,
+                     "label": _node_label(node_id, label, block_state),
+                     # Which registry block the parameter editor opens on. The editor
+                     # renders every member (see `param_editor`); this is where it starts.
+                     "block": node_members(node_id, block_state)[0]},
             "position": {"x": x, "y": y},
             "classes": " ".join(classes),
         })
 
-    for edge in EDGES:
-        src, dst, kind = normalize_edge(edge)
-        src_on = _block_active(block_state, src)
-        dst_on = _block_active(block_state, dst)
-        classes = [] if (src_on and dst_on) else ["inactive"]
-        if kind == "alt":
-            classes.append("alt-path")
+    for node_id, label, category, _members in _CHAIN:
+        _add_node(node_id, label, category)
+    for pid in _PRODUCT_TAP:
+        spec = BLOCKS_BY_ID.get(pid)
+        _add_node(pid, spec.label if spec is not None else pid, "product")
+
+    def _add_edge(src: str, dst: str) -> None:
+        on = _node_active(block_state, src) and _node_active(block_state, dst)
         elements.append({
             "data": {"source": src, "target": dst, "id": f"{src}->{dst}"},
-            "classes": " ".join(classes),
+            "classes": "" if on else "inactive",
         })
+
+    for (src, _l, _c, _m), (dst, _l2, _c2, _m2) in zip(_CHAIN, _CHAIN[1:]):
+        _add_edge(src, dst)
+    for pid, tap in _PRODUCT_TAP.items():
+        _add_edge(tap, pid)
     return elements
 
 
@@ -319,8 +367,54 @@ def _help_head(text: str, budget: int = _HELP_HEAD_CHARS) -> str:
     return (text[:space] if space > 0 else text[:budget]).rstrip(" ,;-") + "…"
 
 
-def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[Any]:
-    """Build the editor controls for a single selected block."""
+#: Chip marking the one knob a preset's card tells the presenter to turn.
+_DEMOED_CHIP_STYLE = {"fontSize": "14px", "fontWeight": "bold", "color": "#ffffff",
+                      "backgroundColor": "#20bf6b", "borderRadius": "3px",
+                      "padding": "1px 6px", "marginLeft": "8px",
+                      "whiteSpace": "nowrap"}
+
+
+def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]],
+                 focus: Any = None) -> List[Any]:
+    """The editor column for the selected DIAGRAM NODE.
+
+    A node can stand for several registry blocks (see `_CHAIN`), so this renders each
+    member block's controls in turn, under its own heading. `block_id` may be either a
+    node id or any member's block id; either way the whole node is rendered.
+
+    `focus=(block_id, param_key)` -- the knob this preset's card tells the presenter to
+    turn -- is hoisted to the TOP of the column and chipped. HOSTILE ROUND 11, D4: on 2 of
+    7 presets the A/B knob was below the fold (Thrust 4's `Tessera: TSV height` sat under
+    two other Tessera params, clipped mid-glyph at the container's bottom edge; Thrust 3's
+    `gap_response` likewise), so the spec's "diagram, the knob and Run on the first screen"
+    was met only for "diagram and Run". Ordering the column by what the screen demos --
+    rather than by registry declaration order -- fixes that for every preset at once,
+    including presets that do not exist yet.
+    """
+    node_id = resolve_node(block_id)
+    members = node_members(node_id, block_state)
+    members = [bid for bid in members if bid in BLOCKS_BY_ID]
+    if not members:
+        return [html.P("Select a block to edit its parameters.")]
+
+    focus_block, focus_param = (focus if focus else (None, None))
+    if focus_block in members:
+        members = [focus_block] + [bid for bid in members if bid != focus_block]
+
+    children: List[Any] = []
+    for i, member in enumerate(members):
+        if i:
+            children.append(html.Hr(style={"border": "none", "borderTop": "1px solid #dfe4ea",
+                                           "margin": "12px 0 8px"}))
+        children.extend(_block_controls(
+            member, block_state,
+            focus_param=(focus_param if member == focus_block else None)))
+    return children
+
+
+def _block_controls(block_id: str, block_state: Dict[str, Dict[str, Any]],
+                    focus_param: Any = None) -> List[Any]:
+    """The controls for ONE registry block (a section of the node's editor column)."""
     spec = BLOCKS_BY_ID.get(block_id)
     if spec is None:
         return [html.P("Select a block to edit its parameters.")]
@@ -361,11 +455,18 @@ def param_editor(block_id: str, block_state: Dict[str, Dict[str, Any]]) -> List[
                                style={"fontSize": "15px", "color": "#8395a7"}))
 
     params = st.get("params", {})
-    for ps in spec.params:
+    ordered = list(spec.params)
+    if focus_param is not None:
+        ordered.sort(key=lambda ps: 0 if ps.key == focus_param else 1)
+    for ps in ordered:
         val = params.get(ps.key, ps.default)
-        children.append(html.Label(ps.label, style={"fontWeight": "bold",
-                                                     "display": "block",
-                                                     "marginTop": "6px"}))
+        label_children: List[Any] = [ps.label]
+        if focus_param is not None and ps.key == focus_param:
+            label_children.append(html.Span("this screen's knob",
+                                            style=_DEMOED_CHIP_STYLE))
+        children.append(html.Label(label_children,
+                                   style={"fontWeight": "bold", "display": "block",
+                                          "marginTop": "6px"}))
         # Control first, help underneath (was help-then-control -- the thing the
         # presenter must click was the least findable object in the column).
         cid = {"role": "block-param", "block": block_id, "param": ps.key}
@@ -556,8 +657,11 @@ def layout() -> Any:
         _legend_swatch(CATEGORY_COLORS["disabled"], "disabled"),
         _legend_line("active edge"),
         _legend_line("inactive edge", dashed=True),
-        _legend_line("alternative source path - only one used per run",
-                     style="dotted", color="#e17055"),
+        # One chain, so there is no "alternative source path" legend entry any more --
+        # the dotted salmon edges it described are gone with the second pipeline.
+        html.Span("one chain: the waveform class is the only branch; products tap the "
+                  "point whose domain they read",
+                  style={"marginLeft": "12px", "color": "#576574"}),
     ], style={"marginTop": "8px", "marginBottom": "8px", "fontSize": "15px",
               "display": "flex", "flexWrap": "nowrap", "overflowX": "auto",
               "alignItems": "center"})

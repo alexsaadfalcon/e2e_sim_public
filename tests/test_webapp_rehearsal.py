@@ -97,28 +97,38 @@ def test_corpus_presets_do_not_light_the_subspace_tracker(pid):
 
 
 # ------------------------------------------------------------------------------------
-# Block diagram: one source lit per run
+# Block diagram: ONE source node, naming the backend this run reads
 # ------------------------------------------------------------------------------------
-def test_diagram_greys_the_pkl_source_when_corpus_replay_feeds_the_run():
+# These two used to assert that the `environment` node went grey and its edges dashed
+# while `corpus_environment` lit up -- the honest rendering of a diagram that drew all
+# three sources with dotted "alternative source path" edges between them. The one-chain
+# diagram draws ONE source node instead (only one source ever feeds a run; the runner
+# ignores the others), so what there is to check is that the node NAMES the backend in
+# use. Same finding, one node later.
+def test_the_source_node_names_the_corpus_backend_when_corpus_replay_feeds_the_run():
     from webapp import block_diagram
 
     state = apply_preset(PRESETS_BY_ID["thrust5_detector_cfar"])
+    assert block_diagram.active_source(state) == "corpus_environment"
     elements = block_diagram.build_elements(state)
-    env = next(e for e in elements if e["data"].get("id") == "environment")
-    assert "disabled" in env["classes"].split()
-    corpus = next(e for e in elements if e["data"].get("id") == "corpus_environment")
-    assert "disabled" not in corpus["classes"].split()
-    env_edges = [e for e in elements if e["data"].get("source") == "environment"]
-    assert env_edges and all("inactive" in e["classes"].split() for e in env_edges)
+    src = next(e for e in elements if e["data"].get("id") == "source")
+    assert "disabled" not in src["classes"].split()
+    assert "stored corpus" in src["data"]["label"]
+    # ...and the editor opens on the backend actually in use, not on the .pkl source.
+    assert src["data"]["block"] == "corpus_environment"
+    assert not any(e["data"].get("id") == "environment" for e in elements)
 
 
-def test_diagram_lights_the_pkl_source_by_default():
+def test_the_source_node_names_the_pkl_backend_by_default():
     from webapp import block_diagram
     from webapp.pipeline_registry import default_block_state
 
-    elements = block_diagram.build_elements(default_block_state())
-    env = next(e for e in elements if e["data"].get("id") == "environment")
-    assert "disabled" not in env["classes"].split()
+    state = default_block_state()
+    assert block_diagram.active_source(state) == "environment"
+    elements = block_diagram.build_elements(state)
+    src = next(e for e in elements if e["data"].get("id") == "source")
+    assert "disabled" not in src["classes"].split()
+    assert "precomputed .pkl" in src["data"]["label"]
 
 
 # ------------------------------------------------------------------------------------

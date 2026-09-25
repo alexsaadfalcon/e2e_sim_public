@@ -69,13 +69,19 @@ def test_registry_block_ids_unique():
     assert len(ids) == len(set(ids)), f"duplicate block ids: {ids}"
 
 
-def test_registry_edges_reference_existing_nodes():
-    from webapp.pipeline_registry import BLOCKS_BY_ID, EDGES, normalize_edge
-    for edge in EDGES:
-        src, dst, kind = normalize_edge(edge)
-        assert src in BLOCKS_BY_ID, f"edge source {src!r} not a known block"
-        assert dst in BLOCKS_BY_ID, f"edge target {dst!r} not a known block"
-        assert kind in {"toggle", "alt"}, f"edge {src}->{dst} has unknown kind {kind!r}"
+def test_the_registry_no_longer_carries_a_second_answer_to_how_blocks_connect():
+    """`EDGES` and `normalize_edge` are gone, deliberately (see the note in their place).
+
+    They were a hand-maintained topology beside the real one, and by 2026-09-24 they
+    disagreed with it: the list still ran ("quantizer", "radar_cube") with no range
+    transform between them, and marked ("interconnect", "dechirp") as an "alt" path when
+    the mixing block is on every chain. One authority per question -- the chain's order is
+    the stage list the runner and `Simulation` build; the diagram draws a collapsed view of
+    that. A future edit that reintroduces a parallel edge table should fail here first."""
+    import webapp.pipeline_registry as reg
+
+    assert not hasattr(reg, "EDGES")
+    assert not hasattr(reg, "normalize_edge")
 
 
 def test_registry_categories_are_known():
@@ -266,28 +272,60 @@ def test_app_imports_without_torch():
 # block_diagram: elements builder + param editor
 # =============================================================================
 
-def test_build_elements_matches_registry():
-    from webapp import block_diagram
-    from webapp.pipeline_registry import BLOCKS, EDGES, default_block_state
+def test_the_diagram_draws_ONE_CHAIN_and_every_block_is_reachable_on_it():
+    """THE one-chain test (owner 2026-09-24: "there are two pipelines ... needs to be
+    fixed immediately from the ground up"; contract section 4).
 
-    elements = block_diagram.build_elements(default_block_state())
-    # Exclude the compound-group container nodes (see block_diagram._GROUPS):
-    # they are not registry blocks and carry no "position".
-    nodes = [e for e in elements
-             if "source" not in e["data"] and "position" in e]
+    Four properties, each of which the previous diagram violated:
+      * no compound REGION groups -- four labelled boxes around a one-path graph are four
+        statements that it has four paths;
+      * no "alt" edges -- the dotted salmon "alternative source path" strokes were the
+        loudest lines in the diagram and the least important;
+      * the chain nodes form ONE simple path, in the spine's order, with no node having
+        two chain predecessors (the waveform CLASS is the only branch, and it is a choice
+        inside one block, not a fork in the graph);
+      * every product hangs off exactly one chain node -- the point whose domain it reads.
+    And the property that keeps the collapse honest: every registry block is reachable
+    through some node's editor, so collapsing boxes did not hide a knob.
+    """
+    from webapp import block_diagram
+    from webapp.pipeline_registry import BLOCKS, default_block_state
+
+    state = default_block_state()
+    elements = block_diagram.build_elements(state)
+    nodes = [e for e in elements if "position" in e]
     edges = [e for e in elements if "source" in e["data"]]
 
-    assert len(nodes) == len(BLOCKS)
-    assert len(edges) == len(EDGES)
+    assert not hasattr(block_diagram, "_GROUPS"), "compound region groups are gone"
+    assert all("group" not in (e.get("classes") or "") for e in elements)
+    assert all("alt-path" not in (e.get("classes") or "") for e in edges)
+    assert not any(sel["selector"] == "edge.alt-path"
+                   for sel in block_diagram.CYTO_STYLESHEET)
 
     node_ids = {n["data"]["id"] for n in nodes}
-    assert node_ids == {b.id for b in BLOCKS}
+    chain_ids = [nid for nid, _l, _c, _m in block_diagram._CHAIN]
+    assert set(chain_ids) <= node_ids
 
-    # every edge connects two real nodes and carries a stable id
+    chain_edges = [(e["data"]["source"], e["data"]["target"]) for e in edges
+                   if e["data"]["source"] in chain_ids and e["data"]["target"] in chain_ids]
+    assert chain_edges == list(zip(chain_ids, chain_ids[1:])), (
+        "the chain must be one simple path in the spine's order")
+
+    for pid, tap in block_diagram._PRODUCT_TAP.items():
+        assert pid in node_ids
+        taps = [s for s, t in ((e["data"]["source"], e["data"]["target"]) for e in edges)
+                if t == pid]
+        assert taps == [tap], f"{pid} must tap exactly {tap!r}, got {taps}"
+
+    reachable = {bid for nid in node_ids
+                 for bid in block_diagram._NODE_MEMBERS.get(nid, [])}
+    # The source node resolves to ONE backend at render time, but all three are members.
+    assert {b.id for b in BLOCKS} <= reachable, (
+        "a registry block that no diagram node stands for is a knob with no way to reach it")
+
     for e in edges:
         d = e["data"]
-        assert d["source"] in node_ids
-        assert d["target"] in node_ids
+        assert d["source"] in node_ids and d["target"] in node_ids
         assert d["id"] == f"{d['source']}->{d['target']}"
 
 
@@ -328,11 +366,19 @@ def test_param_editor_unknown_block_is_graceful():
     assert isinstance(children, list) and children  # returns a "select a block" prompt
 
 
-def _find_checklist(children):
-    """Dig the (single) dcc.Checklist out of a param_editor children list."""
+def _find_checklist(children, block=None):
+    """Dig a dcc.Checklist out of a param_editor children list.
+
+    The editor now renders every registry block a DIAGRAM NODE stands for (the one-chain
+    diagram collapses the three sources, the transmit tributary and the ADC sub-chain), so
+    a node's column can hold several enable checkboxes. `block=` names which one; with no
+    `block` there must still be exactly one.
+    """
     from dash import dcc
     matches = [c for c in children if isinstance(c, dcc.Checklist)]
-    assert len(matches) == 1
+    if block is not None:
+        matches = [c for c in matches if (c.id or {}).get("block") == block]
+    assert len(matches) == 1, f"expected one checklist (block={block!r}), got {len(matches)}"
     return matches[0]
 
 
@@ -349,7 +395,7 @@ def test_param_editor_subspace_checkbox_disabled_while_afe_enabled():
     assert state["afe"]["enabled"] is True  # afe is on by default
     children = block_diagram.param_editor("subspace", state)
 
-    checklist = _find_checklist(children)
+    checklist = _find_checklist(children, block="subspace")
     assert checklist.options[0]["disabled"] is True
     assert checklist.value == ["on"]  # locked "on" regardless of stored state
     caption_text = " ".join(
@@ -369,7 +415,7 @@ def test_param_editor_subspace_checkbox_normal_when_afe_disabled():
     state["subspace"]["enabled"] = False
     children = block_diagram.param_editor("subspace", state)
 
-    checklist = _find_checklist(children)
+    checklist = _find_checklist(children, block="subspace")
     assert not checklist.options[0].get("disabled")
     assert checklist.value == []  # honors the stored (off) state
 
@@ -381,19 +427,19 @@ def test_block_diagram_layout_builds():
     assert getattr(layout, "children", None) is not None
 
 
-def test_positions_cover_every_registered_block_without_collisions():
-    """Every block registered in pipeline_registry.BLOCKS must have an explicit
-    position in block_diagram._POSITIONS -- otherwise it silently falls back to
-    (0, 0) and overlaps another node in the cytoscape diagram -- AND no two
-    nodes' actual rendered boxes may geometrically overlap. Tuple-equality alone
-    is not enough: this is the regression that let range_profile (1020, 270)
-    sit on top of quantizer (1000, 280) -- different tuples, overlapping boxes."""
+def test_positions_cover_every_diagram_node_without_collisions():
+    """Every DIAGRAM NODE must have an explicit position -- otherwise it silently falls
+    back to (0, 0) and overlaps another node -- AND no two nodes' rendered boxes may
+    geometrically overlap. Tuple-equality alone is not enough: this is the regression that
+    let range_profile (1020, 270) sit on top of quantizer (1000, 280) -- different tuples,
+    overlapping boxes. (Positions are per NODE since the one-chain rewrite; several
+    registry blocks share a node, and `_NODE_MEMBERS` is what keeps them reachable --
+    tested in test_the_diagram_draws_ONE_CHAIN_...)"""
     from webapp import block_diagram
-    from webapp.pipeline_registry import BLOCKS
 
-    ids = [b.id for b in BLOCKS]
+    ids = list(block_diagram._NODE_MEMBERS)
     missing = [bid for bid in ids if bid not in block_diagram._POSITIONS]
-    assert not missing, f"blocks missing explicit positions: {missing}"
+    assert not missing, f"nodes missing explicit positions: {missing}"
 
     # Node box size from CYTO_STYLESHEET's base "node" selector (width/height).
     node_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
@@ -419,14 +465,19 @@ def test_positions_cover_every_registered_block_without_collisions():
     assert not colliding, f"node boxes ({w}x{h}) geometrically overlap: {colliding}"
 
 
-def test_diagram_group_boxes_do_not_overlap_each_other():
-    """The compound REGION boxes must not overlap either.
+def test_the_diagram_extent_leaves_enough_fit_zoom_for_legible_labels():
+    """HOSTILE ROUND 11, D2 / acceptance check 17: node labels must render >= 12 px of
+    INK after fit zoom, and they measured ~6 px.
 
-    Node-vs-node checking is not sufficient and missed a real defect (owner-reported,
-    2026-08-16): `comms` is the last row of grp_products, so that group's box -- the
-    children's extent grown by the `:parent` padding -- reached down into grp_adc's box
-    even though no two individual node boxes touched. Cytoscape draws those boxes, so a
-    reader sees the collision the old test could not.
+    The canvas fits the whole graph, so the extent's WIDTH sets the zoom and the zoom
+    times the font size is what the room sees. This pins the arithmetic the fix rests on,
+    in one place, so that adding a chain column or a wider label cannot quietly halve the
+    label ink again: the check that matters is still a measurement on a rendered PNG, and
+    this is the cheap upstream guard that says which change broke it.
+
+    (The two tests that used to live here checked that the four compound REGION boxes did
+    not overlap each other. There are no regions any more -- see
+    test_the_diagram_draws_ONE_CHAIN_and_every_block_is_reachable_on_it.)
     """
     from webapp import block_diagram
 
@@ -434,46 +485,41 @@ def test_diagram_group_boxes_do_not_overlap_each_other():
                       if s["selector"] == "node")
     w = float(node_style["width"].rstrip("px"))
     h = float(node_style["height"].rstrip("px"))
-    parent_style = next(s["style"] for s in block_diagram.CYTO_STYLESHEET
-                        if s["selector"] == "node:parent")
-    pad = float(str(parent_style["padding"]).rstrip("px"))
+    font = float(str(node_style["font-size"]).rstrip("px"))
 
-    def _group_box(gid):
-        xs, ys = [], []
-        for bid in block_diagram._GROUPS[gid]["members"]:
-            x, y = block_diagram._POSITIONS[bid]
-            xs += [x - w / 2, x + w / 2]
-            ys += [y - h / 2, y + h / 2]
-        return (min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad)
+    xs = [x for x, _y in block_diagram._POSITIONS.values()]
+    ys = [y for _x, y in block_diagram._POSITIONS.values()]
+    extent_w = (max(xs) - min(xs)) + w
+    extent_h = (max(ys) - min(ys)) + h
 
-    gids = list(block_diagram._GROUPS)
-    boxes = {g: _group_box(g) for g in gids}
-    colliding = []
-    for i, a in enumerate(gids):
-        for b in gids[i + 1:]:
-            ax0, ax1, ay0, ay1 = boxes[a]
-            bx0, bx1, by0, by1 = boxes[b]
-            if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
-                colliding.append((a, b, boxes[a], boxes[b]))
-    assert not colliding, f"group region boxes overlap (padding {pad}px): {colliding}"
+    # The panel the cytoscape canvas sits in (webapp/block_diagram.layout: flex basis
+    # 1032 px, height 620 px) and the layout's own padding=20 on each side.
+    panel_w, panel_h, pad = 1032.0, 620.0, 20.0
+    zoom = min((panel_w - 2 * pad) / extent_w, (panel_h - 2 * pad) / extent_h, 1.0)
+    # Cap-height / em for the default sans stack, measured off the round-11 crops
+    # (20 px declared -> ~6 px ink at ~0.6 zoom => ~0.5).
+    ink = font * zoom * 0.5
+    assert ink >= 12.0, (
+        f"label ink {ink:.1f} px at fit zoom {zoom:.2f} (extent {extent_w:.0f}x"
+        f"{extent_h:.0f}, font {font:.0f}px) -- acceptance check 17 wants >= 12 px")
 
 
-def test_every_block_belongs_to_exactly_one_diagram_group():
-    """Every registered block must appear in exactly one of block_diagram._GROUPS
-    (the compound region containers from the redesign) -- not zero, not two."""
+def test_every_registry_block_belongs_to_exactly_one_diagram_node():
+    """Every registered block must appear in exactly one diagram node's members -- not
+    zero (unreachable knob), not two (two boxes claiming the same block)."""
     from webapp import block_diagram
     from webapp.pipeline_registry import BLOCKS
 
-    membership_count = {b.id: 0 for b in BLOCKS}
-    for spec in block_diagram._GROUPS.values():
-        for bid in spec["members"]:
-            assert bid in membership_count, f"group member {bid!r} is not a registered block"
-            membership_count[bid] += 1
+    count = {b.id: 0 for b in BLOCKS}
+    for nid, members in block_diagram._NODE_MEMBERS.items():
+        for bid in members:
+            assert bid in count, f"node member {bid!r} is not a registered block"
+            count[bid] += 1
 
-    not_grouped = [bid for bid, n in membership_count.items() if n == 0]
-    multi_grouped = [bid for bid, n in membership_count.items() if n > 1]
-    assert not not_grouped, f"blocks not in any diagram group: {not_grouped}"
-    assert not multi_grouped, f"blocks in more than one diagram group: {multi_grouped}"
+    not_placed = [bid for bid, n in count.items() if n == 0]
+    multi = [bid for bid, n in count.items() if n > 1]
+    assert not not_placed, f"blocks no diagram node stands for: {not_placed}"
+    assert not multi, f"blocks claimed by more than one node: {multi}"
 
 
 # =============================================================================
@@ -1354,31 +1400,42 @@ def test_registry_dechirp_preset_and_mimo_params():
 
 
 def test_registry_imports_without_torch_after_adc_chain_additions():
-    """Re-assert the no-heavy-import invariant now that BLOCKS/EDGES are bigger."""
+    """Re-assert the no-heavy-import invariant now that BLOCKS is bigger."""
     proc = _import_without_torch("webapp.pipeline_registry")
     assert proc.returncode == 0, (
         f"webapp.pipeline_registry must still import without torch; stderr:\n{proc.stderr}"
     )
 
 
-def test_build_elements_includes_adc_chain_nodes():
+def test_the_receive_segment_is_on_the_one_chain_not_a_second_band():
+    """The blocks that used to be drawn as an "ADC-cube chain - mutually exclusive with
+    the products above" band are now segments of the one chain: the mixing block is a
+    chain node, the four ADC stages are collapsed into the single `adc` node (round-11 D2:
+    five boxes there cost label ink and bought nothing a presenter clicks separately), and
+    the transmit tributary is the waveform node. Their ORDER is still asserted -- it just
+    lives in `_CHAIN` and in the stage list `pipeline_runner` builds, not in a set of
+    presentational edges that could drift from either."""
     from webapp import block_diagram
     from webapp.pipeline_registry import default_block_state
 
     elements = block_diagram.build_elements(default_block_state())
-    node_ids = {e["data"]["id"] for e in elements if "source" not in e["data"]}
-    assert _ADC_CHAIN_BLOCK_IDS <= node_ids
-
+    node_ids = {e["data"]["id"] for e in elements}
     edges = {(e["data"]["source"], e["data"]["target"])
              for e in elements if "source" in e["data"]}
-    # spot-check the two new domain bridges are wired into the diagram
-    assert ("tx_pa", "modulate") in edges
-    assert ("interconnect", "dechirp") in edges
-    # D6 parity: the diagram shows every corpus-generator stage in its real order.
-    assert ("dechirp", "thermal_noise") in edges
-    assert ("thermal_noise", "impairment") in edges
-    assert ("impairment", "if_hpf") in edges
-    assert ("if_hpf", "quantizer") in edges
+
+    for bid in _ADC_CHAIN_BLOCK_IDS:
+        assert block_diagram.resolve_node(bid) in node_ids, (
+            f"{bid} is not reachable on the one chain")
+    assert block_diagram._NODE_MEMBERS["adc"] == [
+        "thermal_noise", "impairment", "if_hpf", "quantizer"], (
+        "the ADC node's members are the corpus generator's stage order")
+    assert block_diagram._NODE_MEMBERS["waveform"] == ["waveform", "tx_pa", "modulate"]
+    assert ("interconnect", "dechirp") in edges      # the mixing block, on the chain
+    assert ("dechirp", "rffe") in edges              # front end on the beat record
+    assert ("rffe", "adc") in edges
+    assert ("adc", "cube") in edges                  # the ONE range transform
+    assert ("adc", "detector") in edges              # scored detectors read `adc`
+    assert ("cube", "radar_cube") in edges           # range-Doppler reads `cube`
 
 
 def test_param_editor_runs_for_adc_chain_blocks():

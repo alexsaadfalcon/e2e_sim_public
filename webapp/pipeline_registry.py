@@ -1,11 +1,15 @@
 """
 Single source of truth for the block-diagram pipeline.
 
-Everything the UI knows about the runtime pipeline (which blocks exist, how they
-connect, which params are editable, sensible defaults) is *derived* from the
-``BLOCKS`` and ``EDGES`` definitions below. The block-diagram layout, the
-parameter editor, and the pipeline runner all read from here so there are no
-duplicated, hand-maintained strings scattered across the codebase.
+Everything the UI knows about which blocks exist, which params are editable and what
+their sensible defaults are is *derived* from the ``BLOCKS`` definitions below: the
+block-diagram layout, the parameter editor and the pipeline runner all read from here, so
+there are no duplicated, hand-maintained strings scattered across the codebase.
+
+HOW THE BLOCKS CONNECT IS NOT DEFINED HERE -- see the note where ``EDGES`` used to be.
+The chain's order is the stage list ``e2e.simulation.Simulation`` and
+``webapp.pipeline_runner`` build; ``webapp.block_diagram`` draws a collapsed view of that
+and nothing restates it.
 
 This module imports NOTHING heavy (no torch / sionna / e2e), with one deliberate
 exception: `e2e.interconnect_surrogate` is itself torch-free by contract (see its
@@ -701,68 +705,20 @@ BLOCKS: List[BlockSpec] = [
     ),
 ]
 
-# Directed dataflow edges (source id -> target id). These define the diagram and
-# document the feed-forward order; products fan out from the last serial stage.
-EDGES: List[tuple] = [
-    ("environment", "rffe"),
-    ("rffe", "interconnect"),
-    ("interconnect", "afe"),
-    ("afe", "subspace"),
-    ("subspace", "fft"),
-    ("subspace", "range_az"),
-    ("subspace", "range_el"),
-    ("subspace", "range_profile"),
-    ("subspace", "subspace_err"),
-    ("subspace", "comms"),
-
-    # ADC-cube chain (see the BLOCKS comment above it). Presentational: this is a
-    # DAG for the diagram, not a claim that pipeline_runner assembles every one of
-    # these edges into one live Simulation call (it does not for the TX-time trio;
-    # see pipeline_runner.py). TX-time domain (waveform -> PA) feeds the modulate
-    # bridge alongside an existing frequency-domain source (either precomputed
-    # 'environment' frames or the live-ray-traced 'rt_environment'); modulate hands
-    # back into the same frequency-domain stages (rffe/interconnect) the original
-    # pipeline already has; 'interconnect' is also where the RX-time dechirp bridge
-    # branches off, continuing through impairments/quantization to the RX-time
-    # products (radar cube / neural detector / frame sink).
-    ("waveform", "tx_pa"),
-    ("tx_pa", "modulate"),
-    ("environment", "modulate"),
-    ("rt_environment", "modulate", "alt"),
-    ("rt_environment", "rffe", "alt"),
-    ("modulate", "rffe"),
-    ("interconnect", "dechirp", "alt"),
-    ("dechirp", "thermal_noise"),
-    ("thermal_noise", "impairment"),
-    ("impairment", "if_hpf"),
-    ("if_hpf", "quantizer"),
-    ("quantizer", "radar_cube"),
-    ("quantizer", "detector"),
-    ("quantizer", "sink"),
-    # Corpus Replay enters the chain at ONE of two points, depending on what the
-    # corpus stored and which 'Replay from' is selected: a stored ADC cube is already
-    # digitized, so its only consumers are the RX-time products; a stored RAY-TRACED
-    # CHANNEL enters at the front end and runs the whole chain live. Both are drawn,
-    # as alternative source paths -- the diagram lit the products only, which made the
-    # live path (the one the Thrust 5 presets use) invisible on the Block Diagram tab.
-    ("corpus_environment", "rffe", "alt"),
-    ("corpus_environment", "radar_cube", "alt"),
-    ("corpus_environment", "detector", "alt"),
-]
-
-
-def normalize_edge(edge: tuple) -> tuple:
-    """Normalize an EDGES entry to (src, dst, kind).
-
-    Most entries are plain (src, dst) 2-tuples, which default to kind="toggle"
-    (the original active/inactive-on-disable styling). A few entries are
-    3-tuples (src, dst, "alt") marking one of two mutually-exclusive source
-    paths into the same downstream block (e.g. precomputed 'environment' vs.
-    live 'rt_environment' both feeding 'modulate'/'rffe')."""
-    if len(edge) == 3:
-        return edge
-    src, dst = edge
-    return (src, dst, "toggle")
+# THE DIAGRAM'S TOPOLOGY DOES NOT LIVE HERE ANY MORE.
+#
+# A hand-maintained `EDGES` list used to sit at this point, and `webapp/block_diagram.py`
+# drew it. It is deleted, not moved, because with the one-chain rewrite (2026-09-24) it had
+# become a SECOND answer to "how does the pipeline connect": the order the chain actually
+# runs in is `e2e.simulation.Simulation._build_spine` plus the stage list
+# `webapp/pipeline_runner.py` composes, and the diagram is now derived from the collapsed
+# view of that (`block_diagram._CHAIN` / `_PRODUCT_TAP`). Two documents answering one
+# question means one of them is already wrong, and this one was: it still carried
+# ("interconnect", "dechirp", "alt") and ("quantizer", "radar_cube") after the range
+# transform had moved in between them.
+#
+# `normalize_edge` went with it -- its only reason to exist was the "alt" edge kind, and
+# there are no alternative paths left to mark.
 
 
 # Quick lookups -------------------------------------------------------------------
