@@ -484,11 +484,13 @@ screen now -- a pause/play button, a "frame N of M" readout, and one slider,
 together in the run-identity row at the top. Press pause with that ONE button to
 hold a frame while you talk about it -- it stops every panel together, both arms
 included -- then press it again to resume; dragging its slider does the same and
-now parks BOTH arms (there is only the one slider). Thrust 5 exception:
-RETRACTED (hostile round 11 H3) -- the objectness panel now follows the same
-shared clock as the Range-Doppler cube; only the Detector scoreboard (live
-rows say "last frame") and the offline PR panel still do not animate, so the
-clock desyncs the cube from those two by itself.
+now parks BOTH arms (there is only the one slider). Thrust 5 exception: the
+objectness map steps on the shared clock with the Range-Doppler cube (round 11
+H3 retracted "pinned to the last frame"), and since round 13 the Detector
+scoreboard's visible rows are RUN-LEVEL -- cumulative hits, unmatched per frame,
+recall -- so nothing on it can be mistaken for the frame on screen; the
+per-frame TP/FP/FN triple is in that panel's Details. The offline PR curve is
+one click below the product rows, in the "Offline benchmark" disclosure.
 
 Preset stage order:
 {order}

@@ -580,12 +580,16 @@ PRESETS: List[DemoPreset] = [
         # is visibly brighter" was false on that screen -- the two "share one colour
         # scale" clauses (one generic, one naming arm B by value) are merged into a
         # single clause gated on "when two arms run", true whether one or both render.
-        screen_note=("dB rel. peak; clip follows the frame's median floor + 3 dB; "
-                     "when two arms run, they share one colour scale down to the "
-                     "deeper arm's floor (the printed zmin), and the 0.5 mA arm's "
-                     "background reads visibly brighter than the 8 mA arm's, about "
-                     "twelve dB by the printed numbers, streaks matching; all 1024 "
-                     "elements share one front-end config; " + _ARRAY_DISCLOSURE),
+        # THE FIRST TWO CLAUSES ARE GONE (2026-09-25, N14's other half). Each panel's own
+        # caption already prints "dB rel. peak - clipped at -61.3 dB - same colour scale
+        # on both arms", so the note was re-stating the caption in the smallest type on
+        # the page -- and at 493 characters it overran the page-foot budget, which cut it
+        # exactly where the array disclosure begins. Trimmed to the claims that are ONLY
+        # here, it renders WHOLE, disclosure included, with room to spare.
+        screen_note=("when two arms run they share one colour scale, and the 0.5 mA "
+                     "arm's background reads visibly brighter than the 8 mA arm's, "
+                     "about twelve dB by the printed numbers, streaks matching; all "
+                     "1024 elements share one front-end config; " + _ARRAY_DISCLOSURE),
         # THE RANGE CLAUSE IS GONE FROM HERE, deliberately (shard 3, 2026-09-24). It
         # used to read "1.00 m/gate; display 0-125 m of a 250 m unambiguous window" --
         # typed, and by today wrong twice: the convention is the owner's bistatic excess
@@ -793,10 +797,22 @@ PRESETS: List[DemoPreset] = [
         # a tracker setting.
         # wave 12 (2026-09-24, item 1.6): the note still named the pre-wave-11
         # per-arm adaptive clip; the panels now share one colour scale instead.
-        screen_note=("range-azimuth and range-elevation images barely move under the "
-                     "shared colour scale (statistics printed on each; the range "
-                     "calibration is on the panel); the tracker error moves "
+        # THE CLAIM FIRST (2026-09-25, N14's other half). This note is longer than the
+        # page-foot budget, so what comes first is what the screen keeps -- and what came
+        # first was a re-statement of the two map captions ("images barely move under the
+        # shared colour scale"), which pushed the screen's actual claim (the 4x tracker
+        # move) past the cut. Reordered, not shortened: every clause is still here and the
+        # array disclosure is reserved its room by `app._foot_note`.
+        screen_note=("the tracker error moves "
                      "about 4x (3.8-4.2x over frames 2-6, measured 2026-09-24); "
+                     "the range-azimuth and range-elevation images barely move under "
+                     # COMMA, not a semicolon, INSIDE the parenthetical: `app._foot_note`
+                     # cuts this note at its last clause separator inside the budget, and
+                     # a "; " in here let it cut mid-parenthesis -- the rendered foot read
+                     # "(statistics printed on each. Full note in each arm's Details."
+                     # with the bracket never closed (2026-09-25 render).
+                     "the shared colour scale (statistics printed on each, the range "
+                     "calibration is on the panel); "
                      "subspace error is unnormalised, ceiling sqrt(k) = 1.41 "
                      "for k = 2; the tracker panel's red dotted trace (right axis) is "
                      "refinement passes/frame, fixed at 10 here -- the knob on this "

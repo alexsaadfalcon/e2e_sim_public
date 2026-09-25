@@ -927,7 +927,24 @@ def _arm_caption(payload: Dict[str, Any]) -> str:
     line = CAPTION_SEP.join(parts)
     # ONE line, and the column clips at ~86 characters at 16 px.
     if len(line) <= 86 or len(parts) < 2:
-        return line if len(line) <= 86 else parts[0]
+        if len(line) <= 86:
+            return line
+        # A SINGLE part that overruns is cut at a CLAUSE boundary if one fits, not left
+        # to the browser's ellipsis (measured on the 2026-09-25 render, `clippedChrome`
+        # on both Thrust 4 arms: "Tessera TSV surrogate, scale model x2 (2x geometry,
+        # evaluated at 14.25-15.75 GHz): radius 2.5 um, pitch ..." -- 110 characters of
+        # `_note_headline` against an 86-character column). `_clause_head` returns a
+        # complete phrase, so nothing needs marking as elided, and the whole note is in
+        # this arm's Details either way. Exposed by the chip/caption de-duplication of
+        # the same day: with the chip carrying its value whole there is no overflow in
+        # front of the headline any more, so the headline is what reaches the column.
+        # The LONGEST clause that still fits, not the first one: `_clause_head` cuts at
+        # the earliest separator, which here is the "(" of "(2x geometry, ...)" and
+        # throws the band away with it.
+        head_txt = parts[0]
+        cut = max([head_txt.rfind(sep, 0, 87) for sep in (": ", " -- ", " vs ", " (")]
+                  + [0])
+        return head_txt[:cut].rstrip(" ,;-") if cut > 0 else head_txt
     # Both facts, one line: something has to go. The run note wins when the chip
     # above ALREADY carries every number the knob value has -- on Thrust 5's
     # IF-corner A/B the chip reads "B -- Corner range (m) 25 m (attenuates ~4.3 dB at
