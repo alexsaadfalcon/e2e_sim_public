@@ -333,9 +333,9 @@ PRESETS: List[DemoPreset] = [
         # thrust2's own no-exact-pair rule, same standard applied here).
         blurb=("Press Run once: the two arms (A, left, 8 mA / B, right, 0.5 mA) "
                "share one colour scale down to the deeper floor, so arm B's "
-               "background reads visibly brighter, about twelve dB by the "
-               "printed numbers; streaks match. Manual second knob: IF "
-               "bandwidth 15 -> 50 MHz."),
+               "background reads visibly brighter -- ~12 dB by the printed "
+               "numbers; streaks match. Second knob, manual: IF bandwidth "
+               "15 -> 50 MHz."),
         live_knobs=[("rffe", "lna_bias_ma", "8 -> 0.5 mA (about -12 dB)"),
                     ("rffe", "if_bw_mhz", "manual second knob: 15 -> 50 MHz and run again "
                                           "(about -5 dB; 1 -> 50 MHz is -13.5 dB here, "
@@ -396,12 +396,12 @@ PRESETS: List[DemoPreset] = [
             # quiet once the drive is far enough above the front end's own floor:
             # measured on this preset, the A/B collapses to 0.96 dB at 1e-3 and 0.08 dB
             # at 1e-2.
-            "Drive it harder and these knobs stop mattering: the A/B is 0.96 dB "
-            "at 1e-3 and 0.08 dB at 1e-2, against 11.7 dB at 3e-5 (2026-09-24).",
-            "Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the twelve dB "
+            "Drive it harder and these knobs stop mattering: the A/B is 11.7 dB at "
+            "3e-5, 0.96 dB at 1e-3, 0.08 dB at 1e-2 (2026-09-24).",
+            "Below ~4 mA the LNA is a LOSS stage (-8.5 dB); most of the 12 dB "
             "leaves the attenuator (4->8 mA: +1.6 dB).",
             "No trade-off today: nothing clips; the IF filter only sets noise "
-            "variance (1 MHz = 1 ms sweep vs 20 us at 50 MHz).",
+            "variance (1 MHz = 1 ms sweep, 20 us at 50 MHz).",
             # wave 9 (2026-09-24): "brightest band" was wrong -- the hottest visible
             # pixel on this map is the 37 m return, not range 0; reworded to Thrust 4's
             # framing (the display-normalisation fact, not a brightness claim).
@@ -418,15 +418,15 @@ PRESETS: List[DemoPreset] = [
             # delays, one convention -- and the panel's axis now says "excess path (m)"
             # so the card and the screen cannot disagree about which quantity it is.
             "Excess path 0-4 m is not a target: it is the direct path the display "
-            "normalises to (0 dB); multipath: the ~74 m return the panel names "
+            "normalises to (0 dB). Multipath: the ~74 m return the panel names "
             "(74.2 m; F94's 37.1 m at c*tau/2) and 136 m.",
             # wave 10 (2026-09-24): merged the old "noise figure" and "what
             # end-to-end buys over Friis" bullets -- both turned on the same 0.17 dB
             # agreement figure.
             # wave 12 (2026-09-24): trimmed for the 450-word card ceiling.
-            "Noise figure IS quotable: Friis 11.97 dB vs measured 11.80 dB "
-            "validates the mechanism and this knob's AFE/tracker/detector "
-            "effect. Absolute dBm is NOT quotable: input level is free.",
+            "Noise figure IS quotable: Friis 11.97 vs measured 11.80 dB "
+            "validates the mechanism and this knob's downstream effect. "
+            "Absolute dBm is NOT: the input level is free.",
             "Channel mismatch: all 1024 elements share one config; mismatch is "
             "structurally zero; a per-element spread is a small change.",
             # Re-derived on the unified receiver: the spine's cube bin is 9.99 cm of
@@ -435,15 +435,14 @@ PRESETS: List[DemoPreset] = [
             # 1.00 m gates. The old line said "5 cm, binned 20:1" -- the same physical
             # resolution stated in the other convention over the uncropped 5000-bin
             # transform.
-            "Spacing: lambda/2 at 30 GHz, 0.525 lambda at 31.5 GHz -- grating lobes "
+            "Spacing: lambda/2 at 30 GHz (0.525 at 31.5) -- grating lobes "
             "beyond |sin theta| ~0.90; 9.99 cm excess-path bins, 10:1 to 1.00 m "
             "gates.",
             # wave 9 (2026-09-24): peak-to-median caveat (also on Thrust 2's card) --
             # applies here too, since this is exactly the statistic the LNA-bias knob
             # moves.
-            "Peak-to-median dynamic range measures how empty the map is (median set "
-            "by empty gates), not target SNR; it moves with the noise floor this "
-            "knob changes.",
+            "Peak-to-median measures how empty the map is (median = empty gates), "
+            "not target SNR; it moves with the noise floor this knob changes.",
             # wave 9 (2026-09-24, orchestrator course-correction): the 0 dB reference
             # cell (range-0 gate) is ~1.6 px tall on screen, anti-aliased away -- the
             # colour bar's 0 dB is never actually visible on the map. Numbers not
@@ -452,13 +451,22 @@ PRESETS: List[DemoPreset] = [
             # wave 12 (2026-09-24): dropped "(read it off the screen)" -- now
             # redundant with the dedicated pause-before-reading bullet below.
             "The 0 dB reference is a single range-0 gate too small to see; "
-            "every dB on the map is relative to the direct path.",
+            "every dB is relative to the direct path.",
             # wave 10 (2026-09-24, item 4.1, hostile round 9): the noise floor
             # moves 11 dB between this slide and the next; name the cause before
             # the room asks.
-            "Thrust 1 runs at signal_scaling 3e-5 (legacy mode): peak-median ~58 "
-            "dB is ~11 dB below Thrust 2's ~77 dB -- a different operating "
-            "point.",
+            "Thrust 1 runs at signal_scaling 3e-5 (legacy): peak-median ~58 dB, "
+            "~11 dB below Thrust 2's ~77 dB -- a different operating point. That "
+            "drive is a DISPLAY choice, not an input level (Details).",
+            # SEAT'S READ OF THE 2026-09-24 RENDERS, item 1d. The obvious question from
+            # the floor is why a hand-picked drive is used when the block offers a
+            # `physical` mode. Answered by measurement, taken 2026-09-24 on this preset:
+            # forcing scale_mode='physical' on the munich Ka source (which itself reports
+            # physical_scale=False -- the frames are not volts) puts both arms at ~69-74
+            # dB and INVERTS the A/B to -3.0/-3.6 dB, i.e. the 0.5 mA arm reads better.
+            # And the drive is inside F97b's exact regime with room to spare: the
+            # front end's phase-equivariance error on munich Ka frame 0 is 5.4e-07 at
+            # 3e-5 (float32 rounding), 2.1e-06 at 1e-4, and only reaches 2.1e-04 at 1e-3.
             # wave 12 (2026-09-24, item 1.5): the panel subtitle and its
             # peak-median callout rebuild every 700 ms while the Results clock
             # loops -- a presenter reading a number off a moving screen without

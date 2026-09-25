@@ -948,7 +948,6 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             lna_bias_ma=float(_p_positive(state, "rffe", "lna_bias_ma")),
             if_bw_mhz=float(_p_positive(state, "rffe", "if_bw_mhz")),
         )
-
     interconnect_block = None
     if _enabled(state, "interconnect"):
         case = _p(state, "interconnect", "case")
@@ -1239,6 +1238,32 @@ def run_pipeline(state: Dict[str, Dict[str, Any]], n_steps: int = 10,
             # hand-edited per-element config table (`FrontEndBlock.from_rffe`).
             front_end_block = FrontEndBlock.from_rffe(circuit_block, adc_cfg)
             spine_stages.append(front_end_block)
+        # THE DRIVE IS A DISPLAY CHOICE, and the screen says so in its own words rather
+        # than a card quoting a level (seat's read of the 2026-09-24 renders, item 1d).
+        # Emitted where the front end actually JOINS the spine, so an ADC-replay run
+        # (which skips the front end entirely) does not describe a stage it never ran.
+        # The note is COMPUTED from the run: it names the drive this run used and the
+        # source's own absolute-scale metadata, so it cannot drift from either.
+        # Measured 2026-09-24 on the Thrust 1 preset, munich Ka: the source reports
+        # physical_scale=False, and forcing scale_mode='physical' on it does not make the
+        # level physical -- it feeds a unitless channel response to the LNA, and the A/B
+        # INVERTS (8 mA minus 0.5 mA = -3.0 to -3.6 dB over the preset's 5 frames,
+        # against +11.69 to +11.71 dB in legacy at 3e-5). That is why the preset stays
+        # in legacy and why no card may read the drive as an input level.
+        if circuit_block is not None and not rffe_physical:
+            _drive = float(_p_positive(state, "rffe", "signal_scaling"))
+            _src_abs = getattr(environment_block, "physical_scale", None)
+            run_notes.append(
+                f"Front-end drive {_drive:.3g} is a DISPLAY choice, not a measured "
+                "input level: legacy scale mode renormalises every frame to that mean "
+                "|beat| before the circuit cascade, because these frames carry no "
+                f"absolute volts (this source reports physical_scale={_src_abs!r}). "
+                "Forcing 'physical' would not make the number physical -- it would feed "
+                "a unitless channel response to the LNA. What the drive decides is "
+                "where the picture sits between the front end's own noise floor and its "
+                "clamp, and every A/B on this screen is measured at the drive it ran "
+                "with."
+            )
 
         # Stage order mirrors e2e.ml.chain_generate.build_chain_simulation exactly:
         # Dechirp -> ThermalNoise -> Impairment -> IFHighPass -> Quantizer (D6 parity;
