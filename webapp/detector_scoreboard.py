@@ -920,12 +920,26 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # and it is the transport's own spelling -- which is the confusion being fixed.)
     _last_frame_label = (f"last frame {n_total}/{n_total}" if n_total
                          else "last frame")
-    base_labels = [f"{_last_frame_label}: TP", f"{_last_frame_label}: unmatched (FP)",
-                   f"{_last_frame_label}: FN",
-                  "cumulative hits",
-                  f"unmatched / frame, these {n_scored} frames",
-                  "recall (hits / GT), this run"]
-    base_values = this_frame + [
+    # THE SINGLE-FRAME ROWS LEAVE THE VISIBLE TABLE (2026-09-25, hostile round 13 N3).
+    # They were the table's TOP three rows, so on the LEAD screen the first thing the
+    # room read was "last frame 5/5: TP 0" under the 12-bit arm beside "TP 1" under the
+    # 3-bit arm -- the comparison reading backwards -- with the recovery (cumulative 12
+    # vs 4) three rows down. One frame of five is also the noisiest statistic on the
+    # panel and the only one that can disagree with the objectness map beside it, which
+    # steps with the clock while a Plotly Table cannot. So the visible table now carries
+    # ONLY run-level numbers, in the order the claim is made (hits, then unmatched rate,
+    # then recall), and the per-frame triple moves into Details with the frame it is
+    # about still named. Nothing is deleted; the map is now the one authority for "what
+    # happened on the frame in front of you", and it prints its own matched count.
+    per_frame_detail_rows = [
+        (f"{_last_frame_label}: TP", this_frame[0]),
+        (f"{_last_frame_label}: unmatched (FP)", this_frame[1]),
+        (f"{_last_frame_label}: FN", this_frame[2]),
+    ]
+    base_labels = ["cumulative hits",
+                   f"unmatched / frame, these {n_scored} frames",
+                   "recall (hits / GT), this run"]
+    base_values = [
         f"{cum_hits_str} ({n_scored}/{n_total} scored)",
         fa_per_frame_str, hit_rate_value,
     ]
@@ -1060,13 +1074,17 @@ def scoreboard_figure(scores: Dict[str, Any], *, arm_name: str,
     # the table had no room for, the live/offline connector, then the 4 caveat
     # sentences and the threshold subline that used to be the figure's annotation
     # and title/subtitle.
-    # Why three rows say "last frame" on a screen whose other panels follow the clock.
+    # Why the per-frame triple is HERE and not on the visible table (round 13, N3).
     transport_caveat = (
-        "the per-frame rows name the LAST frame scored, not the frame the "
+        "the three per-frame rows above name the LAST frame scored, not the frame the "
         "transport is parked on: a table is not an animatable Plotly trace, so it "
-        "cannot step with the clock the objectness map beside it follows"
+        "cannot step with the clock the objectness map beside it follows. That is why "
+        "they are in Details and the visible table is run-level only -- for the frame "
+        "on screen, read the objectness map's own statistic strip, which prints that "
+        "frame's detections and how many of them matched"
     )
-    details = ([f"{lbl}: {val}" for lbl, val in offline_detail_rows]
+    details = ([f"{lbl}: {val}" for lbl, val in per_frame_detail_rows]
+              + [f"{lbl}: {val}" for lbl, val in offline_detail_rows]
               + [f"{lbl}: {val}" for lbl, val in connector_rows]
               + [match_rule_text, ceiling_caveat, grouping_caveat, scale_caveat,
                  transport_caveat, subline])

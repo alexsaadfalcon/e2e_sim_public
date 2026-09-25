@@ -60,7 +60,7 @@ import textwrap
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from webapp.app import _ab_arm_chip
+from webapp.app import _ab_arm_chip, offline_benchmark_label
 from webapp.demo_presets import (PRESETS, DemoPreset, apply_preset,
                                  resolved_say as _resolved_say)
 from webapp.pipeline_registry import (
@@ -337,10 +337,21 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
             f'Two panels follow the screen\'s one shared transport, frame for '
             f'frame: **"{_panel_title("radar_cube", preset)}"** and '
             f'**"{det_title}"**.'))
+        # Round 13: N6 (the old "live rows say last frame" is stale -- N3 moved the
+        # per-frame triple into Details, so the visible rows are run-level) and N2 (the
+        # PR panel is behind a CLOSED disclosure, and the runbook described it as
+        # visible, so the presenter had no click to make and the evidence never showed).
         lines.append(_bullet(
-            'Two more do not animate at all: **"Detector scoreboard"** (live '
-            'rows say "last frame") and the offline PR-curve panel '
-            '(**"scored offline: ... test frames"**).'))
+            '**"Detector scoreboard"** does not animate (a table cannot): its '
+            'visible rows are run-level -- cumulative hits, unmatched per frame, '
+            'recall -- and the per-frame TP/FP/FN triple is in its **Details**, '
+            'naming the frame it is about.'))
+        lines.append(_bullet(
+            'CLICK for the precision-recall evidence: **"' + offline_benchmark_label()
+            + '"**, the closed disclosure below the product rows. It holds the '
+            'offline PR curve (both arms draw the same one -- no knob on this '
+            'screen moves it), which is why it is not a product row. Its headline '
+            'numbers are already the last two rows of the scoreboard.'))
         # wave 11 (2026-09-24, owner live test): the Results-tab clock now animates
         # the cube WITHOUT a click, so the desync the wave-10 "leave the slider
         # alone" note warned about is the default state of these three screens.
@@ -354,12 +365,11 @@ def _render_preset(i: int, preset: DemoPreset) -> str:
         lines.append(_bullet(
             'The Range-Doppler and objectness panels loop together on the '
             'shared clock (pause/play + frame N of M + slider, in the '
-            "run-identity row); the Detector scoreboard and the offline "
-            'PR-curve panel do not animate at all, so they can lag behind '
-            "whichever frame the cube and objectness map are parked on. "
-            "Pause the transport before talking about one frame's "
-            "detections, and read the scoreboard's numbers as through its "
-            "own last frame, not necessarily the one on screen."))
+            "run-identity row). Pause it before talking about one frame's "
+            "detections and read that frame's numbers off the objectness "
+            "panel's own strip -- it prints detections, how many matched, and "
+            "how many were labelled, for the frame on screen. The scoreboard "
+            "beside it is the run, not the frame."))
     else:
         state = apply_preset(preset)
         enabled_bids = [bid for bid in PRODUCT_IDS if state[bid]["enabled"]]
@@ -475,19 +485,20 @@ _BEFORE_AUDIENCE = """## Before the audience
    every frame while the clock loops: pause with the button in the
    run-identity row before reading a per-frame number aloud, on every preset,
    not just Thrust 5.
-   **Thrust 4 exception**: the range-profile panel renders once from the LAST
-   frame and never animates (its own statistic strip says "static"); the
-   range-azimuth map above it keeps looping on the shared clock regardless of
-   where the one transport is parked, so the two panels can show different
-   frames by design, with no scrubbing needed to cause it.
-   **Thrust 5 exception**: RETRACTED (hostile round 11 H3) -- the objectness
-   panel used to be pinned to the last frame like the scoreboard and PR panel;
-   it now follows the same shared clock as the Range-Doppler cube, frame for
-   frame. Only the Detector scoreboard (its live rows say "last frame") and
-   the offline PR-curve panel still do not animate at all -- the clock
-   desyncs the cube from those two, not from the objectness map, with no
-   scrubbing needed to cause it. Pause the transport before talking about a
-   specific frame's detections or reading the scoreboard's numbers aloud.
+   **Thrust 4 exception**: RETRACTED (hostile round 13, N6) -- the range-profile
+   panel used to render once from the LAST frame and say "static" in its own
+   strip, beside a range-azimuth map that was looping. It steps on the shared
+   clock now (round 12, item 14), so both panels in that column always show the
+   same frame and the strip prints "frame N of M" like every other.
+   **Thrust 5 exception**: the objectness map steps on the shared clock, frame
+   for frame with the Range-Doppler cube above it (round 11, H3 retracted the
+   old "pinned to the last frame"). What still does not animate is the Detector
+   scoreboard -- a Plotly Table cannot -- and since round 13 (N3) its visible
+   rows are RUN-LEVEL only (cumulative hits, unmatched per frame, recall), so
+   there is nothing on it to mistake for the frame on screen; the per-frame
+   TP/FP/FN triple is in that panel's Details, naming the frame it is about.
+   The offline PR curve does not animate either and is one click below the
+   product rows (see each Thrust 5 preset's own step).
 """
 
 

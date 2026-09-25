@@ -158,9 +158,17 @@ def test_scoreboard_figure_shows_last_frame_and_cumulative_numbers():
     # frame 4 the two read as a contradiction rather than as two different frames. A
     # Plotly Table is not a frame-animated trace, so these rows cannot follow the clock;
     # the label says which frame it is instead.
-    assert row["last frame 2/2: TP"] == "0"
-    assert row["last frame 2/2: unmatched (FP)"] == "1"
-    assert row["last frame 2/2: FN"] == "1"
+    # ...and since hostile round 13 (N3) they are in the panel's DETAILS, not on the
+    # visible table: as the table's top three rows they made the LEAD screen's headline
+    # comparison read backwards (arm A "TP 0" beside arm B "TP 1", the recovery three
+    # rows down), and one frame of five is both the noisiest number on the panel and the
+    # only one that can disagree with the objectness map, which steps with the clock.
+    details = " | ".join(panel_of(fig)["details"])
+    assert "last frame 2/2: TP: 0" in details
+    assert "last frame 2/2: unmatched (FP): 1" in details
+    assert "last frame 2/2: FN: 1" in details
+    for label in ("last frame 2/2: TP", "last frame 2/2: unmatched (FP)"):
+        assert label not in labels, label
     # Cumulative over both frames: 1 hit, 1 false alarm. The "N/N scored" qualifier
     # moved into the value (Change, 2026-09-23 coordinator re-check).
     hits_key = next(k for k in row if k.startswith("cumulative hits"))
@@ -206,7 +214,11 @@ def test_scoreboard_figure_no_scored_frames_reads_na_not_zero():
                                match_rule_text="rule")
     table = _table(fig)
     _labels, values = table.cells.values
-    assert values[:3] == ["n/a", "n/a", "n/a"]
+    # The per-frame triple reads n/a in DETAILS now (round 13, N3 moved it there); the
+    # visible table's own unscored rows read n/a too, which is the point of this test:
+    # an unscored frame is never printed as a zero.
+    assert "n/a" in " | ".join(panel_of(fig)["details"])
+    assert values[1] == "n/a" and values[2].startswith("n/a")
 
 
 def test_scoreboard_figure_fonts_are_legible_at_distance():
@@ -264,9 +276,9 @@ def test_scoreboard_figure_rows_never_clip_regardless_of_arm_name_length(beat_cf
     # figure builder.
     labels, values = table.cells.values
     row = dict(zip(labels, values))
-    assert labels == ["last frame 1/1: TP", "last frame 1/1: unmatched (FP)",
-                      "last frame 1/1: FN",
-                      "cumulative hits", "unmatched / frame, these 0 frames",
+    # THE RUN-LEVEL ROWS, in the order the claim is made (round 13, N3): hits, then the
+    # unmatched rate, then recall. The per-frame triple is in Details.
+    assert labels == ["cumulative hits", "unmatched / frame, these 0 frames",
                       "recall (hits / GT), this run"]
     assert row["cumulative hits"] == "0 (0/1 scored)"
     # target_recall/n_frames (the beat_cfar.json split calibration) no longer appear
@@ -501,9 +513,9 @@ def test_scoreboard_offline_block_reads_ap_fa_for_a_scored_arm(beat_cfar_data):
     # disagreeing without saying they're over different sample sizes.
     assert str(arm["operating_point"]["n_frames"]) in fa_label
     assert any(l.startswith("unmatched / frame, these") for l in row)
-    # More than the base 6 rows now -- the table's height must have grown to match
-    # (see the geometric check below), not silently clipped the new rows.
-    assert len(labels) > 6
+    # More than the base run-level rows now (3 since round 13's N3 moved the per-frame
+    # triple into Details) -- the offline pair is promoted onto the table, not clipped.
+    assert len(labels) > 3
 
 
 def test_scoreboard_offline_block_cfar_arm_has_no_self_reference(beat_cfar_data):
@@ -587,14 +599,15 @@ def test_scoreboard_offline_block_omits_ci_row_when_ci_file_missing(tmp_path, be
 
 
 def test_scoreboard_offline_block_absent_by_default():
-    """No `beat_cfar_arm_name` -> the table stays at its base 6 rows (7 before the 4th
-    hostile-expert read dropped "cumulative unmatched detections", 2026-09-23),
-    exactly the pre-existing behaviour every other test in this file exercises."""
+    """No `beat_cfar_arm_name` -> the table stays at its base RUN-LEVEL rows: 3 since
+    hostile round 13's N3 moved the per-frame triple into Details (6 before that, 7
+    before the 4th hostile-expert read dropped "cumulative unmatched detections",
+    2026-09-23)."""
     scores = ds.score_frames([[]], None)
     fig = ds.scoreboard_figure(scores, arm_name="ML", threshold=0.5,
                                match_rule_text="rule")
     labels, _values = _table(fig).cells.values
-    assert len(labels) == 6
+    assert len(labels) == 3
 
 
 def test_scoreboard_offline_block_rows_never_clip_the_table():
@@ -1232,12 +1245,16 @@ def test_scoreboard_rows_name_the_last_frame_the_transport_ends_on():
     fig = ds.scoreboard_figure(scores, arm_name="classical CFAR", threshold=0.5,
                                match_rule_text=ds.match_rule_text())
     labels = _table(fig).cells.values[0]
-    per_frame = [l for l in labels if l.startswith("last frame")]
-    assert len(per_frame) == 3, labels
-    for label in per_frame:
-        assert label.startswith(f"last frame {n_total}/{n_total}:"), label
-        # The transport prints "frame i of n"; the rows must not.
-        assert " of " not in label, label
+    # They are DETAILS lines since round 13's N3, so the invariant is checked where they
+    # now live -- the naming rule is the same one, and it is still the rule that matters.
+    assert not [l for l in labels if l.startswith("last frame")], labels
+    per_frame = [d for d in panel_of(fig)["details"] if d.startswith("last frame")]
+    assert len(per_frame) == 3, per_frame
+    for line in per_frame:
+        label = line.split(":")[0] + ":"
+        assert label.startswith(f"last frame {n_total}/{n_total}:"), line
+        # The transport prints "frame i of n"; these must not.
+        assert " of " not in label, line
 
 
 # ----------------------------------------------------------------------------------

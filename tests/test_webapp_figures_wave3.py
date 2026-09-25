@@ -154,7 +154,14 @@ def test_range_profile_xlabel_states_earliest_arrival_not_bare_range():
         "range_profile_agg": [prof],
         "_axis_meta": _munich_axis_meta(range_profile_bins=8),
     })["range_profile"]
-    assert fig.layout.xaxis.title.text == "excess path (m; 0 = earliest arrival)"
+    # ONE RANGE VOCABULARY (hostile round 13, N7): the axis title is now the SAME string
+    # the range-azimuth map above this panel uses, and the "0 = earliest arrival" caveat
+    # -- a fact about the frames, not a second axis convention -- rides in the caption.
+    # Before this the profile printed a third definition of zero on a screen whose map
+    # used the first.
+    from webapp.pipeline_runner import panel_of
+    assert fig.layout.xaxis.title.text == "excess path (m)"
+    assert "0 = earliest arrival" in " ".join(panel_of(fig)["caption"])
 
 
 def test_corpus_replay_detector_panel_range_axis_is_not_relabelled():
@@ -170,7 +177,10 @@ def test_corpus_replay_detector_panel_range_axis_is_not_relabelled():
         "_axis_meta": {"detector": {"mode": "cfar", "threshold": 0.5, "label": "x"}},
     }
     fig = figures_from_outputs(outputs)["cfar_detection"]
-    assert fig.layout.yaxis.title.text == "range (m)"
+    # It NAMES its own convention now (round 13, N7) -- the corpus axis is the monostatic
+    # one, `RadarConfig.range_resolution_m` being c/(2B). What must not leak onto it is
+    # the munich frames' delay-normalised zero.
+    assert fig.layout.yaxis.title.text == "range (m), c*tau/2"
     assert "earliest arrival" not in fig.layout.yaxis.title.text
 
 

@@ -41,19 +41,20 @@ change to `webapp/demo_presets.py`.
    every frame while the clock loops: pause with the button in the
    run-identity row before reading a per-frame number aloud, on every preset,
    not just Thrust 5.
-   **Thrust 4 exception**: the range-profile panel renders once from the LAST
-   frame and never animates (its own statistic strip says "static"); the
-   range-azimuth map above it keeps looping on the shared clock regardless of
-   where the one transport is parked, so the two panels can show different
-   frames by design, with no scrubbing needed to cause it.
-   **Thrust 5 exception**: RETRACTED (hostile round 11 H3) -- the objectness
-   panel used to be pinned to the last frame like the scoreboard and PR panel;
-   it now follows the same shared clock as the Range-Doppler cube, frame for
-   frame. Only the Detector scoreboard (its live rows say "last frame") and
-   the offline PR-curve panel still do not animate at all -- the clock
-   desyncs the cube from those two, not from the objectness map, with no
-   scrubbing needed to cause it. Pause the transport before talking about a
-   specific frame's detections or reading the scoreboard's numbers aloud.
+   **Thrust 4 exception**: RETRACTED (hostile round 13, N6) -- the range-profile
+   panel used to render once from the LAST frame and say "static" in its own
+   strip, beside a range-azimuth map that was looping. It steps on the shared
+   clock now (round 12, item 14), so both panels in that column always show the
+   same frame and the strip prints "frame N of M" like every other.
+   **Thrust 5 exception**: the objectness map steps on the shared clock, frame
+   for frame with the Range-Doppler cube above it (round 11, H3 retracted the
+   old "pinned to the last frame"). What still does not animate is the Detector
+   scoreboard -- a Plotly Table cannot -- and since round 13 (N3) its visible
+   rows are RUN-LEVEL only (cumulative hits, unmatched per frame, recall), so
+   there is nothing on it to mistake for the frame on screen; the per-frame
+   TP/FP/FN triple is in that panel's Details, naming the frame it is about.
+   The offline PR curve does not animate either and is one click below the
+   product rows (see each Thrust 5 preset's own step).
 
 Preset stage order (`PRESETS` in `webapp/demo_presets.py`):
 
@@ -466,16 +467,22 @@ DELAY that sits below the printed median floor (number and scope: say list).
 ### What you are looking at
 - Two panels follow the screen's one shared transport, frame for frame:
   **"Range-Doppler power"** and **"CFAR objectness"**.
-- Two more do not animate at all: **"Detector scoreboard"** (live rows say
-  "last frame") and the offline PR-curve panel (**"scored offline: ... test
-  frames"**).
+- **"Detector scoreboard"** does not animate (a table cannot): its visible rows
+  are run-level -- cumulative hits, unmatched per frame, recall -- and the
+  per-frame TP/FP/FN triple is in its **Details**, naming the frame it is
+  about.
+- CLICK for the precision-recall evidence: **"▸ Offline benchmark:
+  precision-recall vs the classical baseline (172-frame test split)"**, the
+  closed disclosure below the product rows. It holds the offline PR curve (both
+  arms draw the same one -- no knob on this screen moves it), which is why it
+  is not a product row. Its headline numbers are already the last two rows of
+  the scoreboard.
 - The Range-Doppler and objectness panels loop together on the shared clock
-  (pause/play + frame N of M + slider, in the run-identity row); the Detector
-  scoreboard and the offline PR-curve panel do not animate at all, so they can
-  lag behind whichever frame the cube and objectness map are parked on. Pause
-  the transport before talking about one frame's detections, and read the
-  scoreboard's numbers as through its own last frame, not necessarily the one
-  on screen.
+  (pause/play + frame N of M + slider, in the run-identity row). Pause it
+  before talking about one frame's detections and read that frame's numbers off
+  the objectness panel's own strip -- it prints detections, how many matched,
+  and how many were labelled, for the frame on screen. The scoreboard beside it
+  is the run, not the frame.
 - Arm chips on screen: "A — ADC bits 12 (as built)" (LEFT column, colour dot) /
   "B — ADC bits 3 (same frames)" (RIGHT column) -- each product renders once
   per column, on the same row, on shared colour limits. The full before/after
@@ -507,9 +514,9 @@ rows, not the crosses.
   breaks that -- the whole demonstration.
 - Classical CFAR scores AP 0.218, a val-tuned CFAR 0.326, chance floor 0.093;
   these 5 frames demonstrate, not measure.
-- The CFAR map spans 0-50 m; the top 10 m is unscored. Detector, scoreboard and
-  PR panels hold the LAST frame; the Range-Doppler cube loops beside them --
-  pause it before discussing one frame's detections.
+- The CFAR map spans 0-50 m; the top 10 m is unscored. It and the Range-Doppler
+  cube loop together on the shared clock -- pause before discussing one frame;
+  the scoreboard beside them is the run, not the frame.
 - Ground truth omits ~3 real objects per frame inside 40 m, so a detector
   catching every real object caps precision at 0.64 -- some 'false alarms' are
   real.
@@ -563,16 +570,22 @@ rows, not the crosses.
 ### What you are looking at
 - Two panels follow the screen's one shared transport, frame for frame:
   **"Range-Doppler power"** and **"Neural detector objectness"**.
-- Two more do not animate at all: **"Detector scoreboard"** (live rows say
-  "last frame") and the offline PR-curve panel (**"scored offline: ... test
-  frames"**).
+- **"Detector scoreboard"** does not animate (a table cannot): its visible rows
+  are run-level -- cumulative hits, unmatched per frame, recall -- and the
+  per-frame TP/FP/FN triple is in its **Details**, naming the frame it is
+  about.
+- CLICK for the precision-recall evidence: **"▸ Offline benchmark:
+  precision-recall vs the classical baseline (172-frame test split)"**, the
+  closed disclosure below the product rows. It holds the offline PR curve (both
+  arms draw the same one -- no knob on this screen moves it), which is why it
+  is not a product row. Its headline numbers are already the last two rows of
+  the scoreboard.
 - The Range-Doppler and objectness panels loop together on the shared clock
-  (pause/play + frame N of M + slider, in the run-identity row); the Detector
-  scoreboard and the offline PR-curve panel do not animate at all, so they can
-  lag behind whichever frame the cube and objectness map are parked on. Pause
-  the transport before talking about one frame's detections, and read the
-  scoreboard's numbers as through its own last frame, not necessarily the one
-  on screen.
+  (pause/play + frame N of M + slider, in the run-identity row). Pause it
+  before talking about one frame's detections and read that frame's numbers off
+  the objectness panel's own strip -- it prints detections, how many matched,
+  and how many were labelled, for the frame on screen. The scoreboard beside it
+  is the run, not the frame.
 - Arm chips on screen: "A — Corner range 1 m (as built)" (LEFT column, colour
   dot) / "B — Corner range 25 m (attenuates ~4.3 dB at 22 m)" (RIGHT column) --
   each product renders once per column, on the same row, on shared colour
@@ -662,16 +675,22 @@ recall-0.5 (0.22); at default 0.5 this checkpoint draws nothing.
 ### What you are looking at
 - Two panels follow the screen's one shared transport, frame for frame:
   **"Range-Doppler power"** and **"Neural detector objectness"**.
-- Two more do not animate at all: **"Detector scoreboard"** (live rows say
-  "last frame") and the offline PR-curve panel (**"scored offline: ... test
-  frames"**).
+- **"Detector scoreboard"** does not animate (a table cannot): its visible rows
+  are run-level -- cumulative hits, unmatched per frame, recall -- and the
+  per-frame TP/FP/FN triple is in its **Details**, naming the frame it is
+  about.
+- CLICK for the precision-recall evidence: **"▸ Offline benchmark:
+  precision-recall vs the classical baseline (172-frame test split)"**, the
+  closed disclosure below the product rows. It holds the offline PR curve (both
+  arms draw the same one -- no knob on this screen moves it), which is why it
+  is not a product row. Its headline numbers are already the last two rows of
+  the scoreboard.
 - The Range-Doppler and objectness panels loop together on the shared clock
-  (pause/play + frame N of M + slider, in the run-identity row); the Detector
-  scoreboard and the offline PR-curve panel do not animate at all, so they can
-  lag behind whichever frame the cube and objectness map are parked on. Pause
-  the transport before talking about one frame's detections, and read the
-  scoreboard's numbers as through its own last frame, not necessarily the one
-  on screen.
+  (pause/play + frame N of M + slider, in the run-identity row). Pause it
+  before talking about one frame's detections and read that frame's numbers off
+  the objectness panel's own strip -- it prints detections, how many matched,
+  and how many were labelled, for the frame on screen. The scoreboard beside it
+  is the run, not the frame.
 - Arm chips on screen: "A — ADC bits 12 (as built)" (LEFT column, colour dot) /
   "B — ADC bits 3 (same frames)" (RIGHT column) -- each product renders once
   per column, on the same row, on shared colour limits. The full before/after
@@ -723,9 +742,9 @@ unprompted.
   front end (F85 addendum).
 - That the drop in hits at 3 bits measures quantisation cost: 5 frames at one
   threshold shows the knob reaches the detector, not measures it.
-- Do not volunteer generalisation/robustness; if asked, read the OOD and
-  3rd-corpus rows as printed (a third corpus never trained on; the lead holds)
-  and stop there.
+- Do not volunteer generalisation: the old out-of-distribution rows were 77 GHz
+  and are NOT on this Ka table. If pressed, F95's never-trained-on Ka corpus:
+  D4 0.511 vs CFAR 0.281, off-screen.
 - That this is what the professor asked for: it is a detector designed to the
   F83 diagnosis, not a port of the collaborators' architectures.
 - That the model converged: val AP peaks at epoch 14 of 40 and decays to

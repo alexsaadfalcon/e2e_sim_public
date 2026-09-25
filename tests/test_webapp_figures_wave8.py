@@ -99,8 +99,10 @@ def test_range_profile_subline_states_direct_path():
     })["range_profile"]
     text = panel_text(fig)
     assert "0 dB = direct path at range 0, not a target" in text
-    # The xlabel keeps its own, separately-pinned wording (test_webapp_figures_wave3.py).
-    assert fig.layout.xaxis.title.text == "excess path (m; 0 = earliest arrival)"
+    # ONE RANGE VOCABULARY (round 13, N7): the xlabel is the shared string every range
+    # axis uses, and the zero rides in the caption -- pinned in
+    # test_webapp_figures_wave3.py, and reachable in `panel_text` above either way.
+    assert fig.layout.xaxis.title.text == "excess path (m)"
 
 
 def test_range_profile_no_direct_path_note_without_axis_metadata():

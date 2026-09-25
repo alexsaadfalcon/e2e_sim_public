@@ -165,33 +165,41 @@ def test_render_gives_a_prepared_line_for_every_preset_while_it_runs():
 
 
 def test_render_gives_the_rdp_slider_rule_a_thrust_5_exception():
-    """Wave 10 (2026-09-24, item 3.3, hostile round 9): the RDP slider rule is
-    actively harmful on Thrust 5 -- the objectness/scoreboard/PR panels have no
-    slider (pinned to the last frame); dragging the Range-Doppler panel's slider
-    desyncs it from the frozen detections."""
+    """Retained name, CURRENT content (hostile round 13, N6). Wave 10's version asserted
+    "desyncs the cube" -- the wording of a state that no longer exists: round 11 (H3) put
+    the objectness map on the same shared clock as the cube, so those two never desync,
+    and round 13 (N3) left the scoreboard with run-level rows only, so there is no
+    per-frame number on it to desync FROM. What the section must still do is name the one
+    panel that cannot animate and say where the offline PR curve went."""
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render
 
     doc = render(PRESETS)
     flat = _flat(doc)
     assert "thrust 5 exception" in flat.lower()
-    assert "desyncs the cube" in flat.lower()
+    assert "objectness map steps on the shared clock" in flat.lower()
+    assert "scoreboard" in flat.lower() and "run-level" in flat.lower()
+    # The stale claim must not come back in any spelling.
+    assert "desyncs the cube" not in flat.lower()
 
 
 # wave 12 (2026-09-24), hostile round 10 items 3.1-3.4.
 def test_render_gives_the_rdp_slider_rule_a_thrust_4_exception_too():
-    """Item 3.2: the loop-vs-static desync isn't Thrust-5-only -- Thrust 4's
-    range-profile panel is built from the LAST frame and never animates while
-    the range-azimuth map above it keeps looping (pipeline_runner's
-    `range_profile_agg[-1]`); the runbook used to disclose only the Thrust 5
-    case."""
+    """Retained name, INVERTED content (hostile round 13, N6). Item 3.2 asked the runbook
+    to disclose that Thrust 4's range-profile panel was built from the LAST frame while
+    the map above it looped. Round 12 (item 14) made it step on the same clock, so the
+    disclosure became the false claim -- and the render printed "frame 1 of 3" in that
+    panel's own strip while the runbook said it never animates. The section now carries
+    the RETRACTION, which is what a presenter reading an older copy needs."""
     from webapp.demo_presets import PRESETS
     from webapp.runbook import render
 
     doc = render(PRESETS)
     flat = _flat(doc)
     assert "thrust 4 exception" in flat.lower()
-    assert "range-profile panel renders once from the last frame" in flat.lower()
+    assert "retracted" in flat.lower()
+    assert "steps on the shared clock" in flat.lower()
+    assert "range-profile panel renders once from the last frame" not in flat.lower()
 
 
 def test_render_says_the_one_shared_slider_parks_both_arms():
@@ -269,7 +277,14 @@ def test_render_lists_all_four_thrust5_panels():
         section = section[:section.index("### Second knob")]
         assert "Range-Doppler power" in section, p.id
         assert "Detector scoreboard" in section, p.id
-        assert "scored offline" in section, p.id
+        # The PR panel is behind a closed disclosure (round 13, N2), so what the section
+        # must carry is the CLICK that opens it, by the disclosure's own summary text --
+        # `webapp.app.offline_benchmark_label()`, the one authority for that string.
+        from webapp.app import offline_benchmark_label
+        # `_flat`: `_bullet` wraps at 79 columns, and this summary string is 89 long, so
+        # it straddles a line break in the rendered source.
+        assert _flat(offline_benchmark_label()) in _flat(section), p.id
+        assert "precision-recall" in _flat(section).lower(), p.id
         assert ("CFAR objectness" in section
                or "Neural detector objectness" in section), p.id
 

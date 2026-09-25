@@ -163,7 +163,11 @@ def test_range_az_yaxis_title_names_the_convention_and_the_half_window():
     })["range_az"]
     rmeta = _range_meta_from_grid(64, 3e9)
     title = fig.layout.yaxis.title.text
-    assert title.startswith("excess path (m)")
+    # "excess path (m), c*tau" since round 13's N7 -- every range axis now names its own
+    # convention, so the title starts with the vocabulary's own entry rather than a bare
+    # "excess path (m)". Read from the module's table, not retyped.
+    from webapp.pipeline_runner import _RANGE_AXIS_LABEL
+    assert title.startswith(_RANGE_AXIS_LABEL["bistatic_path"])
     assert f"displayed half of {rmeta['range_window_m']:.1f} m" in title
     # ...and it stays ONE short line: ~42 characters is what a 363 px plot height fits
     # at the 18 px figure font.

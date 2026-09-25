@@ -672,6 +672,26 @@ def _preset_slot(label: str, source: str) -> str:
     return _clause_head(label)
 
 
+#: A parenthetical clause that says only which BAND a source is on -- "Ka-band",
+#: "30 GHz", "Ka corpus". Recognised so `_env_without_band_clauses` can drop exactly
+#: those and keep whatever else the parenthetical distinguishes the file by.
+_BAND_CLAUSE_RE = re.compile(r"^(ka|ka-band|ka corpus|[\d.]+\s*ghz([- ]band)?)$", re.I)
+
+
+def _env_without_band_clauses(source: str) -> str:
+    """`"munich (Ka-band, 30 GHz, LoS sweep ~2.0 deg/frame)"` ->
+    `"munich (LoS sweep ~2.0 deg/frame)"`; `""` when the parenthetical is only the band
+    (dropping it would leave a bare name that names a DIFFERENT file -- see the caller).
+    """
+    head = _clause_head(source, (": ",))
+    if "(" not in head or not head.rstrip().endswith(")"):
+        return ""
+    name, _, inner = head.partition("(")
+    kept = [c.strip() for c in inner.rstrip().rstrip(")").split(",")
+            if c.strip() and not _BAND_CLAUSE_RE.match(c.strip())]
+    return f"{name.strip()} ({', '.join(kept)})" if kept else ""
+
+
 def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int) -> str:
     """The ONE full-width line that replaces the `Results` H3 and the run half of the
     banner (layout spec section 2.3):
@@ -724,6 +744,18 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
     #: Sionna path the parenthetical IS the band, so it is kept by `_with_band`'s own
     #: test unless the band is already inside the name.
     env_short = _with_band(_clause_head(source, (": ", " (")))
+    #: ...and the one in between: the name plus whatever its parenthetical says BESIDES
+    #: the band. On the smaller cancel-screen budget Thrust 3 could otherwise only fit a
+    #: bare "munich", which is not merely short -- it is the name of the OTHER munich
+    #: file, the static one every other thrust runs, on the one screen whose whole
+    #: subject is that the scene sweeps. "munich (LoS sweep ~2.0 deg/frame)" is shorter
+    #: than the full form and still says which file ran. Empty when the parenthetical is
+    #: ONLY the band, where dropping it would leave the bare name again.
+    #: Only on the path whose band lives INSIDE the name (the Sionna sources). When the
+    #: band is its own `axis_meta` field -- the corpus path -- dropping the
+    #: parenthetical's clauses would drop the band with them, which is the exact defect
+    #: the round-12 residue is about; those rungs then collapse to empty and are skipped.
+    env_medium = _env_without_band_clauses(source) if not band else ""
 
     # A ladder of progressively shorter forms, each made of WHOLE clauses. The first
     # that fits wins; the last rung always fits. Every rung keeps the environment as
@@ -736,6 +768,27 @@ def _run_identity_line(preset, axis_meta: Dict[str, Any], n_clicks, n_steps: int
         [thrust, slot, env_full, frames, run],
         [thrust, slot, env_name, frames, run],
         [thrust, slot, env_name, run],
+        # THE ENVIRONMENT WHOLE, WITHOUT THE PRESET'S NAME, before any rung that
+        # shortens the environment (2026-09-25, round-12 residue: one environment-name
+        # format everywhere). Thrust 3's environment is the longest on the page --
+        # "munich (Ka-band, 30 GHz, LoS sweep ~2.0 deg/frame)" -- and beside its own
+        # 27-character slot it overran the budget by 2 characters, so the ladder fell
+        # through to a bare "munich" ON THE ONE SCREEN WHOSE SUBJECT IS THE SWEEP. The
+        # thrust number already identifies which screen this is, and the card above it
+        # carries the preset's name; nothing else on the page names the FILE.
+        [thrust, env_full, frames, run],
+        [thrust, env_full, run],
+        # The band dropped, the distinguishing clause kept (see `env_medium`). SKIPPED
+        # ENTIRELY when `env_medium` is empty: a rung with an empty environment slot
+        # joins to a line with no environment on it at all, which fits every budget and
+        # therefore wins -- it dropped the corpus screens' environment outright the first
+        # time these rungs were added (caught by re-running every preset's line).
+        *([[thrust, slot, env_medium, frames, run],
+           [thrust, env_medium, frames, run],
+           # ...and without the frame count, which is the rung the CANCEL screen lands
+           # on (its budget is 26 characters smaller because of the amber chip, and that
+           # chip already reads "CANCELLED -- N of M frames").
+           [thrust, env_medium, run]] if env_medium else []),
         [thrust, slot, env_short, frames, run],
         # Keep the ENVIRONMENT before giving up on the label: a screen that says only
         # "Thrust 5 . 5 frames . run #1" has lost the two facts a photograph needs
@@ -1704,6 +1757,28 @@ def _mark_pr_identical_on_arm_a(figs: Dict[str, Any], prev_figs: Dict[str, Any])
 PR_PANEL_KEY = "detector_pr_stored"
 
 
+def offline_benchmark_label() -> str:
+    """The summary text of the closed disclosure that holds the offline PR panel.
+
+    ONE AUTHORITY, because the runbook has to tell the presenter what to CLICK and a
+    second copy of this string is exactly what drifts (hostile round 13, N2: the runbook
+    described the PR evidence as visible, so there was no click and it never showed).
+    The split size is read from beat_cfar.json, never typed.
+
+    It NAMES the curve now: "Offline benchmark" alone did not say the precision-recall
+    evidence was inside, which is why a reader who wanted it did not open it.
+    """
+    label = "▸ Offline benchmark: precision-recall vs the classical baseline"
+    try:
+        from webapp import detector_scoreboard as _ds
+        _, n_frames = _ds._load_recall_target_and_n_frames()
+        if n_frames:
+            label += f" ({int(n_frames)}-frame test split)"
+    except Exception:
+        pass
+    return label
+
+
 def _offline_benchmark_disclosure(figs: Dict[str, Any], prev_figs: Dict[str, Any]):
     """PULL the stored PR panel out of the product rows and render it ONCE, closed,
     below them -- and return that disclosure (or None).
@@ -1725,16 +1800,7 @@ def _offline_benchmark_disclosure(figs: Dict[str, Any], prev_figs: Dict[str, Any
     if fig is None:
         return None
     panel = panel_of(fig)
-    label = "▸ Offline benchmark"
-    try:
-        from webapp import detector_scoreboard as _ds
-        _, n_frames = _ds._load_recall_target_and_n_frames()
-        if n_frames:
-            # READ from beat_cfar.json, never typed: the split size is exactly the kind
-            # of number that drifts when the file is regenerated.
-            label = f"▸ Offline benchmark ({int(n_frames)}-frame test split)"
-    except Exception:
-        pass
+    label = offline_benchmark_label()
     return html.Details([
         html.Summary(label, className="details-summary"),
         html.Div([

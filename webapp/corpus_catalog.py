@@ -112,17 +112,27 @@ def _munich_losweep_label(path: Path) -> str:
             if az:
                 first, last = az[0], az[-1]
         if first is not None and last is not None:
-            # The SPAN, not both endpoints: this label has to survive the
-            # run-identity line's 100-character budget whole (webapp/app.py
-            # `_run_identity_line`), and at "-28.4 to +28.9 deg" it did not -- the
-            # ladder fell through to a bare "munich" on the one screen whose subject
-            # is the sweep. The carrier is not dropped with it: the environment run
-            # note states it ("frames carry a 30 GHz carrier"), and the endpoints are
-            # in the file's own meta.
-            return f"munich (Ka, LoS sweep {abs(float(last) - float(first)):.0f} deg)"
-        return "munich (Ka, LoS sweep)"
+            # THE PER-FRAME RATE, not the file's total span (hostile round 13, N12).
+            # "LoS sweep 57 deg" beside "8 frames" in the same line read as 57 degrees
+            # of sweep in this run; the run flies 8 of the file's 30 frames, i.e. about
+            # 15 deg. The rate is the quantity that is true of the file AND of any run
+            # from it, and it is what the Thrust 3 card already quotes -- computed here
+            # from the file's own endpoints and frame count, never typed.
+            #
+            # Kept to the run-identity line's 100-character budget whole (webapp/app.py
+            # `_run_identity_line`): at "-28.4 to +28.9 deg" the ladder fell through to a
+            # bare "munich" on the one screen whose subject is the sweep.
+            span = abs(float(last) - float(first))
+            n_frames = len(meta.get("frames") or []) or None
+            band_full = f"Ka-band, {ghz:g} GHz" if ghz else "Ka-band"
+            if n_frames and n_frames > 1:
+                per_frame = span / (n_frames - 1)
+                return (f"munich ({band_full}, LoS sweep "
+                        f"~{per_frame:.1f} deg/frame)")
+            return f"munich ({band_full}, LoS sweep {span:.0f} deg total)"
+        return f"munich ({band}, LoS sweep)"
     except Exception:
-        return "munich (Ka, LoS sweep)"
+        return "munich (Ka-band, LoS sweep)"
 
 
 def _discover_sionna_scenario_specs(

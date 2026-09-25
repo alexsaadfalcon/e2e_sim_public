@@ -122,7 +122,16 @@ def test_thrust5_screen_notes_state_the_live_chain_and_scope_the_offline_numbers
         # one-line character budget and two names for one corpus is what it spends on.
         assert "beat_cfar_ka.json" in note, pid
         assert "for reference" in note and "not re-measured live" in note, pid
-        assert "training distribution" in note, pid
+    # ...and the one clause that is NOT shared (hostile round 13, N11): "a knob moves ML
+    # off training distribution" was printed on the classical-CFAR screen, which trains
+    # nothing. It is a per-preset clause now (`_t5_screen_note`), and this is the test
+    # that keeps it that way.
+    for pid in ("thrust5_detector_ml", "thrust5_detector_raddetnet"):
+        assert "training distribution" in PRESETS_BY_ID[pid].screen_note.lower(), pid
+    cfar_note = PRESETS_BY_ID["thrust5_detector_cfar"].screen_note.lower()
+    assert "training distribution" not in cfar_note
+    # It says what its OWN knob does instead, rather than saying nothing.
+    assert "not trained" in cfar_note
 
 
 def test_thrust5_screen_notes_lead_with_the_band():
@@ -849,13 +858,13 @@ def test_thrust5_presets_replay_the_test_split_and_disable_the_frequency_chain()
 
 
 def test_thrust5_all_cards_say_the_detector_panel_is_frame_pinned():
-    """Wave 10 (2026-09-24, item 2.2, hostile round 9): on all three T5 screens
-    the objectness/scoreboard panel has no frame slider (pinned to the last
-    frame) while the Range-Doppler panel does. Wave 11 (2026-09-24): the owner's
-    live test made every animated panel auto-play and loop on one shared clock
-    -- the Range-Doppler cube now loops rather than sitting on a static slider,
-    so the card must tell the presenter to pause it before pointing at one
-    frame's detections, not just that a slider doesn't move the detector."""
+    """Retained name, INVERTED premise (hostile round 13, N6). Wave 10 pinned "the
+    objectness panel has no slider (pinned to the last frame)"; round 11 (H3) put that
+    panel on the shared clock and the claim became false, but a card still said it. What
+    every T5 card must now say is the thing that IS true: the objectness map and the
+    Range-Doppler cube loop TOGETHER, and the presenter pauses before talking about one
+    frame. (The scoreboard is the panel that cannot animate, and since round 13's N3 its
+    visible rows are run-level, so there is no per-frame number on it to confuse.)"""
     for pid in ("thrust5_detector_cfar", "thrust5_detector_ml", "thrust5_detector_raddetnet"):
         p = PRESETS_BY_ID[pid]
         assert any("range-doppler" in s.lower() and "loop" in s.lower()

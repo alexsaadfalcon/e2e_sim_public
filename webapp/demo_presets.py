@@ -302,7 +302,11 @@ _T5_SCREEN_NOTE = (
     "Ka corpus, 28.5-31.5 GHz (b1_demo_cfr_ka); stored ray-traced channel, "
     "ADC chain LIVE; offline numbers (beat_cfar_ka.json) for reference, not "
     "re-measured live; BOTH CFAR baselines, shipped 0.218 and val-tuned 0.326, "
-    "chance floor 0.093; a knob moves ML off training distribution; "
+    "chance floor 0.093; "
+    # N11 (hostile round 13): "a knob moves ML off training distribution" was printed
+    # on the CLASSICAL CFAR screen too, where there is no training distribution to move
+    # off -- a shared paragraph carrying a per-screen claim. The clause is now appended
+    # per preset (`_t5_screen_note`) by the two screens whose detector is learned.
     # 15b (hostile round 12): the ADC runs at full_scale 0 = PER-FRAME AUTOMATIC GAIN,
     # 6 dB of headroom over the frame's own peak. It is why a 3-bit converter still
     # produces a picture, and it lived only in the parameter editor's help text on the
@@ -313,6 +317,35 @@ _T5_SCREEN_NOTE = (
     "ADC: per-frame AGC, 6 dB headroom; "
     "scoring crop 40 m{VMAX_CLAUSE}."
 )
+
+
+#: The clause `_T5_SCREEN_NOTE` ENDS on, and must keep ending on: the scoring crop plus
+#: the render-time velocity clause `webapp.app._resolve_screen_note` fills in or drops
+#: (`tests/test_webapp_ab.py::test_resolve_screen_note_drops_vmax_clause_when_manifest_
+#: is_unreadable` pins that a dropped clause leaves the note ending cleanly on "40 m.").
+_T5_NOTE_TAIL = "scoring crop 40 m{VMAX_CLAUSE}."
+
+
+def _t5_screen_note(*clauses: str) -> str:
+    """The shared Thrust 5 note with THIS screen's own clauses spliced in before its tail.
+
+    Round 13, N11: a shared paragraph may only carry facts true on every screen it is
+    printed on. The A/B knob's meaning is not one of them -- on the two learned-detector
+    screens it moves the input off the training distribution, and on the classical CFAR
+    screen there is nothing trained for a distribution to be about.
+
+    Inserted BEFORE `_T5_NOTE_TAIL` rather than appended after it, so the note still ends
+    on the crop clause whether or not the velocity clause resolves -- and so the
+    separator logic lives in ONE place. It was got wrong twice by hand: "v_max
+    +-24.67 m/s Loses to CFAR ..." ran two sentences together on the 2026-09-24 and -25
+    renders (hostile round 12, item 16).
+    """
+    assert _T5_SCREEN_NOTE.endswith(_T5_NOTE_TAIL), (
+        "the shared Thrust 5 note no longer ends on its own tail clause; "
+        "_T5_NOTE_TAIL has to be updated with it")
+    head = _T5_SCREEN_NOTE[:-len(_T5_NOTE_TAIL)]
+    body = "".join(c.strip().rstrip(".;").strip() + "; " for c in clauses if c.strip())
+    return head + body + _T5_NOTE_TAIL
 
 
 #: Thrust 4's A/B runs the LIVE Tessera surrogate at its canonical (arm A) vs. TSV
@@ -1212,7 +1245,10 @@ PRESETS: List[DemoPreset] = [
         # (hostile round 12, item 16); the label carries "ADC bits" already.
         ab_label_a="12 (as built)",
         ab_label_b="3 (same frames)",
-        screen_note=_T5_SCREEN_NOTE,
+        # N11: this screen's detector has no training distribution, so it does not print
+        # the clause the two learned screens do; it states what its OWN knob does.
+        screen_note=_t5_screen_note(
+            "CA-CFAR is not trained, so no knob here moves it off a distribution"),
         say=[
             "SAY FIRST: the frames change -- Thrusts 1-4 ran munich (249.8 m, "
             "range-azimuth); this is the benchmark corpus (100 m, "
@@ -1226,14 +1262,16 @@ PRESETS: List[DemoPreset] = [
             # wave 9 (2026-09-24, item 1.7): the old line was wrong on both counts --
             # the detector map spans 0-50 m (a 10 m unscored strip above the 40 m
             # dashed line), and the 0-100 m panel is Range-Doppler power, unlabelled.
-            # wave 11 (2026-09-24): the Results screen now auto-plays every
-            # animated panel on one shared clock -- the Range-Doppler cube
-            # loops while the detector/scoreboard/PR panels hold the last
-            # frame; pause the cube before pointing at one frame's crosses.
-            "The CFAR map spans 0-50 m; the top 10 m is unscored. Detector, "
-            "scoreboard and PR panels hold the LAST "
-            "frame; the Range-Doppler cube loops beside them -- pause it "
-            "before discussing one frame's detections.",
+            # RETRACTED as written (hostile round 13, N6): "Detector ... panels hold
+            # the LAST frame" was already false when round 11 put the objectness map on
+            # the shared clock, and this bullet kept telling the presenter otherwise. The
+            # scoreboard is the one panel that cannot animate, and since round 13 (N3)
+            # its visible rows are run-level, so there is no per-frame number on it to
+            # confuse with the map's.
+            "The CFAR map spans 0-50 m; the top 10 m is unscored. It and the "
+            "Range-Doppler cube loop together on the shared clock -- pause before "
+            "discussing one frame; the scoreboard beside them is the run, not the "
+            "frame.",
             "Ground truth omits ~3 real objects per frame inside 40 m, so a "
             "detector catching every real object caps precision at 0.64 -- "
             "some 'false alarms' are real.",
@@ -1329,8 +1367,14 @@ PRESETS: List[DemoPreset] = [
         # "v_max +-24.67 m/s Loses to CFAR 0.105 vs 0.218" (hostile round 12, item 16,
         # and read the same way on the 2026-09-24 PNG at the previous v_max). The
         # comment that used to sit here claimed this was already fixed; it was not.
-        screen_note=_T5_SCREEN_NOTE.rstrip(".")
-        + ". Loses to CFAR 0.105 vs 0.218, shown on purpose.",
+        # Both clauses are at the 400-character budget's limit together (that budget is
+        # two 16 px lines on the 1600 px page; `test_thrust5_screen_note_resolves_within_
+        # a_one_line_character_budget`), so each is as short as its own pinned substrings
+        # allow -- "training distribution" and "loses to CFAR ... shown on purpose" are
+        # both asserted by name.
+        screen_note=_t5_screen_note(
+            "A/B moves ML off its training distribution",
+            "loses to CFAR 0.105 vs 0.218, shown on purpose"),
         say=[
             "The learned detector LOSES to CFAR: 0.105 vs 0.218, chance floor "
             "0.081. Say it first.",
@@ -1438,7 +1482,8 @@ PRESETS: List[DemoPreset] = [
         # (hostile round 12, item 16); the label carries "ADC bits" already.
         ab_label_a="12 (as built)",
         ab_label_b="3 (same frames)",
-        screen_note=_T5_SCREEN_NOTE,
+        screen_note=_t5_screen_note(
+            "the A/B knob moves ML off its training distribution"),
         say=[
             "The defensible sentence: a learned head on the classical front end beats a "
             "CFAR threshold on the same cube, in-distribution -- say that, not 'beats "
@@ -1491,9 +1536,14 @@ PRESETS: List[DemoPreset] = [
             # v2), not this seed-42 checkpoint's; the card's own `say` list already
             # names a DIFFERENT number for THIS checkpoint on v2 (0.208), so the two
             # "v2" statements read as contradictory. Dropped, not disambiguated.
-            "Do not volunteer generalisation/robustness; if asked, read the OOD and "
-            "3rd-corpus rows as printed (a third corpus never trained on; the lead "
-            "holds) and stop there.",
+            # RETRACTED (hostile round 13, N6): there are no OOD or 3rd-corpus rows on
+            # a Ka screen to read -- `detector_scoreboard.DEFAULT_OOD_JSON` and
+            # `DEFAULT_THIRD_CORPUS_JSON` are both None because that scoring exists at
+            # 77 GHz only and has no Ka counterpart, so the card told the presenter to
+            # read numbers off a table that does not carry them.
+            "Do not volunteer generalisation: the old out-of-distribution rows were "
+            "77 GHz and are NOT on this Ka table. If pressed, F95's never-trained-on "
+            "Ka corpus: D4 0.511 vs CFAR 0.281, off-screen.",
             "That this is what the professor asked for: it is a detector designed to "
             "the F83 diagnosis, not a port of the collaborators' architectures.",
             "That the model converged: val AP peaks at epoch 14 of 40 and decays to "

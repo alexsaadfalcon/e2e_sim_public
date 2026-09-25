@@ -59,7 +59,12 @@ def test_corpus_mode_reports_skipped_blocks_in_run_notes(tmp_path):
     st["rffe"]["enabled"] = True
     out = run_pipeline(st, n_steps=1)
     notes = out["_axis_meta"]["notes"]
-    assert len(notes) == 1 and "fft" in notes[0] and "rffe" in notes[0]
+    # EVERY run also states where its front end ran (round 13's N1 measurement made the
+    # placement a run note rather than a claim in the help text), so the skipped-blocks
+    # note is identified by content rather than by being the only note.
+    skipped = [n for n in notes if "fft" in n and "rffe" in n]
+    assert len(skipped) == 1, notes
+    assert any(n.startswith("Front end applied to") for n in notes), notes
     assert "fft" not in out
 
 
@@ -83,7 +88,13 @@ def test_corpus_mode_with_nothing_to_skip_has_no_notes(tmp_path):
         st[bid]["enabled"] = False
     st["detector"]["params"].update({"cfar_guard": 1, "cfar_train": 2})
     out = run_pipeline(st, n_steps=1)
-    assert out["_axis_meta"]["notes"] == []
+    notes = out["_axis_meta"]["notes"]
+    # "No notes" now means "nothing but the composition line": since round 13 every run
+    # says where its front end ran, and on this one -- an ADC replay with the front end
+    # off -- what it says is that no front end ran at all, which is the honest answer and
+    # not an advisory about a block the operator left on.
+    assert notes == ["Front end applied to nowhere: no front end is enabled on this "
+                     "run. Thermal floor injected by: nothing on this run."], notes
     assert out["_axis_meta"]["source"].startswith("Corpus Replay (ADC replay)")
 
 
